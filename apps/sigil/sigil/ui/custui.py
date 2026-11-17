@@ -178,15 +178,18 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     switches the page needs before it asks the edge anything (read now, at startup, and written into the page):
     the iOS install flag (the banner and the iOS tags), whether customer Google sign-in is on and ready (the
     "Continue with Google" button), whether an installed app finishes it through the app hand-off, whether the
-    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), and whether assessments
-    are launched and controlled from the app (C1a). Each is a non-secret on/off value and each counts in the build
-    id."""
+    onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), whether assessments
+    are launched and controlled from the app (C1a), whether customer monitoring is on (the Monitoring screen: the same
+    VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes, so the screen and its API are never out of step), and
+    whether the Team screen is on. Each is a non-secret on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
     handoff = google and _config.customer_oidc_handoff_enabled()
     onboarding = _config.customer_onboarding_enabled()
     launch_ui = _config.customer_launch_ui_enabled()
+    monitoring = _config.customer_monitoring_enabled()
+    team = _config.customer_team_ui_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -194,7 +197,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
                                      "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
-                                     "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0"})
+                                     "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0",
+                                     "__VIGIL_MONITORING__": "1" if monitoring else "0",
+                                     "__VIGIL_TEAM__": "1" if team else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -580,6 +585,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay(_READS[path])
         if path == "/api/customer/onboarding" and _onboarding_on():     # the tour's state (flag OFF -> unknown-route 404)
             return self._onboarding(None)
+        if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("members_list")
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
         if path == "/api/customer/launches" and _launch_ui_on():         # C1a (flag OFF -> unknown-route 404)
@@ -970,6 +977,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if action in ("member/grant", "member/revoke"):
             return self._member(action, body)
+        if action == "member/add" and _team_on():                    # the Team screen (flag OFF -> unknown-action 404)
+            return self._member_add(body)
         if action in ("target/challenge", "target/verify"):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
@@ -1007,6 +1016,21 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("member_grant", requester, payload)
         else:
             c, r = self._provision("member_revoke", requester, payload)
+        return self._json(r, c)
+
+    def _member_add(self, body: dict):
+        """The Team screen's Add member: an existing VIGIL customer, named by the email of their account, joins the
+        SESSION org with a role. As `_member`, the acting REQUESTER, the ORG and the step-up stamp come from the
+        SERVER-side session — never the body (a body `org_id`/`requester` is ignored); only the email and the role
+        travel. No session (or no bound org) is refused before the hop fires."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
+                   "email": body.get("email", ""), "role": body.get("role", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
+        c, r = self._provision("member_add", requester, payload)
         return self._json(r, c)
 
     def _target(self, action: str, body: dict):
@@ -1201,6 +1225,11 @@ def _monitoring_on() -> bool:
 def _onboarding_on() -> bool:
     from .. import config as _config
     return _config.customer_onboarding_enabled()
+
+
+def _team_on() -> bool:
+    from .. import config as _config
+    return _config.customer_team_ui_enabled()
 
 
 def _checkout_on() -> bool:

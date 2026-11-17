@@ -567,6 +567,8 @@ jobs:
               integration/tests/test_launch_trigger.py \
               integration/tests/test_launch_drain.py \
               integration/tests/test_engage_runner.py \
+              integration/tests/test_engage_worker_metered.py \
+              integration/tests/test_live_metered_wiring.py \
               integration/tests/test_engage_worker_pause_redrive.py \
               integration/tests/test_launch_pause_redrive_gate.py \
               integration/tests/test_seam_migration_engine_floor.py \
@@ -577,6 +579,9 @@ jobs:
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \
               integration/tests/test_pr_bot_print_fix_authorization.py \
+              integration/tests/test_redpen_engine.py \
+              integration/tests/test_redpen_certify.py \
+              integration/tests/test_redpen_reproduce.py \
               integration/tests/test_general_reexecutable.py \
               integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \

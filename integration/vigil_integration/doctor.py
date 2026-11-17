@@ -1419,6 +1419,29 @@ def _fold_cache_audit_report(home: "Path | None" = None, now: "float | None" = N
 _AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})   # = sigil.config's affirmative set (a test pins it)
 
 
+def _offense_plane_metered_key_issue(e: "dict") -> str:
+    """M1c-2b — with metered billing on, the OFFENSE plane must hold NO provider key (a customer run reaches the
+    model only through the gateway with its owner-signed grant). Build the offense child env EXACTLY as uiproxy
+    does (``uiproxy._child_env(offense=True, base_env=e)``) and return a HARD-issue message if it would still carry
+    a provider key or the key hot-reload flag — else "". This verifies the invariant directly, so a regression in
+    the uiproxy strip surfaces as a doctor issue. Same plane (integration, stdlib-only uiproxy); never raises."""
+    try:
+        from . import uiproxy as _uip
+        off = _uip._child_env(offense=True, base_env=e)
+    except Exception:  # noqa: BLE001 — cannot reconstruct the offense env ⇒ invent no issue off a probe failure
+        return ""
+    leaked = sorted(k for k in ("SIGIL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY") if (off.get(k) or "").strip())
+    if leaked:
+        return ("VIGIL_METERED_BILLING is on but the offense plane would still inherit a provider key "
+                f"({', '.join(leaked)}); a metered customer run must reach the model ONLY through the gateway with "
+                "its grant. The offense children's environment must not carry the provider key.")
+    if (off.get("VIGIL_LIVE_KEY_RELOAD") or "") == "1":
+        return ("VIGIL_METERED_BILLING is on but the offense plane would hot-reload the persisted provider key "
+                "(VIGIL_LIVE_KEY_RELOAD is set for the offense children); a metered run must spend its grant "
+                "through the gateway, never a provider key.")
+    return ""
+
+
 def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "tuple[dict, list, list]":
     """PRICING M1c — the metered-billing posture (design §4-§5), read from the environment WITHOUT importing sigil
     (FATAL-2; ``vigil_core.model_metering`` is the shared pure core). Returns (section, issues, notes).
@@ -1479,6 +1502,13 @@ def _metering_report(env: "dict | None" = None, probe=None, ssm_probe=None) -> "
     elif gateway_on and not env_key:
         issues.append("the model gateway is enabled but no provider key (SIGIL_ANTHROPIC_API_KEY / "
                       "ANTHROPIC_API_KEY) is in this environment, so it will not start.")
+    if metered:
+        # M1c-2b — with metered billing on, the OFFENSE plane must hold NO provider key: a customer run reaches
+        # the model ONLY through the gateway with its owner-signed grant (the worker scopes it per run). The
+        # SOVEREIGN gateway legitimately holds the key (above), but the offense children must not inherit it.
+        _off_issue = _offense_plane_metered_key_issue(e)
+        if _off_issue:
+            issues.append(_off_issue)
     try:
         from vigil_core import model_metering as _mm
         if metered:

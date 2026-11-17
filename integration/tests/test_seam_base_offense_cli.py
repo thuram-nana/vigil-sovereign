@@ -152,7 +152,7 @@ def test_run_up_pins_the_seam_into_every_child(monkeypatch, tmp_path):
         envs[argv[1]] = dict(extra_env or {})
         return _FakeProc(), Queue()
 
-    def _fake_spawn(argv, log_path, *, extra_env=None):
+    def _fake_spawn(argv, log_path, *, extra_env=None, offense=False):
         envs[argv[1]] = dict(extra_env or {})
         if argv[1] == "serve-customer":
             raise OSError("stop here")                                # aborts run_up cleanly after the capture

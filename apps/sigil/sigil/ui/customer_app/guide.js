@@ -75,13 +75,15 @@
                    "As you use VIGIL, it brings your credits, hosts, assessments and monitoring together in one place."],
           why: "Every screen shows your workspace only. The server decides what each person may see." },
         { id: "team", title: "Bring in your team", where: "Team", route: "#/team",
-          clicks: ["Select Team in the top bar, then Add member. Enter your teammate's work email and choose a role: Admin, Analyst or Viewer.",
+          clicks: ["Select Team in the top bar. Under Add member, enter your teammate's work email and choose a role: Admin, Analyst or Viewer.",
+                   "Select Add member. Your teammate needs a VIGIL account first: if there is none for that email, VIGIL says so and adds no one. They can create one with Create an account on the sign-in screen.",
                    "Admin: billing, the team and monitoring. No testing and no findings.",
                    "Analyst and Viewer: can sign in and look around, without billing or findings.",
-                   "Founder: you, the person who signed the workspace up, and the one role here that can test hosts and read findings.",
+                   "Founder: everything an Admin can do, plus testing hosts and reading findings. Only VIGIL changes or removes the founder, so the founder's row has no buttons.",
                    "To let a teammate test hosts and read findings too, contact VIGIL: that role, Operator, is granted only by VIGIL.",
-                   "Select Remove next to a member to take them off the workspace."],
-          why: "Testing and billing are separate: paying for VIGIL, or running the workspace, never gives anyone permission to test. Team changes may ask for a fresh authenticator code." },
+                   "To give a member another role, choose it on their row and select Change role.",
+                   "To take a member off the workspace, select Remove on their row, then Yes, remove."],
+          why: "Only the founder and admins can see and change the team, and a workspace always keeps one person who can manage it: VIGIL refuses to remove the last one or to make them an Analyst or Viewer. Testing and billing are separate: paying for VIGIL, or running the workspace, never gives anyone permission to test. Team changes may ask for a fresh authenticator code." },
         { id: "notifications", title: "Notifications", where: "The bell", route: null,
           clicks: ["Select the bell in the top bar. It lists new findings, assessment outcomes, billing notices and monitoring events.",
                    "The number on the bell counts what you have not read yet. Select Mark all read to clear it.",
@@ -237,22 +239,24 @@
                    "AEGIS Respond does the same and can also block attacks on the host.",
                    "Choose a plan for 1 or 5 hosts and select Buy."],
           why: "AEGIS plans are monthly and billed on their own line. They never use your credits." },
-        { id: "monitor", title: "Turn on monitoring for a host", where: "Monitoring", route: null,
+        { id: "monitor", title: "Turn on monitoring for a host", where: "Monitoring", route: "#/monitoring",
           clicks: ["Make sure the host shows Verified in Assets.",
-                   "Open Monitoring and choose the host.",
-                   "Choose Observe or Respond, then confirm with your authenticator app.",
+                   "Select Monitoring in the top bar. It lists your hosts and whether AEGIS monitors each one.",
+                   "Select Turn on Observe to have AEGIS watch the host's traffic and report attacks, or Turn on Respond to also block them. Turn on Respond appears only when your plan includes Respond.",
+                   "Confirm with your authenticator app if VIGIL asks for a fresh code.",
                    "Monitoring starts for that host and runs until the end of your plan period."],
           why: "Turning monitoring on needs the founder or an admin. Without monitoring turned on, traffic to the host passes through AEGIS uninspected." },
-        { id: "events", title: "Connect your traffic and see events", where: "Monitoring", route: null,
+        { id: "events", title: "Connect your traffic and see events", where: "Monitoring", route: "#/monitoring",
           clicks: ["VIGIL sets your host up behind the managed AEGIS gateway with you.",
-                   "Open Monitoring to see the events for your hosts. Only your workspace sees them.",
-                   "The bell in the top bar tells you when something new arrives."],
+                   "Open Monitoring to see the events for your hosts, newest first. Only your workspace sees them.",
+                   "Each event shows when it happened, the host, the kind of attack, whether it was confirmed and what AEGIS did, such as Blocked.",
+                   "The list refreshes by itself while Monitoring is open. The bell in the top bar tells you when something new arrives."],
           why: "Each event is checked before it reaches you; a report that cannot be verified is never shown." },
-        { id: "manage", title: "Change or stop monitoring", where: "Monitoring", route: null,
-          clicks: ["Open Monitoring and choose the host.",
-                   "Select Turn off to stop monitoring it. Its traffic then passes through uninspected.",
-                   "Monitoring carries on when your plan renews, and ends when the plan is cancelled.",
-                   "Moving from Respond to Observe turns blocking off. Monitoring of a host also ends when its proof expires, so keep the proof current."],
+        { id: "manage", title: "Change or stop monitoring", where: "Monitoring", route: "#/monitoring",
+          clicks: ["Open Monitoring and find the host.",
+                   "Select Switch to Observe or Switch to Respond to change what AEGIS does. Moving from Respond to Observe turns blocking off.",
+                   "Select Turn off, then Yes, turn off, to stop monitoring it. Its traffic then passes through uninspected.",
+                   "Monitoring carries on when your plan renews, and ends when the plan is cancelled. It also ends when the host's proof expires, so keep the proof current."],
           why: "You can turn monitoring off at any time." },
       ],
     },
@@ -481,8 +485,9 @@
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
 
   /**
-   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter}. Chapter tabs on top; each step of
-   * the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as done".
+   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
+   * step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
+   * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides.
    */
   function viewGuide(env) {
     var h = env.h;
@@ -523,7 +528,7 @@
           draw();
         });
         var actions = [mark];
-        if (s.route && typeof env.nav === "function") {
+        if (s.route && typeof env.nav === "function" && (typeof env.shown !== "function" || env.shown(s.route))) {
           actions.unshift(h("button.btn", { type: "button", text: "Go to " + s.where,
                                             onClick: function () { env.nav(s.route); } }));
         }

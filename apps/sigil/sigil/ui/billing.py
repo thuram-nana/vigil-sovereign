@@ -14,6 +14,7 @@ FATAL-2: sovereign-side (`assert_no_offense()` at import); imports only governor
 """
 from __future__ import annotations
 
+import itertools
 from typing import Any, Optional
 
 from ..reuse import assert_no_offense
@@ -48,7 +49,14 @@ def _sub_json(sub) -> Optional[dict[str, Any]]:
 def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
     """The billing overview for ONE org: spendable credit position (persistent wallet + the active subscription's
     live plan tranche), lifetime wallet totals, and the current subscription. Every number is DERIVED from the
-    spine (never a stored counter). Assumes the caller was already authorized for `org_id` by the route."""
+    spine (never a stored counter). Assumes the caller was already authorized for `org_id` by the route.
+
+    W2c-2 (behind ``VIGIL_METERED_BILLING``; the flag OFF ⇒ this output is byte-identical): adds the wallet's EXACT
+    balance — ``exact_available_mc`` (milli-credits = ``1000 x available - remainder``) and ``exact_available`` (its
+    floor in whole credits, never more than the customer holds). No existing field changes. This exact figure is the
+    statement's ``available_to_start_mc`` (``billing_usage``) — the number I4 reconciles the latest balance-after to."""
+    from .. import config
+
     wallet = WalletRegistry(store)
     plan = PlanCreditLedger(store)
     subs = SubscriptionRegistry(store)
@@ -57,7 +65,7 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
     pos = meter.position(org_id, now)
     sub = subs.subscription(org_id)                     # current subscription (may be past_due/lapsed) — display
     active = subs.active_subscription(org_id, now)      # the ACTIVE + in-period one (None when lapsed/dunning)
-    return {
+    out = {
         "org_id": org_id,
         "credits": {"available": pos.available, "persistent": pos.persistent, "plan_live": pos.plan_live},
         "wallet": {"granted": bal.granted, "debited": bal.debited, "available": bal.available},
@@ -65,6 +73,10 @@ def billing_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
         "active": active is not None,                   # is the plan live right now (in-period + active)?
         "now": now,
     }
+    if config.metered_billing_enabled():
+        out["exact_available_mc"] = bal.exact_available_mc
+        out["exact_available"] = bal.exact_available_mc // 1000   # floor (display never shows more than is held)
+    return out
 
 
 def billing_rates() -> dict[str, Any]:
@@ -109,48 +121,126 @@ def _priced_lines(rec: "dict[str, Any]", card) -> "tuple[list[dict[str, Any]], i
     return out, charge
 
 
-def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_dir, limit: int = 500) -> dict[str, Any]:
+def _balance_after_mc(grants, plan_grants, plan_tranches, charge_events, now: float) -> int:
+    """W2c-2 — the EXACT remaining credit (milli-credits) after each metered charge, in timestamp order, and the
+    final remaining (returned). Each event is a signed delta at an instant:
+      * a PURCHASE / trial grant — ``+1000 x credits`` at its ``issued_at`` (``grants``: ``(issued_at, credits)``);
+      * a PLAN tranche ENTER — ``+1000 x credits`` at its ``issued_at``
+        (``plan_grants``: ``(issued_at, credits, period_end)``);
+      * a PLAN tranche EXPIRY — ``-1000 x unspent`` at its ``period_end``, applied ONLY once it has expired
+        (``period_end <= now``) — non-rollover, exactly ``PlanCreditLedger`` / ``CreditMeter``
+        (``plan_tranches``: ``(period_end, unspent_credits)``);
+      * a metered CHARGE — ``-amount_mc`` at its ``ts`` (``charge_events``: ``(ts, tiebreak, amount_mc, charge)``).
+    A scan's reserve DRAW and its settlement RETURN net to its metered consumption, so they are NOT separate events:
+    the charges ARE the consumption, and ``purchased - consumed`` reconciles to the wallet's exact balance (I4). The
+    running balance starts at 0 and, on a complete (un-pruned) spine, ends at the wallet's ``exact_available_mc``.
+    Events at the same instant order grants (then plan enters) before charges before expiries, deterministically.
+    Mutates each ``charge`` dict with ``balance_after_mc``; returns the final running balance (``remaining_mc``)."""
+    from vigil_core.rate_card import MC_PER_CREDIT
+    events: "list[tuple[tuple, int, Optional[dict[str, Any]]]]" = []
+    ctr = itertools.count()
+    for iss, credits in grants:
+        events.append(((iss, 0, next(ctr)), MC_PER_CREDIT * int(credits), None))
+    for iss, credits, _pe in plan_grants:
+        events.append(((iss, 0, next(ctr)), MC_PER_CREDIT * int(credits), None))
+    for pe, unspent in plan_tranches:
+        if pe <= now:                                    # a tranche expires only once its period has passed
+            events.append(((pe, 2, next(ctr)), -MC_PER_CREDIT * int(unspent), None))
+    for ts, tiebreak, amount_mc, charge in charge_events:
+        events.append(((ts, 1, tiebreak), -int(amount_mc), charge))
+    events.sort(key=lambda e: e[0])
+    bal = 0
+    for _k, delta, charge in events:
+        bal += delta
+        if charge is not None:
+            charge["balance_after_mc"] = bal
+    return bal
+
+
+def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_dir, limit: int = 500,
+                  now: Optional[float] = None) -> dict[str, Any]:
     """The per-charge usage statement of ONE org, newest first: each metered AI request of each of the org's scans,
     priced line by line from the published rate card (operation, time, quantity, unit rate, credits). Tenant-scoped:
     only the org's own owner-signed launch reservations are read, and each scan's meter is found from its
     ``(slug, nonce)`` alone, so another tenant's usage is structurally never in the result. A meter whose hash chain
-    does not verify is reported as unavailable, never priced. Every amount is in credits; the model is never named.
-    PURE read: no key, no lock, no write."""
-    from vigil_core.model_grant import meter_id
-    from vigil_core.rate_card import format_credits, rate_card
+    does not verify is reported as unavailable, never priced (and never in the balance). Every amount is in credits;
+    the model is never named. PURE read: no key, no lock, no write.
 
+    W2c-2 (behind ``VIGIL_METERED_BILLING``; the flag OFF ⇒ this output is byte-identical): each charge also carries
+    ``balance_after_mc`` — the org's EXACT remaining credit (milli-credits) right after that charge, reconstructed in
+    timestamp order over the org's purchases/trial grants, plan-period tranches (entering and expiring, non-rollover)
+    and metered charges (:func:`_balance_after_mc`). Two top-level numbers: ``remaining_mc`` (bought - consumed, exact)
+    and ``available_to_start_mc`` (= ``remaining_mc - held_mc``, the allowances the org's running scans still hold:
+    each running scan's reserved units + extensions, less what it has consumed so far). ``held_mc`` is reported too.
+    Invariant I4 (tested): on a complete spine the latest ``balance_after_mc`` == ``remaining_mc`` ==
+    ``available_to_start_mc`` (no scan running) == the wallet's exact balance == what ``billing_overview`` reports as
+    exact; ``remaining_mc`` and ``balance_after_mc`` are over the LIVE spine window (like the charges), the
+    prune-durable exact balance being the wallet fold (``billing_overview``)."""
+    from vigil_core.model_grant import meter_id
+    from vigil_core.rate_card import MC_PER_CREDIT, format_credits, rate_card
+
+    from .. import config
     from ..governor.launch_reservations import scan_reservations
+    from ..governor.metering import PlanCreditLedger
+    from ..governor.wallet import WalletRegistry
     from ..model_gateway import GrantMeter
 
     card = rate_card()
     meter = GrantMeter(meter_dir)
     ix = scan_reservations(store, trusted_pubkey, org_id=org_id)
+    metered = config.metered_billing_enabled()
     scans: list[dict[str, Any]] = []
     charges: list[dict[str, Any]] = []
+    charge_events: list[tuple] = []                      # (ts, (seq, idx), amount_mc, charge) for the timeline
+    held_mc = 0
     total_mc = 0
     for r in sorted(ix.reservations.values(), key=lambda r: r.seq, reverse=True):
         if r.org_id != org_id:
             continue
         scan: dict[str, Any] = {"scan": r.slug, "launch": r.nonce, "started_at": r.issued_at}
+        running = metered and r.key not in ix.settled    # a reserved-but-not-yet-settled launch still holds credit
         try:
             records = meter.usage_records(meter_id(r.slug, r.nonce))
         except ValueError:
+            # a meter that fails its integrity check: never PRICED (no charge, not in remaining) and flagged
+            # unavailable for the operator to quarantine. But its owner-signed RESERVATION is a real debit, so while
+            # it is still running it HOLDS its whole allowance (its consumption cannot be read, so none is assumed) —
+            # otherwise available_to_start would drift above the wallet's authoritative exact balance.
             scan.update(status="unavailable", detail="this scan's usage record failed its integrity check")
             scans.append(scan)
+            if running:
+                held_mc += MC_PER_CREDIT * r.reserved
             continue
         scan_mc = 0
-        for rec in records:
+        for idx, rec in enumerate(records):
             lines, amount = _priced_lines(rec, card)
             scan_mc += amount
-            charges.append({"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": "AI analysis",
-                            "lines": lines, "credits": format_credits(amount), "amount_mc": amount})
+            charge = {"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": "AI analysis",
+                      "lines": lines, "credits": format_credits(amount), "amount_mc": amount}
+            charges.append(charge)
+            if metered:
+                charge_events.append((rec["ts"], (r.seq, idx), amount, charge))
         total_mc += scan_mc
+        if running:
+            # a RUNNING scan holds its allowance (reserved units + extensions) less what it has consumed so far —
+            # credits earmarked for it, so unavailable to START new work.
+            held_mc += max(0, MC_PER_CREDIT * r.reserved - scan_mc)
         scan.update(status="ok", requests=len(records), credits=format_credits(scan_mc), amount_mc=scan_mc)
         scans.append(scan)
     charges.sort(key=lambda c: c["ts"], reverse=True)
     n = max(1, min(int(limit), 5000))
-    return {"org_id": org_id, "currency": "credits", "scans": scans, "charges": charges[:n],
-            "count": len(charges), "credits": format_credits(total_mc), "amount_mc": total_mc}
+    out: dict[str, Any] = {"org_id": org_id, "currency": "credits", "scans": scans, "charges": charges[:n],
+                           "count": len(charges), "credits": format_credits(total_mc), "amount_mc": total_mc}
+    if metered:
+        import time as _time
+        t = float(now) if now is not None else _time.time()
+        plan = PlanCreditLedger(store)
+        plan_tranches = [(tr.period_end, tr.remaining) for tr in plan.tranches(org_id)]
+        remaining_mc = _balance_after_mc(WalletRegistry(store).purchase_events(org_id),
+                                         plan.grant_events(org_id), plan_tranches, charge_events, t)
+        available_to_start_mc = remaining_mc - held_mc   # the running scans' held allowances are not startable
+        out.update(remaining_mc=remaining_mc, available_to_start_mc=available_to_start_mc, held_mc=held_mc)
+    return out
 
 
 def _invoice_json(inv) -> dict[str, Any]:

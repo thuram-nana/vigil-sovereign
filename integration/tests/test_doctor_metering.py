@@ -90,6 +90,31 @@ def test_metered_billing_without_the_settle_record_is_a_hard_issue():
     assert d._metering_report(flat, probe=_alive)[1] == []                 # flat billing never needs it
 
 
+def test_a_metered_offense_plane_that_would_hold_a_provider_key_is_a_hard_issue(monkeypatch):
+    # M1c-2b — with metered billing on, the offense plane must hold NO provider key. Doctor rebuilds the offense
+    # child env (uiproxy._child_env(offense=True, base_env=e)) and HARD-fails if it would still carry one. Simulate
+    # a REGRESSION in the uiproxy strip (the real strip is exercised by the healthy test above, which stays clean).
+    from vigil_integration import uiproxy as _uip
+    monkeypatch.setattr(_uip, "_child_env", lambda offense=False, base_env=None: {"ANTHROPIC_API_KEY": "sk-leak"})
+    issues = d._metering_report(dict(ON), probe=_alive)[1]
+    assert any("the offense plane would still inherit a provider key" in m for m in issues), issues
+
+
+def test_a_metered_offense_plane_that_would_hot_reload_is_a_hard_issue(monkeypatch):
+    from vigil_integration import uiproxy as _uip
+    monkeypatch.setattr(_uip, "_child_env", lambda offense=False, base_env=None: {"VIGIL_LIVE_KEY_RELOAD": "1"})
+    issues = d._metering_report(dict(ON), probe=_alive)[1]
+    assert any("would hot-reload the persisted provider key" in m for m in issues), issues
+
+
+def test_the_offense_key_issue_is_silent_when_the_offense_env_is_clean(monkeypatch):
+    # the REAL uiproxy strip (metered ON in `e`) leaves a clean offense env ⇒ no issue — the healthy path.
+    assert d._offense_plane_metered_key_issue(dict(ON)) == ""
+    # and flat billing never raises it (the key is legitimately present for the gateway)
+    assert "offense plane would still inherit" not in " ".join(
+        d._metering_report({**ON, "VIGIL_METERED_BILLING": "0"}, probe=_alive)[1])
+
+
 def test_a_retired_pricing_setting_is_a_hard_issue_whether_or_not_metering_is_on():
     flat = {"VIGIL_MODEL_GATEWAY_ENABLED": "1", "SIGIL_ANTHROPIC_API_KEY": "sk", "VIGIL_GATEWAY_DAILY_LIMIT_USD": "9"}
     for name in mm.OBSOLETE_PRICING_ENVS:

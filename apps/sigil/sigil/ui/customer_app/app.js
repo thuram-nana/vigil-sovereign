@@ -40,6 +40,16 @@
  * lists the workspace's launches from api/customer/launches with the controls the server accepts (Start / Cancel
  * before a launch starts, Pause / Resume while it runs), refreshing while one runs and the screen is visible. Off, the
  * screen is read-only exactly as before and that read is never made.
+ * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
+ * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
+ * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
+ * The server decides who may change monitoring, which hosts are proven and what the plan includes; this page sends
+ * only a host the server listed and a mode. Off, there is no tab, #/monitoring is the home screen exactly as any unknown
+ * route, and no call or timer is made.
+ * TEAM. When the edge has the Team screen on (data-team="1", VIGIL_CUSTOMER_TEAM_UI), #/team lists the workspace's
+ * members (GET api/customer/members) and lets the founder or an admin add an existing VIGIL account by its email, change
+ * a member's role and remove a member (confirmed in the page). Off, #/team is the "being wired" card it always was and
+ * nothing is fetched.
  */
 (function () {
   "use strict";
@@ -121,9 +131,12 @@
   function viewGuideScreen() {
     var w = state.get().who || {};
     return shell(h("div", {}, [h("h2", { text: "Guide" }),
-      GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour })]),
+      GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour,
+                        shown: routeShown })]),
     "#/guide");
   }
+  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
+  function routeShown(route) { return route !== "#/monitoring" || MONITORING_ON; }
 
   function field(id, label, type) {
     return [h("label", { for: id, text: label }),
@@ -589,10 +602,30 @@
     try { var p = new URL(String(u)); return p.protocol === "https:" && !!p.hostname && !p.username && !p.password; }
     catch (e) { return false; }
   }
+  // An AEGIS monitoring plan buys protected-host slots (monitor_hosts), never credits.
+  function isMonitoringOffer(o) { return !!o && o.kind !== TOPUP && (parseInt(o.monitor_hosts, 10) || 0) > 0; }
+  function aegisPlanName(hosts, respond) {
+    var n = parseInt(hosts, 10) || 0;
+    return "AEGIS " + (respond ? "Respond" : "Observe") + ", " + n + (n === 1 ? " host" : " hosts");
+  }
   function offerLine(o) {
     if (o.kind === TOPUP) return (o.credits != null ? String(o.credits) + " credits" : "Credit top-up");
     var per = o.period_days ? " every " + String(o.period_days) + " days" : "";
+    if (isMonitoringOffer(o)) {
+      var days = Number(o.period_days) || 0;
+      return aegisPlanName(o.monitor_hosts, !!o.monitor_respond) + (days >= 28 && days <= 31 ? " — monthly" : per ? " —" + per : "")
+        + (o.monitor_respond ? ": watches traffic, reports attacks and can block them" : ": watches traffic and reports attacks");
+    }
     return "Plan: " + String(o.allotment != null ? o.allotment : "") + " credits" + per;
+  }
+  // Checkout refuses a second plan OF THE SAME KIND, so the buy list hides a plan exactly then: a credit plan while the
+  // workspace's credit plan is live or a credit-plan checkout is in progress; an AEGIS plan while its AEGIS plan is live
+  // or an AEGIS checkout is in progress. One kind never hides the other, and top-ups are always offered. (Checkout sells
+  // no AEGIS plan yet; the read that offers one must also report has_monitoring_plan and monitoring_checkout_pending.)
+  function offerShown(d, o) {
+    if (o.kind === TOPUP) return true;
+    if (isMonitoringOffer(o)) return !(d.has_monitoring_plan || d.monitoring_checkout_pending);
+    return !(d.has_active_plan || d.plan_checkout_pending);
   }
   async function startCheckout(o, btn) {
     btn.disabled = true;
@@ -621,9 +654,8 @@
       // Absent while checkout is off (404) and hidden for a role that cannot spend money (403): no buy section.
       try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { return; }
       if (here() !== "#/billing") return;
-      // a live plan, or a plan checkout still in progress (not yet drained): checkout refuses a second plan.
-      var noPlan = !!(d && (d.has_active_plan || d.plan_checkout_pending));
-      var offers = ((d && d.offers) || []).filter(function (o) { return !(noPlan && o.kind !== TOPUP); });
+      // a live plan, or a plan checkout still in progress (not yet drained): checkout refuses a second plan of its kind.
+      var offers = ((d && d.offers) || []).filter(function (o) { return offerShown(d, o); });
       if (!offers.length) return;
       var rows = offers.map(function (o) {
         var btn = h("button.btn", { type: "button", text: "Buy " + money(o.amount_minor, o.currency) });
@@ -1217,6 +1249,428 @@
   }
   // ---- end of launching and controlling assessments (C1a) -------------------------------------------------------
 
+  // ---- Monitoring (AEGIS) -------------------------------------------------------------------------------------------
+  // #/monitoring, only while the edge has customer monitoring on. GET api/customer/monitoring answers for the SESSION
+  // workspace: the hosts with monitoring (grants) and can_manage (the founder or an admin — the server decides); only to
+  // such a person also the hosts whose proof of control is current (hosts) and the AEGIS plan (plan: host slots, whether
+  // it includes Respond, its period end). Turning monitoring on or changing its mode may need a fresh second factor (the
+  // server answers 401 step_up_required); turning it off never does, and is confirmed here first. The page shows only
+  // what the server sent, and nothing internal of an event (no record number, report id, certificate hash or org id).
+  var MONITORING_ON = pageFlag("monitoring");
+  var MON_POLL_MS = 30000;                                // the events refresh this often while the screen is in view
+  var mon = { timer: null, gen: 0, loaded: false };
+  var MON_MODE = { observe: "Observe", block: "Respond" };
+  var MON_ACTION = { block: "Blocked", observe: "Observed", challenge: "Challenged", throttle: "Slowed down",
+                     allow: "Allowed" };
+  function own(table, key) {                              // the label for a server value; never an inherited member
+    var k = String(key == null ? "" : key);
+    return Object.prototype.hasOwnProperty.call(table, k) ? table[k] : "";
+  }
+  function fmtWhen(ts) {
+    try { return new Date(Number(ts || 0) * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC"; }
+    catch (e) { return "—"; }
+  }
+
+  function viewMonitoring() {
+    var holder = h("div#mon-body", {}, loadingHolder("Loading…"));
+    mon.loaded = false;
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring"); }
+      catch (e) {
+        if (here() !== "#/monitoring") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Monitoring"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/monitoring") return;              // the customer navigated away before the load resolved
+      VUI.mount(holder, monitoringBody(d || {}));
+      pollMonEvents();                                    // the events fill in now, then every MON_POLL_MS
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Monitoring" }),
+      h("p.cust-muted", { text: "AEGIS watches live traffic to the hosts your workspace proved and reports attacks as "
+        + "they happen. Only this workspace sees its hosts and events." }),
+      holder]), "#/monitoring");
+  }
+
+  function monitoringBody(d) {
+    var rows = monHostRows(d);
+    var top = d.can_manage ? monPlanCard(d)
+      : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can turn monitoring on or "
+          + "off. You can see which hosts are monitored and what AEGIS reported." });
+    var hosts = rows.length ? h("div.cust-grid", {}, rows.map(function (r) { return monHostCard(r, d); }))
+      : h("div.card.cust-soon", { text: d.can_manage
+          ? "No host of this workspace has a current proof of control. Monitoring needs a host that shows Verified in Assets."
+          : "No host of this workspace is monitored." });
+    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts, h("h3", { text: "Events" }),
+      h("div#mon-events", {}, loadingHolder("Loading events…"))]);
+  }
+
+  // One row per host: each host with a current proof (sent to a manager only) and each host with monitoring.
+  function monHostRows(d) {
+    var by = Object.create(null), out = [];
+    function row(host) { if (!by[host]) { by[host] = { host: host }; out.push(by[host]); } return by[host]; }
+    (d.hosts || []).forEach(function (x) {
+      if (x && x.host) { var r = row(String(x.host)); r.verified = true; r.expires_at = x.expires_at; }
+    });
+    (d.grants || []).forEach(function (g) { if (g && g.host) { row(String(g.host)).grant = g; } });
+    return out.sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+  }
+  function monActive(d) { return (d.grants || []).filter(function (g) { return g && g.active; }).length; }
+
+  function monPlanCard(d) {
+    var p = d.plan;
+    if (!p) {
+      var help = h("div#mon-plan-help", {}, h("p.cust-muted", { text: "Checking where to get one…" }));
+      monPlanHelp(help);
+      return h("div.card", {}, [h("h3", { text: "AEGIS plan" }),
+        h("p", { text: "This workspace has no active AEGIS plan, so monitoring cannot be turned on yet." }), help]);
+    }
+    return h("div.card", {}, [h("h3", { text: "AEGIS plan" }),
+      kv("Plan", aegisPlanName(p.host_slots, !!p.respond)),
+      kv("Hosts monitored", monActive(d) + " of " + (parseInt(p.host_slots, 10) || 0)),
+      kv("Current period ends", fmtDate(p.period_end)),
+      h("p.cust-muted", { text: p.respond ? "Observe watches traffic and reports attacks. Respond also blocks them."
+        : "Observe watches traffic and reports attacks. Blocking attacks needs an AEGIS Respond plan." })]);
+  }
+  // Where a workspace without a plan gets one: Billing, but only while Billing really offers an AEGIS plan.
+  function monPlanHelp(holder) {
+    (async function () {
+      var d = null;
+      try { d = await VUI.getJSON(API + "/billing/offers"); } catch (e) { d = null; }
+      if (here() !== "#/monitoring") return;
+      var sold = ((d && d.offers) || []).some(isMonitoringOffer);
+      VUI.mount(holder, sold
+        ? [h("p.cust-muted", { text: "Choose an AEGIS plan on Billing, then turn monitoring on here." }),
+           h("div.cust-mon-actions", {}, monButton("Go to Billing", function () { nav("#/billing"); }))]
+        : h("p.cust-muted", { text: "AEGIS plans are not sold in the app yet. To add one to this workspace, "
+            + "contact VIGIL." }));
+    })();
+  }
+
+  function monHostCard(r, d) {
+    var g = r.grant, on = !!(g && g.active);
+    var badge = on ? h("span.cust-badge.cust-badge-on", { text: "Monitoring · " + (own(MON_MODE, g.mode) || "On") })
+      : h("span.cust-badge.cust-badge-off", { text: "Not monitored" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: r.host }), badge])];
+    if (on) { body.push(kv("Until", fmtDate(g.not_after))); }
+    else if (g) { body.push(h("p.cust-muted", { text: "Monitoring of this host has ended." })); }
+    if (r.verified) { body.push(kv("Proof expires", fmtDate(r.expires_at))); }
+    else if (d.can_manage) {
+      body.push(h("p.cust-muted", { text: "Its proof of control is not current: verify it again in Assets before "
+        + "monitoring can be turned on." }));
+    }
+    if (d.can_manage) {
+      var actions = h("div.cust-mon-actions", {});
+      VUI.mount(actions, monActions(r, d, actions));
+      body.push(actions);
+    }
+    return h("div.card", {}, body);
+  }
+  // A manager's choices for one host. Turn on needs a plan, a current proof and a free host on the plan; Respond only
+  // when the plan includes it. A monitored host can switch mode (it keeps its place) or be turned off, after a confirm.
+  function monActions(r, d, holder) {
+    var p = d.plan, g = r.grant, on = !!(g && g.active), out = [];
+    if (on) {
+      if (p && p.respond && g.mode === "observe") {
+        out.push(monButton("Switch to Respond", function (b) { monTurnOn(r.host, "block", b); }));
+      }
+      if (p && g.mode === "block") {
+        out.push(monButton("Switch to Observe", function (b) { monTurnOn(r.host, "observe", b); }));
+      }
+      out.push(monButton("Turn off", function () { monConfirmOff(r, d, holder); }, "danger"));
+    } else if (p && r.verified) {
+      if (monActive(d) >= (parseInt(p.host_slots, 10) || 0)) {
+        out.push(h("p.cust-muted", { text: "Every host your plan covers is monitored. Turn off another host to "
+          + "monitor this one." }));
+      } else {
+        out.push(monButton("Turn on Observe", function (b) { monTurnOn(r.host, "observe", b); }, "primary"));
+        if (p.respond) { out.push(monButton("Turn on Respond", function (b) { monTurnOn(r.host, "block", b); }, "primary")); }
+      }
+    }
+    return out;
+  }
+  function monButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // Turning monitoring off is asked here first, in place of the host's buttons; nothing is sent until it is confirmed.
+  function monConfirmOff(r, d, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
+      h("p", { text: "Stop monitoring " + r.host + "? Its traffic then passes through AEGIS uninspected, and attacks on "
+        + "it are no longer reported." }),
+      h("div.cust-mon-actions", {}, [
+        monButton("Yes, turn off", function (b) { monTurnOff(r.host, b); }, "danger"),
+        monButton("Keep monitoring", function () { VUI.mount(holder, monActions(r, d, holder)); }),
+      ]),
+    ]));
+  }
+  async function monTurnOn(host, mode, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/authorize", { host: host, mode: mode });
+      VUI.toast("Monitoring is on for " + host + " (" + own(MON_MODE, mode) + ").");
+      if (here() === "#/monitoring") render();            // show the host's new state
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  async function monTurnOff(host, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/revoke", { host: host });
+      VUI.toast("Monitoring is off for " + host + ".");
+      if (here() === "#/monitoring") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  async function monFailed(e) {
+    if (e && e.status === 401 && e.data && e.data.step_up_required) {
+      return err("For your security, this change to monitoring needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.");
+    }
+    if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+    err("Monitoring was not changed" + ((e && e.data && e.data.error) ? ": " + e.data.error : "."));
+  }
+
+  function monEventsList(events) {
+    var list = (Array.isArray(events) ? events : []).filter(function (ev) { return ev && typeof ev === "object"; });
+    list.sort(function (a, b) { return (Number(b.ts) || 0) - (Number(a.ts) || 0); });     // newest first
+    if (!list.length) {
+      return h("div.card.cust-soon", { text: "No events yet. When AEGIS reports an attack on a monitored host, it "
+        + "appears here." });
+    }
+    var head = h("tr", {}, ["When", "Host", "Attack", "Result", "AEGIS action"].map(function (t) {
+      return h("th", { text: t });
+    }));
+    var rows = list.map(function (ev) {
+      var confirmed = ev.decision === "confirmed";
+      return h("tr", {}, [
+        h("td", { text: fmtWhen(ev.ts) }), h("td", { text: String(ev.host || "—") }),
+        h("td", { text: String(ev.attack_class || "—").replace(/_/g, " ") }),
+        h("td", {}, h("span.cust-badge.cust-badge-" + (confirmed ? "attack" : "signal"),
+          { text: confirmed ? "Confirmed" : "Not confirmed" })),
+        h("td", { text: own(MON_ACTION, ev.action) || "—" }),
+      ]);
+    });
+    return h("div.card.cust-mon-events", {}, h("table.cust-table", {}, [h("thead", {}, head), h("tbody", {}, rows)]));
+  }
+
+  // The events refresh politely: every MON_POLL_MS, and only while the Monitoring screen is shown to someone signed in
+  // and the page is visible. render() and the page's visibility changes re-decide, so leaving the screen, hiding the
+  // page or signing out stops it; an answer that comes back after any of those is dropped (the generation moved on).
+  function monVisible() { return MONITORING_ON && authed() && here() === "#/monitoring" && !document.hidden; }
+  function startMonPoll() { if (!mon.timer) { mon.timer = setInterval(function () { pollMonEvents(); }, MON_POLL_MS); } }
+  function stopMonPoll() { if (mon.timer) { clearInterval(mon.timer); mon.timer = null; } mon.gen++; }
+  function syncMonPoll() { if (monVisible()) { startMonPoll(); } else { stopMonPoll(); } }
+  function onMonVisibility() { syncMonPoll(); if (monVisible()) { pollMonEvents(); } }
+  async function pollMonEvents() {
+    if (!monVisible()) { stopMonPoll(); return; }
+    var gen = mon.gen, d;
+    try { d = await VUI.getJSON(API + "/monitoring/events"); }
+    catch (e) {
+      if (e && (e.status === 401 || e.status === 404)) { stopMonPoll(); }  // signed out, or monitoring was switched off
+      if (e && e.status === 401) { await refreshWho(); return; }
+      var box = VUI.$("#mon-events");
+      if (box && gen === mon.gen && !mon.loaded) {
+        VUI.mount(box, h("div.card.cust-soon", { text: "Events could not be loaded just now. VIGIL tries again shortly." }));
+      }
+      return;                                             // keep what is shown; the next tick tries again
+    }
+    if (gen !== mon.gen || !monVisible()) { return; }     // the screen was left, hidden or signed out meanwhile
+    var holder = VUI.$("#mon-events");
+    if (!holder) { return; }
+    mon.loaded = true;
+    VUI.mount(holder, monEventsList(d && d.events));
+  }
+
+  // ---- Team (VIGIL_CUSTOMER_TEAM_UI): the workspace's members — add, change a role, remove -------------------------
+  // Shown only while the edge writes data-team="1"; off, #/team is the "being wired" card it always was and nothing is
+  // fetched. The SERVER decides everything: GET api/customer/members lists the session's workspace only, and only to
+  // someone who may manage its team (anyone else gets the honest card below). Each change is one request for the
+  // session's workspace — never an org this page names: member/add (an existing VIGIL account, named by its email),
+  // member/grant (a new role) or member/revoke (Remove, confirmed in the page, never with a browser dialog) — and then
+  // the list is read again. Only the roles a customer may grant are offered, and the founder's row has no buttons: only
+  // VIGIL changes the founder.
+  var TEAM_ON = pageFlag("team");
+  var TEAM_ROLES = [["org_admin", "Admin"], ["analyst", "Analyst"], ["viewer", "Viewer"]];
+  var ROLE_LABELS = { founder: "Founder", operator: "Operator", org_admin: "Admin", analyst: "Analyst", viewer: "Viewer" };
+  function roleLabel(role) {
+    var r = String(role || "");
+    return Object.prototype.hasOwnProperty.call(ROLE_LABELS, r) ? ROLE_LABELS[r] : (r || "—");
+  }
+  function teamGrantable(role) {
+    for (var i = 0; i < TEAM_ROLES.length; i++) { if (TEAM_ROLES[i][0] === role) return true; }
+    return false;
+  }
+  function teamName(m) { return String((m && (m.email || m.username)) || ""); }
+  // A role picker offering exactly the grantable roles. A current role a customer cannot grant (an Operator) is shown
+  // as a first, unselectable option, so the row reads truthfully and any change is a deliberate choice.
+  function teamRoleSelect(id, current, label) {
+    var sel = h("select" + (id ? "#" + id : ""), label ? { "aria-label": label } : {});
+    if (current && !teamGrantable(current)) {
+      sel.appendChild(h("option", { value: "", text: roleLabel(current), disabled: true }));
+    }
+    TEAM_ROLES.forEach(function (r) { sel.appendChild(h("option", { value: r[0], text: r[1] })); });
+    sel.value = teamGrantable(current) ? current : "";
+    return sel;
+  }
+  // The server's own words for a refusal, without its "denied: " style prefix (while VIGIL restarts: the kit's words).
+  function teamWhy(e) {
+    var d = (e && e.data) || {};
+    if (d.error === "updating") return String((e && e.message) || "");
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+  // True when no answer came back (a 5xx other than "updating", or no response at all): whether the change happened is
+  // not known, so the page reads the list again. While VIGIL restarts the request reached nothing.
+  function teamUnsure(e) {
+    var status = e && e.status;
+    return !status || (status >= 500 && !(status === 503 && e.data && e.data.error === "updating"));
+  }
+  // Why a change did not go through. The provisioner refuses before it writes anything, so a refusal says "Nothing was
+  // changed."; when no answer came back that cannot be said — the list is read again instead.
+  function teamRefusal(e, name) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (status === 401 && d.step_up_required) {
+      return "For your security, changing your team needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.";
+    }
+    if (status === 429) return "Too many team changes in a short time. Wait a minute, then try again. Nothing was changed.";
+    if (teamUnsure(e)) return "VIGIL could not confirm the change. The list shows your team as it is now.";
+    if (status === 503) return String(e.message);                      // "updating": the kit's own words
+    var why = teamWhy(e);
+    if (/last administrator/i.test(why)) {
+      return name + " is the last person who can manage this workspace's team. Make another member an Admin first. "
+        + "Nothing was changed.";
+    }
+    return (why ? why.replace(/\.?$/, ".") : "The change was refused.") + " Nothing was changed.";
+  }
+  function teamNoAccess() {
+    return h("div.card.cust-soon", { text: "Only the workspace's founder and admins can see and change its team. Ask "
+      + "one of them to add someone or to change a role." });
+  }
+  function teamRow(m, isMe, act) {
+    var name = teamName(m);
+    var rows = [
+      h("div.cust-member-head", {}, [
+        h("strong.cust-member-name", { text: name }),
+        isMe ? h("span.chip", { text: "You" }) : null,
+        h("span.cust-badge", { text: roleLabel(m.role) }),
+      ]),
+      m.since ? h("p.cust-muted", { text: "Role since " + fmtDate(m.since) }) : null,
+    ];
+    if (m.role === "founder") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL changes or removes the founder." }));
+      return h("div.card.cust-member", {}, rows);
+    }
+    if (m.role === "operator") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL makes someone an Operator: after a change, only VIGIL can make "
+        + "them one again." }));
+    }
+    var pick = teamRoleSelect(null, m.role, "New role for " + name);
+    var change = h("button.btn", { type: "button", text: "Change role" });
+    change.addEventListener("click", function () {
+      var role = String(pick.value || "");
+      if (!teamGrantable(role) || role === m.role) { act.say("Choose a new role for " + name + " first.", true); return; }
+      act.change(m, role, change);
+    });
+    var ask = h("div.cust-member-confirm", {});
+    ask.hidden = true;
+    var remove = h("button.btn.danger", { type: "button", text: "Remove" });
+    remove.addEventListener("click", function () {
+      var yes = h("button.btn.danger", { type: "button", text: "Yes, remove" });
+      yes.addEventListener("click", function () { act.remove(m, yes); });
+      VUI.mount(ask, [
+        h("p", { text: isMe ? "Remove yourself from this workspace? You lose access to it straight away."
+                            : "Remove " + name + " from this workspace? They lose access to it straight away." }),
+        h("div.cust-member-actions", {}, [yes, h("button.btn", { type: "button", text: "Cancel",
+          onClick: function () { ask.hidden = true; VUI.clear(ask); } })]),
+      ]);
+      ask.hidden = false;
+    });
+    rows.push(h("div.cust-member-actions", {}, [pick, change, remove]), ask);
+    return h("div.card.cust-member", {}, rows);
+  }
+  function teamMembers(list, act) {
+    if (!list.length) return h("div.card.cust-soon", { text: "No members yet." });
+    var me = String((state.get().who || {}).username || "");
+    return h("div.cust-team-list", {}, list.map(function (m) { return teamRow(m, !!me && m.username === me, act); }));
+  }
+  function teamAddCard(act) {
+    var email = h("input#team-add-email", { type: "email", autocomplete: "off", spellcheck: "false" });
+    var role = teamRoleSelect("team-add-role", "viewer");
+    var add = h("button.btn.primary", { type: "button", text: "Add member" });
+    add.addEventListener("click", function () {
+      var e = String(email.value || "").trim().toLowerCase(), r = String(role.value || "");   // as the list shows it
+      if (!e) { act.say("Enter your teammate's work email.", true); return; }
+      if (!teamGrantable(r)) { act.say("Choose a role: Admin, Analyst or Viewer.", true); return; }
+      act.add(e, r, add);
+    });
+    return h("div.card.cust-team-add", {}, [
+      h("h3", { text: "Add member" }),
+      h("p.cust-muted", { text: "Your teammate needs a VIGIL account first. Enter the email they sign in to VIGIL with "
+        + "and choose their role." }),
+      h("label", { for: "team-add-email", text: "Work email" }), email,
+      h("label", { for: "team-add-role", text: "Role" }), role,
+      h("div.cust-member-actions", {}, [add]),
+    ]);
+  }
+  function viewTeam() {
+    var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
+    var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
+    function say(text, bad) {
+      note.textContent = text || "";
+      note.className = "cust-team-msg" + (bad ? " bad" : "");
+      if (bad) { try { note.scrollIntoView({ block: "nearest" }); } catch (e) { /* a convenience */ } }
+    }
+    async function load() {
+      var d;
+      try { d = await VUI.getJSON(API + "/members"); }
+      catch (e) {
+        if (here() !== "#/team") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) { VUI.mount(holder, teamNoAccess()); return; }
+        VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load your team"
+          + (teamWhy(e) ? ": " + teamWhy(e) : ".") }));
+        return;
+      }
+      if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
+      VUI.mount(holder, [teamMembers((d && d.members) || [], act), teamAddCard(act)]);
+    }
+    async function send(path, body, done, name, btn) {
+      say("");
+      if (btn) btn.disabled = true;
+      try { await VUI.postJSON(API + path, body); }
+      catch (e) {
+        if (btn) btn.disabled = false;
+        if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); return; }
+        say(teamRefusal(e, name), true);
+        if (teamUnsure(e)) await load();
+        return;
+      }
+      VUI.toast(done);
+      await load();
+    }
+    var act = {
+      say: say,
+      add: function (email, role, btn) {
+        return send("/member/add", { email: email, role: role }, email + " was added as " + roleLabel(role) + ".",
+          email, btn);
+      },
+      change: function (m, role, btn) {
+        return send("/member/grant", { member_username: m.username, role: role },
+          teamName(m) + " is now " + roleLabel(role) + ".", teamName(m), btn);
+      },
+      remove: function (m, btn) {
+        return send("/member/revoke", { member_username: m.username },
+          teamName(m) + " was removed from this workspace.", teamName(m), btn);
+      },
+    };
+    load();
+    return shell(h("div", {}, [h("h2", { text: "Team" }), note, holder]), "#/team");
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -1420,6 +1874,7 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -1480,7 +1935,9 @@
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
-    "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
+    "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
+    // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
+    "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
   };
@@ -1514,6 +1971,7 @@
     VUI.mount(root, view());
     setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it
     syncNtf();                     // start/stop the notification poll to match the live session + pref
+    syncMonPoll();                 // monitoring on: the events refresh only while their screen is in view
     maybeOpenTour();               // the guide on: the first-sign-in tour (once per account in this browser)
   }
 
@@ -1526,6 +1984,8 @@
     window.addEventListener("hashchange", onLaunchRoute);
     document.addEventListener("visibilitychange", onLaunchVisibility);
   }
+  // monitoring on: the events stop refreshing while the page is hidden, and refresh at once when it is back in view
+  if (MONITORING_ON) { document.addEventListener("visibilitychange", onMonVisibility); }
   state.sub(render);
 
   // ---- boot ---------------------------------------------------------------------------------------

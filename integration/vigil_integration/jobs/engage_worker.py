@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -36,6 +37,44 @@ from vigil_core.seam_base import resolve_seam_base
 from .model import SecurityJob
 
 _ATTEMPTS_DIRNAME = ".engage-attempts"
+
+
+#: M1c-2b — the worker outcome a METERED run reports when the model gateway STOPS it for want of prepaid credit.
+#: Deliberately NOT a ``vigil_core.EngagementOutcome`` (``completed`` / ``canceled`` / ``failed``): those are the
+#: SETTLE triggers, and a credit pause must NEVER settle — the launch is parked, not charged and not refunded.
+PAUSED_CREDIT_OUTCOME = "paused_credit"
+
+
+@dataclass(frozen=True)
+class CreditPaused:
+    """M1c-2b — the result a worker returns when a METERED run's prepaid credits are exhausted mid-run. The launch
+    is PARKED, not failed and not completed: its owner-signed lease is HELD unsettled (neither charged nor
+    refunded, never tombstoned), and the single-use floor is held re-armable (the resume-required marker), so W3's
+    resume-after-top-up (§11.6) re-arms the SAME lease WITHOUT re-burning it. ``outcome`` is the distinct
+    ``paused_credit`` tag the seam reports (``JobRunner.run_one`` → ``JobOutcome.result``); a RETURN (never a raise)
+    keeps the one-shot delivery, so the launch does NOT re-drive into the still-exhausted gateway. The W3 interface
+    this slice defines: the held, unsettled lease + the worker's resume-required marker + this outcome; W3 adds the
+    SOVEREIGN-side credit-pause record, the resume trigger and the 7-day close. Carries ONLY public identity
+    (slug + nonce) — no key, no amount (FATAL-2 / money-silent)."""
+
+    engagement_slug: str
+    nonce: str
+    outcome: str = PAUSED_CREDIT_OUTCOME
+
+
+#: M1c-2b — the env a METERED run must NEVER carry: the persisted provider key, its hot-reload flag, the Anthropic
+#: SDK's key sibling (``ANTHROPIC_AUTH_TOKEN`` — a stale one would bypass the grant), and the api-base siblings a
+#: Strix / LiteLLM child resolves BEFORE ``LLM_API_BASE`` (a stray one would repoint it off the loopback gateway).
+#: ``_model_grant_scope`` unsets every one of these for the run and restores them exactly on exit.
+_GRANT_SCOPE_UNSET = (
+    "SIGIL_ANTHROPIC_API_KEY",
+    "VIGIL_LIVE_KEY_RELOAD",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "LITELLM_BASE_URL",
+    "OLLAMA_API_BASE",
+)
 
 
 #: A customer launch re-drives (resume) on a transient worker failure up to this many arm attempts; the LAST
@@ -164,6 +203,143 @@ def _lease_currently_paused(base_dir: Any, slug: str, nonce: str) -> bool:
         return bool(is_lease_paused(base_dir, slug, nonce))
     except Exception:  # noqa: BLE001 — cannot read the pause store ⇒ treat as a genuine failure (terminates)
         return False
+
+
+def _is_credits_exhausted(exc: BaseException) -> bool:
+    """M1c-2b — True iff ``exc`` is the engine's terminal METERED credit stop
+    (``framework.v2.common.errors.CreditsExhausted``). Lazy + guarded (FATAL-2: no ``framework`` at module scope).
+    By the time a run has raised, the runner has imported ``framework``, so this is a cheap ``sys.modules`` lookup.
+    SAFE DEFAULT = False: a type that cannot be resolved is treated as a NORMAL failure (the transient/terminal
+    FAILED path), never silently converted into a held, unsettled launch — the money-dangerous direction is a
+    false POSITIVE, which ``isinstance`` cannot produce."""
+    try:
+        from framework.v2.common.errors import CreditsExhausted
+    except Exception:  # noqa: BLE001 — cannot classify ⇒ treat as a normal failure (safe default)
+        return False
+    return isinstance(exc, CreditsExhausted)
+
+
+def _grant_model_effort(token: str, root: Any) -> "Optional[tuple[str, str]]":
+    """M1c-2b — decode the owner-signed model-grant ``token`` for its ``(model, effort)``, verifying under the
+    owner key the worker ALREADY loaded (``root``'s authorizer pubkeys — the SAME trust root the arm verifies the
+    lease under). The gateway ADMITS only the grant's model (a wrong model → provider 400), so the model MUST be
+    the grant's — never a derived ``VIGIL_RUN_MODEL`` that could have drifted since publish; the effort is the
+    grant's (the one the gateway pins). Returns ``(model, effort)`` or ``None`` (no root / no authorizer pubkey, or
+    the token does not verify / is malformed). Lazy (two-env): ``vigil_core`` only, no ``framework``. Total:
+    never raises; never logs the token."""
+    try:
+        from vigil_core.model_grant import decode_token
+    except Exception:  # noqa: BLE001 — verifier unavailable ⇒ cannot confirm the grant (fail-closed)
+        return None
+    try:
+        pubkeys = [str(getattr(a, "public_key_b64", "") or "").strip()
+                   for a in (getattr(root, "authorizers", None) or [])]
+    except Exception:  # noqa: BLE001 — an odd trust root ⇒ no pubkeys (fail-closed)
+        return None
+    for pk in pubkeys:
+        if not pk:
+            continue
+        grant, _reason = decode_token(token, pk)      # total: (grant, "") or (None, reason), never raises
+        if grant is not None:
+            model = str(getattr(grant, "model", "") or "").strip()
+            effort = str(getattr(grant, "effort", "") or "").strip()
+            if model and effort:
+                return model, effort
+    return None
+
+
+def _read_run_model_grant(base_dir: Any, slug: str, nonce: str, root: Any
+                          ) -> "tuple[Optional[Any], str, str]":
+    """M1c-2b — resolve THIS launch's MODEL GRANT (a metered run) or confirm it is a FLAT run, BEFORE the arm.
+
+    The sovereign plane writes a per-launch owner-signed grant to the seam at a METERED publish, BEFORE the lease
+    it mints the job from, so a metered launch's job always has its grant when the worker runs (the keyless
+    "this run is metered" signal — §15.5). Returns ``(bundle, model, effort)``:
+
+      * ``(None, "", "")`` — a FLAT launch: no grant published for this slug ⇒ byte-identical (no gateway, no
+        env scope). Also the no-nonce / defensive case (a grant is nonce-bound; a job with no launch nonce is not
+        a metered launch).
+      * ``(bundle, model, effort)`` — a METERED launch: the owner-verified grant bound to THIS nonce + its decoded
+        model/effort.
+
+    RAISES ``RuntimeError`` BEFORE the arm (so the single-use floor is never burned) when this is a METERED
+    context with no USABLE grant: a grant published for this slug but absent for this nonce / malformed, or one
+    whose token does not verify under the owner key. A metered launch must never arm without its model access —
+    it would run with no gateway (or reach for an inherited provider key), the exact leak this slice closes.
+    Keyless + lazy (``framework`` is never imported here)."""
+    if not nonce:
+        return None, "", ""
+    base = base_dir if base_dir is not None else resolve_seam_base()   # the engine arm reads the same seam base
+    from vigil_integration.live.model_grant_broker import grant_path, read_model_grant
+    bundle = read_model_grant(base, slug, expect_nonce=nonce)
+    if bundle is not None:
+        me = _grant_model_effort(str(getattr(bundle, "token", "") or ""), root)
+        if me is None:
+            raise RuntimeError(
+                f"engage worker: the model grant for {slug!r} does not verify under the owner key — refusing "
+                f"the metered run BEFORE the arm (fail-closed; the single-use floor is not burned)")
+        return bundle, me[0], me[1]
+    # No usable grant bound to THIS launch. Is a grant FILE nonetheless present for the slug (a metered launch
+    # whose grant is absent for this nonce / malformed)? Then this is a metered context with no model access —
+    # refuse before the arm rather than run it unmetered. A broken presence probe reads as "no file" (flat).
+    try:
+        gp = grant_path(base, slug)
+        present = gp is not None and os.path.lexists(gp)
+    except Exception:  # noqa: BLE001 — a presence probe that breaks ⇒ treat as no file (flat)
+        present = False
+    if present:
+        raise RuntimeError(
+            f"engage worker: a model grant was published for {slug!r} but none is usable for this launch "
+            f"(absent for its nonce / malformed) — refusing the metered run BEFORE the arm (fail-closed; the "
+            f"single-use floor is not burned)")
+    return None, "", ""
+
+
+@contextlib.contextmanager
+def _model_grant_scope(bundle: Any, model: str, effort: str) -> "Iterator[None]":
+    """M1c-2b — scope a METERED run's model environment to its owner-signed grant + the loopback model gateway for
+    the duration of ONE run, restoring EXACTLY on exit (each key back to its prior value, or UNSET when it had
+    none). ``bundle is None`` ⇒ a NO-OP (a flat run: byte-identical). While it is active, every model call of the
+    run — the kernel Anthropic backend, the live think step, a Strix child — spends the grant through the gateway
+    and NEVER the provider key: the gateway (``ANTHROPIC_BASE_URL`` / ``LLM_API_BASE``) and the grant as the key
+    (``ANTHROPIC_API_KEY`` / ``LLM_API_KEY`` / ``VIGIL_MODEL_GRANT``) are set, the Anthropic backend is pinned
+    (``CRUCIBLE_LLM_BACKEND=anthropic``) with routing off (``CRUCIBLE_MODEL_ROUTING=0``) at the grant's model
+    (``CRUCIBLE_ANTHROPIC_MODEL`` / ``STRIX_LLM``) and effort (``CRUCIBLE_EFFORT``), and the provider-key env is
+    UNSET (:data:`_GRANT_SCOPE_UNSET`). Mutating ``os.environ`` for the whole run is safe ONLY because
+    ``JobRunner.run_one`` serialises jobs — one job at a time under the per-slug run lease, so ``os.environ`` is
+    stable for the run and every in-process sample reads the same values (the SAME assumption
+    :func:`_model_routing_scope` relies on)."""
+    if bundle is None:
+        yield
+        return
+    token = str(getattr(bundle, "token", "") or "")
+    gateway = str(getattr(bundle, "gateway_url", "") or "")
+    set_env = {
+        "ANTHROPIC_BASE_URL": gateway,
+        "ANTHROPIC_API_KEY": token,
+        "VIGIL_MODEL_GRANT": token,
+        "CRUCIBLE_LLM_BACKEND": "anthropic",
+        "CRUCIBLE_MODEL_ROUTING": "0",
+        "CRUCIBLE_ANTHROPIC_MODEL": model,
+        "CRUCIBLE_EFFORT": effort,
+        "STRIX_LLM": f"anthropic/{model}",
+        "LLM_API_BASE": gateway,
+        "LLM_API_KEY": token,
+    }
+    touched = list(set_env.keys()) + list(_GRANT_SCOPE_UNSET)   # snapshot EVERY key we set OR unset
+    prev = {k: os.environ.get(k) for k in touched}
+    try:
+        for k, v in set_env.items():
+            os.environ[k] = v
+        for k in _GRANT_SCOPE_UNSET:
+            os.environ.pop(k, None)
+        yield
+    finally:
+        for k in touched:
+            if prev[k] is None:
+                os.environ.pop(k, None)                 # restore EXACTLY: a key that was unset goes back to unset
+            else:
+                os.environ[k] = prev[k]
 
 
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
@@ -373,6 +549,16 @@ def make_engage_worker(
             kwargs["profile"] = run_tier.engage_profile_for(tier)  # surface|full — the roster NAME (manifest-recorded)
             kwargs.update(_engage_profile_kwargs(kwargs["profile"]))   # the enable_* passes that roster turns ON
             routing_override = run_tier.routing_enabled_for(tier)  # quick ⇒ cheaper tiers on; deep ⇒ capable models
+        # M1c-2b — a METERED customer run reaches a model ONLY through the loopback model gateway, spending its
+        # owner-signed grant. Read the grant published for THIS launch (written BEFORE the lease, so it is always
+        # present for a metered launch's job — the keyless "this run is metered" signal): a usable grant ⇒ metered,
+        # scope its env around the runner (below) and force model-routing OFF (the gateway admits only the grant's
+        # model, so a quick-tier route would 400); a grant FILE present but unusable ⇒ a metered launch with no
+        # model access ⇒ _read_run_model_grant REFUSES here, BEFORE the arm, so this job never burns the single-use
+        # floor; no grant ⇒ a FLAT launch (byte-identical: grant_bundle is None ⇒ the scope below is a no-op).
+        grant_bundle, grant_model, grant_effort = _read_run_model_grant(base_dir, job.slug, nonce, root)
+        if grant_bundle is not None:
+            routing_override = False       # a metered run never routes — belt to the engine's own routing_enabled()
         # K4-5d(B): the completion SEAM. Load the owner-delegated offense-governance signers BEFORE the arm
         # (fail-closed — a run that could never settle must not consume the lease), then:
         #   run succeeds → cross the confirmed FACTs (best-effort) + emit a COMPLETED settle signal (REQUIRED —
@@ -385,9 +571,26 @@ def make_engage_worker(
         do_settle = bool(emit_completion and nonce)
         sgnrs = (signers if signers is not None else _launch_governance_signers(base_dir)) if do_settle else None
         try:
-            with _model_routing_scope(routing_override):          # EC-7: scope CRUCIBLE_MODEL_ROUTING to the tier (no-op when off)
-                result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
+            with _model_grant_scope(grant_bundle, grant_model, grant_effort):  # M1c-2b: metered env (no-op when flat)
+                with _model_routing_scope(routing_override):      # EC-7: scope CRUCIBLE_MODEL_ROUTING to the tier (no-op when off)
+                    result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
         except Exception as _run_exc:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
+            # M1c-2b — a METERED run whose prepaid credits are exhausted (the model gateway's terminal credit stop)
+            # is a reversible CREDIT PAUSE, not a failure: HOLD the lease for a W3 top-up + resume. Classify it
+            # FIRST (by TYPE, not message) so it: emits NO settle signal — no COMPLETED charge, no FAILED refund,
+            # the lease stays unsettled, neither tombstoned nor refunded (the sovereign credit-pause record is W3);
+            # and mirrors the cooperative-pause bookkeeping (roll the attempt slot back + record resume-required),
+            # so repeat credit pauses never exhaust _MAX_ARM_ATTEMPTS and the eventual resume re-validates / re-binds
+            # WITHOUT re-burning the single-use floor into a replay refusal. Then RETURN the distinct
+            # ``paused_credit`` outcome (never a raise): JobRunner keeps the one-shot delivery, so the launch is
+            # PARKED — it does NOT re-drive into the still-exhausted gateway. W3's resume-after-top-up (§11.6)
+            # re-triggers it from the held lease + the resume-required marker.
+            if _is_credits_exhausted(_run_exc):
+                if nonce:
+                    if _slot_created:
+                        _release_attempt(base_dir, job.slug, nonce, attempt)
+                    _record_resume_required(base_dir, job.slug, nonce)
+                return CreditPaused(engagement_slug=job.slug, nonce=nonce)
             # pause/resume PR-3 — a COOPERATIVE in-flight PAUSE halt is NOT a failure; it is a re-driveable
             # transient. Classify it by TYPE (not by message) BEFORE the FAILED-settle path so a paused launch:
             #   * NEVER emits the terminal refunding FAILED settle (the lease is HELD for resume, not refunded or
