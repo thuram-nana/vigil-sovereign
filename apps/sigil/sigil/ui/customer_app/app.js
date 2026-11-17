@@ -41,6 +41,10 @@
  * The server decides who may change monitoring, which hosts are proven and what the plan includes; this page sends
  * only a host the server listed and a mode. Off, there is no tab, #/monitoring is the home screen exactly as any unknown
  * route, and no call or timer is made.
+ * TEAM. When the edge has the Team screen on (data-team="1", VIGIL_CUSTOMER_TEAM_UI), #/team lists the workspace's
+ * members (GET api/customer/members) and lets the founder or an admin add an existing VIGIL account by its email, change
+ * a member's role and remove a member (confirmed in the page). Off, #/team is the "being wired" card it always was and
+ * nothing is fetched.
  */
 (function () {
   "use strict";
@@ -1122,6 +1126,193 @@
     VUI.mount(holder, monEventsList(d && d.events));
   }
 
+  // ---- Team (VIGIL_CUSTOMER_TEAM_UI): the workspace's members — add, change a role, remove -------------------------
+  // Shown only while the edge writes data-team="1"; off, #/team is the "being wired" card it always was and nothing is
+  // fetched. The SERVER decides everything: GET api/customer/members lists the session's workspace only, and only to
+  // someone who may manage its team (anyone else gets the honest card below). Each change is one request for the
+  // session's workspace — never an org this page names: member/add (an existing VIGIL account, named by its email),
+  // member/grant (a new role) or member/revoke (Remove, confirmed in the page, never with a browser dialog) — and then
+  // the list is read again. Only the roles a customer may grant are offered, and the founder's row has no buttons: only
+  // VIGIL changes the founder.
+  var TEAM_ON = pageFlag("team");
+  var TEAM_ROLES = [["org_admin", "Admin"], ["analyst", "Analyst"], ["viewer", "Viewer"]];
+  var ROLE_LABELS = { founder: "Founder", operator: "Operator", org_admin: "Admin", analyst: "Analyst", viewer: "Viewer" };
+  function roleLabel(role) {
+    var r = String(role || "");
+    return Object.prototype.hasOwnProperty.call(ROLE_LABELS, r) ? ROLE_LABELS[r] : (r || "—");
+  }
+  function teamGrantable(role) {
+    for (var i = 0; i < TEAM_ROLES.length; i++) { if (TEAM_ROLES[i][0] === role) return true; }
+    return false;
+  }
+  function teamName(m) { return String((m && (m.email || m.username)) || ""); }
+  // A role picker offering exactly the grantable roles. A current role a customer cannot grant (an Operator) is shown
+  // as a first, unselectable option, so the row reads truthfully and any change is a deliberate choice.
+  function teamRoleSelect(id, current, label) {
+    var sel = h("select" + (id ? "#" + id : ""), label ? { "aria-label": label } : {});
+    if (current && !teamGrantable(current)) {
+      sel.appendChild(h("option", { value: "", text: roleLabel(current), disabled: true }));
+    }
+    TEAM_ROLES.forEach(function (r) { sel.appendChild(h("option", { value: r[0], text: r[1] })); });
+    sel.value = teamGrantable(current) ? current : "";
+    return sel;
+  }
+  // The server's own words for a refusal, without its "denied: " style prefix (while VIGIL restarts: the kit's words).
+  function teamWhy(e) {
+    var d = (e && e.data) || {};
+    if (d.error === "updating") return String((e && e.message) || "");
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+  // True when no answer came back (a 5xx other than "updating", or no response at all): whether the change happened is
+  // not known, so the page reads the list again. While VIGIL restarts the request reached nothing.
+  function teamUnsure(e) {
+    var status = e && e.status;
+    return !status || (status >= 500 && !(status === 503 && e.data && e.data.error === "updating"));
+  }
+  // Why a change did not go through. The provisioner refuses before it writes anything, so a refusal says "Nothing was
+  // changed."; when no answer came back that cannot be said — the list is read again instead.
+  function teamRefusal(e, name) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (status === 401 && d.step_up_required) {
+      return "For your security, changing your team needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.";
+    }
+    if (status === 429) return "Too many team changes in a short time. Wait a minute, then try again. Nothing was changed.";
+    if (teamUnsure(e)) return "VIGIL could not confirm the change. The list shows your team as it is now.";
+    if (status === 503) return String(e.message);                      // "updating": the kit's own words
+    var why = teamWhy(e);
+    if (/last administrator/i.test(why)) {
+      return name + " is the last person who can manage this workspace's team. Make another member an Admin first. "
+        + "Nothing was changed.";
+    }
+    return (why ? why.replace(/\.?$/, ".") : "The change was refused.") + " Nothing was changed.";
+  }
+  function teamNoAccess() {
+    return h("div.card.cust-soon", { text: "Only the workspace's founder and admins can see and change its team. Ask "
+      + "one of them to add someone or to change a role." });
+  }
+  function teamRow(m, isMe, act) {
+    var name = teamName(m);
+    var rows = [
+      h("div.cust-member-head", {}, [
+        h("strong.cust-member-name", { text: name }),
+        isMe ? h("span.chip", { text: "You" }) : null,
+        h("span.cust-badge", { text: roleLabel(m.role) }),
+      ]),
+      m.since ? h("p.cust-muted", { text: "Role since " + fmtDate(m.since) }) : null,
+    ];
+    if (m.role === "founder") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL changes or removes the founder." }));
+      return h("div.card.cust-member", {}, rows);
+    }
+    if (m.role === "operator") {
+      rows.push(h("p.cust-muted", { text: "Only VIGIL makes someone an Operator: after a change, only VIGIL can make "
+        + "them one again." }));
+    }
+    var pick = teamRoleSelect(null, m.role, "New role for " + name);
+    var change = h("button.btn", { type: "button", text: "Change role" });
+    change.addEventListener("click", function () {
+      var role = String(pick.value || "");
+      if (!teamGrantable(role) || role === m.role) { act.say("Choose a new role for " + name + " first.", true); return; }
+      act.change(m, role, change);
+    });
+    var ask = h("div.cust-member-confirm", {});
+    ask.hidden = true;
+    var remove = h("button.btn.danger", { type: "button", text: "Remove" });
+    remove.addEventListener("click", function () {
+      var yes = h("button.btn.danger", { type: "button", text: "Yes, remove" });
+      yes.addEventListener("click", function () { act.remove(m, yes); });
+      VUI.mount(ask, [
+        h("p", { text: isMe ? "Remove yourself from this workspace? You lose access to it straight away."
+                            : "Remove " + name + " from this workspace? They lose access to it straight away." }),
+        h("div.cust-member-actions", {}, [yes, h("button.btn", { type: "button", text: "Cancel",
+          onClick: function () { ask.hidden = true; VUI.clear(ask); } })]),
+      ]);
+      ask.hidden = false;
+    });
+    rows.push(h("div.cust-member-actions", {}, [pick, change, remove]), ask);
+    return h("div.card.cust-member", {}, rows);
+  }
+  function teamMembers(list, act) {
+    if (!list.length) return h("div.card.cust-soon", { text: "No members yet." });
+    var me = String((state.get().who || {}).username || "");
+    return h("div.cust-team-list", {}, list.map(function (m) { return teamRow(m, !!me && m.username === me, act); }));
+  }
+  function teamAddCard(act) {
+    var email = h("input#team-add-email", { type: "email", autocomplete: "off", spellcheck: "false" });
+    var role = teamRoleSelect("team-add-role", "viewer");
+    var add = h("button.btn.primary", { type: "button", text: "Add member" });
+    add.addEventListener("click", function () {
+      var e = String(email.value || "").trim().toLowerCase(), r = String(role.value || "");   // as the list shows it
+      if (!e) { act.say("Enter your teammate's work email.", true); return; }
+      if (!teamGrantable(r)) { act.say("Choose a role: Admin, Analyst or Viewer.", true); return; }
+      act.add(e, r, add);
+    });
+    return h("div.card.cust-team-add", {}, [
+      h("h3", { text: "Add member" }),
+      h("p.cust-muted", { text: "Your teammate needs a VIGIL account first. Enter the email they sign in to VIGIL with "
+        + "and choose their role." }),
+      h("label", { for: "team-add-email", text: "Work email" }), email,
+      h("label", { for: "team-add-role", text: "Role" }), role,
+      h("div.cust-member-actions", {}, [add]),
+    ]);
+  }
+  function viewTeam() {
+    var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
+    var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
+    function say(text, bad) {
+      note.textContent = text || "";
+      note.className = "cust-team-msg" + (bad ? " bad" : "");
+      if (bad) { try { note.scrollIntoView({ block: "nearest" }); } catch (e) { /* a convenience */ } }
+    }
+    async function load() {
+      var d;
+      try { d = await VUI.getJSON(API + "/members"); }
+      catch (e) {
+        if (here() !== "#/team") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) { VUI.mount(holder, teamNoAccess()); return; }
+        VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load your team"
+          + (teamWhy(e) ? ": " + teamWhy(e) : ".") }));
+        return;
+      }
+      if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
+      VUI.mount(holder, [teamMembers((d && d.members) || [], act), teamAddCard(act)]);
+    }
+    async function send(path, body, done, name, btn) {
+      say("");
+      if (btn) btn.disabled = true;
+      try { await VUI.postJSON(API + path, body); }
+      catch (e) {
+        if (btn) btn.disabled = false;
+        if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); return; }
+        say(teamRefusal(e, name), true);
+        if (teamUnsure(e)) await load();
+        return;
+      }
+      VUI.toast(done);
+      await load();
+    }
+    var act = {
+      say: say,
+      add: function (email, role, btn) {
+        return send("/member/add", { email: email, role: role }, email + " was added as " + roleLabel(role) + ".",
+          email, btn);
+      },
+      change: function (m, role, btn) {
+        return send("/member/grant", { member_username: m.username, role: role },
+          teamName(m) + " is now " + roleLabel(role) + ".", teamName(m), btn);
+      },
+      remove: function (m, btn) {
+        return send("/member/revoke", { member_username: m.username },
+          teamName(m) + " was removed from this workspace.", teamName(m), btn);
+      },
+    };
+    load();
+    return shell(h("div", {}, [h("h2", { text: "Team" }), note, holder]), "#/team");
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -1386,7 +1577,7 @@
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
-    "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },
+    "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is

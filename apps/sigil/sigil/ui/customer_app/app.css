@@ -139,6 +139,29 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-ntf-body { font-size: 0.82rem; opacity: 0.78; margin-top: 2px; word-break: break-word; }
 .cust-ntf-kind { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.5; margin-top: 4px; }
 
+/* ---- the Team screen (only while the edge has VIGIL_CUSTOMER_TEAM_UI on) ---------------------------------------- */
+.cust-team-msg { min-height: 1.4em; margin: 0 0 12px; }
+.cust-team-msg.bad { color: var(--st-blocked, #e2776c); font-weight: 600; }
+.cust-team-list { display: grid; gap: 12px; margin-bottom: 24px; }
+.cust-member { display: grid; gap: 8px; }
+.cust-member p { margin: 0; }
+.cust-member-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cust-member-name { word-break: break-all; }
+.cust-member-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cust-member-actions select { width: auto; min-width: 9rem; }
+.cust-member-confirm { display: grid; gap: 8px; padding: 12px 14px; border-radius: var(--r-2);
+  border: 1px solid color-mix(in srgb, var(--st-blocked) 45%, var(--border)); }
+/* an author `display` beats the browser's own [hidden] rule, so the closed confirmation needs its own */
+.cust-member-confirm[hidden] { display: none; }
+.cust-team-add { display: grid; gap: 6px; max-width: 520px; }
+.cust-team-add h3, .cust-team-add p { margin: 0 0 6px; }
+.cust-team-add label { font-size: 0.85rem; opacity: 0.8; margin-top: 6px; }
+/* the shared kit styles text inputs and selects but not email inputs: the same look here */
+.cust-team-add input[type=email] { width: 100%; box-sizing: border-box; background: var(--bg-2);
+  border: 1px solid var(--border-strong); color: var(--text-0); border-radius: var(--r-2); padding: 11px 14px;
+  font-size: var(--fs-md); font-family: inherit; }
+.cust-team-add .cust-member-actions { margin-top: 10px; }
+
 /* CHK-2 — buy credits (hosted checkout) */
 .cust-offer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 0;
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2)); flex-wrap: wrap; }

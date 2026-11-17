@@ -261,9 +261,20 @@ class LaunchGate:
         conservative credit-envelope PROXY ``consumed * E`` until the keyless actual-token delivery lands),
         CLAMPED to the reserved envelope ``reserved * E`` so a forged over-report can never over-settle. All
         arguments come from the VERIFIED lease (never a wire value). Gated DEFAULT-OFF + idempotent per
-        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve)."""
+        ``(slug, nonce)`` via the ``settle-cost:`` prefix. FAIL-SAFE (advisory metering, same as the reserve).
+
+        W2c-2 (k): a launch published METERED writes NO cost-settle proxy — ``consumed`` is the whole-credit customer
+        charge and ``reserved`` the allowance chunk, so ``* E`` would be a fictional token count; its real provider
+        cost is metered by the model gateway (GrantMeter cost_nano). So ``ENVELOPE_TOKENS_PER_CREDIT`` is never read
+        on a metered launch's settle; a flat launch is byte-identical. An unreadable billing mode fails closed to
+        'metered' (skip) — advisory metering never over-reports, and the real cost is on the gateway meter."""
         from .. import config
         if not config.cost_ledger_write_enabled():
+            return
+        try:
+            if self._launch_was_metered(slug, nonce):
+                return
+        except OSError:
             return
         try:
             from vigil_core import ENVELOPE_TOKENS_PER_CREDIT
@@ -460,7 +471,12 @@ class LaunchGate:
             # EC-5: after the real (incremental) reserve succeeds, write the cost-ledger RESERVE for the pool
             # meter — the signed envelope `u * E`. Gated default-OFF + fail-safe (advisory; never breaks the
             # launch). Keyed on the SAME (slug, nonce) as the credit debit, so it is idempotent with it.
-            self._write_cost_reserve(oid, u, slug, non, now_ts)
+            # W2c-2 (k): ONLY a flat launch (depth is None) writes the `u * E` proxy. A metered launch's `u` is an
+            # allowance CHUNK, not a token estimate, so `u * E` would be a fictional cost; its real provider cost is
+            # metered by the model gateway (GrantMeter cost_nano). So ENVELOPE_TOKENS_PER_CREDIT is never read on a
+            # metered launch, and the flat path is byte-identical.
+            if depth is None:
+                self._write_cost_reserve(oid, u, slug, non, now_ts)
             if depth is not None:                         # W2b-3: the depth, named under the owner signature, in a
                 from vigil_core.credit_lease import LEASE_DEPTH_VERSION    # lease version an older reader refuses
                 split.update(run_tier=depth, version=LEASE_DEPTH_VERSION)

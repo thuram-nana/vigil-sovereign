@@ -10,15 +10,29 @@
 > §10 of this file). Slice **W1** (published rate card + per-charge usage statement) is built; **W2 → W6** are
 > specified in §11.5–§11.9 in enough detail to implement directly.
 >
-> **Verified takeover state on 2026-11-16 (local takeover session):**
-> - `origin/main` = `454d9ac3` (#1133). #1130 (W1), #1131 (W2a), #1132 (W2b-1) and #1133 (W2b-2) are merged.
-> - **IN REVIEW: W2b-3** (explicit depth in the lease + the first allowance sized `min(available, chunk)`), its own
->   PR off `454d9ac3`. See §11.20. Next: W2c (§11.5 f, g, j, k).
+> **⇒ TAKE OVER FROM §15 (the exact take-off point at the end of 2026-11-16), then read §0.**
+>
+> **Verified state at the end of 2026-11-16 (two local sessions):**
+> - `origin/main` = **`4c977a4b`** (#1141). Merged on 2026-11-16: #1130 (W1), #1131 (W2a), #1132 (W2b-1), #1133
+>   (W2b-2), **#1134 (W2b-3, `02bfcdcf`)**, **#1135 (Dependabot PR A: the z3-solver floor, `9eb4f64a`)**, **#1136
+>   (Dependabot PR B: the anthropic SDK 2.8, `a43f8fd3`)**, **#1138 (M1c-2a: the engine guards + the Strix prices,
+>   `71610f3b`)**, **#1139 (NYX: the UI-only display name of the Strix engine, `a43b4a31`)**, **#1140 (W2c-1: exact
+>   milli-credit settlement + the floor retired, `198b8f37`)**, **#1141 (the in-app onboarding guide with the tour's
+>   answer kept server-side, `4c977a4b`)**. Dependabot #1121, #1122, #1124, #1125, #1126 are closed as superseded
+>   (#1120 was closed earlier).
+> - **Open PR:** **#1137** (this handoff). Merge when its 15 required checks are green (§15.1). **The complete list
+>   of what is left to code is §15.11.**
+> - Owner decisions of 2026-11-16 (all recorded below — do not re-ask): Stripe is the payment provider (Flutterwave
+>   paused); no server / VPS work; NYX is UI-only; the three production flips are delegated to the agent behind their
+>   gates (§6); the floor is retired. **W5 dispute timing DECIDED (owner, 2026-11-16):** remove the disputed credits
+>   when the dispute OPENS (`charge.dispute.created` / `funds_withdrawn`) and give them back automatically when it is
+>   won (`funds_reinstated` / closed `won`). **Red-Pen (D) is built together with the customer app's Code screen.**
 > - Every money number the program needs is now **decided by the owner** (§11.2, §12, §13). Nothing in this file is
 >   a proposal waiting for a decision except where it says "OPEN".
 >
-> Order of work (details §5): **#1130 → W2 → W3 → M1c-2 → W4 → W5 → W6 → G1 → Gate-5-lite (wallet E2E, simulated)
-> → Red-Pen R1–R5 → Front C S1–S4 → Gate 5 → A1**, with the two Dependabot PRs (§13.3) slotted in whenever CI is idle.
+> Order of work (details §5, the full list §15.11): **W2c-2 → W3 → M1c-2b → W4 → W5 → W6 → G1 → Gate-5-lite (wallet
+> E2E, simulated) → Red-Pen R1–R5 → Front C S1–S4 → Gate 5 → A1 / O1 / L1**, with the customer-app screens of §15.11 C
+> built alongside (each before the onboarding guide can be switched on).
 
 ---
 
@@ -50,8 +64,9 @@ confirmed findings (each fix mutation-verified) → PR → merge only on CI gree
 1. Do **not** flip `VIGIL_CUSTOMER_PROD_EXECUTION`, the multi-shard production flag or `VIGIL_METERED_BILLING`
    **before its gate is green**. The owner delegated these three flips to the agent on 2026-11-16 (§6): each is
    flipped on the production deployment only when its own gate passes, then reported — never early.
-2. Do **not** inject or commit a real Flutterwave secret (`VIGIL_FLW_SECRET_KEY` is read from env at call time;
-   tests use dummies).
+2. Do **not** inject or commit a real payment secret — the Stripe keys (`VIGIL_STRIPE_SECRET_KEY`,
+   `VIGIL_STRIPE_WEBHOOK_SECRET`) or the paused Flutterwave ones (`VIGIL_FLW_SECRET_KEY`); all are read from env at
+   call time; tests use dummies and Stripe TEST mode only.
 3. Do **not** ratify money numbers — margins, $/token, catalog prices, **scale targets**.
 4. Do **not** dismiss a security alert. An A14 (supply-chain) red is *handled*, never ignored; the
    GitHub-release-CDN 504 is "transient" only once a clean re-run confirms it.
@@ -276,8 +291,16 @@ record and is kept as history.
 ### Front B — hostable / pay round-trip ✅ built, flag-held
 - **Money-IN drain** — `apps/sigil/sigil/inbound/billing_spool.py` (`vigil billing-drain`) + systemd
   `vigil-billing-drain.{service,timer}` (#1055, `VIGIL_BILLING_DRAIN_ENABLED`).
-- **Hosted checkout** (#1056) — `provision.billing_checkout`; Flutterwave hosted payment
-  (`VIGIL_FLW_SECRET_KEY`, `VIGIL_FLW_API_BASE`), amounts always from the **owner catalog**
+- **Payment provider = STRIPE (owner, 2026-11-16): "we won't be using Flutterwave so leave its development paused,
+  focus on Stripe."** The Flutterwave code stays on `main` but nothing new is built on it. Stripe lane:
+  `VIGIL_BILLING_PROVIDER=stripe`, `VIGIL_BILLING_ENABLE_STRIPE`, `VIGIL_STRIPE_SECRET_KEY`,
+  `VIGIL_STRIPE_WEBHOOK_SECRET`, `VIGIL_STRIPE_API_VERSION`, `VIGIL_STRIPE_BILLING_DRAIN_ENABLED`
+  (`governor/billing.py::StripeBillingProvider` — acts on `checkout.session.completed`,
+  `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, re-fetching each object from
+  Stripe; `governor/stripe_egress.py`). The code still DEFAULTS to Flutterwave when `VIGIL_BILLING_PROVIDER` is unset
+  (fails closed without its secrets); making Stripe the default is its own small slice (or part of W5).
+- **Hosted checkout** (#1056) — `provision.billing_checkout`; hosted payment (Stripe; the paused Flutterwave lane is
+  `VIGIL_FLW_SECRET_KEY`, `VIGIL_FLW_API_BASE`), amounts always from the **owner catalog**
   (`governor/catalog.py`), never a client field; credit is granted **only** by the verified inbound webhook drain.
   Flags: `VIGIL_CUSTOMER_CHECKOUT_ENABLED` (top-ups), `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` (subscription plans;
   enable only after a sandbox renewal proves attribution), `VIGIL_BILLING_PLAN_ALARM` (quarantine an
@@ -316,9 +339,10 @@ record and is kept as history.
 |---|---|---|
 | `VIGIL_CUSTOMER_PROD_EXECUTION` | customer launches executing against production targets | **owner only — never the agent** |
 | multi-shard production flag (S2/S4, not yet built) | production multi-shard routing | **owner only, after S4 is green** |
+| `VIGIL_CUSTOMER_ONBOARDING` | the customer app's onboarding guide: the first-sign-in tour (finished/skipped kept server-side per account: edge `GET/POST api/customer/onboarding` → provision `onboarding_get` / `onboarding_set` → `ui/onboarding_store.py`, `SIGIL_HOME/customer/onboarding/`; all three absent while OFF), the Guide screen and the wordmark loader (#1141) | owner, once the flows it walks through are live (§15.11 C) |
 | `VIGIL_FOLD_CACHE_ENABLED` | the verified fold cache (S0: every request-path registry read — §4.2) + the cockpit's boot warm-up / audit thread | owner (production); tests set it |
 | `VIGIL_FOLD_CACHE_AUDIT_S` | seconds between the cockpit's rebuild-and-compare audits (default 21600; 0 = warm-up only) | operator |
-| `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (needs `VIGIL_FLW_SECRET_KEY` + `VIGIL_BILLING_WEBHOOK_SECRET`) | owner |
+| `VIGIL_CUSTOMER_CHECKOUT_ENABLED` | hosted top-up checkout (Stripe: `VIGIL_BILLING_PROVIDER=stripe` + `VIGIL_BILLING_ENABLE_STRIPE` + `VIGIL_STRIPE_SECRET_KEY` + `VIGIL_STRIPE_WEBHOOK_SECRET` + `VIGIL_STRIPE_API_VERSION`) | owner |
 | `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED` | subscription-plan checkout (needs the base flag) | owner, after a sandbox renewal |
 | `VIGIL_BILLING_PLAN_ALARM` | quarantine an unaccountable paid plan charge | owner (keep ON while plans can renew) |
 | `VIGIL_BILLING_DRAIN_ENABLED` | the money-IN drain unit is watched by the dead-man + doctor | owner / operator |
@@ -338,8 +362,8 @@ record and is kept as history.
 | `VIGIL_BILLING_TARGET_MARGIN` (**no default**: the owner's, set at deploy; unset = metered pricing refused) · `VIGIL_BILLING_CANCEL_SETTLEMENT` (`metered` \| `refund`; unset = `metered`, the owner's decision of 2026-11-13: a cancelled run pays for what it used; an unrecognised value refuses metered launches) · `VIGIL_RUN_FLOOR_CREDITS` (25) · `VIGIL_MODEL_PRICES` (JSON) · `VIGIL_RUN_MODEL` (`claude-opus-4-8`) | the pricing the gateway and settle use | owner (defaults = the owner-delegated design) |
 | `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4) · `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32) · `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset) | protecting the one shared API key | owner / operator |
 
-Secrets (never in git): `VIGIL_FLW_SECRET_KEY`, `VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`,
-`SIGIL_CUSTOMER_SESSION_KEY`, `SIGIL_ANTHROPIC_API_KEY`.
+Secrets (never in git): `VIGIL_STRIPE_SECRET_KEY`, `VIGIL_STRIPE_WEBHOOK_SECRET`, (paused) `VIGIL_FLW_SECRET_KEY` /
+`VIGIL_BILLING_WEBHOOK_SECRET`, `VIGIL_BACKUP_PASSPHRASE`, `SIGIL_CUSTOMER_SESSION_KEY`, `SIGIL_ANTHROPIC_API_KEY`.
 
 ---
 
@@ -466,9 +490,10 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 0. ~~Merge #1130~~ — **merged 2026-11-16** (`503e06af`).
 1. **W2 — wallet-backed rolling reservations + rate-card charging + exact milli-credit settlement** (§11.5). The
    hardest money slice; read §11.3–§11.4 first. **W2a is merged (§11.17, #1131); W2b-1 is merged (§11.18,
-   #1132, `cc227ccc`); W2b-2 is merged (§11.19, #1133, `454d9ac3`); W2b-3 is built (§11.20, its own PR off
-   main)**; W2c remains: exact settlement with the per-org remainder (f), the floor retired (g), balance-after on the
-   statement (j), the envelope constant off every metered path (k) — expect two PRs (W2c-1 f+g, W2c-2 j+k).
+   #1132, `cc227ccc`); W2b-2 is merged (§11.19, #1133, `454d9ac3`); W2b-3 is merged (§11.20, #1134, `02bfcdcf`)**;
+   **W2c-1** (f + g: exact settlement with the per-org remainder, the floor retired) is **merged (#1140,
+   `198b8f37`, §11.21 / §15.2)**; **W2c-2** (j + k: balance-after on the statement, the envelope constant off every
+   metered path, the exact customer-visible balance) is NEXT (§15.6, §15.11).
 2. **W3 — pause on insufficient credit, resume after top-up** (§11.6).
 3. **M1c-2 — offense wiring through the gateway** (§10.6 row M1c-2, unchanged, plus §11.10 notes). Until W2 + W3 +
    M1c-2 are merged, `VIGIL_METERED_BILLING` stays OFF (and it is the owner's flip, never the agent's).
@@ -483,8 +508,9 @@ Every item is one or more PRs, each built per §0.2 (default-OFF, fail-closed, m
 11. **Gate 5** — hands-on end-to-end, updated for the wallet (§13.2).
 12. **A1 — auto top-up** (§11.13), **O1 — owner money view** (§10.6 row O1, now "rate-card revenue vs gateway
     cost"), **L1 — live Max** (§10.6 row L1).
-13. **Dependabot** (§13.3) — two PRs, any time CI is idle. **Housekeeping** — delete merged `claude/*` branches;
-    keep this file current at the end of every session.
+13. ~~**Dependabot** (§13.3)~~ — **done 2026-11-16** (#1135, #1136). **NYX** (§15.4) — the UI-only display name,
+    built; merge its PR. **Housekeeping** — delete merged `claude/*` branches; keep this file current at the end of
+    every session.
 
 **Removed from the program (owner, 2026-11-16):** M5 calibration (never build it, never run paid calibration
 scans); every estimate / quote / tier-budget screen in M4; the run floor (`VIGIL_RUN_FLOOR_CREDITS`, retire it in
@@ -503,7 +529,7 @@ allowance chunks).
   - the multi-shard production flag — after S4 is green (§13.1; the flag arrives with S2–S4).
 - **Flips that stay the owner's:** `VIGIL_FOLD_CACHE_ENABLED` in production; `VIGIL_MODEL_GATEWAY_ENABLED` in production
   other than as part of the metered flip above.
-- **Secrets / accounts:** the live Flutterwave secret + webhook secret; the Anthropic API key in the sovereign secret
+- **Secrets / accounts:** the live Stripe secret key + webhook signing secret; the Anthropic API key in the sovereign secret
   store (or SSM) for the gateway; a dedicated Anthropic workspace (or several, for G1) with Console spend limits;
   Anthropic auto-reload with a cap; an Anthropic admin key (O1 reconciliation); Bedrock / Vertex accounts if G1's
   overflow is wanted; the customer-facing GitHub App registration (Red-Pen, with `checks:write`); the AWS KMS key for
@@ -520,8 +546,9 @@ allowance chunks).
 
 ## 7. DEFINITION OF 100% — the closing gates
 1. ✅ Pause/resume chain (PR-1..PR-5). ✅ Front A (except the owner-blocked KMS escrow). ✅ Front B surface.
-2. ⏳ **The wallet** — W1 ✅ (in #1130); W2–W6 to build; the simulated wallet E2E (§11.12) green.
-3. ⏳ **Metered offense** — M1 ✅, M1c-1 ✅, M1c-2 to build; G1 to build.
+2. ⏳ **The wallet** — W1 ✅ (#1130); W2a ✅, W2b-1 ✅, W2b-2 ✅, W2b-3 ✅ (#1131–#1134); W2c-1 ✅ (#1140); W2c-2,
+   W3–W6 to build; the simulated wallet E2E (§11.12) green.
+3. ⏳ **Metered offense** — M1 ✅, M1c-1 ✅, M1c-2 in progress (part 1 of 6, §15.5); G1 to build.
 4. ⏳ **Red-Pen** — R1–R5 to build.
 5. ⏳ **1M scaling** — S0 ✅; S1, S2a–c, S3, S4 to build; S4 passes at 100,000 then 1,000,000 users (§13.1).
 6. ⏳ **Gate 5** — the personal hands-on end-to-end + at-scale verification, with evidence (§13.2).
@@ -1084,7 +1111,13 @@ negative; keep the floor.
   **Lease-window caveat:** a lease window is at most a week and a resume after it refuses re-drive
   (`record_paused_past_expiry`, §10.5). Read `framework/v2/launch_lease.py` + `resume_launch` and choose: an
   owner-signed window continuation for credit pauses, or a continuation lease bound to the SAME meter. Keep one meter
-  per scan so the statement stays continuous.
+  per scan so the statement stays continuous. **VERIFIED 2026-11-16 (check-don't-assume #4):** the Provisioner reserves
+  with the DEFAULT window — `_DEFAULT_LEASE_HOURS = 8.0` (max a week) — and a grant lives at most 7 days + 1 h from the
+  lease's start (`MAX_GRANT_LIFETIME_S`); a run armed in the window keeps running past `not_after`, but a RE-ARM (the
+  resume re-drive) after it is refused by the seam poller, the pickup gate and the arm, and `paused_expiry_settle`
+  settles a paused launch whose window closed. So a credit pause can outlive its lease (8 h) and its grant, and the
+  continuation is REQUIRED, not optional: `CreditLaunchLease.continue_of` (a signed v2 field nothing uses yet) is the
+  hook; count the 7-day TTL from the pause, not from the lease.
 - **Tests:** E2E with a fake upstream: run → balance hits zero → 403 → marker → phases stop → notification →
   sandbox top-up (signed webhook fixture → `billing-drain`) → Resume → completes; no duplicate charge; evidence intact;
   statement continuous; 7-day close; 90% warning once; limit pause + raise; two scans of one org racing for the last
@@ -1108,8 +1141,15 @@ negative; keep the floor.
 - Statement operations: "Scan-worker time", and the API's label.
 
 ### 11.8 W5 — chargebacks, reversals, refunds; the low-balance alert
-- Read Flutterwave's webhook documentation for the refund and chargeback/dispute event types and their signature
-  scheme (do not guess event names). Extend `governor/billing.py` (EVIDENCE → owner-signed FACT; `billing_spool`,
+- **Stripe** (the payment provider since 2026-11-16). Event names VERIFIED from docs.stripe.com/api/events/types
+  (2026-11-16): disputes (`data.object` = Dispute) `charge.dispute.created`, `charge.dispute.funds_withdrawn` (funds
+  removed from the account), `charge.dispute.updated`, `charge.dispute.closed` (status `won` | `lost` |
+  `warning_closed`), `charge.dispute.funds_reinstated` (funds returned after the dispute closes); refunds
+  `charge.refunded` (`data.object` = Charge, incl. partial refunds) and `refund.created` / `refund.updated` /
+  `refund.failed` (`data.object` = Refund); early fraud warnings `radar.early_fraud_warning.created` / `.updated`.
+  Re-fetch every object from Stripe before acting (the existing provider never trusts a body). **OPEN (owner, ask with
+  a popup before building):** remove the disputed credits when the dispute opens / funds are withdrawn, or only when
+  it closes `lost` (and re-grant on `funds_reinstated`)? Extend `governor/billing.py` (EVIDENCE → owner-signed FACT; `billing_spool`,
   `vigil billing-drain`): a verified reversal → an owner-signed reversal record that debits `min(disputed,
   available)` from the wallet; the rest goes to the arrears ledger (`governor/postpaid.py`, `postpaid_debit`) as
   owed; an owner-signed **billing hold** on the org that `LaunchGate.reserve_launch` and W2 extensions refuse
@@ -1145,8 +1185,12 @@ W2/W3 but `VIGIL_METERED_BILLING` stays off until all three are merged.
 ### 11.11 G1 — gateway at scale
 Stand-ins today: `VIGIL_GATEWAY_TENANT_CONCURRENCY` (4), `VIGIL_GATEWAY_GLOBAL_CONCURRENCY` (32),
 `VIGIL_GATEWAY_DAILY_LIMIT_USD` (unset = none) in `model_gateway.py`. Build: (1) capacity sized from the provider's
-rate-limit response headers (Anthropic returns per-key request / input-token / output-token limit + remaining + reset
-headers and `retry-after` — **verify the exact header names in the current API docs**); (2) a per-tenant fair share
+rate-limit response headers — **VERIFIED 2026-11-16 (check-don't-assume #3) from platform.claude.com/docs/en/api/
+rate-limits:** `retry-after` (seconds; not on every 429 — the spend-cap 429 `rate_limit_error` never carries it),
+`anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}` (`*-reset` RFC 3339; token
+`*-remaining` rounded to the nearest thousand; `tokens-*` show the most restrictive limit in effect) and
+`anthropic-workspace-id`; limits are RPM, ITPM (cache-aware) and OTPM per model class. The gateway passes through only
+`request-id`, `retry-after`, `x-should-retry` today (`_PASS_RESPONSE_HEADERS`) — G1 must READ these; (2) a per-tenant fair share
 in requests AND tokens per minute; (3) a pool of provider accounts — several Anthropic workspace keys, Bedrock and/or
 Vertex as overflow (different request APIs: re-validate the allowlist and pinning per provider; the prompt cache does
 not cross providers), with health checks and failover; (4) the loss alarm: day's unconfirmed provider spend >
@@ -1161,8 +1205,9 @@ injection: kill the gateway mid-request, kill the settle mid-way, duplicate webh
 Assert I1–I10. No real payment, no production AI call.
 
 ### 11.13 A1 — auto top-up
-Off by default; customer-set trigger balance, pack and monthly cap; needs card tokenisation (verify Flutterwave's
-tokenized-charge API + its webhook); never above the cap; a receipt per charge; after a confirmed payment, auto-resume
+Off by default; customer-set trigger balance, pack and monthly cap; needs a saved card — on STRIPE: a saved
+PaymentMethod on the org's Customer and an off-session PaymentIntent (verify the API and its webhooks at A1); never
+above the cap; a receipt per charge; after a confirmed payment, auto-resume
 the org's credit-paused scans (W3 hook).
 
 ### 11.14 Trial
@@ -1175,7 +1220,15 @@ A signed contract or a paid invoice credits the same wallet (`governor/invoices.
 path exists, add it if not); trusted customers may get a credit line (`governor/postpaid.py`). The $25 seat includes
 no credits — check `governor/catalog.py` / `governor/subscription.py` grant none by default.
 
-### 11.20 W2b-3 — BUILT (its own PR off `454d9ac3`): the explicit depth in the lease + the first allowance
+### 11.21 W2c-1 — MERGED (#1140 → `198b8f37`, 2026-11-16): exact settlement, the floor retired
+Implements §11.5 (f) and (g). The decided design, everything built, the tests, the mutants and the risks are in §15.2;
+when its PR merges, move that text here. In one line: the owner-signed `governor.launch_settled` v3 decision is the only
+place an org's sub-credit remainder moves; the wallet fold derives the remainder from the lifetime Σ `consumed_mc`
+(snapshot schema 11 carries it across a hard prune); a metered settle keeps ⌊(r + used)/1000⌋ whole credits; metered
+reserves (under the settle lock) and extensions draw from the exact balance; `VIGIL_RUN_FLOOR_CREDITS` is a retired
+setting; no settle reads the target margin.
+
+### 11.20 W2b-3 — DONE (merged in #1134, `02bfcdcf`): the explicit depth in the lease + the first allowance
 Implements §11.5 (c) and (h). Behind `VIGIL_METERED_BILLING` (OFF); a flat launch passes, reserves, signs and settles
 exactly as before (I7).
 - **Depths** (`vigil_core/run_tier.py`): `DEPTHS = ("quick", "deep", "max")` — a superset of the units band's
@@ -1410,15 +1463,20 @@ login and page latency **under 500 ms**; the appends/s target follows from S1's 
 §4.4. The multi-shard production flag stays the owner's flip after S4 is green.
 
 ### 13.2 Gate 5 (updated for the wallet)
-Signup → buy credits (Flutterwave **sandbox**, never a live secret) → webhook → `vigil billing-drain` credits the
+Signup → buy credits (Stripe **test mode**, never a live key or a real card) → webhook → the Stripe billing drain credits the
 wallet → prove domain ownership → launch with **no estimate** → live consumption on the dashboard → exhaust credits →
 pause with work preserved → sandbox top-up → Resume → an oracle-confirmed FACT → exact settle → the statement
 reconciles with the ledger → `vigil doctor` / `vigil ready` clean. Repeat with `VIGIL_FOLD_CACHE_ENABLED=1`. Then the
 S4 harness at §13.1's targets. Any real AI spend needs the owner's explicit authorisation; otherwise use the fake
 upstream.
 
-### 13.3 Dependabot (owner-approved plan, 2026-11-16)
-Open: **#1120** pytest-httpserver 1.2.0 → 1.2.1 (`engine/crucible/framework/v2`; `main` already carries 1.2.1 via
+### 13.3 Dependabot (owner-approved plan, 2026-11-16) — DONE
+**Done on 2026-11-16:** PR A = #1135 (`9eb4f64a`, the z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras;
+pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`, #1120 was already closed) — #1121, #1124, #1126 closed with a
+comment linking it; PR B = #1136 (`a43f8fd3`, the anthropic SDK 2.8, §15.3) — #1122, #1125 closed with a comment
+linking it. Note on z3 5.4.1.0: its wheels are `manylinux_2_27_x86_64` / `manylinux_2_38_aarch64` only, so a
+binary-only install on an older glibc cannot take the `smt` extra (recorded in #1135). The plan as it stood:
+Open (then): **#1120** pytest-httpserver 1.2.0 → 1.2.1 (`engine/crucible/framework/v2`; `main` already carries 1.2.1 via
 `d2ba73f0` — check, likely superseded), **#1121** z3-solver floor ≥ 5.4.1.0 (`engine/crucible`), **#1124** pydantic
 ≥ 2.14.3 (`engine/crucible`), **#1126** pydantic ≥ 2.14.3 (`packages/core/vigil_core`), **#1122** anthropic
 `<1` → `>=2.8.0,<3` (`engine/crucible` dev), **#1125** anthropic `>=0.40,<3` (`engine/crucible/framework/v2` dev).
@@ -1462,3 +1520,492 @@ Code scanning → Dismiss) — the agent never does, never filters SARIF, never 
   committing — it scans commit messages) and `... tree` for the working tree.
 - The vigil_core suite: `cd packages/core/vigil_core && ../../../.venv-sovereign/bin/python -m pytest
   -p no:cacheprovider tests` (769 + 1 skip after W1).
+
+---
+
+## 15. TAKE-OFF POINT — end of the 2026-11-16 local session (READ THIS FIRST, then §0)
+
+This section is the exact place to pick up. Everything in it was verified against GitHub at the time of writing;
+re-verify with §15.10 before acting (another session may have moved things since).
+
+### 15.1 Exact state
+| Item | State | Anchor |
+|---|---|---|
+| `origin/main` | **`4c977a4b`** (merge of #1141) | `git log --first-parent --oneline origin/main` |
+| W2b-3 (explicit depth in the lease + the first allowance) | **MERGED** #1134 → `02bfcdcf` | §11.20 |
+| Dependabot **PR A** — z3-solver floor `>=5.4.1.0,<6` in both engine `smt` extras | **MERGED** #1135 → `9eb4f64a`; closed #1121, #1124, #1126 (pydantic ≥ 2.14.3 was already on `main` since `d2ba73f0`); #1120 had been closed earlier | §13.3 |
+| Dependabot **PR B** — the anthropic SDK 2.8 | **MERGED** #1136 → `a43f8fd3`; closed #1122, #1125 | §15.3 |
+| **W2c-1** — exact milli-credit settlement + the floor retired | **MERGED #1140** → `198b8f37` (squashed `793cd477` + the mypy / wording fix `cb6645d7`; 23 mutants red; all 15 required checks green) | §11.21, §15.2 (the build record) |
+| **NYX** — the agentic engine shown as "NYX" in the UI only | **MERGED #1139** → `a43b4a31` (8 mutants red) | §15.4 |
+| **M1c-2a** — the engine guards + the Strix prices | **MERGED #1138** → `71610f3b` (17 mutants red) | §15.5 — next: **M1c-2b** |
+| **Onboarding guide** — first-time users, end to end | **MERGED #1141** → `4c977a4b` (`claude/customer-onboarding-guide`): `customer_app/guide.js` + app.js / app.css / index.html wiring, plus the SERVER-SIDE tour state (`ui/onboarding_store.py`, provision `onboarding_get` / `onboarding_set`, edge `api/customer/onboarding`), behind `VIGIL_CUSTOMER_ONBOARDING` (default OFF); 42 mutants red. (An earlier stand-alone design page the owner holds privately is superseded by it.) | §15.6 item 0 — the flag waits for the screens of §15.11 C |
+| Everything after (W2c-2, W3, W4, W5, W6, G1, wallet E2E, R1–R5, Front C S1–S4, Gate 5, A1/O1/L1) | not started | §15.6, §5 |
+
+Strict branch protection ⇒ each open PR must be brought up to date with `main` after every merge (rebase, re-run CI).
+**Two sessions worked in parallel at the end of 2026-11-16** (§15.8); the second one (W2c-1 / NYX) ended at about
+15:00 EST, and everything it had — committed or not — was committed and pushed by the remaining session (NYX as
+#1139, W2c-1 as `638bf8e9`). Whatever happened after this was written is on GitHub — run §15.10 first.
+**Merge checks:** the classic branch-protection API answers "Branch not protected" and the rulesets list was empty on
+2026-11-16, so `mergeStateStatus` is not a reliable gate: before merging, confirm each of the 15 names in
+`.github/required-status-checks.txt` is green on the PR head yourself.
+
+### 15.2 W2c-1 — MERGED (#1140 → `198b8f37`); kept as the build record
+**What it is.** §11.5 (f) exact settlement and (g) the floor retired. The design was chosen on 2026-11-16 from three
+independent designs (a v3 decision record / a separate remainder ledger / "minimal"); the winner is "minimal": no new
+record type, fold, registry or lock.
+
+**The design (decided — implement exactly this):**
+1. **The settle decision record is the ONLY commit point of the remainder.** `governor.launch_settled` v3 = the v2 core
+   + `consumed_mc`, `remainder_before`, `remainder_after`, all signed together (`launch_settlement._SETTLED_CORE_V3`,
+   `EXACT_RECORD_VERSION = 3`). `consumed` keeps its v2 meaning — the WHOLE credits the settle keeps of the
+   reservation; refunds = reserved − consumed, split by the unchanged K4-1 logic. `SettlementDecision.validate()`
+   enforces `remainder_before + consumed_mc == 1000·consumed + remainder_after` (forces consumed = ⌊t/1000⌋: never
+   rounded up, no remainder dropped), both remainders < 1000, `consumed_mc ≤ 1000·reserved`, and the three fields
+   all-or-none. A separate remainder record written after the decision is NOT atomic (another settle of the same org
+   could decide on a stale r in between) — that is why the decision carries it.
+2. **The remainder is DERIVED, not stored:** r = C mod 1000 with C = Σ `consumed_mc` of the org's first verified,
+   well-formed v3 decision per lease. A count-add is order-independent and associative (needed by multi-prune
+   fold-of-fold). ONE step function, `launch_settlement.fold_exact_settle(p, key_at_seq, seen, usage)`, is used by the
+   wallet fold, the fold-cache view, `SnapshotState.build` and the prune tripwire, so they cannot diverge. It keys
+   `(signal, org, "slug:nonce")` in the wallet's own prune-durable seen-set (a malformed v3 is consumed but counts
+   nothing, so a later copy never counts).
+3. **Snapshot schema 10 → 11**, one additive row `wallet_usage_mc` (`wallet_usage_map()`); a v10 snapshot loads with
+   empty usage (correct: no older build wrote v3). The prune tripwire (`spine/prune.py::stranded_active_wallets`)
+   refuses a prune whose round-tripped seed drops the usage total.
+4. **Enforcement uses the EXACT balance.** `Balance.usage_mc`, `.remainder_mc`, `.exact_available_mc` (1000·available
+   − r), `.spendable` (max(0, exact) // 1000); `WalletRegistry.remainder_mc(org)`. A METERED reserve holds the
+   cross-process settle lock (new `LaunchGate._settle_lock_into`; E7's `_one_launch_locked` already takes it) and
+   sizes `u = min(max(chunk, ⌈min_mc/1000⌉), _exact_room(org, balance))` where `_exact_room = max(0, 1000·balance −
+   r)//1000` with balance = plan + wallet (prepaid) or credit_limit − accrued (postpaid), then re-checks the start
+   (`u ≥ 1 and 1000·u ≥ min_mc`) because a settle can land between `_gated()` and the lock. An allowance extension
+   (wallet only) needs `wallet.balance(org).spendable ≥ credits`. `LaunchAllowance.available_credits` = spendable
+   (unlocked hint). Flat reserves ignore r (I7; owner-accepted).
+   *Why plan + wallet for reserves (owner-accepted deviation from this file's earlier wallet-only formula):*
+   `1000·wallet − r ≥ 0` is not maintainable once a launch is plan-funded (a d = 0 settle refunds the plan in full
+   while r rises). *Why the reserve must hold the settle lock:* `CreditMeter.position` reads the wallet then the plan;
+   a plan-funded settle in another process between the two reads made a model run end negative in 4,996 of 5,000
+   seeds unlocked, 0 locked.
+5. **Settle** (`ui/launch_gate.py`): `metered_use_mc(slug, nonce)` = Σ over `GrantMeter.usage_records` of the recorded
+   `charge_mc` (W2a; never re-priced) else `card.charge(usage)[0]` priced PER LINE with the card in force (equals the
+   statement's `ui/billing._priced_lines`; pricing the aggregate would break I4). It raises `MeteringError` while a
+   retired pricing setting is present and `RateCardError` on a malformed card (both ⇒ the caller DEFERS as
+   `deferred_config`; both are `ValueError`s, so catch them before the broken-meter `ValueError`).
+   `settle_launch(..., consumed_units=0, consumed_mc=N)`: refused unless the launch was published metered; clamps to
+   `1000·(lease units + extensions)`; `_settle_reservation` builds `exact(r)` closures (prepaid via the shared
+   `_split(kept)` helper, postpaid `refund = reserved − d`); `_settle_once(exact=...)` reads r INSIDE spine_lock +
+   settle_lock on a FRESH settle only (after `refuse_if` → meter close → allowance re-check), replaces the
+   provisional decision with `exact(r)`, and records it **whatever `VIGIL_SETTLE_SPINE_RECORD` says** (record
+   condition `decision.exact or config.settle_spine_record_enabled()`). The result adds `consumed_mc` and
+   `remainder_mc`. A not-fresh settle never reads r and finishes the RECORDED decision (ignores its own consumed_mc).
+   Zero use never takes the exact path (callers pass None ⇒ the byte-identical v2 refund).
+6. **Callers:** `completion_spool._settle_inputs` → `(units, consumed_mc, guard)`; `ops_sweeps._paused_metered_use_mc`
+   (renamed from `_paused_metered_charge`) and `paused_expiry_settle` pass `consumed_mc` (basis `sweep:paused`) or
+   None (`sweep:refund`); their `charged` row field = the settle's `net_spend`, plus `charged_mc`. The callers no
+   longer clamp (`settle_launch` does) and no longer read the margin.
+7. **Floor retired:** `VIGIL_RUN_FLOOR_CREDITS` (`FLOOR_ENV`) joins `OBSOLETE_PRICING_ENVS` (doctor: HARD issue
+   whether or not metering is on; metered publishes refuse and metered settles defer while it is set);
+   `run_floor_credits` / `DEFAULT_FLOOR_CREDITS` deleted; `obsolete_setting_refusal` reworded (no longer "the only
+   pricing input is the margin"); `credits_for_cost` kept (legacy + its tests, no production caller). Doctor drops
+   `floor_credits` and adds a HARD issue for metered billing with the settle record off (the finish passes need it).
+   `deploy_checks.MUST_MATCH`: the floor row became `VIGIL_RATE_CARD`; the margin row was DROPPED (no settler reads the
+   margin any more — it is read only where a metered launch is published).
+8. **Crash / re-drive:** (a) crash before the v3 append ⇒ nothing recorded; the re-drive is fresh and decides on the r
+   of THEN (correct: this lease moved nothing). (b) crash after the v3 append ⇒ r moved exactly once; every later
+   settle is not fresh and finishes only the recorded refunds (`has_grant_entry` / `has_credit_entry` guards).
+   (c) duplicate completion ⇒ tombstoned, no-op. (d) the flag-gated finish passes still need
+   `VIGIL_SETTLE_SPINE_RECORD` (hence the doctor issue).
+9. **Invariant sketch (I2):** E = 1000(A+P) − r only decreases through reserve/extend, both sized to keep E ≥ 0
+   under settle_lock; a settle changes E by 1000·U − c ≥ 0. Caveats (owner-accepted): a plan tranche expiring can
+   take E to −r (< 1 credit) with no spending; a flat reserve after an owner rollback ignores r (≤ 999 mc).
+10. **Owner-decided open questions (2026-11-16):** v3 written regardless of the flag (+ the doctor issue); the plan +
+    wallet reserve form; the exact customer-visible balance lands in W2c-2 / W6 (metered stays OFF until then);
+    retired settings keep deferring settles; reword the refusal; keep `credits_for_cost`; `VIGIL_RATE_CARD` in
+    MUST_MATCH; flat reserves ignore r; no rate-card digest in the decision; the remainder is per ORG (not per org +
+    mode — a postpaid ↔ prepaid switch carries r across).
+
+**Built on the branch (`9c747e19`) — production code is complete per the design above:**
+`governor/launch_settlement.py` (v3, `with_exact`, `exact`, validate, `record_launch_settled` v3, `_decision_from`
+v2/v3, `verified_settle_core` — tries the claimed core, then the others, then v1: ANY owner-signed record settles —
+`decision_of(p, core)` — a decision is read only from the core its `v` claims —, `fold_exact_settle`, the scans,
+evidence JSON), `governor/launch_reservations.py` (verifies v3 too), `governor/wallet.py` (usage slot, Balance
+props, `_seed`/`_fold` 4-tuples, `remainder_mc`), `spine/snapshot.py` (schema 11), `spine/prune.py` (tripwire),
+`ui/launch_gate.py`, `inbound/completion_spool.py`, `ops_sweeps.py`, `paused_expiry_settle.py`,
+`vigil_core/model_metering.py`, `integration/.../doctor.py`, `deploy_checks.py`, `config.py` (docstring),
+`docs/runbooks/GO-LIVE-quickstart.md`, `infra/systemd/vigil-settle-drain.env.example`, and
+`apps/sigil/tests/test_metered_billing.py` updated (78 pass: fixture usage = 8,640 output tokens = exactly 54 credits
+at the default card; floor tests rewritten; `test_a_metered_settle_reads_no_target_margin` added).
+
+**Status at `862a2640` (end of 2026-11-16):** steps 1–3 below are DONE — the regression set passes (977 sovereign
+settle / wallet / launch / gateway / statement tests + 100 doctor tests + 784 vigil_core + 496 docs), the three new
+test modules exist (`test_exact_settle.py` 25, `test_exact_settle_xproc.py` 1, `test_exact_settle_prune.py` 2 × 3
+fixtures), and 23 mutants are red (the list in step 3, minus "metered reserve skips the settle lock", "price the
+meter's aggregate", "evidence_from_json drops the exact fields" — still worth adding). An inline red-pen (step 4) found
+one wrong comment (the in-lock start check guards against a draw — another process's flat reserve — not a settle: a
+settle only ever adds room; fixed). **Left:** the whole sovereign suite with the fold cache off and on (a run was in
+progress at hand-off; locally `test_capability_ui.py::test_typed_ask_survives_a_voice_disable` and
+`test_aegis_multi_gateway.py::test_real_gateway_self_registers` fail identically on `main`), §11.21, then the PR.
+
+**The steps (kept for the record):**
+1. **Update the existing tests that pin the old behaviour.** These were red at `9c747e19`; `638bf8e9` updated all of
+   them plus `test_doctor_metering`, `test_doctor_deploy_units` and `test_model_metering`:
+   - `apps/sigil/tests/test_allowance_extensions.py`: `test_the_settle_charges_extension_usage_and_refunds_the_rest`,
+     `test_the_paused_abandoned_charge_clamps_to_lease_and_extensions` — charge = exact rate-card use (make the big
+     usage 240,000 output tokens = exactly 1,500 credits).
+   - `apps/sigil/tests/test_paused_expiry_settle.py`: `test_a_metered_launch_paused_until_its_window_closed_is_charged_
+     for_what_it_used[record_off|record_on]`, `test_a_a_halted_run_resumed_after_its_window_closed_settles_once_the_
+     grace_from_the_resume_passed[*-metered]`.
+   - `apps/sigil/tests/test_settle_fold_main.py`: `test_a_meter_retry_writes_no_decision[flag_off|flag_on]`,
+     `test_a_pause_landing_after_the_sweeps_pause_read_is_honoured`, `test_a_sweep_refusal_of_a_paused_metered_launch_
+     leaves_it_unsettled_and_the_next_pass_charges`, `test_a_failed_completion_whose_past_expiry_record_flips_in_lock_
+     is_deferred_then_charged_under_d4`, `test_flag_on_a_d3_metered_cancel_charge_survives_seam_loss`,
+     `test_flag_on_a_d4_paused_charge_survives_seam_loss`, `test_flag_on_a_failed_paused_past_expiry_charge_is_
+     recorded`; ADD a `v=4` "unknown version" case to the malformed/legacy-record test (it must still SETTLE).
+   - `apps/sigil/tests/test_settle_flag_off_golden.py`: the four metered scenarios (`metered_completed`,
+     `metered_d3_canceled`, `metered_failed_past_expiry`, `metered_d4_paused`) in both tests. Keep the golden literal =
+     `main`'s capture; add an `EXACT_SCENARIOS` set whose assertion is "main's records with the exact refund amount,
+     plus exactly ONE v3 `governor.launch_settled` record first" (flag off AND on). Every flat / cancel / refund /
+     postpaid scenario must stay byte-identical (I7).
+   - `apps/sigil/tests/test_pricing_ledgers.py::test_schema_is_v10_and_an_older_snapshot_loads_with_empty_fields` →
+     schema 11, an older snapshot loads with empty `wallet_usage_mc`.
+   - Not yet run on the branch: `integration/tests/test_doctor_metering.py` (no `floor_credits` key / render
+     fragment; retired-setting count 2 → 3; the floor out of the refused-value loop; the new metered + settle-record-
+     off HARD issue), `integration/tests/test_doctor_deploy_units.py` (MUST_MATCH rows), `packages/core/vigil_core/
+     tests/test_model_metering.py` (the retired tuple; `run_floor_credits` gone; the refusal wording is pinned in
+     ~3 places), `docs/tests` (runbook text pins), `apps/sigil/tests/test_public_repo_money_hygiene.py`, then the
+     whole sovereign suite, the suite with `VIGIL_FOLD_CACHE_ENABLED=1`, and the integration sovereign leg (§0.6).
+2. **New test modules** (write them; names are the contract the mutants point at):
+   - `apps/sigil/tests/test_exact_settle.py`: `test_the_remainder_is_exact_across_three_settles[cache off|on]`
+     (2,502 + 499 + 1 mc → debits 2, 1, 0; remainder 2 mc; 97 credits available = 96,998 mc; pin each v3 row's
+     consumed_mc / consumed / remainder_before / remainder_after) · `test_a_settle_never_keeps_more_than_the_allowance`
+     · `test_a_pre_w2a_meter_is_priced_per_line_like_the_statement` (two 1-token lines = 14 mc = `billing_usage`'s
+     `amount_mc`; the aggregate would be 13) · `test_a_recorded_charge_is_never_repriced_and_a_pre_w2a_line_is_priced_
+     now` (recorded 6,250 kept; pre-W2a line priced with an owner `VIGIL_RATE_CARD` override in force) ·
+     `test_a_reserve_draws_from_the_exact_balance` (30 credits with r = 500 → reserves 29) ·
+     `test_the_start_check_uses_the_whole_credits_the_exact_balance_can_hold` (8 credits with r = 500 → refused:
+     7 < 7.965) · `test_an_extension_draws_from_the_exact_balance` (20 refused, 19 granted) ·
+     `test_the_exact_decision_is_recorded_with_the_settle_record_off` · `test_a_crash_after_the_decision_finishes_it_
+     exactly_once` (inject `OSError` on the `settle-wallet:` grant after the v3; the re-drive passes 12,345 mc yet the
+     recorded decision stands; r moved once) · `test_a_crash_before_the_decision_decides_afresh` (inject `OSError` on
+     `record_launch_settled`) · `test_a_duplicate_completion_is_settled_once` · `test_a_flat_settle_records_nothing_
+     new` (and an exact settle of a flat launch is refused) · `test_two_orgs_settle_in_parallel_threads` ·
+     `test_the_fold_cache_reads_the_remainder_like_the_full_fold[5 seeds, replays, forged records]` ·
+     `test_the_snapshot_carries_the_usage_total` (schema 11; v10 loads empty; a captured v3 replayed above K counts
+     once) · `test_an_exact_decision_that_does_not_reconcile_is_never_recorded_or_counted` ·
+     `test_a_forged_exact_decision_moves_no_remainder[cache off|on]` · `test_a_settle_landing_before_the_reserve_takes_
+     the_settle_lock_is_seen_by_the_sizing` · `test_a_postpaid_metered_launch_settles_exactly_and_its_line_counts_the_
+     remainder` (accrued 20 → 2, r 502, the next reserve gets 37 not 38) · `test_the_floor_is_retired` (a no-usage run
+     is charged 0; doctor HARD issue; no `floor_credits` key) · `test_a_metered_reserve_holds_the_settle_lock` ·
+     a `settle_checkpoint` round-trip of an exact decision · pins `wallet._SETTLED_SIGNAL ==
+     launch_settlement.LAUNCH_SETTLED_SIGNAL` and every `MC_PER_CREDIT` copy == `vigil_core.rate_card.MC_PER_CREDIT`.
+   - `apps/sigil/tests/test_exact_settle_xproc.py`: `test_two_processes_settling_one_org_chain_their_remainders` (REAL
+     child processes; widen the r-read → v3-append window, e.g. 0.6 s, via the `SETTLE_RACE_WIDEN_AT` harness of
+     `test_settle_cross_process_race.py` at `sigil.governor.launch_settlement:record_launch_settled`; the two decisions
+     must chain 0→600→300 or 0→700→300 and debit exactly 1 credit in total).
+   - `apps/sigil/tests/test_exact_settle_prune.py`: `test_a_settle_after_a_hard_prune_collects_the_carried_remainder
+     [cache_off|cache_on|settle_record_on]` (a REAL `commit_prune` archives a v3; `wallet_usage_map() == {org: 2502}`;
+     the next 499 mc settle debits 1, carries 1) · `test_the_prune_tripwire_refuses_a_seed_that_drops_the_usage_total`;
+     add the wallet remainder to `test_real_prune_registries.py`'s registry.
+3. **Mutation-verify** (`mutate.py`, §15.9; each must turn a NAMED test red, then restore): round the debit up
+   (prepaid builder; postpaid builder) · decide on r = 0 · `validate()` without the identity · the wallet fold
+   ignores v3 · counts a replayed v3 twice · counts a forged v3 · the reserve ignores r · no in-lock start check ·
+   the extension ignores r · record the exact decision only with the flag · re-decide a recorded settle on the
+   current r · no clamp of consumed_mc · exact settle allowed on a flat launch · price a recorded charge with the
+   card in force · price pre-W2a lines with `DEFAULT_RATE_CARD` instead of the card in force · the snapshot drops
+   the usage total · the wallet seed ignores the carried usage · keep the floor (not retired) · decision readers
+   verify only the claimed core · the prune tripwire ignores the usage · read r outside the settle lock (the xproc
+   test: debit 0 instead of 1) · the metered reserve skips the settle lock · price the meter's aggregate · the fold
+   counts a malformed v3 · `evidence_from_json` drops the exact fields · `decision_of` ignores the core.
+4. **Red-pen** (adversarial; each "finding" is a claim to verify). Focus: lock order (`_publish_lock` → spine_lock →
+   settle_lock → leaves; the metered reserve's new settle-lock acquisition must never nest), every place a v2-only
+   reader could still exist (grep `_SETTLED_CORE_V2`), version skew (a pre-W2c-1 build ignores v3 and sees a
+   v3-settled lease as settled only through its seam marker; an OLDER build that prunes after v3 records exist
+   writes a v10 snapshot without the usage — deploy forward-only, upgrade every settling process together, never
+   prune with an older build), the plan-expiry caveat, postpaid remainder, fold cache == full fold, I4 statement ==
+   settle, the "charged" sweep row, doctor/deploy messages, and that NOTHING changed for flat launches.
+5. **Write §11.21** (the W2c-1 record: what it is, its anchors, the invariants, the risks above) and update the header
+   and §5 of this file in the same PR; then PR → CI (15 required checks) → merge (§0.4).
+
+**Known follow-ups surfaced while building:** `LaunchGate.reserved_with_extensions` no longer has a production
+caller (keep it only if a test or the gateway needs it; else delete with its tests under the dead-code rule);
+`completion_spool._consumed_for` still returns units only; `Balance`/`balances()` list only orgs with wallet activity
+(a postpaid-only org's usage is reachable through `balance(org)`).
+
+### 15.3 What PR B (#1136, the anthropic SDK 2.8) changed — for anyone touching an SDK client
+- `packages/core/vigil_core/vigil_core/sdk_retry.py`: SDK 2.x honours ANY positive `Retry-After` (0.x capped it at
+  60 s), so `bounded_http_client()` adds `cap_retry_after` (drops a `retry-after(-ms)` outside (0, 60] s or
+  unreadable) to an `anthropic.DefaultHttpxClient`. **Every SDK client VIGIL builds must pass
+  `http_client=bounded_http_client(...)` or `max_retries=0`** — enforced by the AST guard
+  `engine/crucible/framework/v2/kernel/tests/test_sdk_client_retry_guard.py` (a new client site fails CI until it
+  complies). The helper returns None when the installed `anthropic` has no `DefaultHttpxClient` (test doubles).
+- `kernel/llm.py::sampling_create_kwargs(model, temperature, effort, *, platform="anthropic")`: older models keep
+  `temperature` through the legacy API version (anthropic: header `2023-06-01`; bedrock: body
+  `bedrock-2023-05-31`; vertex: body `vertex-2023-10-16`); current models send `output_config.effort` and no sampling
+  params; the Claude 5 family (incl. `claude-haiku-5`) is "current".
+- The extra is pinned `anthropic>=2.8.0,<2.9` on purpose (the legacy-route preparation was verified on 2.8 only —
+  widen after re-verifying). SDK 2.x sends the key as `Authorization: Bearer` (the gateway accepts it) and uses the
+  OS trust store (httpx2).
+
+### 15.4 NYX — built; open its PR
+Owner (2026-11-16): **"nyx will be only in ui, nothing changes in backend."** The vendored Strix engine is shown as
+"NYX" in every UI; backend ids, routes, `STRIX_*` settings, signed `strix.*` ids, CI check names and `vendor/strix`
+(with its Apache-2.0 NOTICE credit) are untouched.
+- `packages/vigil-ui/ui.js`: `DISPLAY_RENAMES` (`\bStrix\b` / `\bSTRIX\b` → `NYX`), `displayText()` applied by `h()`
+  to `text` props, text children and the visible attributes `title` / `aria-label` / `placeholder` / `alt` only;
+  `RAW_TEXT_TAGS` (`pre`, `code`, `kbd`, `samp`, `textarea`, `script`, `style`) keep evidence exactly as recorded;
+  ids, classes, option values, URLs and `data-*` are never renamed; `VUI.displayText` exported.
+- `packages/vigil-ui/app.js`: the drawer title and the two graph-label writers go through `V.displayText`; the
+  kill-switch reason it POSTs stays backend data.
+- `apps/sigil/tests/test_ui_display_names.py` (5 tests, run under node with a minimal DOM; 6 mutants all red; the
+  131 UI tests and the console S10 suite pass).
+- Two more suites must stay green on it (the parallel session was fixing both when this was written):
+  `test_ci_suite_legs` (the new test's node lookup must go through the shared failing gate) and
+  `test_customer_kit_copies` (the customer `ui.js` fork must match outside its customer regions).
+- **PR #1139.** Both copies of the kit carry the rule (`test_customer_kit_copies`), the node test goes through the
+  shared `_need_node` gate (`test_ci_suite_legs`); 8 mutants red; checked that the app's direct label writers and the
+  `Strix …` strings in `app.js` all render through `h()` / `displayText`. To do: CI green → merge (update with `main`
+  first if another PR merged).
+
+### 15.5 M1c-2 — offense wiring through the gateway (the full map, 2026-11-16)
+**M1c-2a = PR #1138** (branch `claude/billing-m1c2-strix-prices`) — DONE pending CI:
+- item (4): `vendor/strix/strix/report/anthropic_pricing.py` rows for `claude-opus-4-5` … `4-8` at $5 / $25 / $0.50 /
+  $6.25 (without them `claude-opus-4` matched by substring and Strix's runtime cap stopped a run at a third of what it
+  was allowed);
+- `engine/crucible/framework/v2/kernel/metered.py` (`model_grant()`, `metered_mode()`, `gateway_base()`,
+  `stop_reason()`); `AnthropicBackend` builds a metered client for the grant + the LOOPBACK gateway only (rule:
+  `vigil_core.model_grant.gateway_url`, now shared with the grant seam), keyed on (grant, gateway), no client without a
+  gateway, no key hot-reload under a grant, and **no ambient proxy** (`trust_env=False` AND the proxy patterns mounted
+  to no proxy — SDK 2.x mounts the environment's proxies whatever `trust_env` says; verified on 2.8.0 and 0.120.2);
+- the gateway's credit refusal carries `x-vigil-stop: credits_exhausted` (`vigil_core.model_grant.STOP_HEADER` /
+  `STOP_CREDITS_EXHAUSTED`) and the backend raises it as a terminal `CreditsExhausted(BackendError)` (never retried,
+  never failed over);
+- `kernel/llm.py`: under a grant only `anthropic` / `anthropic-zdr` are constructed (`_refuse_unmetered`), selected
+  (`_metered_backend`, cached per grant, never touching the unmetered selection), pinned (`complete_with_backend`) —
+  no failover; `kernel/routing.py`: routing off under a grant.
+- Tests: `kernel/tests/test_metered_engine.py` (29 + a real-SDK wire test, skipped where the SDK is absent),
+  `test_model_gateway.py::test_only_the_credit_stop_names_itself_to_the_run`, vigil_core `gateway_url` cases; 17
+  mutants red.
+
+**CI note for #1138:** its first P5 run failed in `integration/tests/test_strix_patch_series.py` — any change under
+`vendor/strix` must be recorded with `python3 tools/vendoring/regen_strix_series.py` (fixed in `696707bf`). On this
+machine git renders a UTC author date as `Z` where the committed series (and CI) have `+00:00`, so the script also
+rewrites patches 037 / 038: keep only the NEW patch file and its `series.json` entry (+ the changed file hash), and
+re-run the test. A rebase changes the commit hash the patch names: regenerate after any rebase of that commit.
+
+**Remaining = M1c-2b** (nothing sets `VIGIL_MODEL_GRANT` until this lands; from the read-only map of every place a
+customer run's model call leaves the engine — the items M1c-2a already did are marked DONE):
+- DONE (M1c-2a): the metered helper, the grant-only client, the key-reload guard, the distinguishable terminal
+  credit stop, the no-failover / gateway-only selection, routing off.
+- **Map `CreditsExhausted` at the engage seam to a pause** (the worker holds the lease for resume — no refund, no
+  re-drive), or leave that mapping to W3; decide and record it. Note: the engine's reasoning phases run inside
+  PhaseLedger swallow-wrappers, so a `CreditsExhausted` raised there must be re-raised past them (as the customer-pause
+  `EngagementPaused` already is at a clean point), or a credit stop silently degrades the run.
+- **The worker forces `routing_override=False`** for a metered run (the engine guard is in; the worker scope is not).
+- **`jobs/engage_worker.py`:** read `model_grant_broker.read_model_grant(base, slug, expect_nonce=nonce)`; metered and
+  no grant ⇒ refuse BEFORE the arm (never burn the single-use floor); a `_model_grant_scope` around the runner sets
+  and restores EXACTLY: `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` = gateway / grant, `VIGIL_MODEL_GRANT`,
+  `CRUCIBLE_LLM_BACKEND=anthropic`, `CRUCIBLE_MODEL_ROUTING=0`, `CRUCIBLE_ANTHROPIC_MODEL` = the grant model,
+  `CRUCIBLE_EFFORT` = the depth's effort, `STRIX_LLM=anthropic/<grant model>`, `LLM_API_BASE` / `LLM_API_KEY` =
+  gateway / grant; unset `SIGIL_ANTHROPIC_API_KEY`, `VIGIL_LIVE_KEY_RELOAD` and the api-base siblings. (Safe only
+  because `JobRunner.run_one` serialises jobs.)
+- **`live/think_claude.py`:** `_resolve_key` prefers the grant; `_build_live_client` passes `base_url`; its error
+  path must recognise the credit 403 (today it degrades to ASK_USER — a metered live run would never pause).
+  **`live/codefix_runner.py`:** in metered mode use the grant's model (its default differs ⇒ a gateway 400).
+- **Strix children** (`strix_runtime.strix_child_env`, `console/actions._strix_session_llm_env`, the sovereignty
+  gates): permit `anthropic/<model>` pinned at the LOOPBACK gateway without widening the cloud allowlist; confirm that
+  LiteLLM's `anthropic/` provider honours `LLM_API_BASE` / `LLM_API_KEY` (read the vendored call site).
+- **`uiproxy._child_env`:** in metered mode exclude `SIGIL_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY` from offense
+  children and do not set `VIGIL_LIVE_KEY_RELOAD=1`; **doctor**: a HARD issue when the offense plane would inherit a
+  provider key in metered mode.
+- **Wire test (item 5)**: with a fake gateway (`httpx2.MockTransport`, importorskip the SDK), assert base_url, the
+  Bearer grant, the grant model, `output_config.effort` = the grant's effort and NO temperature.
+- Tests + one mutant per guard as listed; FATAL-2 (`integration/tests/test_two_env_boundary.py`) stays green.
+- Open engineering questions to settle while building (NOT money — decide and record): the authoritative KEYLESS
+  "this run is metered" signal (the grant file is written before the lease at publish — recommended); grant model /
+  effort source in the worker (decode the grant token with the owner public key the worker already loads vs derive
+  from the lease depth); claude-code refused in metered mode for M1c-2 (route it through the gateway later, M2);
+  whether `anthropic-zdr` counts as the grant backend.
+
+### 15.6 After W2c-1, NYX and M1c-2 — the rest of the program (unchanged order, §5)
+0. **The onboarding guide** (owner request, 2026-11-16) = **#1141**, in the customer app itself, behind
+   `VIGIL_CUSTOMER_ONBOARDING` (default OFF; all of it — the tour, the Guide tab, the loader, the server route and
+   the cockpit actions — is absent while OFF):
+   - **The tour** opens after a person's first sign-in and at each sign-in after it, **on any device, until they
+     finish or skip it**. The answer is kept SERVER-SIDE per account: the app asks `GET api/customer/onboarding`
+     (once per page load; `pending` / `done` / `skipped`) and records the outcome with `POST {state}`. The edge relays
+     for the SESSION's account only (never a body field) → provision `onboarding_get` / `onboarding_set` (flag-gated
+     in `_provision_dispatch` too) → `Provisioner.onboarding_state` / `onboarding_record` (ACTIVE customers only,
+     `done` / `skipped` only; the same answer again writes nothing and only the FIRST close is audited as
+     `provision.audit` `onboarding_record`, so a customer cannot grow the signed spine by re-posting) →
+     `ui/onboarding_store.py`: one sha256-named 0600 JSON file per account in `SIGIL_HOME/customer/onboarding/`
+     (0700; O_NOFOLLOW; anything odd reads `pending`; outside backups like the rest of `customer/` — a restore shows
+     the tour once more). The browser also remembers the answer (`vigil.guide.v1.<username>`): it decides only when
+     the server cannot be asked, and a tour closed here whose record did not land is re-sent, not re-shown. Skip /
+     Esc / Finish all record; the top-bar tab of each step is lit.
+   - **The Guide screen** (`#/guide`) covers the whole app: 8 chapters — Get started (account, sign-in incl. Google
+     and passkey, account security, install, password reset, sign-out), Your workspace (Overview, Team + roles,
+     notifications), Credits and plans (buy, plans, trial, how credits are spent, rates, low balance + auto top-up),
+     Prove you control a host, Test a host (launch, follow / pause / resume / cancel, findings, retest), Red-Pen and
+     GitHub (connect the App step by step, PR reviews, merge-blocking settings, whole-repo review, Fix this,
+     disconnect), AEGIS monitoring (plans, turn on, events, change / stop), Statement and invoices — plus a
+     Questions tab (9 answers). Each step: where, the clicks in order, why, "Go to <screen>", "Mark as done".
+     The Team step offers only the roles a customer can grant (`provision._CUSTOMER_GRANTABLE_ROLES`: Admin, Analyst,
+     Viewer — test-pinned; Operator is granted only by VIGIL); the launch step offers Quick and Deep only — **add
+     Max to the guide when L1 lands** (there is no Max launch product before it).
+   - **Tests:** `test_customer_onboarding.py` (the tour, the Guide, the loader, the copy rules — no model / engine
+     names, no price or credit amount, an estimate only to rule it out — the server-decides scenarios, and a
+     **screen census**: every route in app.js `ROUTES` must be covered, so a new screen fails CI until the guide
+     covers it) and `test_customer_onboarding_state.py` (store, provisioner, cockpit dispatch, edge stub + real hop).
+   - **Before the flag goes on:** the screens the guide already describes must exist — §15.11 C. Keep the copy in
+     step as each lands (the census + the chapter / step ids are test-pinned).
+1. **W2c-2** (§11.5 j + k): `balance_after_mc` per statement line, "remaining" vs "available to start work"; take
+   `ENVELOPE_TOKENS_PER_CREDIT` off every metered path (the EC-5 cost settle still multiplies the exact debit by it);
+   show the customer the EXACT balance (floor of `exact_available_mc`) on `billing_overview` / the wallet card.
+2. **W3** (§11.6) pause on insufficient credit / resume after top-up. VERIFIED: a credit pause can outlive the 8-hour
+   lease and the grant (7 days + 1 h), so the continuation lease (`CreditLaunchLease.continue_of`, bound to the SAME
+   meter) is REQUIRED; count the 7-day TTL from the pause.
+3. **M1c-2** finished (§15.5). Then `VIGIL_METERED_BILLING` may be flipped by the agent only per §6.
+4. **W4** (§11.7), **W5** (§11.8 — Stripe; **ask the owner the dispute-timing question with a pick-one pop-up BEFORE
+   building**: remove disputed credits when the dispute opens / funds are withdrawn, or only when it closes `lost`
+   and re-grant on `funds_reinstated`?), **W6** (§11.9), **G1** (§11.11, headers verified), the **wallet E2E**
+   (§11.12), **Red-Pen R1–R5** (§12), **Front C S1–S4** (§4.4, §13.1), **Gate 5** (§13.2, Stripe TEST mode),
+   **A1 / O1 / L1**.
+5. Optional cleanup noted: split `test_smt_unknown_region_is_a_noop_without_z3` into its two cases (after PR A it
+   covers both the with-z3 and without-z3 paths in one test).
+
+### 15.7 Owner decisions recorded on 2026-11-16 (do not re-ask)
+- **Flips delegated** to the agent, each only when its gate is green and only once a deployment exists (§6):
+  production execution after Gate 5; metered billing after W2 + W3 + M1c-2 are merged and the wallet E2E is green
+  (and the owner has set the target margin and the Anthropic key); multi-shard after S4.
+- **No server / VPS work** — the program builds the customer app (code, tests, CI) only.
+- **Payment provider = Stripe**; Flutterwave development paused (its code stays; build nothing new on it).
+- **NYX** is the UI-only display name of the Strix engine (§15.4).
+- **The floor is retired** (W2c-1) and the rate card is the customer price (§11.2).
+- **W5 disputes** (pick-one, 2026-11-16): remove the disputed credits when the dispute OPENS / funds are withdrawn;
+  re-grant automatically when it is won. **Red-Pen R1–R5 is built together with the Code screen** (tests use a fake
+  GitHub; the owner registers the real GitHub App). The owner asked for ALL of §15.11 B + C (+ D) to be built by
+  parallel agents and strictly tested (2026-11-16).
+- The owner asked what "the margin value" means: `VIGIL_BILLING_TARGET_MARGIN` is the owner's private target margin
+  over the METERED AI cost, set at deploy and never in the repo. Since W2c-1 no settle reads it: customers are charged
+  from the published rate card; the margin sets the USD ceiling of a run's model grant (`billing_markup()` at publish)
+  and feeds the owner's money view (O1). It must be set (with the Anthropic key) before the metered flip.
+
+### 15.8 Lessons from this session (they will bite again)
+- **Two sessions, one worktree.** On 2026-11-16 two Claude processes of the SAME session worked the same local
+  worktrees at the same time (one merged #1136 while the other committed W2c-1). Before editing, check for a peer
+  (`ListAgents`, `ps -ef | grep claude`), give each session its own worktree, and message the peer before touching
+  shared state.
+- **Never `git stash` in a worktree.** The stash list is shared by every worktree of the repo: a `git stash` on a
+  clean tree saves nothing, and the `git stash pop` after it pops someone else's entry. On 2026-11-16 that applied the
+  main checkout's old `salvage-main-dirty-327behind-2026-09-30` stash into the W2c-1 worktree (conflicts); the worktree
+  was reset to its commit and the stash entry is still there, untouched (`git stash list`). To compare with the base,
+  use `git show origin/main:<path>` or a second worktree.
+- **`CRUCIBLE_ROOT`.** A test run without `CRUCIBLE_ROOT` set writes into the LIVE engine root (one run appended 3
+  lines to `/home/kali/Music/PENTEST/crucible/framework/v2/.crucible-v2.log`; removing them was refused as log
+  tampering, so they stay). Always `CRUCIBLE_ROOT=<worktree>/engine/crucible CRUCIBLE_ROOT_STRICT=1`.
+- **Stage by path, never `git add -A`:** tests regenerate `engine/crucible/targets/127-0-0-1/charter.md` (a stray copy
+  nearly shipped in PR B).
+- **Run the mypy ratchet on every slice before its PR** (`PATH=<venv>/bin:$PATH bash tools/governance/mypy_ratchet.sh`):
+  #1140's first CI run failed on new type errors in three modules. Locally the ratchet also prints a STALE line for
+  `sigil/voice/components.py` (identical on `main`, an environment difference): read the module list it names, not
+  just the exit status.
+- **Fake `anthropic` modules in tests** have no `DefaultHttpxClient` — that is why `bounded_http_client()` returns
+  None for them (43 console tests went red before that).
+- **`git fetch` over SSH can hang** — wrap it in `timeout 60`.
+- **Commit messages via `git commit -F <file>`** — backticks inside `-m "…"` are executed by the shell.
+- Failing identically on `main` locally (not regressions): `test_aegis_multi_gateway.py::test_real_gateway_self_
+  registers`, UI socket timeouts, an old onnxruntime; the shared `.venv-sovereign`'s editable installs point at
+  `/home/kali/vigil`, whose checkout carries an unrelated uncommitted change — test a worktree with the worktree first
+  on `PYTHONPATH` (or a venv copy whose editable installs point at the worktree).
+- The Workflow tool and subagents may be unavailable or rate-limited ("5-hour limit"); every step here can be done
+  inline.
+- Attribution used locally (no session URL available): commit trailer `Co-Authored-By: …` only; PR bodies end with
+  the "Generated with Claude Code" line (§0.8).
+
+### 15.9 Local tooling recipes (this machine; re-create in a scratch dir)
+- The second session kept its own copies under `<scratchpad>/e0/` (`t.sh`, `mutate.py`, `ciwait.sh`, a venv copy whose
+  editable installs point at `e0/slice`, and the mutant specs `m1c2a_mutants.py`, `w2c1_mutants.py`,
+  `w2c1_xproc_mutant.py`, `w2c1_prune_mutants.py`). The scratchpad does not survive; the recipes below re-create
+  them. `t.sh` re-points `slice` to the worktree it is given — never run two worktrees' tests through one slice at
+  once.
+- **Test helper** `t.sh <worktree> <leg> <pytest args…>`: legs `sov` (PYTHONPATH = `apps/sigil:integration:
+  packages/core/vigil_core`), `int` (+ `gateway`), `core` (`packages/core/vigil_core`), `off` / `eng` (offense venv
+  `/home/kali/vigil/.venv-offense`, PYTHONPATH with `engine/crucible`); always a fresh `SIGIL_HOME=$(mktemp -d)`,
+  `CRUCIBLE_ROOT=<worktree>/engine/crucible`, `CRUCIBLE_ROOT_STRICT=1`, `-p no:cacheprovider`, no extra `-q`.
+- **Mutation runner** `mutate.py <worktree> <spec.py>`: the spec lists `(file, old, new, test-node-ids)`; for each it
+  applies the one edit, runs the named tests (they must FAIL), restores the file byte-for-byte, and reports
+  RED/SURVIVED. Restore is verified with `git diff --quiet`.
+- **CI wait** `ciwait.sh <pr>`: polls `gh pr view <pr> --json statusCheckRollup` every 60 s, prints
+  `pending=N fail=M`, exits when nothing is pending. Merge with
+  `gh pr merge <pr> --merge --match-head-commit <headRefOid>` only when every required check is green.
+- Hygiene before every push: `python3 tools/governance/money_hygiene.py ci --base origin/main --head HEAD` and
+  `gitleaks git --log-opts="origin/main..HEAD" --no-banner .`.
+
+### 15.10 Verify before acting
+```bash
+git fetch origin && git log --first-parent --oneline -5 origin/main
+gh pr list --repo thuram-nana/vigil-sovereign --state open
+for b in claude/billing-w2c1-exact-settle claude/ui-nyx-display-name claude/billing-m1c2-strix-prices; do
+  echo "== $b"; git log --oneline origin/main..origin/$b; done
+```
+
+### 15.11 EVERYTHING LEFT TO CODE — the complete list (end of 2026-11-16)
+Everything the program still needs, in build order. Each line is one or more PRs built per §0.2. "Owner" marks what
+only the owner can do. Nothing here is server work (§6).
+
+**A. Open PRs.** #1137 (this file) — merge when its 15 required checks are green. (#1141 merged → `4c977a4b`.)
+
+**B. Money and metering (the wallet program, §11).**
+1. **W2c-2** — `balance_after_mc` on every statement line; "remaining" vs "available to start work"; take
+   `ENVELOPE_TOKENS_PER_CREDIT` off every metered path; show the EXACT balance (floor of `exact_available_mc`) on
+   `billing_overview` and the wallet card (§15.6 item 1).
+2. **W3** — pause on insufficient credit, resume after a top-up (continuation lease bound to the SAME meter; the 7-day
+   grant TTL counted from the pause) (§11.6).
+3. **M1c-2b** — the offense wiring through the gateway: `CreditsExhausted` → pause at the engage seam (past the
+   PhaseLedger swallow-wrappers); `routing_override=False` in the worker; `engage_worker` grant scope;
+   `think_claude` / `codefix_runner` grant use; Strix children via the loopback gateway; `uiproxy._child_env` key
+   exclusion + the doctor HARD issue; the wire test (§15.5).
+4. **W4** — worker-time and premium-API metering (§11.7).
+5. **W5** — chargebacks / reversals / refunds + the low-balance alert, on Stripe. **Decided (owner, 2026-11-16):**
+   remove the disputed credits when the dispute opens / funds are withdrawn; re-grant automatically when it is won
+   (`funds_reinstated` / closed `won`) (§11.8).
+6. **W6** — the customer billing dashboard (§11.9; see C5 below for its screens).
+7. **G1** — the gateway at scale: capacity from the provider's rate-limit headers, per-tenant fair share, a
+   provider-account pool, the loss alarm (§11.11).
+8. **Wallet E2E (simulated)** — the whole §11.1 journey in one test, fake upstream + sandbox payments (§11.12).
+9. **A1** auto top-up (§11.13), **O1** the owner money view, **L1** live Max (§10.6).
+
+**C. Customer-app screens the onboarding guide already describes but that do not exist yet** (the API mostly does;
+each is a UI slice with its own tests; the guide flag stays OFF until all of C is in):
+1. **Assessments: launch and control** — depth picker (Quick / Deep; Max only with L1) → `launch/reserve` → `launch/start`;
+   Pause / Resume / Cancel (`launch/pause|resume|cancel`, PR-4b flag); live state and what a run has used so far;
+   **Retest** on a finding. The app still says "Launching a new assessment arrives with the run driver."
+2. **Team** — list members, Add member (email + role), change role, Remove (the member-management provision actions
+   exist; `#/team` is still `viewSoon`).
+3. **Account security** — TOTP enrolment (`mfa/totp/enroll`, `mfa/verify`) and passkey enrolment
+   (`passkey/enroll/*`), plus **passkey sign-in** on the sign-in screen (`passkey/login/*`); the step-up prompt for a
+   sensitive action (today a purchase only shows an error asking for a fresh check).
+4. **Monitoring (AEGIS)** — the screen: choose a verified host, Observe / Respond, step-up, events list, Turn off
+   (`api/customer/monitoring*` exists behind `VIGIL_CUSTOMER_MONITORING_ENABLED`); and on **Billing**, the AEGIS plan
+   offers rendered as plans for 1 / 5 hosts (today `offerLine` would print an AEGIS plan as "Plan: 0 credits").
+5. **Billing (W6)** — Rates view (`billing/rates` read exists), the statement with balance-after (`billing/usage`
+   read exists), credits on hold for running assessments, live consumption per run, the low-balance notice (W5),
+   Auto top-up settings (A1).
+6. **Code (Red-Pen)** — Connect GitHub (the App install round-trip), the repository list, per-repo merge-blocking
+   threshold + monthly spending limit, Red-Pen System (now / schedule), Fix this → re-checked fix PR (never merged by
+   VIGIL), disconnect — this is Red-Pen R1–R5 (D below) seen from the app.
+7. **Overview** — bring credits, hosts, assessments and monitoring together (today: account + workspace only).
+
+**D. Red-Pen R1 → R5** (§12; design §7) — the GitHub App (owner registers it, with `checks:write`), PR reviews that
+post only reproduced FACTs, the "VIGIL Red-Pen" check blocking Critical / High, per-repo threshold + monthly
+spending limit, System reviews on demand / on a schedule, Fix this.
+
+**E. Scale and the closing gates.** Front C **S1, S2a–c, S3, S4** (§4.4, §13.1: 100,000 then 1,000,000 users);
+**Gate 5** — the hands-on end-to-end with evidence, Stripe TEST mode (§13.2).
+
+**F. Owner-only (never the agent's, §6).** The GitHub App registration; the live Stripe secret + webhook secret; the
+Anthropic key + workspace + spend limits; the target margin and trial credits at deploy; the AWS KMS key for
+evidence-DEK escrow; DNS / TLS; the CodeQL by-design dismissals. The three production flips
+are delegated to the agent behind their gates (§6) once a deployment exists.
+
+**G. Housekeeping.** Delete merged `claude/*` branches; split `test_smt_unknown_region_is_a_noop_without_z3` into its
+two cases; keep this file current at the end of every session.
