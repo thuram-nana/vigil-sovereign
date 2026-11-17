@@ -982,8 +982,8 @@ class Provisioner:
         (TOTP) is set up, the passkeys registered (credential id — not a secret: the browser is told it to avoid a
         duplicate — and when each was added), and the name an authenticator shows for the account (its email, as in the
         TOTP setup link). Never a secret, a sealed blob or a public key. Account-level like MFA: the requester is the
-        hop-bound session principal, never a body field, and must be an ACTIVE customer. Fail-closed when the credential
-        registry is not wired."""
+        hop-bound session principal, never a body field, and must be an ACTIVE customer. Fail-closed when customer MFA
+        is not enabled on this deployment."""
         if self.customer_credentials is None:
             raise ProvisionError("customer MFA is not enabled on this deployment")
         acct = self.customers.customer(requester)
