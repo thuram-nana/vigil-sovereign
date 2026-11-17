@@ -303,8 +303,12 @@ class PendingPlanCheckouts:
         # None ⇒ every billing spool's ``processed/`` is read (reading more can only hold more).
         self.stripe_spools = None if stripe_spools is None else [Path(d) for d in stripe_spools]
 
-    def _marker(self, org_id: str) -> Path:
-        return self.dir / hashlib.sha256(f"org:{org_id}".encode("utf-8")).hexdigest()
+    def _marker(self, org_id: str, kind: str = "") -> Path:
+        # One marker per (org, KIND): the credit plan (``kind=""``) keeps the historical ``org:<id>`` key, so its
+        # marker is byte-identical; an AEGIS monitoring checkout (``kind="monitoring"``) lives under its own
+        # ``monitoring:org:<id>`` key, so a pending AEGIS checkout never blocks a credit checkout and vice-versa.
+        key = f"org:{org_id}" if not kind else f"{kind}:org:{org_id}"
+        return self.dir / hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def _locked_fd(self) -> int:
         """Open + exclusively flock the claim lock; raises OSError (the caller fails closed)."""
@@ -474,17 +478,18 @@ class PendingPlanCheckouts:
             prev = listing
         return "the billing spool kept changing while it was read"
 
-    def claim(self, org_id: str, price_id: str, tx_ref: str, *, now: float) -> dict:
-        """Record THIS org's pending plan checkout (``tx_ref``), or raise ``PendingCheckoutRefused``. Exclusive
-        across threads and processes; see the module docstring for the refusal cases. Returns ``{"record": the
-        signed record, "replaced": ""|why}`` — ``replaced`` names a stale UNVERIFIABLE record it reaped (for the
-        audit)."""
+    def claim(self, org_id: str, price_id: str, tx_ref: str, *, now: float, kind: str = "") -> dict:
+        """Record THIS org's pending plan checkout (``tx_ref``) OF ``kind`` (``""`` credit plan / ``"monitoring"``
+        AEGIS plan — each kind has its own marker, so one never blocks the other), or raise
+        ``PendingCheckoutRefused``. Exclusive across threads and processes; see the module docstring for the
+        refusal cases. Returns ``{"record": the signed record, "replaced": ""|why}`` — ``replaced`` names a stale
+        UNVERIFIABLE record it reaped (for the audit)."""
         org_id, price_id, tx_ref, t = str(org_id), str(price_id), str(tx_ref), float(now)
         if self.owner_key is None or not self.trusted_pubkey:
             raise PendingCheckoutRefused(
                 "plan checkout is unavailable right now (contact support)", code="refused_pending_unsigned",
                 detail="the owner signing key is unavailable, so the pending plan-checkout record cannot be signed")
-        marker = self._marker(org_id)
+        marker = self._marker(org_id, kind)
         try:
             fd = self._locked_fd()
         except OSError as exc:
@@ -551,22 +556,23 @@ class PendingPlanCheckouts:
         finally:
             os.close(fd)
 
-    def pending(self, org_id: str, *, now: float) -> bool:
-        """Read-only: True iff a plan checkout for the org is in progress — a verified record still inside its window
-        or expired with its webhook still undrained (``undrained``), OR a record that cannot be trusted (fail-closed:
-        ``claim`` would refuse each of these too). For the offers read, so the UI does not offer a plan that checkout
-        would refuse. Takes no lock (a stale answer is only a UI hint)."""
-        rec, problem = self._read(self._marker(str(org_id)), str(org_id))
+    def pending(self, org_id: str, *, now: float, kind: str = "") -> bool:
+        """Read-only: True iff a plan checkout OF ``kind`` for the org is in progress — a verified record still
+        inside its window or expired with its webhook still undrained (``undrained``), OR a record that cannot be
+        trusted (fail-closed: ``claim`` would refuse each of these too). For the offers read, so the UI does not
+        offer a plan that checkout would refuse. ``kind`` selects the per-kind marker (``""`` credit /
+        ``"monitoring"`` AEGIS). Takes no lock (a stale answer is only a UI hint)."""
+        rec, problem = self._read(self._marker(str(org_id), kind), str(org_id))
         if problem:
             return True
         if rec is None:
             return False
         return float(now) < float(rec["expires_at"]) or bool(self.undrained((str(rec.get("tx_ref") or ""),)))
 
-    def release(self, org_id: str, tx_ref: str) -> bool:
-        """Drop the org's pending record iff it is still THIS checkout's (verified, same ``tx_ref``). Best-effort:
-        False on any fault — the record then simply expires (the safe direction)."""
-        marker = self._marker(str(org_id))
+    def release(self, org_id: str, tx_ref: str, kind: str = "") -> bool:
+        """Drop the org's pending record OF ``kind`` iff it is still THIS checkout's (verified, same ``tx_ref``).
+        Best-effort: False on any fault — the record then simply expires (the safe direction)."""
+        marker = self._marker(str(org_id), kind)
         try:
             fd = self._locked_fd()
         except OSError:

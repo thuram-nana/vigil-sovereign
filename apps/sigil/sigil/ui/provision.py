@@ -1691,34 +1691,57 @@ class Provisioner:
         where ``offered`` is ``{price_id: (amount_minor, currency)}`` from the OWNER catalog. Shared by
         ``billing_checkout`` (which refuses anything outside it) and the ``billing_offers`` read (which lists
         exactly it), so the UI can never show a buy button that checkout would refuse. Top-ups always; credit
-        SUBSCRIPTION plans only with the extra plan flag; NEVER the AEGIS monitoring plans (the billing drain
-        does not wire the monitoring line, so one would be charged for nothing)."""
+        SUBSCRIPTION plans only with the extra plan flag; the AEGIS monitoring plans only with the monitoring
+        flag (``customer_monitoring_enabled`` — INDEPENDENT of the credit-plan flag: an AEGIS plan is monthly,
+        billed on its own line, never credits). With the monitoring flag OFF ``catalog.expected_amounts()``
+        excludes the AEGIS prices, so ``offered`` is byte-identical to the pre-AEGIS set."""
         from .. import config
         from ..governor import catalog
         from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP
         ents = catalog.entitlements()
         sellable = {EVENT_TOPUP} | ({EVENT_SUBSCRIPTION_ACTIVE} if config.customer_plan_checkout_enabled() else set())
         monitoring = catalog.monitoring_price_ids()
-        offered = {pid: amt for pid, amt in catalog.expected_amounts().items()
-                   if getattr(ents.get(pid), "kind", None) in sellable and pid not in monitoring}
+        monitoring_on = config.customer_monitoring_enabled()
+        offered: "dict[str, tuple[int, str]]" = {}
+        for pid, amt in catalog.expected_amounts().items():
+            if pid in monitoring:
+                if monitoring_on:                     # the AEGIS plan's own sale flag (not the credit-plan one)
+                    offered[pid] = amt
+            elif getattr(ents.get(pid), "kind", None) in sellable:
+                offered[pid] = amt
         return offered, ents
 
     def _org_has_live_plan(self, org_id: str, t: float) -> bool:
-        """True iff the org already holds a credit plan that is active or past_due and not yet expired — the
-        CHK-1b double-billing guard (checkout refuses a second plan; the offers read reports it so the UI does not
-        offer one)."""
+        """True iff the org already holds a CREDIT plan that is active or past_due and not yet expired — the
+        CHK-1b double-billing guard (checkout refuses a second credit plan; the offers read reports it so the UI
+        does not offer one). Reads the credit-plan line (``governor.subscription``) ONLY: a live AEGIS monitoring
+        plan is on a different line and never blocks a credit plan (one plan per KIND)."""
         from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
         cur = SubscriptionRegistry(self.store).subscription(org_id)
         return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
 
-    def _spine_plan_checkouts(self, org_id: str, t: float) -> "tuple[str, list[str]]":
-        """Audit E1b backstop — the PLAN checkouts the spine audit shows CREATED for ``org_id`` (a created plan row
-        carries its pending window's ``expires_at``): ``(live, lapsed)`` — the tx_ref of one whose window is still
-        open at ``t`` (else ""), and the tx_refs of those whose window has ended. The pending record is a SIGIL_HOME
-        file a local writer could delete; these rows are on the tamper-evident spine, so a deleted record still
-        refuses the second plan while a window is open, or while a lapsed one's webhook waits undrained
-        (fail-closed). A spine read fault raises (caller refuses). A full scan, but only on a plan checkout (rare,
-        and rate-limited)."""
+    def _org_has_live_monitoring_plan(self, org_id: str, t: float) -> bool:
+        """True iff the org already holds an AEGIS MONITORING plan that is active or past_due and not yet expired
+        — the per-KIND twin of ``_org_has_live_plan``. Reads the SEPARATE monitoring line
+        (``governor.monitoring_subscription``) ONLY, so a live AEGIS plan blocks a second AEGIS plan but NEVER a
+        credit plan, and vice-versa. Keyless read (``owner_key=None``)."""
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE
+        cur = MonitoringSubscriptionRegistry(self.store, owner_key=None).subscription(org_id)
+        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+
+    def _spine_plan_checkouts(self, org_id: str, t: float, *, monitoring: bool) -> "tuple[str, list[str]]":
+        """Audit E1b backstop — the PLAN checkouts of ONE kind the spine audit shows CREATED for ``org_id`` (a
+        created plan row carries its pending window's ``expires_at``): ``(live, lapsed)`` — the tx_ref of one whose
+        window is still open at ``t`` (else ""), and the tx_refs of those whose window has ended. The pending
+        record is a SIGIL_HOME file a local writer could delete; these rows are on the tamper-evident spine, so a
+        deleted record still refuses the second plan while a window is open, or while a lapsed one's webhook waits
+        undrained (fail-closed). ``monitoring`` selects the KIND: a created row counts only when its ``target``
+        price is (``monitoring=True``) / is not (``monitoring=False``) an AEGIS monitoring price, so an AEGIS
+        checkout's backstop never gates a credit checkout and vice-versa (one plan per kind). A spine read fault
+        raises (caller refuses). A full scan, but only on a plan checkout (rare, and rate-limited)."""
+        from ..governor.catalog import monitoring_price_ids
+        mon = {p[:64] for p in monitoring_price_ids()}   # the audit row caps ``target`` at 64 chars (_audit_payload)
         live, lapsed = "", []
         for r in self.store.iter_records():
             pl = r.payload
@@ -1729,6 +1752,8 @@ class Provisioner:
             ea = pl.get("expires_at")
             if not isinstance(ea, (int, float)) or isinstance(ea, bool):
                 continue                                  # a top-up row (no pending window)
+            if (str(pl.get("target") or "") in mon) != monitoring:
+                continue                                  # a checkout of the OTHER kind does not gate this one
             if t < float(ea):
                 live = live or str(pl.get("tx_ref") or "?")
             elif pl.get("tx_ref"):
@@ -1740,9 +1765,11 @@ class Provisioner:
         """Front B CHK-2 — what THIS customer can buy right now, for the billing page's buy buttons. Gated exactly
         like checkout: the checkout flag (default-OFF), then ``admit_customer(manage_billing)`` for the SESSION org
         (a role that cannot spend money is not shown a price list it cannot use). Lists precisely the shared
-        ``_checkout_offered`` set (owner catalog prices — never a client-supplied amount) and whether the org
-        already holds a live plan (so the UI offers top-ups only, matching checkout's second-plan refusal). Reads
-        only: mints nothing, touches no owner key."""
+        ``_checkout_offered`` set (owner catalog prices — never a client-supplied amount) and, PER KIND, whether the
+        org already holds a live plan or has a plan checkout in progress (``has_active_plan`` /
+        ``plan_checkout_pending`` for the credit plan; with the monitoring flag on, ``has_monitoring_plan`` /
+        ``monitoring_checkout_pending`` for the AEGIS plan), so the UI hides exactly what checkout's per-kind
+        second-plan refusal would refuse. Reads only: mints nothing, touches no owner key."""
         from .. import config
         if not config.customer_checkout_enabled():
             raise ProvisionDenied("customer checkout is not enabled")
@@ -1753,12 +1780,22 @@ class Provisioner:
             offered, _ents = self._checkout_offered()
             items = [p for p in catalog.plans() if p.get("price_id") in offered]
             plans_on = bool(config.customer_plan_checkout_enabled())
-            # E1b: a plan checkout already in progress (paid or not, not yet drained) refuses a second plan, so the
-            # UI must not offer one either. Fail-closed: an unwired / untrusted pending record reads as pending.
+            # E1b: a plan checkout already in progress (paid or not, not yet drained) refuses a second plan OF THE
+            # SAME KIND, so the UI must not offer one either. Fail-closed: an unwired / untrusted pending record
+            # reads as pending. The CREDIT line and the AEGIS line are tracked per-kind (own pending marker).
             pending = plans_on and (self.pending_checkouts is None
                                     or self.pending_checkouts.pending(org_id, now=t))
-            return {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
-                    "plans_enabled": plans_on, "plan_checkout_pending": bool(pending)}
+            out = {"offers": items, "has_active_plan": self._org_has_live_plan(org_id, t),
+                   "plans_enabled": plans_on, "plan_checkout_pending": bool(pending)}
+            # AEGIS plan SALE (flag-gated so OFF is byte-identical): the UI's offerShown() hides an AEGIS offer
+            # exactly when the workspace has a live AEGIS plan or an AEGIS checkout is in progress — independent of
+            # the credit-plan fields above (one plan per kind).
+            if config.customer_monitoring_enabled():
+                mon_pending = (self.pending_checkouts is None
+                               or self.pending_checkouts.pending(org_id, now=t, kind="monitoring"))
+                out["has_monitoring_plan"] = self._org_has_live_monitoring_plan(org_id, t)
+                out["monitoring_checkout_pending"] = bool(mon_pending)
+            return out
         return self._customer_read(requester, requester_org_id, "manage_billing", project)
 
     def billing_checkout(self, requester: str, requester_org_id: str, price_id: str, *, ip: str = "",
@@ -1801,19 +1838,32 @@ class Provisioner:
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id, outcome="unconfigured")
             raise ProvisionDenied("checkout is not configured (the owner has not provisioned the payment processor)")
         from ..governor.billing import EVENT_SUBSCRIPTION_ACTIVE, UnsupportedCapability
-        # The ONE shared offered set (top-ups; plans only with the plan flag; never monitoring) — the
-        # billing_offers read lists exactly this, so the UI and checkout cannot disagree.
+        from ..governor.catalog import monitoring_price_ids
+        # The ONE shared offered set (top-ups; credit plans with the plan flag; AEGIS monitoring plans with the
+        # monitoring flag) — the billing_offers read lists exactly this, so the UI and checkout cannot disagree.
         offered, ents = self._checkout_offered()
         is_plan = getattr(ents.get(str(price_id or "")), "kind", None) == EVENT_SUBSCRIPTION_ACTIVE
+        # PER-KIND: an AEGIS monitoring plan and a credit plan are different processor subscriptions on different
+        # sovereign lines, so each kind's second-plan guard (live subscription + pending record + spine backstop)
+        # is independent — a live/pending AEGIS plan blocks a second AEGIS plan but NEVER a credit plan, and
+        # vice-versa (one plan per kind). The selling flag lives in ``offered`` (monitoring prices appear there
+        # only when the monitoring flag is on), so with it off a monitoring price is not in ``offered`` and is
+        # refused at ``create_checkout`` exactly as before (byte-identical).
+        is_monitoring = str(price_id or "") in monitoring_price_ids()
+        _has_live_plan = self._org_has_live_monitoring_plan if is_monitoring else self._org_has_live_plan
+        _pending_kind = "monitoring" if is_monitoring else ""
+        _already_msg = ("this workspace already has an AEGIS monitoring plan — changing it is not self-serve yet "
+                        "(contact support), so a second subscription is refused rather than billed") if is_monitoring \
+            else ("this workspace already has a plan — changing plans is not self-serve yet "
+                  "(contact support), so a second subscription is refused rather than billed")
         if is_plan and str(price_id) in offered:
             # CHK-1b red-pen HIGH: a SECOND processor subscription would double-bill (there is no processor-side
             # cancel/upgrade path yet, and the newest charge wins the sovereign plan each renewal). Refuse while the
-            # org already holds a credit plan that is active or past_due and not yet expired.
-            if self._org_has_live_plan(requester_org_id, t):
+            # org already holds a plan OF THE SAME KIND that is active or past_due and not yet expired.
+            if _has_live_plan(requester_org_id, t):
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                             target=str(price_id), outcome="refused_existing_plan")
-                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
-                                      "(contact support), so a second subscription is refused rather than billed")
+                raise ProvisionDenied(_already_msg)
         # The processor needs the payer's email: take it from the owner-signed customer record (usernames are
         # opaque ids, never emails) — the account's OWN registered address, never a body field.
         acct = self.customers.customer(requester) if self.customers is not None else None
@@ -1837,19 +1887,21 @@ class Provisioner:
                     raise PendingCheckoutRefused("plan checkout is unavailable right now (contact support)",
                                                  code="refused_pending_unwired",
                                                  detail="no pending plan-checkout ledger is wired")
-                claimed = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref, now=t)
+                claimed = self.pending_checkouts.claim(requester_org_id, str(price_id), pending_ref, now=t,
+                                                       kind=_pending_kind)
                 pending_note, pending_until = claimed.get("replaced", ""), float(claimed["record"]["expires_at"])
-                # the deletion-proof backstop: a CREATED plan checkout still inside its window on the spine audit
-                # refuses even if its pending record file is gone (a deleted record must not reopen the window).
+                # the deletion-proof backstop: a CREATED plan checkout OF THIS KIND still inside its window on the
+                # spine audit refuses even if its pending record file is gone (a deleted record must not reopen the
+                # window).
                 lapsed: "list[str]" = []
                 try:
-                    live, lapsed = self._spine_plan_checkouts(requester_org_id, t)
+                    live, lapsed = self._spine_plan_checkouts(requester_org_id, t, monitoring=is_monitoring)
                 except Exception as exc:  # noqa: BLE001 — a spine read fault is fail-CLOSED, never "no checkout"
                     live, why = "?", f"the spine audit could not be read ({type(exc).__name__})"
                 else:
                     why = f"pending record missing but the spine audit shows a live plan checkout {live}"
                 if live:
-                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    self.pending_checkouts.release(requester_org_id, pending_ref, kind=_pending_kind)
                     raise PendingCheckoutRefused(
                         "a plan checkout for this workspace is already in progress — complete it, or wait for it to "
                         "expire (contact support)", code="refused_pending_spine", detail=why[:160])
@@ -1858,7 +1910,7 @@ class Provisioner:
                 # Stripe subscription checkout has no drained plan yet, whatever the record.
                 unconfirmed = self.pending_checkouts.undrained(lapsed)
                 if unconfirmed:
-                    self.pending_checkouts.release(requester_org_id, pending_ref)
+                    self.pending_checkouts.release(requester_org_id, pending_ref, kind=_pending_kind)
                     raise PendingCheckoutRefused(UNCONFIRMED_MESSAGE, code="refused_pending_unconfirmed",
                                                  detail=unconfirmed[:160])
             except PendingCheckoutRefused as exc:
@@ -1866,13 +1918,12 @@ class Provisioner:
                             target=str(price_id), outcome=exc.code, reason=exc.detail, tx_ref=pending_ref)
                 raise ProvisionDenied(str(exc)) from None
             # The first plan may have DRAINED between the pre-claim check above and the claim (e.g. over a record
-            # that had just expired): re-check under the claim, so a plan that is now live still refuses.
-            if self._org_has_live_plan(requester_org_id, t):
-                self.pending_checkouts.release(requester_org_id, pending_ref)
+            # that had just expired): re-check (same kind) under the claim, so a plan that is now live still refuses.
+            if _has_live_plan(requester_org_id, t):
+                self.pending_checkouts.release(requester_org_id, pending_ref, kind=_pending_kind)
                 self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                             target=str(price_id), outcome="refused_existing_plan", tx_ref=pending_ref)
-                raise ProvisionDenied("this workspace already has a plan — changing plans is not self-serve yet "
-                                      "(contact support), so a second subscription is refused rather than billed")
+                raise ProvisionDenied(_already_msg)
         from .pending_checkout import PLAN_LINK_SESSION_MIN
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
@@ -1884,7 +1935,7 @@ class Provisioner:
         except (UnsupportedCapability, ValueError) as exc:
             if pending_ref:
                 # the processor refused: the customer never received a link, so free the claim for a retry
-                self.pending_checkouts.release(requester_org_id, pending_ref)
+                self.pending_checkouts.release(requester_org_id, pending_ref, kind=_pending_kind)
             self._audit("billing_checkout", requester=requester, org_id=requester_org_id,
                         target=str(price_id or ""), outcome="refused", tx_ref=pending_ref)
             raise ProvisionDenied(f"checkout refused: {exc}") from None

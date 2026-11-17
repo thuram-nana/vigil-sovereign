@@ -13,9 +13,9 @@ on Billing.
 * The manager-only fields: the hosts with a CURRENT proof only (never a pending or expired one, never a challenge
   token, never another workspace's), and the plan exactly as the catalog defines it (host slots + respond + period
   end; no price), or none — a credit plan is never mistaken for an AEGIS plan.
-* Billing: an AEGIS plan never hides or blocks a credit plan (the offers read and checkout), checkout still sells no
-  AEGIS plan (the billing drain does not mint that line), and the app's buy list shows exactly the plans checkout
-  accepts.
+* Billing: one plan kind never hides or blocks the other (the offers read and checkout); with the monitoring flag on
+  checkout sells the AEGIS plans (end to end in test_customer_monitoring_sale.py), and the app's buy list shows
+  exactly the plans checkout accepts.
 
 Mutation-verify targets (each neuter reds a NAMED test here):
   * can_manage forced true / the hosts or the plan sent to a read-only role
@@ -342,20 +342,24 @@ def test_an_aegis_plan_never_hides_or_blocks_a_credit_plan(monkeypatch):
     assert d["has_active_plan"] is False and d["plan_checkout_pending"] is False
     plans = [o["price_id"] for o in d["offers"] if o["kind"] == "subscription_active"]
     assert "vigil_pro_monthly" in plans
-    assert not {o["price_id"] for o in d["offers"]} & catalog.monitoring_price_ids()     # AEGIS: not sold here yet
+    assert catalog.monitoring_price_ids() <= {o["price_id"] for o in d["offers"]}        # AEGIS plans are on sale ...
+    assert d["has_monitoring_plan"] is True                                              # ... and this one holds one
     r = p.billing_checkout(admin, org, "vigil_pro_monthly", now=5000.0)
     assert r["price_id"] == "vigil_pro_monthly" and posted[-1]["payment_plan"] == "vigil_pro_monthly"
 
 
 def test_the_app_and_checkout_agree_on_which_plans_can_be_bought(monkeypatch):
     """The server's real offers payload, run through the app's own buy list (node): every plan the app shows,
-    checkout accepts; every plan it hides, checkout refuses for the second-plan rule — for a workspace holding an
-    AEGIS plan (credit plans stay on offer) and one holding a credit plan (only top-ups)."""
+    checkout accepts; every plan it hides, checkout refuses for the second-plan rule OF ITS KIND — for a workspace
+    holding an AEGIS plan (every offer but the AEGIS plans: credit plans stay on offer) and one holding a credit plan
+    (the top-ups and the AEGIS plans)."""
     from test_customer_monitoring_screen import _buy
 
+    from sigil.governor import catalog
     from sigil.governor.monitoring_subscription import MonitoringSubscriptionRegistry
     from sigil.governor.subscription import SubscriptionRegistry
     from sigil.ui.provision import ProvisionDenied
+    mon = catalog.monitoring_price_ids()
     pa, admin_a, org_a, posted_a = _plans_provisioner(monkeypatch)
     MonitoringSubscriptionRegistry(pa.store).subscribe(org_a, "aegis_observe_1h", 0, period_start=0.0,
                                                        period_end=1e12, issued_at=50.0)
@@ -366,13 +370,22 @@ def test_the_app_and_checkout_agree_on_which_plans_can_be_bought(monkeypatch):
     offers_c = pc.customer_billing_offers(admin_c, org_c, now=5000.0)
     shown = _buy({"aegis": offers_a, "credit": offers_c})
     name = {o["name"]: o for o in offers_a["offers"]}
-    assert shown["aegis"] == [o["name"] for o in offers_a["offers"]]     # every offer, credit plans included
-    assert shown["credit"] == [o["name"] for o in offers_c["offers"] if o["kind"] == "topup_purchased"]
+    assert shown["aegis"] == [o["name"] for o in offers_a["offers"] if o["price_id"] not in mon]   # AEGIS hides AEGIS
+    assert shown["credit"] == [o["name"] for o in offers_c["offers"]
+                               if o["kind"] == "topup_purchased" or o["price_id"] in mon]      # credit hides credit
     plan = next(name[n]["price_id"] for n in shown["aegis"] if name[n]["kind"] == "subscription_active")
     assert pa.billing_checkout(admin_a, org_a, plan, now=5000.0)["price_id"] == plan
+    for o in offers_a["offers"]:
+        if o["name"] not in shown["aegis"]:
+            with pytest.raises(ProvisionDenied, match="already has an AEGIS monitoring plan"):
+                pa.billing_checkout(admin_a, org_a, o["price_id"], now=5000.0)
     for o in offers_c["offers"]:
+        if o["price_id"] in mon:
+            continue                                                     # (one AEGIS purchase is checked below)
         if o["name"] in shown["credit"]:
             assert pc.billing_checkout(admin_c, org_c, o["price_id"], now=5000.0)["price_id"] == o["price_id"]
         else:
             with pytest.raises(ProvisionDenied, match="already has a plan"):
                 pc.billing_checkout(admin_c, org_c, o["price_id"], now=5000.0)
+    aegis = next(o["price_id"] for o in offers_c["offers"] if o["price_id"] in mon)
+    assert pc.billing_checkout(admin_c, org_c, aegis, now=5000.0)["price_id"] == aegis     # shown: checkout accepts
