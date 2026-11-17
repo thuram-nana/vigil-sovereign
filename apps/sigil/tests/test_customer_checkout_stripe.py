@@ -141,12 +141,20 @@ def test_an_unknown_provider_is_not_configured_and_never_falls_back(monkeypatch,
         p.billing_checkout(admin, org, "vigil_topup_1k")
 
 
+@pytest.mark.parametrize("provider", ["stripe", None])            # explicit, and the default (unset)
 @pytest.mark.parametrize("missing", ["VIGIL_BILLING_ENABLE_STRIPE", "VIGIL_STRIPE_WEBHOOK_SECRET",
                                      "VIGIL_STRIPE_SECRET_KEY", "VIGIL_STRIPE_API_VERSION"])
-def test_stripe_needs_every_precondition(monkeypatch, missing):
+def test_stripe_needs_every_precondition(monkeypatch, missing, provider):
+    """Each Stripe precondition holds on the explicit AND the default (unset) path: with any one missing there is no
+    provider, so no checkout — never a fall-back to a fully provisioned Flutterwave. (Without the webhook secret the
+    drain could not verify, and so never credit, what the checkout charged.)"""
     _on(monkeypatch)
     _stripe_on(monkeypatch)
     _with_fake_stripe(monkeypatch)
+    if provider is None:
+        monkeypatch.delenv("VIGIL_BILLING_PROVIDER")
+    monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "flw-" + "x")   # Flutterwave fully provisioned
+    monkeypatch.setenv("VIGIL_FLW_SECRET_KEY", "flw-" + "key")
     monkeypatch.delenv(missing)
     p, *_rest = _provisioner()
     assert p._checkout_provider() is None
