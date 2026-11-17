@@ -1795,6 +1795,29 @@ def _strix_local_default_base(backend_name: str) -> str:
     return _STRIX_LOCAL_DEFAULT_BASE.get(name, "http://localhost:11434")
 
 
+def _strix_metered_gateway_base(strix_llm_env: dict, *, include_json: bool = True) -> bool:
+    """M1c-2b — True iff this is a METERED customer run (a model grant is in scope) whose resolved Strix
+    ``api_base`` is the LOOPBACK model gateway, so an ``anthropic/<model>`` pick egresses ON-HOST (to the
+    sovereign gateway that holds the provider key) rather than to ``api.anthropic.com``. Used by
+    :func:`_strix_sovereignty_backend` to classify that one case ``local`` (permitted under every tier) WITHOUT
+    widening the cloud allowlist — a non-metered ``anthropic/`` pick, or one whose base is not the loopback
+    gateway, is UNaffected. Total: never raises; any failure ⇒ False (the pick stays cloud, gated as before)."""
+    try:
+        from ..kernel import metered as _metered
+        if not _metered.metered_mode():
+            return False
+        if not _metered.gateway_base():                # ANTHROPIC_BASE_URL is the loopback gateway (else None)
+            return False
+        base = _strix_resolved_base(strix_llm_env, include_json=include_json)
+        if not base:
+            return False
+        from . import chat as _chat
+        ok, _host = _chat._url_host_is_local(base)
+        return bool(ok)
+    except Exception:  # noqa: BLE001 — cannot prove the metered loopback case ⇒ NOT local (fail-closed: stays cloud)
+        return False
+
+
 def _strix_sovereignty_backend(strix_llm_env: dict, *, include_json: bool = True) -> str:
     """The ``kernel.sovereignty`` backend NAME the spawned Strix codebase agent must be gated as.
 
@@ -1819,6 +1842,14 @@ def _strix_sovereignty_backend(strix_llm_env: dict, *, include_json: bool = True
         return _sovereignty.direct_anthropic_backend_name()
     provider = model.split("/", 1)[0].strip().lower()
     if provider == "anthropic":
+        # M1c-2b — a METERED run pins ``anthropic/<model>`` at the LOOPBACK model gateway (the sovereign chokepoint
+        # that holds the provider key + meters every call). The child's model egress is then to 127.0.0.1 — on-host,
+        # like a self-hosted loopback endpoint — so it classifies LOCAL and is permitted under every tier, and the
+        # positive-control alias guard PINS LLM_API_BASE to the gateway + strips the siblings for it. This does NOT
+        # widen the cloud allowlist: a non-metered ``anthropic/`` pick, or one whose base is not the loopback
+        # gateway, falls through to the cloud backend name below and is gated at construction exactly as before.
+        if _strix_metered_gateway_base(strix_llm_env, include_json=include_json):
+            return "self-hosted"     # classify() → local: an on-host (loopback-gateway) egress, permitted everywhere
         # ZDR attestation moves a direct Anthropic client from cloud_only → trusted_cloud (one rule, one place).
         return _sovereignty.direct_anthropic_backend_name()
 
