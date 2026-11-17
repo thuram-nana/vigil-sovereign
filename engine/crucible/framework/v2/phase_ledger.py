@@ -70,6 +70,7 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from .common import logging as _v2log
 from .common import paths as _paths
+from .common.errors import CreditsExhausted
 
 _log = _v2log.get_logger(__name__)
 
@@ -370,7 +371,10 @@ class PhaseLedger:
                                   so a resume retries it).
 
         ``fn`` may carry its own side effects (mutating the run ``result``); its return value is
-        passed straight back. This wrapper NEVER raises."""
+        passed straight back. This wrapper NEVER raises — with ONE deliberate exception (M1c-2b): a
+        :class:`~framework.v2.common.errors.CreditsExhausted` (a metered run's terminal credit stop
+        from the model gateway) is RE-RAISED past this swallow-wrapper, so a credit stop halts the run
+        cleanly for a top-up + resume instead of silently degrading the deliverable (see below)."""
         if not enabled:
             # The phase's opt-in flag is off — a legitimate fail-open skip, but make it VISIBLE instead of
             # silent so a skipped step shows up in the record (log-only; returns default exactly as before).
@@ -382,6 +386,17 @@ class PhaseLedger:
         self.start(phase)
         try:
             out = fn()
+        except CreditsExhausted:
+            # M1c-2b — a METERED run's prepaid credits are exhausted (the model gateway's terminal credit stop).
+            # That is a reversible CREDIT PAUSE, never a phase failure to swallow: RE-RAISE it past this
+            # swallow-wrapper (the way the cooperative ``EngagementPaused`` is raised at a clean body point in
+            # ``engage.run_engagement``), so the run halts cleanly and the worker HOLDS the lease for a top-up +
+            # resume instead of silently DEGRADING the deliverable (a half-reasoned run billed as complete). The
+            # phase is recorded ``halted`` (reversible — neither a failure nor a completion), so a resume re-runs
+            # it. DEFAULT-OFF: an unmetered run never raises this, so this branch is unreachable off the metered
+            # path and ``run_phase`` stays byte-identical.
+            self.halt(phase)
+            raise
         except Exception:
             self.fail(phase)
             return default

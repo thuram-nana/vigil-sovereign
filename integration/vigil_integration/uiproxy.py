@@ -1202,7 +1202,10 @@ class PlaneControl:
                 extra_env = ({**dynamic, **(static_env or {})}
                              if self._env_resolver is not None else dict(static_env or {}))
                 try:
-                    self._children[name] = _spawn(list(argv), Path(log), extra_env=extra_env)
+                    # M1c-2b: PlaneControl manages the OFFENSE children (it carries their env resolver), so a
+                    # metered restart drops the provider key from them exactly as the boot spawn does.
+                    self._children[name] = _spawn(list(argv), Path(log), extra_env=extra_env,
+                                                  offense=(self._env_resolver is not None))
                     started.append(name)
                 except (OSError, ValueError) as exc:
                     failed.append(f"{name} ({type(exc).__name__}: {exc})")
@@ -2771,18 +2774,46 @@ _PIDS_NAME = "pids"
 # offense plane is the attack surface and has no business holding a sovereign provisioning secret).
 _CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "VIGIL_PROVISION_HOP_KEY"})
 
+#: M1c-2b — the provider-key env a METERED OFFENSE child must NEVER inherit: a metered customer run reaches a model
+#: ONLY through the loopback gateway with its owner-signed grant (the worker scopes the grant per run), so the
+#: offense plane holds no provider key. Excluded from the offense child env (and the hot-reload flag is not set)
+#: while metered billing is on. The SOVEREIGN cockpit — which hosts the gateway and legitimately holds the key,
+#: read from its own sigil.env — is NOT an offense child and is unaffected (``offense=False``).
+_METERED_OFFENSE_KEY_EXCLUDE = frozenset({"SIGIL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"})
 
-def _child_env() -> dict:
+#: = ``sigil.config``'s affirmative set, restated so uiproxy stays stdlib-only (FATAL-2); a test pins the two equal.
+_AFFIRMATIVE_ENV = frozenset({"1", "true", "yes", "on", "enabled"})
+
+
+def _metered_billing_on(env: "Optional[dict]" = None) -> bool:
+    """M1c-2b — True iff metered billing is enabled (``VIGIL_METERED_BILLING`` affirmative). A stdlib read of the
+    env the proxy was started with (``os.environ`` by default), mirroring ``sigil.config.metered_billing_enabled``
+    WITHOUT importing sigil (uiproxy stays stdlib-only — FATAL-2)."""
+    e = os.environ if env is None else env
+    return (e.get("VIGIL_METERED_BILLING") or "").strip().lower() in _AFFIRMATIVE_ENV
+
+
+def _child_env(offense: bool = False, *, base_env: "Optional[dict]" = None) -> dict:
     """A clean env for cross-venv children — strip PYTHONPATH/PYTHONHOME so the parent's offense-side
     path can never inject a module into a child (mirrors dispatch's discipline), strip the BASE64
     file-content credential vars so a value that happens to be in the PARENT `vigil up` env can never leak
     into a child's environment (the child only ever gets the materialised file PATH, never the content), and
-    HARD-EXCLUDE the owner signing key (A4) so it can never be inherited from the ambient parent env."""
+    HARD-EXCLUDE the owner signing key (A4) so it can never be inherited from the ambient parent env.
+
+    M1c-2b: ``offense=True`` + metered billing on ⇒ also EXCLUDE the provider-key env
+    (:data:`_METERED_OFFENSE_KEY_EXCLUDE`) and do NOT set ``VIGIL_LIVE_KEY_RELOAD`` — a metered offense child holds
+    no provider key and never hot-reloads one (the worker scopes the owner-signed grant per run; the gateway holds
+    the only key). Sovereign children (``offense=False``, the default) are byte-identical. ``base_env`` overrides
+    the source env (``os.environ`` by default) so ``vigil doctor`` can verify the offense child env over a probe
+    env without spawning anything."""
+    src = os.environ if base_env is None else base_env
     _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
-    env = {k: v for k, v in os.environ.items()
+    metered_offense = offense and _metered_billing_on(src)
+    env = {k: v for k, v in src.items()
            if k not in ("PYTHONPATH", "PYTHONHOME")
            and k not in _content_vars
-           and k not in _CHILD_ENV_HARD_EXCLUDE}
+           and k not in _CHILD_ENV_HARD_EXCLUDE
+           and not (metered_offense and k in _METERED_OFFENSE_KEY_EXCLUDE)}
     # Unbuffer child stdout (B2): the cockpit prints its ?token= line then immediately blocks in
     # serve_forever; with a PIPE (a fresh box), CPython block-buffers that ~200-byte line and _await_token
     # would hang the full cockpit-timeout before aborting. PYTHONUNBUFFERED forces the flush.
@@ -2793,8 +2824,10 @@ def _child_env() -> dict:
     # to uiproxy-spawned children only — a test or a bare-shell `vigil engage` never sets it and keeps the
     # plain-env behaviour. Not a secret and not a settings-plane var, so the config/offense allowlists are
     # untouched. The plaintext sigil.env backend hot-reloads; a keyring/TPM-vault secret still needs a
-    # Start-offense (the offense cannot unseal the sovereign vault).
-    env["VIGIL_LIVE_KEY_RELOAD"] = "1"
+    # Start-offense (the offense cannot unseal the sovereign vault). M1c-2b: NOT set for a metered offense
+    # child — a metered run must never hot-reload the persisted provider key (it spends the grant).
+    if not metered_offense:
+        env["VIGIL_LIVE_KEY_RELOAD"] = "1"
     return env
 
 
@@ -2878,8 +2911,9 @@ def _pump_child_output(proc: subprocess.Popen, log_path: Path,
         pass
 
 
-def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
-    env = _child_env()
+def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None,
+           offense: bool = False) -> subprocess.Popen:
+    env = _child_env(offense=offense)   # M1c-2b: an offense child drops the provider key when metered billing is on
     if extra_env:
         env.update(extra_env)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
@@ -2889,13 +2923,13 @@ def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None)
 
 
 def _spawn_tracked(procs: list, name: str, argv: list[str], log_path: Path, cleanup,
-                   *, extra_env: Optional[dict] = None) -> bool:
+                   *, extra_env: Optional[dict] = None, offense: bool = False) -> bool:
     """Spawn + append a backend to ``procs``; on a spawn failure (OSError: EMFILE/ENOMEM/fork pressure, a
     full or read-only .vigil-live, a bin TOCTOU) run ``cleanup()`` on everything already started and return
     True (the caller then returns cleanly). A failed spawn must NEVER orphan the running backends (B?-2).
     Module-scoped so this cleanup-on-failure path is unit-testable, not buried in a run_up closure."""
     try:
-        procs.append((name, _spawn(argv, log_path, extra_env=extra_env)))
+        procs.append((name, _spawn(argv, log_path, extra_env=extra_env, offense=offense)))
         return False
     except (OSError, ValueError) as exc:   # ValueError too, for uniformity with assemble/proxy guards
         print(f"vigil up: backend {name!r} failed to start ({exc}) — cleaned up, nothing orphaned.",
@@ -3047,9 +3081,14 @@ def _filter_offense_runtime_env(data: dict, runtime_dir: "Optional[Path]") -> di
     allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
     channel even if the emitter changed. BASE64 file-content creds (GCP JSON / kubeconfig) are materialised
     to a 0600 file here and replaced by their PATH env var; the raw content never reaches an offense
-    child as an env var."""
+    child as an env var.
+
+    M1c-2b: with metered billing on, the sovereign-sealed PROVIDER KEY (:data:`_METERED_OFFENSE_KEY_EXCLUDE`) is
+    DROPPED here too — the offense plane holds no provider key when metered; a customer run reaches the model only
+    through the gateway with its grant (the worker scopes it per run). Byte-identical when metered billing is off."""
+    drop = _METERED_OFFENSE_KEY_EXCLUDE if _metered_billing_on() else frozenset()
     env = {k: str(v) for k, v in data.items()
-           if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
+           if k in _OFFENSE_ENV_ALLOWLIST and k not in drop and isinstance(v, str) and v}
     return _materialise_file_secrets(env, runtime_dir)
 
 
@@ -3895,8 +3934,10 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                 except ProcessLookupError:
                     pass
 
-    def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
-        return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env={**(extra_env or {}), **seam_env})
+    def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None,
+               offense: bool = False) -> bool:
+        return _spawn_tracked(procs, name, argv, log_path, _cleanup,
+                              extra_env={**(extra_env or {}), **seam_env}, offense=offense)
 
     # E1 — mint the edge→provisioner hop secret ONCE per `vigil up --with-saas`, BEFORE the cockpit spawn
     # so the cockpit's /api/provision/* routes verify under it. Handed ONLY to the cockpit (here) and the
@@ -3951,7 +3992,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     if vigil_bin:
         console_static["VIGIL_BIN"] = vigil_bin
     console_env = {**offense_llm_env, **console_static}
-    if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env):
+    if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env, offense=True):
         return 1
     # W16-12 — the gated api child ALSO receives the SAME per-run hop key (never argv/log). The proxy
     # stamps a per-user role assertion on the api hop just as it does on the console hop, and the api now
@@ -3961,7 +4002,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # (+ optional CRUCIBLE_API_KEY), ignoring VIGIL_CONSOLE_TOKEN.
     api_static = {_CONSOLE_HOP_KEY_ENV: hop_key, **seam_env}
     api_env = {**offense_llm_env, **api_static}
-    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=api_env):
+    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=api_env, offense=True):
         return 1
 
     # PLANE CONTROL captures THESE spawns — the argv, STATIC env and log path just used — so the button
@@ -4055,7 +4096,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             feed_argv = [str(crucible_bin), "intel", "feed-daemon", "--live",
                          "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
             if _track("offense-feed", feed_argv, logs / "offense-feed.log",
-                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}, offense=True):
                 return 1
 
     # 3b') OPTIONAL live assurance/metrics collector (G2). OFF by default. A READ-ONLY, one-way projection of
@@ -4067,7 +4108,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             tel_out = base.resolve() / "live-ui" / "telemetry.json"
             tel_argv = [vigil_bin, "telemetry", "--out", str(tel_out), "--interval", str(max(1, telemetry_interval))]
             if _track("offense-telemetry", tel_argv, logs / "offense-telemetry.log",
-                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}, offense=True):
                 return 1
         else:
             print("vigil up: --with-telemetry skipped (`vigil` bin unresolved) — the console still computes "
@@ -4087,7 +4128,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         drain_argv = [vigil_bin, "learn-drain", "--spool", str(learn_spool),
                       "--owner-pubkey", owner_pub, "--watch"]
         if _track("offense-learn-drain", drain_argv, logs / "offense-learn-drain.log",
-                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}, offense=True):
             return 1
     else:
         print("vigil up: learn-drain skipped (no owner pubkey resolvable or `vigil` bin unresolved) — the "

@@ -41,6 +41,7 @@ from .agents.http_executor import (
 )
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
+from .common.errors import CreditsExhausted
 from .phase_ledger import (
     P_ASSESS_FINDINGS,
     P_CHAINING,
@@ -2033,11 +2034,16 @@ def run_fusion_only(slug: str, *, spine: object = None, run_dir: "str | None" = 
     except Exception:
         pass
 
-    # Opt-in event-spine mirror (only when --spine attached). Best-effort; never sinks the run.
+    # Opt-in event-spine mirror (only when --spine attached). Best-effort; never sinks the run — EXCEPT a
+    # metered run's terminal credit stop (M1c-2b), which must NOT be swallowed here any more than in the
+    # PhaseLedger wrappers: a credit stop is a reversible PAUSE the worker holds the lease for, not a best-effort
+    # degrade, so it re-raises for the engage seam instead of settling a half-reasoned run as complete.
     if sink is not None:
         try:
             _run_reasoning_pass(sink, spine, slug, report, result, world)
             _persist_plan_input(slug, report, world)
+        except CreditsExhausted:
+            raise
         except Exception:
             pass
     return result

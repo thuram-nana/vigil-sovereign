@@ -46,6 +46,23 @@ from .wiring import default_classify
 
 logger = logging.getLogger("vigil.live.codefix_runner")
 
+
+def _metered_model(default: str) -> str:
+    """M1c-2b — in a METERED run the model gateway ADMITS only the grant's model (``CRUCIBLE_ANTHROPIC_MODEL``,
+    set by the worker's grant scope), so the coder MUST use it — its own configured default (``claude-opus-5``)
+    would be a DIFFERENT model and 400 at the gateway. Unmetered ⇒ the configured ``default`` (byte-identical).
+    Lazy (two-env: ``kernel.metered``); never raises."""
+    try:
+        from framework.v2.kernel import metered as _metered  # noqa: PLC0415 — lazy (FATAL-2: no framework at scope)
+        if _metered.metered_mode():
+            m = (os.environ.get("CRUCIBLE_ANTHROPIC_MODEL") or "").strip()
+            if m:
+                return m
+    except Exception:  # noqa: BLE001 — reader unavailable ⇒ the configured default (unmetered behaviour)
+        pass
+    return default
+
+
 _MAX_CONTEXT_BYTES = 8192            # per sibling file
 _PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
 _MAX_CONTEXT_FILES = 10              # finding file + up to N related files (graph neighborhood or same-dir siblings)
@@ -533,7 +550,7 @@ class CodefixSession:
         # before the model sees it; the SDK round-trip runs only inside the egress context (a bypass fails
         # closed). Behaviour is otherwise unchanged: a model error OR a gateway refusal both degrade to no-patch.
         try:
-            resp = egress_cloud_create(client, path="codefix", model=self.config.model,
+            resp = egress_cloud_create(client, path="codefix", model=_metered_model(self.config.model),
                                        max_tokens=_mx, user=prompt)
         except Exception:  # noqa: BLE001 — a coder failure degrades to no-patch (the loop is total)
             return ""
