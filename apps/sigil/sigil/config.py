@@ -197,6 +197,14 @@ PENDING_PLAN_CHECKOUT_DIR = _customer / "pending_plan_checkout"   # owner-signed
 # the customer ONCE at enrollment, never persisted).
 CUSTOMER_TOTP_SEAL_CONTEXT = b"sigil/customer.totp"
 CUSTOMER_MFA_REPLAY_DIR = _customer / "mfa_totp_replay"  # the per-customer TOTP (username, step) replay ledger
+# Enrolment hardening (VIGIL_CUSTOMER_MFA_ENROLL_STEPUP). Confirm-before-activate stores a freshly generated
+# TOTP secret as PENDING here (the owner-vault-SEALED blob, never plaintext) until a fresh code confirms it, so
+# a hijacked session cannot silently SWAP the active factor; one marker per account, named by a domain-separated
+# sha256 of the username; expires after CUSTOMER_MFA_PENDING_TTL_SECONDS. The per-account MFA brute-force /
+# enrolment-churn limiter's markers live in their own dir. Both are inert while the flag is off (nothing writes).
+CUSTOMER_MFA_PENDING_TOTP_DIR = _customer / "mfa_totp_pending"
+CUSTOMER_MFA_ENROLL_RATELIMIT_DIR = _customer / "mfa_enroll_ratelimit"
+CUSTOMER_MFA_PENDING_TTL_SECONDS = _int_env("VIGIL_CUSTOMER_MFA_PENDING_TTL_SECONDS", 900)   # 15 minutes
 # Slice E3b-2 — customer passkey (WebAuthn). The single-use registration/assertion challenge ledger (edge) +
 # the NON-SIGNED per-credential sign-count clone-floor ledger (provisioner; a monotonic high-water, NOT an
 # owner-signed record — a passkey login is a pure signature check with no owner re-sign). OFF by default:
@@ -224,6 +232,29 @@ def customer_stepup_required() -> bool:
     `CUSTOMER_STEPUP_WINDOW_SECONDS`) before a launch / target-verify / member grant+revoke — so a paid or
     offense op always rides a recent second-factor proof."""
     return (os.environ.get("VIGIL_CUSTOMER_STEPUP_REQUIRED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_mfa_enroll_stepup_enabled() -> bool:
+    """True iff AUTHENTICATOR-ENROLMENT hardening is ON (`VIGIL_CUSTOMER_MFA_ENROLL_STEPUP` affirmative). OFF by
+    default (the codebase's posture-flag pattern): when OFF the enrol/verify paths are BYTE-IDENTICAL to today
+    (a TOTP enrol activates the new secret at once, enrolling a factor needs only a session, and verify has no
+    per-account limiter). When ON, this one flag turns on all three enrolment guards together:
+
+      * CONFIRM-BEFORE-ACTIVATE (TOTP): `enroll_totp` stores the sealed secret as PENDING instead of activating
+        it; a separate `confirm_totp` (a fresh code) activates it — so a hijacked session cannot silently SWAP
+        the victim's authenticator (a passkey enrol is confirm-by-construction: its WebAuthn registration
+        ceremony is itself the proof, so it has no pending/confirm split);
+      * STEP-UP ON ENROLMENT (TOTP + passkey): adding/replacing a factor when the account ALREADY has one needs
+        a FRESH second-factor proof (the session's `mfa_at` within `CUSTOMER_STEPUP_WINDOW_SECONDS`), checked at
+        enrolment and again when a pending TOTP is confirmed; the FIRST factor (bootstrap, no existing factor) is
+        allowed without step-up;
+      * RATE-LIMIT: a per-account limiter bounds TOTP code-guessing (verify + confirm) and enrolment churn.
+
+    Distinct from `customer_stepup_required()` (E3c), which gates step-up on the SPEND/offense ops
+    (launch / target-verify / member change); this flag gates step-up on the ACCOUNT-SECURITY ops. Both the edge
+    (the confirm route, relaying the session's `mfa_at`) and the cockpit (the guards) read it on each request —
+    set the SAME value in customer.env and cockpit.env (a value on one side only fails closed or stays inert)."""
+    return (os.environ.get("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP") or "").strip().lower() in _OIDC_AFFIRMATIVE
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
 # sign-up requests per canonical mailbox per hour, counted only after the per-ip guard passed. 0 (the default)

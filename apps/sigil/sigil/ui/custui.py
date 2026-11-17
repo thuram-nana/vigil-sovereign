@@ -1000,6 +1000,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
+        if action == "mfa/totp/confirm" and _mfa_enroll_hardening_on():   # new route (flag OFF -> unknown-action 404)
+            return self._mfa(action, body)
         if action in ("passkey/enroll/challenge", "passkey/enroll/verify",
                       "passkey/login/challenge", "passkey/login/verify"):
             return self._passkey(action, body)
@@ -1154,17 +1156,31 @@ class CustomerHandler(BaseHTTPRequestHandler):
         body. MFA is ACCOUNT-level (a customer enrolls/verifies their OWN factor, not an org's), so the gate
         is simply an authenticated session. `mfa/totp/enroll` returns the otpauth:// URI + the one-time secret
         for the customer to add to their authenticator app (shown once, never persisted plaintext);
-        `mfa/verify` proves a fresh TOTP code (the step-up / second-factor primitive E3c consumes)."""
+        `mfa/verify` proves a fresh TOTP code (the step-up / second-factor primitive E3c consumes).
+
+        Enrolment hardening (VIGIL_CUSTOMER_MFA_ENROLL_STEPUP, default off): with the flag ON, `mfa/totp/enroll`
+        and `mfa/totp/confirm` carry the SESSION step-up stamp `mfa_at` (never a body field) so the sovereign can
+        require a fresh factor to REPLACE an existing one (checked at enrolment AND again at activation), and the
+        enrolment returns a PENDING secret that `mfa/totp/confirm` activates with a fresh code. With the flag OFF
+        every hop body here is exactly what it was (no `mfa_at`; the confirm route does not exist). A verify OR a
+        confirm stamps a fresh `mfa_at` onto the live session (the edge half)."""
         rec = self._session()
         if rec is None or not rec.get("username"):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         if action == "mfa/totp/enroll":
-            c, r = self._provision("mfa_enroll_totp", requester, {"ip": self._ip()})
+            payload = {"ip": self._ip()}
+            if _mfa_enroll_hardening_on():
+                payload["mfa_at"] = rec.get("mfa_at")             # from the SERVER-side session, never the body
+            c, r = self._provision("mfa_enroll_totp", requester, payload)
         else:
-            c, r = self._provision("mfa_verify", requester, {"code": body.get("code", ""), "ip": self._ip()})
-            # E3c step-up: a verified TOTP stamps mfa_at onto the LIVE session (the edge half — mfa_at is
-            # SERVER-set from `now`, never a client field), so the sensitive ops see a fresh second factor.
+            payload = {"code": body.get("code", ""), "ip": self._ip()}
+            if action == "mfa/totp/confirm":                      # (the route exists only while the flag is on)
+                payload["mfa_at"] = rec.get("mfa_at")             # step-up re-checked at activation
+            prov_action = "mfa_totp_confirm" if action == "mfa/totp/confirm" else "mfa_verify"
+            c, r = self._provision(prov_action, requester, payload)
+            # E3c step-up: a verified OR confirmed TOTP stamps mfa_at onto the LIVE session (the edge half —
+            # mfa_at is SERVER-set from `now`, never a client field), so the sensitive ops see a fresh factor.
             if c == 200 and isinstance(r, dict) and r.get("ok"):
                 sid = self._cookie()
                 if sid:
@@ -1226,11 +1242,14 @@ class CustomerHandler(BaseHTTPRequestHandler):
         ch = str(body.get("challenge", ""))
         if not ch or not store.consume(ch):
             return self._deny(401, "unknown, expired, or already-used passkey challenge")
-        c, r = self._provision("passkey_enroll", requester, {
+        payload = {
             "credential_id": body.get("credential_id", ""),
             "public_key_spki_b64": body.get("public_key_spki_b64", ""),
             "cose_alg": body.get("cose_alg"), "uv": bool(body.get("uv")),
-            "client_data_json": body.get("client_data_json", ""), "challenge": ch, "ip": self._ip()})
+            "client_data_json": body.get("client_data_json", ""), "challenge": ch, "ip": self._ip()}
+        if _mfa_enroll_hardening_on():                       # enrolment step-up (flag OFF -> hop body unchanged)
+            payload["mfa_at"] = rec.get("mfa_at")               # from the SERVER-side session, never the body
+        c, r = self._provision("passkey_enroll", requester, payload)
         return self._json(r, c)
 
 
@@ -1255,6 +1274,11 @@ def _team_on() -> bool:
 def _checkout_on() -> bool:
     from .. import config as _config
     return _config.customer_checkout_enabled()
+
+
+def _mfa_enroll_hardening_on() -> bool:
+    from .. import config as _config
+    return _config.customer_mfa_enroll_stepup_enabled()
 
 
 def _pause_resume_on() -> bool:

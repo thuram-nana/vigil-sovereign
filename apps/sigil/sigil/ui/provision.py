@@ -373,6 +373,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
+                 pending_totp=None, mfa_limiter=None,
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None,
@@ -401,6 +402,16 @@ class Provisioner:
         # Slice E3b-2 — the per-credential WebAuthn sign-count clone-floor ledger (NON-SIGNED, monotonic).
         # None ⇒ passkey login fail-closed.
         self.signcount = signcount
+        # Enrolment hardening (customer_mfa_enroll_stepup_enabled, default OFF). The PENDING (unconfirmed) TOTP
+        # store (confirm-before-activate): with the flag on, enroll_totp parks the SEALED secret here and
+        # confirm_totp activates it, so a hijacked session cannot silently swap the active factor. None with the
+        # flag ON ⇒ enroll_totp fail-closed (it cannot park a pending secret). Untouched while the flag is off.
+        self.pending_totp = pending_totp
+        # The per-account MFA limiter (a LoginRateLimiter) bounding TOTP code-guessing (verify + confirm) and
+        # enrolment churn (enroll_totp / enroll_passkey), in two key namespaces. USED only while the flag is on
+        # (so OFF is byte-identical); None ⇒ no limiting (no dead, never-incremented gate — the member_limiter
+        # pattern). The factory always wires it; a test that cares injects one.
+        self.mfa_limiter = mfa_limiter
         # Slice G0 — the ownership-proof FETCHER (reads a customer's published well-known token). None ⇒
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
@@ -531,6 +542,76 @@ class Provisioner:
         if locked is not None:
             raise ProvisionRateLimited(locked)
         self.member_limiter.record_failure(f"member:org:{org_id}", now=now)
+
+    # -- enrolment hardening (customer_mfa_enroll_stepup_enabled; default OFF ⇒ all three are no-ops) ----
+    def _enroll_hardening_on(self) -> bool:
+        from .. import config
+        return config.customer_mfa_enroll_stepup_enabled()
+
+    def _has_active_mfa_factor(self, requester: str) -> bool:
+        """True iff `requester` ALREADY has an active SECOND FACTOR (an enrolled TOTP or passkey). A federated
+        (Google) binding is a primary login method, not a second factor, so it does not count — enrolling the
+        first TOTP/passkey over an OIDC-only account is still the bootstrap case. The basis for the step-up
+        gate: replacing/adding a factor when one exists needs proof of the current one; the FIRST factor cannot
+        (you can't step-up with a factor the account does not have)."""
+        if self.customer_credentials is None:
+            return False
+        from ..governor.customer_credentials import KIND_PASSKEY, KIND_TOTP
+        return any(c.kind in (KIND_TOTP, KIND_PASSKEY)
+                   for c in self.customer_credentials.for_user(requester))
+
+    def _require_enroll_stepup(self, requester: str, mfa_at, *, now: float) -> None:
+        """Enrolment step-up: when the hardening flag is ON and `requester` ALREADY has a second factor, adding
+        or replacing one needs a FRESH step-up (`mfa_at` within `CUSTOMER_STEPUP_WINDOW_SECONDS`) — so a hijacked
+        session that never proved the CURRENT factor cannot swap it. The FIRST factor (no existing factor) is
+        allowed WITHOUT step-up (bootstrap, documented). NO-OP while the flag is off (byte-identical). Fail-
+        closed: a missing / non-numeric / non-positive / stale mfa_at refuses with ProvisionStepUpRequired."""
+        from .. import config
+        if not self._enroll_hardening_on():
+            return
+        if not self._has_active_mfa_factor(requester):
+            return                                       # bootstrap: the first factor needs no step-up
+        try:
+            at = float(mfa_at)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= 0.0 or (now - at) > float(config.CUSTOMER_STEPUP_WINDOW_SECONDS):
+            raise ProvisionStepUpRequired("a fresh second-factor (step-up) is required to change your authenticator")
+
+    def _mfa_enroll_rate_guard(self, requester: str, *, now: float) -> None:
+        """Guard-AND-COUNT one enrolment attempt (enroll_totp / enroll_passkey) against the per-account MFA
+        limiter's `mfa:enroll:` namespace — bounds enrolment churn by a hijacked session. NO-OP while the flag
+        is off (byte-identical) or no limiter is wired (no dead gate). A locked key refuses fail-closed BEFORE
+        the enrol, and the attempt is recorded (abusive and legitimate alike count toward the window)."""
+        if not self._enroll_hardening_on() or self.mfa_limiter is None:
+            return
+        key = f"mfa:enroll:{requester}"
+        locked = self.mfa_limiter.locked(key, now=now)
+        if locked is not None:
+            raise ProvisionRateLimited(locked)
+        self.mfa_limiter.record_failure(key, now=now)
+
+    def _mfa_code_rate_guard(self, requester: str, *, now: float) -> None:
+        """Refuse a TOTP code check (verify_mfa / confirm_totp) when the per-account `mfa:code:` budget is
+        locked — bounds code-guessing. NO-OP while the flag is off or no limiter is wired. The CALLER records a
+        failure on a wrong code and a success on a good one, mirroring the login limiter's failure-counter use."""
+        if not self._enroll_hardening_on() or self.mfa_limiter is None:
+            return
+        locked = self.mfa_limiter.locked(f"mfa:code:{requester}", now=now)
+        if locked is not None:
+            raise ProvisionRateLimited(locked)
+
+    def _mfa_code_fail(self, requester: str, *, now: float) -> None:
+        """Count one WRONG TOTP code against the per-account `mfa:code:` budget (no-op while off / unwired)."""
+        if not self._enroll_hardening_on() or self.mfa_limiter is None:
+            return
+        self.mfa_limiter.record_failure(f"mfa:code:{requester}", now=now)
+
+    def _mfa_code_ok(self, requester: str) -> None:
+        """Clear the per-account `mfa:code:` budget after a GOOD code (no-op while off / unwired)."""
+        if not self._enroll_hardening_on() or self.mfa_limiter is None:
+            return
+        self.mfa_limiter.record_success(f"mfa:code:{requester}")
 
     def _member_admins(self, org_id: str) -> "set[str]":
         """The usernames whose ACTIVE membership in `org_id` carries `manage_members` (resolved LIVE from the
@@ -959,19 +1040,37 @@ class Provisioner:
         return username
 
     # -- customer MFA: TOTP enroll + verify (E3b) ---------------------------------------------------
-    def enroll_totp(self, requester: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
+    def enroll_totp(self, requester: str, *, ip: str = "", mfa_at=0.0,
+                    now: "Optional[float]" = None) -> dict:
         """E3b — enroll (or re-enroll) a TOTP second factor for the requesting customer's OWN account. MFA is
         account-level (per customer username), NOT per-org, so the gate is simply that the requester is an
         ACTIVE customer (the edge binds requester from the SESSION, never the body). Generates a fresh secret,
         SEALS it via the owner vault (only the sealed blob reaches the spine — the plaintext is returned ONCE
-        for the customer to add to their authenticator app, NEVER persisted), owner-signs the credential (the
-        per-(username,"totp") high-water LWW supersedes any prior TOTP), and returns the otpauth:// URI +
-        the secret. Fail-closed when customer MFA is not enabled on this deployment."""
+        for the customer to add to their authenticator app, NEVER persisted), and returns the otpauth:// URI +
+        the secret. Fail-closed when customer MFA is not enabled on this deployment.
+
+        Enrolment hardening (`customer_mfa_enroll_stepup_enabled`, default OFF ⇒ BYTE-IDENTICAL to below):
+          * STEP-UP — replacing/adding a factor when the account already has one needs a FRESH `mfa_at`
+            (the SESSION step-up stamp, never a body field); the first factor is allowed without step-up;
+          * RATE-LIMIT — the enrol attempt is counted against the per-account enrolment budget;
+          * CONFIRM-BEFORE-ACTIVATE — the sealed secret is PARKED as pending (NOT owner-signed active), so a
+            hijacked session cannot silently swap the victim's authenticator; `confirm_totp` (a fresh code)
+            activates it. The response then carries `pending: True`.
+        With the flag OFF the secret is owner-signed ACTIVE immediately (the per-(username,"totp") high-water
+        LWW supersedes any prior TOTP), exactly as before."""
         if self.customer_credentials is None:
             raise ProvisionError("customer MFA is not enabled on this deployment")
         acct = self.customers.customer(requester)
         if acct is None:
             raise ProvisionDenied("requester is not an active customer")
+        hardened = self._enroll_hardening_on()
+        t = 0.0
+        if hardened:                                      # the flag-OFF path never enters (nor reads the clock)
+            if self.pending_totp is None:
+                raise ProvisionError("MFA enrollment is unavailable (no pending store)")
+            t = self._now() if now is None else float(now)
+            self._require_enroll_stepup(requester, mfa_at, now=t)
+            self._mfa_enroll_rate_guard(requester, now=t)
         from .. import config
         from ..governor import totp as _totp
         from ..platform.vault import owner_vault
@@ -981,6 +1080,15 @@ class Provisioner:
         except Exception:  # noqa: BLE001 — VaultLocked (unprovisioned) / seal fault → clean refusal, not a 500
             raise ProvisionError("MFA enrollment is unavailable (the owner vault is not provisioned)") from None
         sealed_b64 = base64.b64encode(blob).decode("ascii")
+        if hardened:
+            # Confirm-before-activate: park the SEALED secret; nothing is owner-signed active until confirm_totp.
+            try:
+                self.pending_totp.put(requester, sealed_b64, now=t)
+            except (OSError, ValueError):
+                raise ProvisionError("MFA enrollment could not be saved") from None
+            self._audit("mfa_enroll_totp", requester=requester, target=requester, outcome="pending")
+            uri = _totp.provisioning_uri(secret, account_name=(acct.email or requester), issuer="VIGIL")
+            return {"ok": True, "method": "totp", "provisioning_uri": uri, "secret": secret, "pending": True}
         with self._lock:
             self.customer_credentials.enroll_totp(requester, sealed_secret=sealed_b64,
                                                   issued_at=self._next_issued())
@@ -1007,6 +1115,59 @@ class Provisioner:
         return {"ok": True, "totp": any(c.kind == KIND_TOTP for c in creds),
                 "passkeys": [{"id": c.cred_key, "added_at": c.issued_at} for c in passkeys],
                 "account_name": acct.email or requester}
+
+    def confirm_totp(self, requester: str, *, code: str = "", mfa_at=0.0,
+                     now: "Optional[float]" = None) -> dict:
+        """Enrolment hardening — ACTIVATE a pending TOTP enrolment (`enroll_totp` with the flag on parked it) by
+        proving a fresh code from the authenticator the customer just added. Only now is the credential
+        owner-signed active (the high-water LWW supersedes any prior TOTP), so a hijacked session that cannot
+        produce a live code can never complete a factor swap.
+
+        The STEP-UP gate is re-checked HERE, at activation, not only at enrolment: a secret parked under the
+        bootstrap exemption (the account had no factor) must not become active without step-up once the account HAS
+        gained a factor (e.g. its owner added a passkey in between) — otherwise a hijacked session could park a
+        secret early and add it as a second factor later. `mfa_at` is the SESSION step-up stamp, never a body field.
+
+        Fail-closed at every step: the hardening flag must be ON (else there is no pending flow — refuse);
+        requester must be an ACTIVE customer; a fresh step-up when the account already has a factor; the
+        per-account code budget must be unlocked; a pending (unexpired) sealed secret must exist and open under
+        the customer TOTP context; the code must verify within the ±1-step skew; and the `(requester, step)` must
+        be UNSPENT in the replay ledger (the same ledger verify_mfa uses, so a code spent here cannot be replayed
+        for step-up and vice-versa). On success the pending secret is cleared. Returns {ok, method}."""
+        t = self._now() if now is None else float(now)
+        if not self._enroll_hardening_on():
+            raise ProvisionDenied("TOTP confirmation is not enabled on this deployment")
+        if self.customer_credentials is None or self.mfa_replay is None or self.pending_totp is None:
+            raise ProvisionError("customer MFA is not enabled on this deployment")
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        self._require_enroll_stepup(requester, mfa_at, now=t)   # re-checked at ACTIVATION (closes the TOCTOU)
+        self._mfa_code_rate_guard(requester, now=t)       # bound code-guessing against the pending secret
+        sealed = self.pending_totp.peek(requester, now=t)
+        if not sealed:
+            raise ProvisionDenied("no pending TOTP enrolment to confirm")
+        from .. import config
+        from ..governor import totp as _totp
+        from ..platform.vault import owner_vault
+        try:
+            secret = owner_vault().unseal_secret(base64.b64decode(sealed),
+                                                 context=config.CUSTOMER_TOTP_SEAL_CONTEXT).decode("utf-8")
+        except Exception:  # noqa: BLE001 — sealed secret unreadable (vault locked / tamper / wrong context)
+            raise ProvisionDenied("TOTP confirmation is unavailable") from None
+        step = _totp.verify(secret, code, at=t, window=1)
+        if step is None:
+            self._mfa_code_fail(requester, now=t)
+            raise ProvisionDenied("invalid or expired TOTP code")
+        if not self.mfa_replay.consume(requester, step):
+            raise ProvisionDenied("this TOTP code was already used")
+        with self._lock:
+            self.customer_credentials.enroll_totp(requester, sealed_secret=sealed,
+                                                  issued_at=self._next_issued())
+            self._audit("mfa_confirm_totp", requester=requester, target=requester, outcome="activated",
+                        critical=True)
+        self.pending_totp.clear(requester)
+        self._mfa_code_ok(requester)
+        return {"ok": True, "method": "totp"}
 
     def onboarding_state(self, requester: str) -> dict:
         """The onboarding tour's state for the requesting customer's OWN account (``ui/onboarding_store``): ``pending``
@@ -1057,6 +1218,7 @@ class Provisioner:
         cred = self.customer_credentials.totp_for(requester)
         if cred is None or not cred.sealed_secret:
             raise ProvisionDenied("no TOTP factor is enrolled")
+        self._mfa_code_rate_guard(requester, now=t)       # bound code-guessing (no-op while the flag is off)
         from .. import config
         from ..governor import totp as _totp
         from ..platform.vault import owner_vault
@@ -1067,17 +1229,19 @@ class Provisioner:
             raise ProvisionDenied("second-factor verification is unavailable") from None
         step = _totp.verify(secret, code, at=t, window=1)
         if step is None:
+            self._mfa_code_fail(requester, now=t)         # count a wrong code toward the brute-force budget
             raise ProvisionDenied("invalid or expired TOTP code")
         # Replay guard: consume AFTER a successful verify (an invalid code never touches the ledger), so a
         # code already spent for its (username, step) is refused — mirrors the operator _check_totp ledger.
         if not self.mfa_replay.consume(requester, step):
             raise ProvisionDenied("this TOTP code was already used")
+        self._mfa_code_ok(requester)                      # a good code clears the budget (no-op while off)
         self._audit("mfa_verify", requester=requester, target=requester, outcome="ok")
         return {"ok": True, "method": "totp"}
 
     # -- customer passkey: WebAuthn enroll + login (E3b-2) -------------------------------------------
     def enroll_passkey(self, requester: str, *, credential_id: str, public_key_spki_b64: str, cose_alg,
-                       uv: bool, client_data_json: str, expected_challenge: str,
+                       uv: bool, client_data_json: str, expected_challenge: str, mfa_at=0.0,
                        now: "Optional[float]" = None) -> dict:
         """E3b-2 — register a WebAuthn passkey for the requesting customer's OWN account (account-level; the
         requester is the session/hop principal, never a body field). ``verify_registration`` validates the
@@ -1085,13 +1249,22 @@ class Provisioner:
         public key is the WebAuthn-L2 ``getPublicKey()`` DER SubjectPublicKeyInfo the browser supplied (so NO
         attestation-CBOR parse — a bad key only fails that customer's own later login). Owner-signs the
         credential via the E2a ``enroll_passkey`` (its GLOBAL uniqueness refuses a credential_id already bound
-        to another customer — the anti-hijack crypto backing). Fail-closed when passkey is not configured."""
+        to another customer — the anti-hijack crypto backing). Fail-closed when passkey is not configured.
+
+        Enrolment hardening (`customer_mfa_enroll_stepup_enabled`, default OFF ⇒ byte-identical): adding a
+        passkey when the account ALREADY has a factor needs a FRESH step-up (`mfa_at`, session-bound), and the
+        attempt counts against the per-account enrolment budget. A passkey enrol has NO pending/confirm split —
+        its WebAuthn registration ceremony is itself the proof the customer holds the new authenticator."""
         from . import webauthn as _wa
         if self.customer_credentials is None:
             raise ProvisionError("customer passkey is not enabled on this deployment")
         acct = self.customers.customer(requester)
         if acct is None:
             raise ProvisionDenied("requester is not an active customer")
+        if self._enroll_hardening_on():                    # the flag-OFF path never enters (nor reads the clock)
+            t = self._now() if now is None else float(now)
+            self._require_enroll_stepup(requester, mfa_at, now=t)
+            self._mfa_enroll_rate_guard(requester, now=t)
         from .. import config
         origins = config.customer_passkey_origins()
         if not origins:
@@ -2644,6 +2817,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from .email_channel import EmailCodeLedger, EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
     from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs, stripe_billing_spool_dirs
+    from .pending_totp import PendingTotpEnrolments
     from .signcount import SignCountLedger
     from .totp_replay import TotpReplayLedger
     # E2b — customer Google OIDC, OFF by default. When `customer_oidc_enabled()`, build the IdentityProvider
@@ -2716,6 +2890,14 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         mfa_replay=TotpReplayLedger(config.CUSTOMER_MFA_REPLAY_DIR),
         # E3b-2 — the per-credential WebAuthn sign-count clone-floor ledger (non-signed, monotonic).
         signcount=SignCountLedger(config.CUSTOMER_PASSKEY_SIGNCOUNT_DIR),
+        # Enrolment hardening (customer_mfa_enroll_stepup_enabled; the stores are INERT while the flag is off).
+        # The PENDING (confirm-before-activate) sealed-TOTP store, and the per-account MFA limiter bounding code
+        # guessing + enrolment churn (10 wrong codes / enrol attempts per 5-minute window, then a 5-minute lock
+        # doubling up to an hour — generous for a human, negligible for a guesser against a ~3-in-1e6 target).
+        pending_totp=PendingTotpEnrolments(config.CUSTOMER_MFA_PENDING_TOTP_DIR,
+                                           ttl_s=config.CUSTOMER_MFA_PENDING_TTL_SECONDS),
+        mfa_limiter=LoginRateLimiter(config.CUSTOMER_MFA_ENROLL_RATELIMIT_DIR, max_fails=10, window_s=300.0,
+                                     base_lock_s=300.0, max_lock_s=3600.0),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         trial_claims=TrialClaimRegistry(store),

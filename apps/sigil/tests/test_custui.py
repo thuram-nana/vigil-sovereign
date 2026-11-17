@@ -1082,6 +1082,163 @@ def test_stepup_off_by_default_sensitive_op_unchanged(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
+# ======================================================================================================
+# Authenticator-enrolment hardening over the edge (VIGIL_CUSTOMER_MFA_ENROLL_STEPUP)
+# ======================================================================================================
+def test_mfa_enroll_is_pending_until_confirmed_over_the_edge(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP", "1")     # hardening ON for this test
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "harden@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        # enrol the FIRST factor: the response is PENDING (not yet active); no step-up needed to bootstrap it
+        c, enr = _post(op, ep, "/api/customer/mfa/totp/enroll", {})
+        assert c == 200 and enr["pending"] is True and enr["secret"], (c, enr)
+        # the secret is NOT active yet: a verify (which checks the ACTIVE factor) is refused before any code
+        # check, so it does not consume the step the confirm then uses.
+        assert _post(op, ep, "/api/customer/mfa/verify",
+                     {"code": _totp.code_now(enr["secret"], at=time.time())})[0] == 403
+        # confirming with a fresh code ACTIVATES it (a 200 {ok} is returned only after the credential is
+        # owner-signed active) — proving the pending -> confirm -> active round-trip over the real hop
+        c, r = _post(op, ep, "/api/customer/mfa/totp/confirm",
+                     {"code": _totp.code_now(enr["secret"], at=time.time())})
+        assert c == 200 and r["ok"], (c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_mfa_confirm_route_404_and_enroll_activates_immediately_when_flag_off(tmp_path, monkeypatch):
+    # GOLDEN over the hop: with the flag OFF the new confirm route does not exist (404, like any unknown
+    # action) and enrol activates the secret at once (no "pending" key) — byte-identical to pre-hardening.
+    monkeypatch.delenv("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP", raising=False)
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "off@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        c, enr = _post(op, ep, "/api/customer/mfa/totp/enroll", {})
+        assert c == 200 and "pending" not in enr and enr["secret"], (c, enr)   # active immediately, no pending
+        # the confirm route is a 404 unknown action while the flag is off (the route did not exist before)
+        assert _post(op, ep, "/api/customer/mfa/totp/confirm", {"code": "123456"})[0] == 404
+        # and a fresh code verifies at once (the enrol was already active)
+        assert _post(op, ep, "/api/customer/mfa/verify",
+                     {"code": _totp.code_now(enr["secret"], at=time.time())})[0] == 200
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_replacing_a_factor_needs_a_fresh_stepup_over_the_edge(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP", "1")
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        # session A enrols + confirms the first factor; confirming stamps a FRESH mfa_at on A (the account now
+        # has an active TOTP). Because A is freshly stepped-up, enrolling a REPLACEMENT from A proceeds.
+        a = _opener()
+        t = _post(a, ep, "/api/customer/signup/request", {"email": "swap@acme.com"})[1]["dev_token"]
+        _post(a, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        secret = _post(a, ep, "/api/customer/mfa/totp/enroll", {})[1]["secret"]
+        assert _post(a, ep, "/api/customer/mfa/totp/confirm",
+                     {"code": _totp.code_now(secret, at=time.time())})[1]["ok"]
+        c, r = _post(a, ep, "/api/customer/mfa/totp/enroll", {})    # ALLOWED: A carries a fresh step-up
+        assert c == 200 and r["pending"] is True, (c, r)
+        # a FRESH session B (a re-login) holds NO step-up stamp — modelling a hijacked/stale session. From B,
+        # enrolling a second factor is REFUSED: the account already has one and B proved none.
+        b = _opener()
+        assert _post(b, ep, "/api/customer/login",
+                     {"email": "swap@acme.com", "password": "customer-pw-1"})[0] == 200
+        c, r = _post(b, ep, "/api/customer/mfa/totp/enroll", {})
+        assert c == 401 and r.get("step_up_required") is True, (c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_flag_off_mfa_hop_bodies_are_unchanged(tmp_path, monkeypatch):
+    # GOLDEN at the HOP: with the flag OFF the edge sends the cockpit exactly the keys it sent before the hardening
+    # — no `mfa_at` on the TOTP enrol, verify or passkey enrol hop — so the loopback bytes, not only the replies, are
+    # as before. (The enrol/verify replies and the 404 confirm route are the reply-level golden above.)
+    from sigil.ui import custui as _cu
+    monkeypatch.delenv("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP", raising=False)
+    monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_RP_ID", PK_RP)
+    monkeypatch.setenv("VIGIL_CUSTOMER_PASSKEY_ORIGINS", PK_ORIGIN)
+    hops: "list[tuple[str, dict]]" = []
+    real = _cu.CustomerHandler._provision
+
+    def _recording(self, action, principal, body):
+        hops.append((action, dict(body)))
+        return real(self, action, principal, body)
+
+    monkeypatch.setattr(_cu.CustomerHandler, "_provision", _recording)
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "hops@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        secret = _post(op, ep, "/api/customer/mfa/totp/enroll", {})[1]["secret"]
+        assert _post(op, ep, "/api/customer/mfa/verify",
+                     {"code": _totp.code_now(secret, at=time.time())})[0] == 200
+        auth = SoftAuthenticator()
+        ch = _post(op, ep, "/api/customer/passkey/enroll/challenge", {})[1]["challenge"]
+        reg = auth.register(ch)
+        assert _post(op, ep, "/api/customer/passkey/enroll/verify",
+                     {"credential_id": "cred-hops-1", "public_key_spki_b64": reg["public_key_spki_b64"],
+                      "cose_alg": reg["cose_alg"], "uv": False, "client_data_json": reg["client_data_json"],
+                      "challenge": ch})[0] == 200
+        # the confirm route does not exist at the EDGE while the flag is off: 404 with NO hop to the cockpit
+        assert _post(op, ep, "/api/customer/mfa/totp/confirm", {"code": "123456"})[0] == 404
+        keys = {a: set(b) for a, b in hops}
+        assert keys["mfa_enroll_totp"] == {"ip"}
+        assert keys["mfa_verify"] == {"code", "ip"}
+        assert keys["passkey_enroll"] == {"credential_id", "public_key_spki_b64", "cose_alg", "uv",
+                                          "client_data_json", "challenge", "ip"}
+        assert "mfa_totp_confirm" not in keys                       # the new hop is never sent while the flag is off
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_flag_on_mfa_hops_carry_the_session_stamp_never_the_body(tmp_path, monkeypatch):
+    # With the flag ON the enrol and confirm hops carry `mfa_at` for the step-up gate — and it is the SERVER-side
+    # session's stamp, never a value the request body names (a client cannot claim a fresh step-up).
+    from sigil.ui import custui as _cu
+    monkeypatch.setenv("VIGIL_CUSTOMER_MFA_ENROLL_STEPUP", "1")
+    hops: "list[tuple[str, dict]]" = []
+    real = _cu.CustomerHandler._provision
+
+    def _recording(self, action, principal, body):
+        hops.append((action, dict(body)))
+        return real(self, action, principal, body)
+
+    monkeypatch.setattr(_cu.CustomerHandler, "_provision", _recording)
+    sov, edge, ep, _ = _stack_vault(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "stamp@acme.com"})[1]["dev_token"]
+        _post(op, ep, "/api/customer/signup/confirm",
+              {"token": t, "password": "customer-pw-1", "org_name": "Acme"})
+        forged = 9999999999.0                                       # a body-claimed "fresh step-up"
+        secret = _post(op, ep, "/api/customer/mfa/totp/enroll", {"mfa_at": forged})[1]["secret"]
+        assert _post(op, ep, "/api/customer/mfa/totp/confirm",
+                     {"code": _totp.code_now(secret, at=time.time()), "mfa_at": forged})[0] == 200
+        before = time.time()
+        assert _post(op, ep, "/api/customer/mfa/totp/enroll", {"mfa_at": forged})[0] == 200   # session now stamped
+        by_action: "dict[str, list[dict]]" = {}
+        for a, b in hops:
+            by_action.setdefault(a, []).append(b)
+        first_enrol, second_enrol = by_action["mfa_enroll_totp"]
+        (confirm,) = by_action["mfa_totp_confirm"]
+        assert set(confirm) == {"code", "ip", "mfa_at"}
+        assert first_enrol["mfa_at"] is None and confirm["mfa_at"] is None    # no stamp yet: the body was ignored
+        assert isinstance(second_enrol["mfa_at"], float)             # the confirm stamped the SESSION...
+        assert second_enrol["mfa_at"] != forged and second_enrol["mfa_at"] <= before + 1   # ...never the body value
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 def test_notifications_route_requires_a_session(tmp_path, monkeypatch):
     # the notification centre read is session-gated at the edge: no customer cookie -> 401, never an anon leak.
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
