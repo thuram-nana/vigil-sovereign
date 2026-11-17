@@ -300,6 +300,7 @@ WARMED_FOLDS = {
     "governor.postpaid:governor.postpaid", "governor.postpaid_arrears", "governor.promotion",
     "governor.asset_ownership_proof", "governor.asset_ownership_challenge", "governor.monitoring_authority",
     "governor.killswitch", "governor.capability", "governor.budget", "ui.assessments", "ui.margin.settle_events",
+    "governor.billing_reversal",
 }
 def _seed_owner_spine(p):
     owner = ensure_owner_keypair()
