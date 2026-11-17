@@ -193,6 +193,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active monitoring authorit(ies) {stranded_ma}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
+    # (c, Red-Pen R2) the SAME referential floor for governor.connected_repos: a connected repository whose only
+    # authoritative owner-signed ACTIVE record sits below K and is not re-asserted live would be silently
+    # disconnected (the registry folds a genesis scan with no seed in this slice) or, by resetting the
+    # per-(org,repo) high-water, re-open replay-resurrection of a disconnected repo. Fail-closed, like the floors
+    # above; empty in the happy path (no connected repos, or every active record sits >= K).
+    stranded_cr = stranded_active_connected_repos(store, archived, K)
+    if stranded_cr:
+        raise PruneUnsafe(f"K={K} would strand connected repositor(ies) {stranded_cr}: their only owner-signed "
+                          f"active record sits below K and is not re-asserted live (dropping the connection or "
+                          f"resetting the per-(org,repo) anti-replay high-water); lower K or re-sign above K")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -559,6 +569,60 @@ def stranded_active_monitoring_authorities(store, archived: list[Segment], K: in
     carried = {(row[0], row[1]) for row in seed.monitoring_authority_row
                if seed_state.get((row[0], row[1])) == "active"}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def _connected_repo_active_hw(records, resolver) -> "dict[tuple, float]":
+    """``{(org_id, repo): max VERIFIED-active issued_at}`` over ``records`` (Red-Pen R2). Only owner-signed active
+    connected-repo records (verified under the owner pubkey valid at their seq) count; a revoke / forged / unsigned
+    record contributes nothing. Pure read, never raises out of the scan."""
+    from ..governor.connected_repos import SIGNAL as CR_SIGNAL, _owner_root, _parse_signed
+    from ..governor.authn import as_issued_at
+    from vigil_core import verify_connected_repo_record
+    hw: "dict[tuple, float]" = {}
+    for r in sorted(records, key=lambda r: r.seq):
+        p = getattr(r, "payload", None)
+        if not isinstance(p, dict) or p.get("signal") != CR_SIGNAL:
+            continue
+        rec = p.get("record")
+        if not isinstance(rec, dict):
+            continue                                  # a revoke (top-level state) carries no active hw
+        signed = _parse_signed(rec)
+        root = _owner_root(resolver.at(r.seq)) if signed is not None else None
+        if signed is None or root is None or not verify_connected_repo_record(signed, root)[0]:
+            continue
+        key = (signed.document.org_id, signed.document.repo)
+        at = as_issued_at(signed.document.issued_at)
+        if at > hw.get(key, float("-inf")):
+            hw[key] = at
+    return hw
+
+
+def stranded_active_connected_repos(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Red-Pen R2) — the connected repositories (`governor/connected_repos.py`) a hard prune to K would
+    STRAND: those whose only authoritative owner-signed ACTIVE record sits in the pruned prefix [0..K) and is NOT
+    superseded by a live (>= K) active record with an equal-or-higher ``issued_at``. This is the fail-closed
+    durability floor for the connected-repo registry, which (in this slice) folds a signature-verifying genesis
+    scan with NO snapshot seed — so a prune that dropped a (org, repo)'s deciding active record would either
+    silently DISCONNECT an active repository or, by resetting the per-(org, repo) anti-replay high-water, re-open
+    REPLAY-RESURRECTION of a captured active record for a disconnected one. Both are caught by the one condition
+    ``max(below-K active issued_at) > max(live active issued_at)`` (a repository re-asserted live at or above the
+    below-K high-water is safe). EMPTY in the happy path (no connected repos, or every active record sits >= K).
+    Returns keys as ``repo@org_id``. VERIFIED-active only (a forged record never blocks a prune). Read-only.
+
+    Carrying connected-repo rows into the snapshot seed (exactly as AE-0 did for monitoring, so this tripwire is
+    empty even when active records sit below K) is a clean follow-on; until then an owner lowers K below the
+    oldest unsuperseded connection, or re-signs it above K, to prune."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    below_hw = _connected_repo_active_hw(below, resolver)
+    live_hw = _connected_repo_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
+    neg = float("-inf")
+    return sorted(f"{k[1]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
 
 
 def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:

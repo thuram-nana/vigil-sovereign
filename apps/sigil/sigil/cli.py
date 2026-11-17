@@ -3145,6 +3145,59 @@ def _signed_head_doctor() -> tuple[bool, str]:
         return False, f"spine unreadable — cannot confirm a signed head: {type(e).__name__}: {e}"
 
 
+def _redpen_doctor() -> "tuple[bool, str, str]":
+    """Red-Pen (code review) preflight (sovereign — the App key + registries are sovereign, FATAL-2). Returns
+    ``(ok, state, detail)``: the GitHub App credential must be present IFF Red-Pen is on (a hard issue when on
+    without it; informational when off but provisioned), the webhook secret must be set when on, and an org over its
+    per-repo MONTHLY LIMIT is INFORMATIONAL, never hard (reviews simply pause for that repo until next month). With
+    Red-Pen off the whole pipeline is inert, so this is a clean OFF line."""
+    import time as _time
+    from .config import redpen_enabled
+    from .governor import github_app as _ga
+    on = redpen_enabled()
+    key_present = _ga.github_app_configured()
+    if not on:
+        detail = "Red-Pen off (VIGIL_REDPEN_ENABLED)"
+        if key_present:
+            detail += "; a GitHub App credential is provisioned but inert until Red-Pen is turned on"
+        return True, "OFF", detail
+    issues: "list[str]" = []
+    if not key_present:
+        issues.append("the GitHub App id + private key are not provisioned (VIGIL_GITHUB_APP_ID + "
+                      "VIGIL_GITHUB_APP_PRIVATE_KEY or its SSM ref)")
+    if not _ga.webhook_secret_configured():
+        issues.append("the repo-connect webhook secret is not set (VIGIL_GH_WEBHOOK_SECRET)")
+    info = ""
+    try:                                   # per-repo limit sanity + over-limit count: informational, best-effort
+        from .governor.connected_repos import ConnectedRepoRegistry
+        from .governor.redpen_spend import RedPenSpendLedger
+        store = SpineStore()
+        pub = _owner_pub_for_doctor()
+        reg = ConnectedRepoRegistry(store, owner_key=None, trusted_pubkey=pub)
+        spend = RedPenSpendLedger(store, owner_key=None, trusted_pubkey=pub)
+        now = _time.time()
+        all_active = reg.active_records()            # read-only cross-tenant active view (owner-side)
+        limited = [d for d in all_active if d.monthly_limit_credits > 0]
+        over = sum(1 for d in limited
+                   if spend.charged(d.org_id, d.repo, now=now) >= d.monthly_limit_credits)
+        info = (f"{len(all_active)} repo(s) connected, {len(limited)} with a monthly limit, {over} at/over "
+                f"this month (informational)")
+    except Exception as e:  # noqa: BLE001 — the doctor reports, never crashes
+        info = f"connected-repo state unread ({type(e).__name__})"
+    if issues:
+        return False, "ON", "Red-Pen on but: " + "; ".join(issues) + (f" | {info}" if info else "")
+    return True, "ON", f"App key via {_ga.credential_source()}, webhook secret set" + (f"; {info}" if info else "")
+
+
+def _owner_pub_for_doctor() -> "str | None":
+    """The owner pubkey for the Red-Pen doctor's pure-READ registry folds, fail-closed to None."""
+    try:
+        from .governor.identity import owner_pubkey
+        return owner_pubkey()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def sigil_doctor_report() -> dict:
     """Build the SIGIL doctor report dict — the SAME data `sigil doctor --json` emits. Shared by the CLI
     (`cmd_doctor`) and the `/api/doctor` UI read (in-process, same venv). Driven by the shared
@@ -3188,6 +3241,8 @@ def sigil_doctor_report() -> dict:
     _shok, _shdetail = _signed_head_doctor()
     checks.append(Check(id="signed_head", ok=_shok, required=True,
                         state=("OK" if _shok else "NO-HEAD"), detail=_shdetail))
+    _rpok, _rpstate, _rpdetail = _redpen_doctor()
+    checks.append(Check(id="redpen", ok=_rpok, required=False, state=_rpstate, detail=_rpdetail))
     drift = list(config_drift())
     from vigil_integration import doctor as _idoc
     repo = _idoc.find_repo_root()

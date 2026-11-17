@@ -187,12 +187,12 @@ def test_role_can_global_is_exported_by_the_package():
 
 
 # --- the per-org founder role (owner-approved self-serve testing) ------------------------------------
-def test_founder_is_exactly_org_admin_plus_the_two_testing_permissions():
+def test_founder_is_exactly_org_admin_plus_the_testing_permissions():
     assert "founder" not in ROLES                         # per-org only — never a global account role
     assert PERMISSIONS["founder"] == frozenset({
         "read", "view_billing", "view_usage", "view_invoices", "manage_billing", "manage_members",
-        "manage_monitoring", "run_engagement", "view_assessments"})
-    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {"run_engagement", "view_assessments"}
+        "manage_monitoring", "run_engagement", "view_assessments", "manage_code"})   # +manage_code (Red-Pen R2, O-4)
+    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {"run_engagement", "view_assessments", "manage_code"}
     assert PERMISSIONS["founder"] <= PERMISSIONS["owner"]  # owner remains the ceiling
 
 
