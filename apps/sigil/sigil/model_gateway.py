@@ -1621,6 +1621,9 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "VIGIL-model-gateway"
     sys_version = ""
+    # Declared on the class so its type is fixed regardless of method order: _free_before_reply (above do_POST)
+    # clears it to None, do_POST re-seeds it per request, and the G1 paths assign a live lane.
+    _g1_lane: "Optional[gc.CapacityLane]" = None
 
     @property
     def gw(self) -> ModelGateway:
@@ -1702,12 +1705,17 @@ class _Handler(BaseHTTPRequestHandler):
             _log.exception("model gateway: internal error")
             self._refuse(_Refusal(500, "api_error", "the VIGIL model gateway failed"))
 
-    def _release_ticket(self) -> None:
-        """Release this request's reservation (a no-op once the response was metered, and idempotent) BEFORE a
-        refusal is written: a client that sees the refusal and calls again must find its budget already free."""
+    def _free_before_reply(self) -> None:
+        """Release this request's reservation (a no-op once the response was metered, and idempotent) and give its G1
+        capacity lane back, BEFORE a refusal or a relayed provider error is written: a client that sees the answer and
+        calls again must find its budget and capacity already free. ``do_POST``'s ``finally`` repeats both (no-ops)."""
         ticket = getattr(self, "_ticket", None)
         if ticket is not None:
             ticket.release()
+        lane = getattr(self, "_g1_lane", None)
+        if lane is not None:
+            lane.release(*self._g1_reserved)
+            self._g1_lane = None
 
     def do_POST(self) -> None:  # noqa: N802
         path, _, query = self.path.partition("?")
@@ -1717,7 +1725,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._streaming = False
         self._prefix: Optional[tuple] = None
         self._g1_account: "Optional[gc.ProviderAccount]" = None   # G1: the chosen pool account and its capacity lane
-        self._g1_lane: "Optional[gc.CapacityLane]" = None
+        self._g1_lane = None                                       # type fixed by the class-level declaration above
         self._g1_reserved: "tuple[int, int]" = (0, 0)             # the (input, output) tokens reserved on the lane
         self._g1_tried: "list[str]" = []
         give_back: "Optional[Callable[[], None]]" = None
@@ -1759,14 +1767,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._forward_plain(path_qs, shaped, headers, grant=grant)
         except _Refusal as r:
             if not self._streaming:
-                self._release_ticket()            # before the refusal reaches the client, not after
+                self._free_before_reply()            # before the refusal reaches the client, not after
                 self._refuse(r)
         except OSError:                           # the client went away or stalled past its deadline
             self.close_connection = True
         except Exception:  # noqa: BLE001 — fail closed: an internal error never forwards and never leaks detail
             _log.exception("model gateway: internal error")
             if not self._streaming:
-                self._release_ticket()
+                self._free_before_reply()
                 self._refuse(_Refusal(500, "api_error", "the VIGIL model gateway failed"))
             self.close_connection = True
         finally:
@@ -1995,7 +2003,9 @@ class _Handler(BaseHTTPRequestHandler):
                 ticket.hold()                          # it may have run: unconfirmed spend, never free
             raise
         if err is not None:
-            # a provider error is not billed: the ticket is released in do_POST (also if relaying it fails)
+            # a provider error is not billed: free what the request held BEFORE relaying it (do_POST's ``finally``
+            # repeats it — also if relaying fails), so a client that sees the error and retries finds it free
+            self._free_before_reply()
             self._relay_error(err)
             return
         try:
@@ -2040,6 +2050,7 @@ class _Handler(BaseHTTPRequestHandler):
                 ticket.hold()
             raise
         if err is not None:
+            self._free_before_reply()             # not billed: free before the client can see the error
             self._relay_error(err)
             return
         self._streaming = True

@@ -795,6 +795,28 @@ def test_a_refusal_releases_the_reservation_before_the_client_sees_it(gateway, u
     assert seen == [0]
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["plain", "stream"])
+def test_a_relayed_provider_error_frees_the_reservation_before_the_client_sees_it(gateway, upstream, monkeypatch,
+                                                                                    stream):
+    """A provider error is not billed, and its reservation is freed BEFORE the error is relayed: a client that sees
+    the error and retries at once finds its budget free. Deterministic — read at the moment the relay is written; a
+    check made after the response raced the handler's ``finally`` (it failed CI once as a flake)."""
+    from sigil import model_gateway as mg
+    upstream.mode = "error"
+    g = _grant()
+    seen = []
+    real = mg._Handler._relay_error
+
+    def _spy(self, e):
+        seen.append(gateway.gateway.meter.pending(g.meter_id))
+        return real(self, e)
+    monkeypatch.setattr(mg._Handler, "_relay_error", _spy)
+    s, _h, raw = _call(gateway, {**BODY, "stream": True} if stream else BODY, _tok(g))
+    assert s == 429 and _err(raw)[0] == "rate_limit_error"
+    assert seen == [0]
+    assert gateway.gateway.meter.pending(g.meter_id) == 0
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Key custody
 # ---------------------------------------------------------------------------------------------------------------
