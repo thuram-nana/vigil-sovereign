@@ -117,7 +117,7 @@ def _mark_browserless(res: "RuntimeRedriveResult", bug_class: str, url: str, why
 
 def dom_xss_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                     param: "str | None" = None, timeout: float = 25.0,
-                    browser: Any = None) -> "RuntimeRedriveResult":
+                    browser: Any = None, producer_branch: "str | None" = None) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for DOM-based XSS in VIGIL's OWN egress-gated headless-browser harness and mint a
     signed FACT ONLY when the deterministic ``dom_execution`` oracle observes VIGIL's unique per-probe canary
     ACTUALLY EXECUTE in a real DOM (a ``__crucible_xss`` binding call) — never on a reflected-but-inert
@@ -126,7 +126,12 @@ def dom_xss_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     Drives the fragment (``location.hash`` sinks) and the declared / candidate query parameters. A missing
     endpoint / gate refusal / browserless env / oracle non-fire ⇒ LEAD. ``browser`` (a started ``CdpBrowser``
     or a stub) may be injected to amortise launch cost / for tests; otherwise an egress-gated one is
-    constructed here and torn down. Never raises."""
+    constructed here and torn down. Never raises.
+
+    ``producer_branch`` (set ONLY by the Strix proof-sink rail) ALSO records the identical VIGIL-owned
+    capture+oracle verdict under the FACT-capable ``strix.dom_execution`` PRODUCER branch — judged over
+    VIGIL's OWN CDP capture through the SAME ``admit``+``certify_admitted`` path, so a reflected-but-inert
+    payload (oracle non-fire) mints nothing there either; it is the branch's declared blocking_work."""
     from framework.v2.verify.oracles import dom_execution_oracle  # noqa: PLC0415 — FATAL-2 (offense plane)
 
     res, ok = _browser_preamble(url, slug, "dom_xss", _DOM_XSS_BRANCH)
@@ -183,6 +188,15 @@ def dom_xss_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                                  engagement_slug=engagement_slug, signers=signers, context=context,
                                  item=f"{r.injection}:{r.canary}", surface=surface,
                                  fired=signal.fired, conclusive=signal.conclusive, body_unreadable=False)
+                if producer_branch:
+                    # Record the SAME VIGIL-owned capture+oracle verdict under the Strix PRODUCER branch as
+                    # well (the branch's declared blocking_work). admit() gates a FACT on ``signal.fired`` —
+                    # the dom_execution oracle firing over VIGIL's OWN CDP capture — and certify_admitted
+                    # re-fires it, so a reflected-but-inert payload never mints here either.
+                    _admit_one(res, branch=producer_branch, bug_class="dom_xss",
+                               engagement_slug=engagement_slug, signers=signers, context=context,
+                               item=f"{r.injection}:{r.canary}", surface=surface,
+                               fired=signal.fired, conclusive=signal.conclusive, body_unreadable=False)
                 if out.is_fact:
                     fired_here = True
                     break

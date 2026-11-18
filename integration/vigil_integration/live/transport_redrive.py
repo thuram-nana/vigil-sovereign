@@ -76,6 +76,20 @@ _BRANCHES_FOR = {
     "weak_crypto_artifact": (("weak_tls", _WEAK_TLS_BRANCH), ("weak_crypto_artifact", _WEAK_CRYPTO_BRANCH)),
 }
 
+# PRODUCER-BRANCH PROMOTION. When this re-drive is reached from the Strix proof-sink rail
+# (``strix_producer=True``), the SAME VIGIL-owned capture+oracle verdict is ALSO recorded under the Strix
+# PRODUCER branch for the classes whose producer branch is now FACT-capable — exactly the "record that same
+# VIGIL-owned capture+oracle verdict under this branch as well" the capability matrix names as those branches'
+# blocking_work. The Strix report is NEVER the proof: ``admit`` still gates a FACT on ``fired`` (the
+# deterministic oracle firing over VIGIL's OWN capture) and ``certify_admitted`` RE-FIRES it over the retained
+# context, so a benign twin / a tool say-so mints NOTHING (it stays a LEAD). ``weak_crypto_artifact`` has NO
+# Strix producer branch: ``strix.tls_negotiation`` speaks to the negotiated PROTOCOL/CIPHER
+# (``OracleKind.TLS_WEAKNESS``), not the leaf-key weakness, which keeps minting only on its VIGIL-owned twin.
+_STRIX_PRODUCER_FOR = {
+    "service_reachable": "strix.service_reachability",
+    "weak_tls": "strix.tls_negotiation",
+}
+
 _TLS_CLASSES = frozenset({"weak_tls", "weak_crypto_artifact"})
 
 _DEFAULT_PORT_FOR_SCHEME = {"http": 80, "https": 443, "ws": 80, "wss": 443}
@@ -290,14 +304,20 @@ _CONTEXT_FOR = {
 def transport_redrive(endpoint: str = "", *, claimed_class: str, slug: str, engagement_slug: str,
                       signers: "list[tuple[str, str]]", host: str = "", port: Any = None,
                       protocol: str = "tcp", posture: str = "AUDIT",
-                      timeout: "float | None" = None) -> TransportRedriveResult:
+                      timeout: "float | None" = None,
+                      strix_producer: bool = False) -> TransportRedriveResult:
     """Re-drive a producer-reported ``host:port`` through VIGIL's OWN gated transport capture and mint a
     signed, offline-re-verifiable FACT ONLY when the deterministic oracle fires over THAT capture.
 
     ``claimed_class`` is the "where to look" (``service_reachable`` / ``weak_tls`` /
     ``weak_crypto_artifact``); it never decides anything — the oracle does, and a mis-routed class simply
     fails to fire. Never raises: a gate refusal, an unparseable target, an unregistered branch or a probe
-    error all return a result whose ``n_facts`` is 0."""
+    error all return a result whose ``n_facts`` is 0.
+
+    ``strix_producer`` (set ONLY by the Strix proof-sink rail) ALSO records the identical VIGIL-owned
+    capture+oracle verdict under the FACT-capable Strix PRODUCER branch (``_STRIX_PRODUCER_FOR``) — the
+    producer branch is judged over VIGIL's OWN capture via the SAME ``admit``+``certify_admitted`` path, so a
+    benign twin / a tool say-so never mints there. The VIGIL-owned twin is admitted unchanged either way."""
     from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
     from .verdict import Verdict, admit, branch_ids  # noqa: PLC0415 — pure stdlib
 
@@ -322,6 +342,16 @@ def transport_redrive(endpoint: str = "", *, claimed_class: str, slug: str, enga
     for c, b in pairs:
         if b not in registered:
             res.notes.append(f"branch {b!r} is not registered — cannot admit {c!r} (fail-closed)")
+    if strix_producer:
+        # Record the SAME VIGIL-owned capture+oracle verdict under the Strix PRODUCER branch as well (the
+        # branches' declared blocking_work). Judged over VIGIL's OWN capture through the SAME admit()+certify
+        # path as the twin — never on the producer's say-so; a benign twin / tool claim mints nothing.
+        for c, _b in pairs:
+            pb = _STRIX_PRODUCER_FOR.get(c)
+            if pb and pb in registered and (c, pb) not in drivable:
+                drivable.append((c, pb))
+            elif pb and pb not in registered:
+                res.notes.append(f"producer branch {pb!r} is not registered — cannot admit {c!r} (fail-closed)")
     if not drivable:
         return res
 
