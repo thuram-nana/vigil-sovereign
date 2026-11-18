@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  VIGIL opt-in CD — the GitHub-OIDC deploy role used by .github/workflows/deploy-ec2.yml. Grants a
+  GitHub Actions run from this repo's main branch the MINIMUM it needs to roll the box: SSM SendCommand
+  (AWS-RunShellScript) against ONE instance, plus read of the command result. No long-lived keys; no
+  SSH; nothing else. Create this stack once, then set the repo variable VIGIL_DEPLOY_AWS_ROLE_ARN to the
+  RoleArn output. Fully optional — the deploy workflow stays inert until that variable is set.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: thuram-nana/vigil-sovereign
+    Description: owner/repo allowed to assume the role (OIDC `sub` is pinned to its main branch).
+  TargetInstanceId:
+    Type: String
+    Description: the EC2 instance id (i-...) running `vigil up` that this role may SendCommand to.
+  CreateOIDCProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      true to create the token.actions.githubusercontent.com OIDC provider (only if the account does not
+      already have one — a second provider for the same URL fails to create).
+  ExistingOIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: when CreateOIDCProvider=false, the ARN of the account's existing GitHub OIDC provider.
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOIDCProvider, "true"]
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # AWS now manages the thumbprint for this well-known provider; this value is accepted and ignored.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "vigil-cd-deploy-${AWS::Region}"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - MakeProvider
+                - !Ref GitHubOIDCProvider
+                - !Ref ExistingOIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Only a run on THIS repo's main branch may assume the role.
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: vigil-cd-ssm-sendcommand
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # SendCommand: only the RunShellScript document, only the one target instance.
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${TargetInstanceId}"
+              # Read the result of a command this role issued.
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: Set repo variable VIGIL_DEPLOY_AWS_ROLE_ARN to this.
+    Value: !GetAtt DeployRole.Arn
