@@ -385,6 +385,48 @@ class _Purchase:
                           reversals=reversals)
 
 
+# ============================================================================ the off-session auto top-up (A1) ======
+
+class _A1Stripe:
+    """The off-session PaymentIntent poster + object fetcher for A1's auto top-up (§11.13) — the SAME fake Stripe as
+    A1's own suite (``test_billing_auto_topup._FakeStripe``): it honours the Idempotency-Key exactly like Stripe (the
+    same key returns the one PaymentIntent), so a retried create reuses the ONE ``pi_`` and a crossing charges once.
+    No network, no real card, no Stripe secret — only the off-session charge the ``AutoTopUpCharger`` drives."""
+
+    def __init__(self, *, created):
+        self.objects: dict = {}
+        self.pi_calls: list = []
+        self.by_key: dict = {}
+        self.created = int(created)
+        self.fetched: list = []
+
+    def fetch(self, kind, oid):
+        self.fetched.append((kind, oid))
+        return copy.deepcopy(self.objects[oid])
+
+    def create_pi(self, params, *, idempotency_key):
+        self.pi_calls.append((copy.deepcopy(params), idempotency_key))
+        pid = self.by_key.get(idempotency_key)
+        if pid is None:
+            pid = f"pi_wallete2eA1{len(self.by_key) + 1}"
+            self.by_key[idempotency_key] = pid
+            self.objects[pid] = {
+                "object": "payment_intent", "id": pid, "livemode": False, "status": "succeeded",
+                "amount": params["amount"], "amount_received": params["amount"], "currency": params["currency"],
+                "customer": params["customer"], "payment_method": params["payment_method"], "created": self.created,
+                "metadata": dict(params["metadata"])}
+        return copy.deepcopy(self.objects[pid])
+
+
+def _a1_webhook(signer, etype, object_id, *, t, eid="evt_a1"):
+    """Deliver ONE signed sandbox Stripe webhook to a ``BillingSigner`` — the SAME HMAC scheme the e2e ``_Purchase``
+    uses (``_WHSEC``). Returns the minted spine seq, or None when the drain mints nothing (an idempotent re-delivery)."""
+    raw = json.dumps({"id": eid, "object": "event", "type": etype, "created": t, "livemode": False,
+                      "data": {"object": {"id": object_id}}}).encode()
+    mac = hmac.new(_WHSEC.encode(), f"{t}.".encode() + raw, hashlib.sha256).hexdigest()
+    return signer.ingest(raw, f"t={t},v1={mac}", now=float(t))
+
+
 # ============================================================================ the customer edge =====================
 
 def _signup_operator(op, ep, store, email, org="Acme"):
@@ -805,10 +847,11 @@ def test_stage_8b_the_customer_statement_shows_the_reversal(monkeypatch):
 # ============================================================================ STAGE 9 — auto top-up (A1) ===========
 
 def test_stage_9_auto_topup_fires_on_a_low_balance():
-    """A1 (pending). Armed by the customer (a trigger balance, a pack, a monthly cap, a saved card), a balance below the
-    trigger is topped up off-session — never above the cap, a receipt per charge — and credit-paused scans resume after
-    the payment is confirmed. OFF by default. LIVE today: real metered use brings the balance to the low point A1
-    triggers on, and nothing tops it up."""
+    """A1 (§11.13). Armed by the customer (a trigger balance, a catalog pack, a monthly cap, a saved card), a balance
+    that crosses below the trigger is topped up OFF-SESSION — exactly once, never above the monthly cap, credit minted
+    only by the confirmed webhook — and a credit-paused scan resumes once the payment is confirmed (the W3 hook). OFF
+    by default (opt-in, owner-signed). LIVE control: real metered use brings the balance to the low point A1 triggers
+    on, and — with NO armed auto top-up — nothing tops it up (byte-identical to pre-A1)."""
     s = _store()
     _seat(s, "org_a", HOST_A, credits=100)
     g = LaunchGate(s)
@@ -816,11 +859,88 @@ def test_stage_9_auto_topup_fires_on_a_low_balance():
     _meter_use("org_a", r, mm.Usage(output_tokens=14_400))                # 90 credits of use
     assert _settle_exact(g, "org_a", r)["ok"]
     assert _bal(s, "org_a").available == 10                                # below any trigger; nothing topped it up
-    pytest.skip("A1 pending: auto top-up is not merged" + (" (an A1 module is now present: wire this stage)"
-                                                            if _merged_a1() else "") +
-                ". Un-skips when an armed trigger makes an off-session Stripe PaymentIntent on the org's saved "
-                "PaymentMethod (<= the monthly cap) whose confirmed webhook mints a `topup` grant and resumes the "
-                "org's credit-paused scans (the W3 hook); this stage then asserts exactly one capped top-up.")
+    if not _merged_a1():
+        pytest.skip("A1 pending: auto top-up is not merged. Un-skips when an armed trigger makes an off-session "
+                    "Stripe PaymentIntent on the org's saved PaymentMethod (<= the monthly cap) whose confirmed "
+                    "webhook mints a `topup` grant and resumes the org's credit-paused scans (the W3 hook); this "
+                    "stage then asserts exactly one capped top-up.")
+    # --- A1 merged (§11.13): wired exactly as A1's own suites do (test_billing_auto_topup / test_credit_pause_resume),
+    #     over the SAME sovereign money harness the stages above use. An armed low-balance crossing drives exactly ONE
+    #     capped off-session top-up; its confirmed webhook mints a `topup` grant; a credit-paused scan then resumes. ---
+    from sigil.governor import auto_topup as a1
+    from sigil.governor import catalog as cat
+    from vigil_integration.live import credit_lease_pause as clp
+    pack_id = "vigil_topup_1k"                                            # a catalog TOP-UP pack
+    pack_credits = cat.mintable_entitlements()[pack_id].credits
+    pack_amount, pack_ccy = cat.mintable_expected()[pack_id]
+    cap = pack_credits                                                    # room for EXACTLY one pack this month
+
+    s2 = _store()
+    _seat(s2, "org_a", HOST_A, credits=100)                              # a fresh org with its trial credit
+    g2 = LaunchGate(s2)
+    r2 = _reserve_start(g2, "org_a", HOST_A)                             # the scan holds the whole trial chunk
+    _meter_use("org_a", r2, U2502)                                       # it ran, then its prepaid allowance ran dry
+    base = os.environ["VIGIL_BASE_DIR"]
+    assert g2.record_credit_pause(slug=r2["slug"], nonce=r2["nonce"], now=NOW)["ok"]    # W3: the sovereign credit pause
+    assert clp.is_lease_paused(base, r2["slug"], r2["nonce"])
+    assert clp.credit_pause_reason(base, r2["slug"], r2["nonce"]) == "insufficient_credits"
+    assert _bal(s2, "org_a").available == 0                              # below the trigger; nothing has topped it up
+
+    reg = a1.AutoTopUpRegistry(s2)                                       # owner-signed under the persisted identity
+    reg.set_settings("org_a", enabled=True, trigger_credits=50, pack_price_id=pack_id, monthly_cap_credits=cap,
+                     issued_at=NOW)
+    reg.capture_payment_method("org_a", "cus_wallete2eA1", "pm_wallete2eA1", issued_at=NOW)
+
+    stripe = _A1Stripe(created=int(NOW))                                 # the fake off-session poster (no network/card)
+    provider = StripeBillingProvider(_WHSEC, fetcher=stripe.fetch, expected_mode="test",
+                                     enable_reference_adapter=True, auto_topup=True,
+                                     payment_intent_creator=stripe.create_pi)
+    signer = BillingSigner(provider, wallet=WalletRegistry(s2), subscriptions=SubscriptionRegistry(s2),
+                           plan=PlanCreditLedger(s2), invoices=InvoiceRegistry(s2),
+                           catalog=cat.mintable_entitlements(), expected=cat.mintable_expected(),
+                           require_verified_amount=True)
+    notes: list = []
+    charger = a1.AutoTopUpCharger(reg, WalletRegistry(s2), provider,
+                                  notify=lambda org, c: notes.append((org, c.status, c.crossing_key)))
+
+    # 1) the armed crossing drives EXACTLY ONE off-session charge, on the saved card, for the pack, <= the cap
+    res = charger.run("org_a", now=NOW)
+    assert res.reason == "charged" and res.payment_intent_id.startswith("pi_")
+    ((params, _key),) = stripe.pi_calls
+    assert params["off_session"] is True and params["confirm"] is True
+    assert (params["customer"], params["payment_method"]) == ("cus_wallete2eA1", "pm_wallete2eA1")
+    assert (params["amount"], params["currency"]) == (pack_amount, pack_ccy.lower())    # the OWNER CATALOG's amount
+    assert params["metadata"]["vigil_auto_topup"] == "1" and params["metadata"]["org_id"] == "org_a"
+    (charge,) = reg.charges("org_a")
+    assert charge.status == a1.STATUS_CHARGED and charge.credits == pack_credits <= cap
+    assert charge.payment_intent_id == res.payment_intent_id
+    assert notes == [("org_a", a1.STATUS_CHARGED, charge.crossing_key)]  # one receipt, for this crossing
+    assert _bal(s2, "org_a").available == 0                              # the charge call NEVER credits
+
+    # 2) the confirmed webhook mints a `topup` grant; the balance rises by EXACTLY the pack's credits (never above cap)
+    assert _a1_webhook(signer, "payment_intent.succeeded", res.payment_intent_id, t=int(NOW)) is not None
+    assert _bal(s2, "org_a").available == pack_credits                   # 0 + 1,000
+    assert [c for (_at, c, k) in WalletRegistry(s2).purchase_grants("org_a") if k == "topup"] == [pack_credits]
+
+    # 3) idempotent: a re-delivered webhook folds once and a second sweep above the trigger top up NOTHING more
+    _a1_webhook(signer, "payment_intent.succeeded", res.payment_intent_id, t=int(NOW), eid="evt_a1_again")
+    assert _bal(s2, "org_a").available == pack_credits                   # a redelivery mints no second grant
+    assert [c for (_at, c, k) in WalletRegistry(s2).purchase_grants("org_a") if k == "topup"] == [pack_credits]
+    assert charger.run("org_a", now=NOW + 1).reason == "above_trigger"   # at/above the trigger: no new charge
+    assert len(reg.charges("org_a")) == 1 and len(stripe.pi_calls) == 1  # the top-up stands exactly once
+
+    # 4) the W3 hook: the credit-paused scan RESUMES now that the top-up is confirmed (and not before)
+    out = g2.resume_launch(signed_lease=r2["lease"], expect_org_id="org_a", now=NOW)
+    assert out["ok"] and out.get("credit_resumed") is True and "expired" not in out, out
+    assert not clp.is_lease_paused(base, r2["slug"], r2["nonce"])        # un-parked: the halt is gone ...
+    assert clp.credit_pause_reason(base, r2["slug"], r2["nonce"]) is None  # ... and so is the credit-pause record
+
+    # the cap holds a SECOND crossing in the same month: spend back below the trigger -> cap-blocked, no second charge
+    WalletRegistry(s2).debit("org_a", _bal(s2, "org_a").available, entry_id="wallet-e2e-a1-spend2", issued_at=NOW)
+    assert charger.run("org_a", now=NOW + 2).reason == "cap_exceeded"
+    assert len(stripe.pi_calls) == 1                                     # nothing new reached Stripe
+    assert [c.status for c in reg.charges("org_a")] == [a1.STATUS_CHARGED, a1.STATUS_CAP_BLOCKED]
+    assert reg.month_charged_credits("org_a", NOW) == cap                # CAPPED: one pack this month, never above it
 
 
 # ============================================================================ STAGE 10 — worker time (W4) =========
