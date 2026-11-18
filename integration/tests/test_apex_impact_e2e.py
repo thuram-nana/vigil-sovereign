@@ -7,12 +7,19 @@ oracle re-execution; nothing is asserted. Needs framework → the ``off`` leg (i
 """
 from __future__ import annotations
 
+import pytest
+
 from vigil_core import generate_keypair
 from vigil_core.retest_reproof import CLEARED, STILL_PRESENT
 from vigil_integration.autopatch import BuildResult, CloneResult, PatchApproval, PrResult, QuorumOutcome
 from vigil_integration.jobs.apex_retest_scheduler import RetestRegistry, WatchedFinding, run_cadence_tick
 from vigil_integration.remediation import TriageFinding
 from vigil_integration.remediation.apex_pcr import close_remediation_loop
+
+# OFFENSE plane: the real framework imports are LAZY (inside the test body / oracle-context builder), so this
+# module-scope probe makes the suite SKIP in the sovereign (keyless) leg of the two-env job and RUN in the
+# offense leg — the framework-guard pattern (cf. test_backup_dr_drill_coverage.py). Listed in ci.yml offense leg.
+pytest.importorskip("framework.v2.evidence.poc")
 
 SIGNER = generate_keypair()
 SIGNERS = [("root0", SIGNER.private_key_b64)]

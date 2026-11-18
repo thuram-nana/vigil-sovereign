@@ -16,6 +16,11 @@ from vigil_integration.autopatch import BuildResult, CloneResult, PatchApproval,
 from vigil_integration.remediation import TriageFinding
 from vigil_integration.remediation.apex_pcr import ApexPcrResult, close_remediation_loop
 
+# OFFENSE plane: the real framework imports are LAZY (inside the oracle-context builder), so this module-scope
+# probe is what makes the suite SKIP in the sovereign (keyless) leg of the two-env job and RUN in the offense
+# leg — the framework-guard pattern (cf. test_backup_dr_drill_coverage.py). Listed in ci.yml's offense leg.
+pytest.importorskip("framework.v2.evidence.poc")
+
 SIGNER = generate_keypair()
 SIGNERS = [("root0", SIGNER.private_key_b64)]
 PUBKEYS = {"root0": SIGNER.public_key_b64}
