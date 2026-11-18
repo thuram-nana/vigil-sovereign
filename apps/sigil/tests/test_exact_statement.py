@@ -279,9 +279,13 @@ def test_the_statement_is_byte_identical_with_the_flag_off(monkeypatch):
     off = _usage(s, "org_a", now=NOW + 30_000)
     assert set(off) == {"org_id", "currency", "scans", "charges", "count", "credits", "amount_mc"}
     assert all("balance_after_mc" not in c for c in off["charges"])
-    # the OLD fields are identical whether or not the flag is on
-    assert {k: on[k] for k in off if k != "charges"} == {k: off[k] for k in off if k != "charges"}
+    assert all("running" not in sc and "held_mc" not in sc for sc in off["scans"])   # W6 per-scan keys: metered only
+    # the OLD fields are identical whether or not the flag is on (charges carry balance_after_mc, scans carry
+    # running/held_mc only when metered — stripped here for the comparison)
+    assert ({k: on[k] for k in off if k not in ("charges", "scans")}
+            == {k: off[k] for k in off if k not in ("charges", "scans")})
     assert [{k: v for k, v in c.items() if k != "balance_after_mc"} for c in on["charges"]] == off["charges"]
+    assert [{k: v for k, v in sc.items() if k not in ("running", "held_mc")} for sc in on["scans"]] == off["scans"]
 
 
 # --------------------------------------------------------------------------------- purchase_events excludes refunds
