@@ -223,6 +223,14 @@ class AutonomyResult:
     discovered_findings: list = field(default_factory=list)  # serialised NEW AuditFindings (oracle_context kept)
     discovered_count: int = 0          # NEW oracle-confirmed findings discovery minted this run
     findings_folded: int = 0           # W-F3 — discovered findings SPLICED into the authoritative report
+    # APEX PR-1 — set ONLY by the in-engagement driver (``engage._run_apex_driver``) from the SHARED scan
+    # executor's stats, as the one-shared-budget proof. 0 for every standalone caller (byte-identical).
+    shared_budget: int = 0             # the ONE executor's request budget (scan + loop share it)
+    shared_requests_made: int = 0      # requests the ONE executor made across scan + loop (<= shared_budget)
+    shared_requests_before: int = 0    # requests the executor had made at scan-end, BEFORE the loop drove probes
+    # APEX PR-1 — the multi-agent SURFACE DECOMPOSITION telemetry (when a decomposing ``select_fn`` drove the
+    # loop): per-domain counts of leaves the specialized selectors picked. Empty for the default planner.
+    surface_domains_driven: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -1245,6 +1253,7 @@ def run_autonomous_cycle(
     probe_posture: str = "auto-test",
     run_dir: "str | None" = None,
     seed_url: "str | None" = None,
+    select_fn: Any = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1282,6 +1291,14 @@ def run_autonomous_cycle(
     from .agents.tools import ToolContext
 
     lookahead_depth = max(1, int(lookahead_depth))
+
+    # APEX PR-1 — the PRIMARY-action selector. Default (``select_fn`` None) is the existing path-aware/
+    # lookahead ``_select`` (so every existing caller is byte-identical). An injected ``select_fn`` (the
+    # in-engagement driver passes a multi-agent SURFACE-DECOMPOSITION selector) replaces ONLY the primary
+    # pick each cycle; the re-orient PREVIEW below stays ``_select`` so a stateful round-robin advances
+    # exactly once per cycle. Same signature as ``_select``: ``(tree, world, objectives, source, *,
+    # lookahead_depth, budget) -> leaf | None``.
+    _sel = select_fn if callable(select_fn) else _select
 
     world = getattr(result, "world", None)
     findings = list(getattr(getattr(result, "report", None), "active_findings", []) or [])
@@ -1496,14 +1513,23 @@ def run_autonomous_cycle(
         out.fused_observations += cycle_fused
         _emit_fused_leads(sink, cycle_obs, emitted_lead_ids)   # I-C: fused leads reach the report
 
-        leaf = _select(tree, world, objectives, source,
-                       lookahead_depth=lookahead_depth, budget=request_budget)
+        leaf = _sel(tree, world, objectives, source,
+                    lookahead_depth=lookahead_depth, budget=request_budget)
         if leaf is None:
             out.notes.append(f"cycle {c}: no open action remaining")
             break
         step = AutonomyStep(cycle=c, picked_leaf_id=leaf.id, picked_label=leaf.label,
                             picked_surface=leaf.surface, picked_bug_class=leaf.bug_class,
                             fused_observations=cycle_fused)
+        # APEX PR-1 — record the SURFACE DOMAIN this pick belongs to, when a decomposing selector exposes its
+        # classifier. Telemetry only (the oracle stays authoritative); empty for the default planner.
+        _classify = getattr(select_fn, "domain_for", None)
+        if callable(_classify):
+            try:
+                _dom = str(_classify(leaf.label, leaf.bug_class, leaf.surface))
+                out.surface_domains_driven[_dom] = out.surface_domains_driven.get(_dom, 0) + 1
+            except Exception:
+                pass
         finding = leaf_to_finding.get(leaf.id)
         # A probe-leaf (an unexplored ENDPOINT lead, not a confirmed finding) drives DISCOVERY;
         # every other open leaf is a confirmed finding and drives the existing RE-VERIFY path.
