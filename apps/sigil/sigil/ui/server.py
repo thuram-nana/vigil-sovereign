@@ -1764,6 +1764,20 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.customer_checkout_enabled():
                 return None
             return p.customer_billing_offers(requester, str(body.get("org_id", "")), ip=ip)
+        # A1 — auto top-up: the session org's settings read and the settings change. Absent (unknown action -> 404)
+        # unless VIGIL_BILLING_AUTO_TOPUP is ON; requester = the hop principal, org = the edge SESSION, never a body
+        # field. The body carries only the customer's choices (validated + owner-signed sovereign side).
+        if action in ("billing_auto_topup", "billing_auto_topup_set"):
+            from .. import config as _config
+            if not _config.billing_auto_topup_enabled():
+                return None
+            if action == "billing_auto_topup":
+                return p.customer_billing_auto_topup(requester, str(body.get("org_id", "")), ip=ip)
+            return p.billing_auto_topup_set(requester, str(body.get("org_id", "")), enabled=body.get("enabled"),
+                                            trigger_credits=body.get("trigger_credits"),
+                                            pack_price_id=body.get("pack_price_id"),
+                                            monthly_cap_credits=body.get("monthly_cap_credits"),
+                                            ip=ip, mfa_at=body.get("mfa_at"))
         # customer-plane READS (the Slice-I backend) — admit_customer-gated; org from the hop-bound session.
         if action == "billing_overview":
             return p.customer_billing(requester, str(body.get("org_id", "")), ip=ip)

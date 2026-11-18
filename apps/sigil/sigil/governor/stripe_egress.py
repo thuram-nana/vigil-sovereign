@@ -60,6 +60,9 @@ _OBJECTS: "Mapping[str, tuple[str, str, re.Pattern[str]]]" = {
     "dispute": ("/v1/disputes/", "dispute", re.compile(r"(?:du|dp)_[A-Za-z0-9]{1,255}")),
     "refund": ("/v1/refunds/", "refund", re.compile(r"(?:re|pyr)_[A-Za-z0-9]{1,255}")),
     "charge": ("/v1/charges/", "charge", re.compile(r"(?:ch|py)_[A-Za-z0-9]{1,255}")),
+    # A1 auto top-up: the off-session PaymentIntent a signed payment_intent.succeeded event names, re-fetched so
+    # money/tenant are read from the AUTHORITATIVE object (never the webhook body), exactly like the others.
+    "payment_intent": ("/v1/payment_intents/", "payment_intent", re.compile(r"pi_[A-Za-z0-9]{1,255}")),
 }
 # W5 — the two LIST reads a reversal needs: kind -> (path, the one filter parameter, its anchored id shape). Each is
 # fetched with that filter only and limit=10; the response must be a Stripe `list`.
@@ -283,6 +286,31 @@ def make_checkout_creator(*, transport=None):
                     idempotency_key=idempotency_key)
         if not isinstance(resp, Mapping) or resp.get("object") != "checkout.session":
             raise StripeEgressError("Stripe checkout create returned an unexpected object")
+        return resp
+
+    return create
+
+
+def make_payment_intent_creator(*, transport=None):
+    """Build ``create(params, *, idempotency_key)``: POST ``/v1/payment_intents`` form-encoded with the
+    ``Idempotency-Key`` header (A1 — the OFF-SESSION auto top-up charge). The params are built upstream from the
+    OWNER CATALOG (``billing.StripeBillingProvider.create_off_session_topup``: ``amount`` / ``currency`` /
+    ``customer`` / ``payment_method`` / ``off_session`` / ``confirm`` / ``metadata``); this poster never edits
+    money. The Idempotency-Key makes a retried create reuse the one PaymentIntent (so one crossing charges once).
+    A declined / authentication-required off-session charge is a definitive HTTP 402 → a (non-transient)
+    ``StripeEgressError`` the charger records as ``declined``. Returns the parsed PaymentIntent object."""
+    send = transport or _request
+
+    def create(params: "Mapping[str, Any]", *, idempotency_key: str) -> "Mapping[str, Any]":
+        if (not isinstance(idempotency_key, str) or not idempotency_key
+                or len(idempotency_key) > _MAX_IDEMPOTENCY_KEY
+                or any(not (0x21 <= ord(c) <= 0x7e) for c in idempotency_key)):
+            raise StripeEgressError("refusing a Stripe payment-intent create without a valid Idempotency-Key")
+        secret = _require_secret()
+        resp = send("POST", f"{_API_BASE}/v1/payment_intents", secret=secret, form=params,
+                    idempotency_key=idempotency_key)
+        if not isinstance(resp, Mapping) or resp.get("object") != "payment_intent":
+            raise StripeEgressError("Stripe payment-intent create returned an unexpected object")
         return resp
 
     return create

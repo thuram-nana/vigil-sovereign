@@ -168,6 +168,30 @@ def _retest_reverify(ctx: "dict") -> str:
     traffic); and map only a DECISIVE REMEDIATED to ``cleared`` (STILL_VULNERABLE→``still_present``,
     INCONCLUSIVE/REFUSED→``inconclusive``)."""
     return "unavailable"
+# A1 auto top-up: the newest receipts the billing read returns, and the newest per-charge notices the notification
+# centre carries (each with the stable id ``auto_topup:<crossing>``, so a viewer sees each receipt once).
+_AUTO_TOPUP_RECEIPTS = 20
+_AUTO_TOPUP_NOTICES = 5
+
+
+def _auto_topup_notice(c) -> dict:
+    """The notification-centre item for one auto-top-up charge record (credits only — never a money amount)."""
+    credits = int(getattr(c, "credits", 0) or 0)
+    status = str(getattr(c, "status", "") or "")
+    if status == "charged":
+        sev, title = "info", "Automatic top-up"
+        body = (f"{credits:,} credits were bought with your saved card. They are added to your balance as soon as "
+                "the payment is confirmed.")
+    elif status == "cap_blocked":
+        sev, title = "medium", "Monthly top-up limit reached"
+        body = (f"An automatic top-up of {credits:,} credits was not made because it would pass your monthly limit. "
+                "Raise the limit or buy credits on the Billing page.")
+    else:
+        sev, title = "high", "Automatic top-up failed"
+        body = ("Your saved card could not be charged for an automatic top-up. Buy credits on the Billing page to "
+                "keep your assessments running.")
+    return {"id": "auto_topup:" + str(getattr(c, "crossing_key", "") or ""), "kind": "billing", "severity": sev,
+            "title": title, "body": body, "ts": getattr(c, "issued_at", None)}
 
 
 class ProvisionError(Exception):
@@ -2175,13 +2199,21 @@ class Provisioner:
                             target=str(price_id), outcome="refused_existing_plan", tx_ref=pending_ref)
                 raise ProvisionDenied(_already_msg)
         from .pending_checkout import PLAN_LINK_SESSION_MIN
+        # A1: a TOP-UP checkout asks the processor to save the card for off-session auto top-ups ONLY when auto top-up
+        # is wired AND this org opted in (its owner-signed auto-top-up settings are enabled). Otherwise the call is
+        # exactly the pre-A1 one (the keyword is not even passed), so the checkout payload is byte-identical and no
+        # card is saved for an org that never asked.
+        create_kw: "dict[str, bool]" = {}
+        if not is_plan and self._auto_topup_opted_in(requester_org_id):
+            create_kw["save_future_payments"] = True
         try:
             sess = provider.create_checkout(requester_org_id, str(price_id or ""), expected=offered,
                                             customer_email=email, redirect_url=return_url, nonce=nonce,
                                             payment_plan=(str(price_id) if is_plan and price_id in offered else None),
                                             # E1b: a plan link must stop being payable before its pending record
                                             # lapses (top-ups pass None: their payload is unchanged)
-                                            session_minutes=(PLAN_LINK_SESSION_MIN if pending_ref else None))
+                                            session_minutes=(PLAN_LINK_SESSION_MIN if pending_ref else None),
+                                            **create_kw)
         except (UnsupportedCapability, ValueError) as exc:
             if pending_ref:
                 # the processor refused: the customer never received a link, so free the claim for a retry
@@ -2194,6 +2226,109 @@ class Provisioner:
                     expires_at=pending_until)
         return {"checkout_url": sess.hosted_link, "tx_ref": sess.tx_ref, "price_id": sess.price_id,
                 "amount_minor": sess.amount_minor, "currency": sess.currency}
+
+    # -- A1 auto top-up (default-OFF: VIGIL_BILLING_AUTO_TOPUP) ----------------------------------------------------
+    def _auto_topup_registry(self, *, signing: bool):
+        """The auto-top-up ledger over this provisioner's spine, under the SAME owner identity as the wallet it arms
+        (in production the persisted owner identity) — so its records and the wallet grants it anchors on verify
+        under one key. A read never holds the private key (``owner_key=None``)."""
+        from ..governor.auto_topup import AutoTopUpRegistry
+        return AutoTopUpRegistry(self.store, owner_key=getattr(self.wallet, "owner_key", None) if signing else None,
+                                 trusted_pubkey=getattr(self.wallet, "trusted_pubkey", None))
+
+    def _auto_topup_opted_in(self, org_id: str) -> bool:
+        """True iff auto top-up is wired (the flag) AND ``org_id``'s owner-signed auto-top-up settings are enabled —
+        the gate on asking the processor to save a card at checkout. Fail-closed: flag off, no settings, or an
+        unreadable ledger → False (no card is saved)."""
+        from .. import config
+        if not config.billing_auto_topup_enabled():
+            return False
+        try:
+            s = self._auto_topup_registry(signing=False).settings(org_id)
+        except Exception:  # noqa: BLE001 — an unreadable ledger never saves a card
+            return False
+        return bool(s is not None and s.enabled)
+
+    def _auto_topup_packs(self) -> "list[dict]":
+        """The packs auto top-up may buy: exactly the OFFERED top-ups (the shared ``_checkout_offered`` set), in CREDITS
+        only — ``{price_id, name, credits}``, never a money amount."""
+        from ..governor import catalog
+        from ..governor.billing import EVENT_TOPUP
+        offered, ents = self._checkout_offered()
+        names = {p.get("price_id"): str(p.get("name") or "") for p in catalog.plans()}
+        return [{"price_id": pid, "name": names.get(pid) or pid, "credits": int(ents[pid].credits)}
+                for pid in sorted(offered) if getattr(ents.get(pid), "kind", None) == EVENT_TOPUP]
+
+    def customer_billing_auto_topup(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                    now: "Optional[float]" = None) -> dict:
+        """A1 — the SESSION org's auto top-up, for the billing page. Gated on the auto-top-up flag (default-OFF → an
+        unknown action, 404), then ``admit_customer(view_billing)``. CREDITS ONLY: the packs list their credits, the
+        receipts their outcome, credits and time; whether a card is saved is a yes/no (the processor's ids never
+        leave the sovereign plane). Reads only: mints nothing, touches no owner key."""
+        from .. import config
+        if not config.billing_auto_topup_enabled():
+            raise ProvisionDenied("auto top-up is not enabled")
+        t = self._now() if now is None else float(now)
+
+        def project(_store, org_id: str) -> dict:
+            reg = self._auto_topup_registry(signing=False)
+            s = reg.settings(org_id)
+            receipts = reg.charges(org_id)[-_AUTO_TOPUP_RECEIPTS:]
+            return {"settings": None if s is None else {
+                        "enabled": s.enabled, "trigger_credits": s.trigger_credits,
+                        "pack_price_id": s.pack_price_id, "monthly_cap_credits": s.monthly_cap_credits},
+                    "card_saved": reg.payment_method(org_id) is not None,
+                    "packs": self._auto_topup_packs(),
+                    "month_credits": reg.month_charged_credits(org_id, t),
+                    "receipts": [{"status": c.status, "credits": c.credits, "at": c.issued_at}
+                                 for c in reversed(receipts)]}
+        return self._customer_read(requester, requester_org_id, "view_billing", project)
+
+    def billing_auto_topup_set(self, requester: str, requester_org_id: str, *, enabled: object,
+                               trigger_credits: object, pack_price_id: object, monthly_cap_credits: object,
+                               ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """A1 — set the SESSION org's auto top-up: on/off, the balance that triggers it, the pack it buys (an OFFERED
+        top-up — the catalog, never the caller, decides its credits and price) and the monthly limit (credits).
+
+        Gated on the flag (default-OFF → 404), then ADMIT-FIRST ``admit_customer(manage_billing)`` (a role that cannot
+        spend money cannot arm an automatic charge), a fresh step-up, and only then does the provisioner OWNER-SIGN
+        the settings record (LWW; a captured record cannot be replayed to lift the limit). Fail-closed: a non-bool
+        ``enabled``, a trigger / limit that is not a whole number of credits in range, a pack that is not an offered
+        top-up, or — when enabling — a monthly limit below one pack is refused. Nothing is charged here: the sweep
+        charges the saved card on the next crossing, and credit is minted only by the verified webhook."""
+        from .. import config
+        from ..governor.auto_topup import check_setting_credits
+        if not config.billing_auto_topup_enabled():
+            raise ProvisionDenied("auto top-up is not enabled")
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_billing"):
+                self._audit("billing_auto_topup", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage billing for this org")
+            self._require_stepup(mfa_at, now=t)
+            if not isinstance(enabled, bool):
+                raise ProvisionDenied("enabled must be true or false")
+            try:
+                trig = check_setting_credits(trigger_credits, "trigger_credits")
+                cap = check_setting_credits(monthly_cap_credits, "monthly_cap_credits")
+            except ValueError as exc:
+                raise ProvisionDenied(str(exc)) from None
+            packs = {p["price_id"]: p["credits"] for p in self._auto_topup_packs()}
+            pack = pack_price_id if isinstance(pack_price_id, str) else ""
+            if pack not in packs:
+                raise ProvisionDenied("pack_price_id must be one of the offered top-up packs")
+            if enabled and cap < packs[pack]:
+                raise ProvisionDenied("the monthly limit must allow at least one pack")
+            try:
+                self._auto_topup_registry(signing=True).set_settings(
+                    requester_org_id, enabled=enabled, trigger_credits=trig, pack_price_id=pack,
+                    monthly_cap_credits=cap, issued_at=self._next_issued())
+            except ValueError as exc:
+                raise ProvisionDenied(f"auto top-up settings refused: {exc}") from None
+            self._audit("billing_auto_topup", requester=requester, org_id=requester_org_id, target=pack,
+                        outcome="enabled" if enabled else "disabled", critical=True)
+        return {"enabled": enabled, "trigger_credits": trig, "pack_price_id": pack, "monthly_cap_credits": cap}
 
     def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
                       ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
@@ -2974,6 +3109,14 @@ class Provisioner:
                 or self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="view_assessments")):
             items.extend(_credit_pause_notices(self.store, requester_org_id, now=t))
+        # 6) A1 AUTO TOP-UP receipts (view_billing) — one notice per owner-signed per-crossing charge record, so
+        #    every automatic charge (and every refused one) reaches the customer exactly once (stable id
+        #    ``auto_topup:<crossing>``). Credits only, never a money amount. Only while auto top-up is wired:
+        #    with the flag off this source contributes nothing (byte-identical).
+        if _cfg.billing_auto_topup_enabled() and self.orgs.admit_customer(
+                username=requester, org_id=requester_org_id, permission="view_billing"):
+            for c in self._auto_topup_registry(signing=False).charges(requester_org_id)[-_AUTO_TOPUP_NOTICES:]:
+                items.append(_auto_topup_notice(c))
 
         # Stable, severity-ranked order; a stable sort keeps within-source order (findings + monitoring are
         # already newest-first). Cap the returned list; ``count`` is the TRUE pre-cap total for the UI badge.

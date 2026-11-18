@@ -606,6 +606,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("members_list")
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
+        if path == "/api/customer/billing/auto-topup" and _auto_topup_on():   # A1 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_auto_topup")
         if path == "/api/customer/launches" and _launch_ui_on():         # C1a (flag OFF -> unknown-route 404)
             return self._customer_read_relay("launch_list")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
@@ -1008,6 +1010,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._monitoring(action, body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
+        if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
+            return self._auto_topup_set(body)
         if action == "onboarding" and _onboarding_on():              # the tour closed (flag OFF -> unknown-action 404)
             return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
@@ -1136,6 +1140,23 @@ class CustomerHandler(BaseHTTPRequestHandler):
         payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "price_id": body.get("price_id", ""),
                                       "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
         c, r = self._provision("billing_checkout", requester, payload)
+        return self._json(r, c)
+
+    def _auto_topup_set(self, body: dict):
+        """A1 — change the session org's auto top-up. REQUESTER + ORG + the step-up stamp from the SERVER-side session,
+        never the body (a body org_id is ignored): a customer can only ever arm THEIR bound org. The body carries only
+        the customer's choices (on/off, trigger, pack, monthly limit), passed verbatim for the provisioner to validate
+        and owner-sign."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "enabled": body.get("enabled"),
+                                      "trigger_credits": body.get("trigger_credits"),
+                                      "pack_price_id": body.get("pack_price_id"),
+                                      "monthly_cap_credits": body.get("monthly_cap_credits"),
+                                      "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_auto_topup_set", requester, payload)
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -1309,6 +1330,11 @@ def _checkout_on() -> bool:
 def _mfa_enroll_hardening_on() -> bool:
     from .. import config as _config
     return _config.customer_mfa_enroll_stepup_enabled()
+
+
+def _auto_topup_on() -> bool:
+    from .. import config as _config
+    return _config.billing_auto_topup_enabled()
 
 
 def _pause_resume_on() -> bool:

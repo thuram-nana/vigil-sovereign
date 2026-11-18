@@ -226,6 +226,7 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/billing_reversal.py",   # W5: owner-signed reversal/arrears ledger (its own literal signal governor.billing_reversal)
     "governor/connected_repos.py",    # Red-Pen R2: owner-signed connected-repo registry (its own literal signal)
     "governor/redpen_spend.py",       # Red-Pen R2: owner-signed per-(repo,month) spend record (its own literal signal)
+    "governor/auto_topup.py",         # A1: owner-signed per-org auto-top-up settings + saved method + charge ledger
     "seam_migrate.py",                # the owner-signed seam-migration audit record (its own signal, no latch)
 })
 
