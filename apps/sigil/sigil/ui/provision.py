@@ -1816,16 +1816,19 @@ class Provisioner:
         processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
         verif-hash secret and the processor key are read from the environment and never logged or returned.
 
-        ``VIGIL_BILLING_PROVIDER`` picks the processor: unset (the DEFAULT) or ``stripe`` is the Stripe provider
-        (:meth:`_stripe_checkout_provider`); ``flutterwave`` is the Flutterwave provider below (retained and
-        selectable, but no longer the default — Flutterwave development is paused); any other value is "not
-        configured" (None) — never a fallback to the other processor, which would take a payment the configured
-        drain does not credit."""
+        The processor is ``config.billing_provider()`` — the one resolver the bare billing drain and tx-refs sweep use
+        too, so checkout and the drain that credits its payments agree by construction: ``"stripe"`` (the DEFAULT,
+        ``VIGIL_BILLING_PROVIDER`` unset) is :meth:`_stripe_checkout_provider`; ``"flutterwave"`` is the Flutterwave
+        provider below (retained and selectable, no longer the default — Flutterwave development is paused); None
+        (any other value) is "not configured" — never a fallback to the other processor, which would take a payment
+        the configured drain does not credit."""
         import os as _os
-        choice = (_os.environ.get("VIGIL_BILLING_PROVIDER") or "").strip().lower()
-        if choice in ("", "stripe"):
+
+        from .. import config
+        kind = config.billing_provider()
+        if kind == "stripe":
             return self._stripe_checkout_provider()
-        if choice != "flutterwave":
+        if kind != "flutterwave":
             return None
         secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
         if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():

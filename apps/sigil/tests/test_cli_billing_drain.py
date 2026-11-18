@@ -1,4 +1,5 @@
-"""`sigil billing-drain` — the CLI verb that drains the inbound Flutterwave billing-webhook spool.
+"""`sigil billing-drain` — the CLI verb that drains the inbound Flutterwave billing-webhook spool (its Flutterwave
+lane: `--provider flutterwave`, as the unit runs it, or a bare drain while VIGIL_BILLING_PROVIDER names flutterwave).
 
 Pins: default-OFF behind VIGIL_BILLING_DRAIN_ENABLED; the verif-hash secret comes ONLY from the env (no argv
 flag exists) and is NEVER printed; fail-closed without a secret or without a server-side transaction verifier;
@@ -24,6 +25,14 @@ from sigil.spine.store import SpineStore
 
 _SECRET = "flw-cli-secret-DO-NOT-PRINT-7f3a"
 _SCHEMA = "vigil.webhook.billing.v1"
+
+
+@pytest.fixture(autouse=True)
+def _flutterwave_lane(monkeypatch):
+    """This file drives the FLUTTERWAVE lane. A bare `billing-drain` takes the processor checkout uses
+    (`config.billing_provider()`: Stripe unless VIGIL_BILLING_PROVIDER names flutterwave), so the selector names it
+    here; the production unit pins `--provider flutterwave` itself, which `_real_drain` runs verbatim."""
+    monkeypatch.setenv("VIGIL_BILLING_PROVIDER", "flutterwave")
 
 
 @pytest.fixture()
@@ -319,7 +328,9 @@ _DUMMY_FLW = "dummy-flw-key"
 
 
 def _real_drain(tmp_path, *, stray_owner: bool, proxy_spool: bool, sigil_home: "Path | None" = None):
-    """`sigil billing-drain drain` in a REAL interpreter, as the unit runs it, after the GO-LIVE §2 move: the
+    """`sigil billing-drain drain --provider flutterwave` in a REAL interpreter, exactly as the unit runs it (its env
+    file names no VIGIL_BILLING_PROVIDER, so checkout's processor is the Stripe default: the pinned flag alone picks
+    this lane), after the GO-LIVE §2 move: the
     cockpit's home is <tmp>/mnt/.sigil (holding the paid webhook the proxy spooled), the drain's env has no
     SIGIL_HOME. ``stray_owner``: an owner-signing command was run once without SIGIL_HOME exported (or a pre-move
     install / a copy-migration left one), so ~/.sigil holds a REAL owner identity. ``proxy_spool``: the drain env
@@ -330,7 +341,7 @@ def _real_drain(tmp_path, *, stray_owner: bool, proxy_spool: bool, sigil_home: "
     user_home.mkdir()
     _spool_charge(moved / "billing-spool", 9911)
     env = {k: v for k, v in os.environ.items() if k not in ("SIGIL_HOME", "SIGIL_SPINE_DIR", "VIGIL_BILLING_SPOOL",
-                                                             "VIGIL_BILLING_WEBHOOK_SPOOL")}
+                                                             "VIGIL_BILLING_WEBHOOK_SPOOL", "VIGIL_BILLING_PROVIDER")}
     env.update(HOME=str(user_home), PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
     if stray_owner:
         subprocess.run([sys.executable, "-c", "from sigil.governor.identity import ensure_owner_keypair; "
@@ -342,7 +353,8 @@ def _real_drain(tmp_path, *, stray_owner: bool, proxy_spool: bool, sigil_home: "
         env["VIGIL_BILLING_WEBHOOK_SPOOL"] = str(moved / "billing-spool")
     if sigil_home is not None:
         env["SIGIL_HOME"] = str(sigil_home)
-    r = subprocess.run([sys.executable, "-c", "from sigil.cli import main; main(['billing-drain', 'drain'])"],
+    r = subprocess.run([sys.executable, "-c",
+                        "from sigil.cli import main; main(['billing-drain', 'drain', '--provider', 'flutterwave'])"],
                        env=env, capture_output=True, text=True, timeout=120)
     return r, user_home, moved
 

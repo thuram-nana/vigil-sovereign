@@ -77,7 +77,7 @@ def test_cmd_billing_drain_refuses_percent_h_spool(capsys, monkeypatch):
     from sigil.cli import cmd_billing_drain
     monkeypatch.setenv("VIGIL_BILLING_DRAIN_ENABLED", "1")
     monkeypatch.setenv("VIGIL_BILLING_WEBHOOK_SECRET", "dummy-test-secret")
-    a = types.SimpleNamespace(spool="%h/.sigil/spool/billing", billing_cmd="drain", interval=2.0)
+    a = types.SimpleNamespace(spool="%h/.sigil/spool/billing", billing_cmd="drain", interval=2.0, provider="flutterwave")
     with pytest.raises(SystemExit) as ei:
         cmd_billing_drain(a)
     assert ei.value.code == 2

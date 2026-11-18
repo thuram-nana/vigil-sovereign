@@ -328,7 +328,7 @@ def test_outbound_secret_never_leaks_through_drain(_home, capsys, monkeypatch):
 
     spool = Path(tempfile.mkdtemp())
     _spool_charge(spool, 9911)
-    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
+    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1, provider="flutterwave"))
     out = capsys.readouterr()
     text = out.out + out.err
     assert "1 minted" in text and _DUMMY not in text and _FLW_HASH not in text

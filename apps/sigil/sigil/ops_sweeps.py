@@ -836,7 +836,7 @@ def _recorded_outcome(fp: Path) -> Optional[dict]:
     return o
 
 
-def _body_tx_ref(body: dict, provider: str = "flutterwave") -> Optional[str]:
+def _body_tx_ref(body: dict, provider: str) -> Optional[str]:
     """The checkout reference a spooled webhook body carries (report-only matching, never a money decision):
     Flutterwave's ``data.tx_ref``; Stripe's ``data.object.client_reference_id``, else ``data.object.metadata.tx_ref``."""
     data = body.get("data")
@@ -868,9 +868,11 @@ def load_checkouts(path: "str | os.PathLike") -> list[dict]:
 
 
 def sweep_dangling_tx_refs(checkouts: list[dict], *, spool_dir: "str | os.PathLike", now: float,
-                           ttl_s: float, provider: str = "flutterwave") -> dict:
+                           ttl_s: float, provider: str) -> dict:
     """REPORT-ONLY: classify each started checkout older than ``ttl_s`` against the billing spool of ``provider``
-    (``flutterwave``, the default, or ``stripe``)."""
+    (``stripe`` or ``flutterwave``). REQUIRED, with no default: the caller names the processor (the CLI passes its
+    ``--provider``, else ``config.billing_provider()``), so a reading can never silently default to one processor's
+    envelope format."""
     if provider not in ("flutterwave", "stripe"):
         raise ValueError(f"unknown billing provider {provider!r}")
     spool = Path(spool_dir)

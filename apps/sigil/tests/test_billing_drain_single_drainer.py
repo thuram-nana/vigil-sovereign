@@ -323,7 +323,7 @@ def cli_rig(tmp_path, monkeypatch):
     (spool / "incoming" / "1.json").write_text("{}", encoding="utf-8")
     return SimpleNamespace(cli=cli, spool=spool,
                            run=lambda: cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool),
-                                                                             interval=0.1)))
+                                                                             interval=0.1, provider="flutterwave")))
 
 
 def test_the_cli_pass_that_cannot_get_the_lock_fails_loudly_and_touches_nothing(cli_rig, capsys):
@@ -357,5 +357,6 @@ def test_the_cli_watch_warns_on_the_same_bound_as_the_cli_lock_wait(cli_rig, mon
     from sigil.inbound.billing_spool import BillingSpoolWatcher
     seen: dict = {}
     monkeypatch.setattr(BillingSpoolWatcher, "watch", lambda self, **kw: seen.update(kw))
-    cli_rig.cli.cmd_billing_drain(SimpleNamespace(billing_cmd="watch", spool=str(cli_rig.spool), interval=0.5))
+    cli_rig.cli.cmd_billing_drain(SimpleNamespace(billing_cmd="watch", spool=str(cli_rig.spool), interval=0.5,
+                                                  provider="flutterwave"))
     assert seen == {"interval": 0.5, "busy_warn_s": 0.3}           # cli_rig pins _BILLING_LOCK_WAIT_S = 0.3

@@ -3,8 +3,9 @@
 Pins: every fail-closed refusal (exit 2, env names only, never a secret); a proxy-format Stripe envelope drains
 through the re-fetch to exactly one owner-catalog mint; the HMAC is re-verified at the envelope's receive time (a
 20-minute-old delivery still mints, a future one is quarantined); a transient fetch failure parks under NET-2b; a
-404 quarantines; each lane quarantines the other lane's envelopes; and the default lane is the Flutterwave one,
-untouched by any VIGIL_STRIPE_* setting.
+404 quarantines; each lane quarantines the other lane's envelopes; and the Flutterwave lane (a bare drain under the
+flutterwave selector, or the unit's pinned --provider flutterwave) is untouched by any VIGIL_STRIPE_* setting. Which
+lane a BARE drain takes — the processor checkout uses — is pinned in test_billing_provider_agreement.py.
 """
 from __future__ import annotations
 
@@ -214,8 +215,16 @@ def test_each_lane_quarantines_the_other_lanes_envelopes(home, capsys, monkeypat
     assert WalletRegistry(SpineStore(home)).available("acme") == 0
 
 
-def test_the_default_lane_is_flutterwave_and_reads_no_stripe_setting(home, capsys, monkeypatch):
+@pytest.mark.parametrize("selector, flag", [("flutterwave", []), (None, ["--provider", "flutterwave"])],
+                         ids=["bare-under-the-flutterwave-selector", "pinned-flag-under-the-stripe-default"])
+def test_the_flutterwave_lane_reads_no_stripe_setting(home, capsys, monkeypatch, selector, flag):
+    """The Flutterwave lane — a bare drain while VIGIL_BILLING_PROVIDER names flutterwave, or the unit's pinned
+    `--provider flutterwave` while checkout is on the Stripe default — never reads a VIGIL_STRIPE_* setting."""
     from sigil.governor import billing
+    if selector is None:
+        monkeypatch.delenv("VIGIL_BILLING_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("VIGIL_BILLING_PROVIDER", selector)
     monkeypatch.setenv("VIGIL_STRIPE_SECRET_KEY", "garbage")
     monkeypatch.setenv("VIGIL_STRIPE_API_VERSION", "garbage")
     monkeypatch.setenv("VIGIL_STRIPE_BILLING_DRAIN_ENABLED", "0")
@@ -227,7 +236,7 @@ def test_the_default_lane_is_flutterwave_and_reads_no_stripe_setting(home, capsy
     real = billing.FlutterwaveBillingProvider
     monkeypatch.setattr(billing, "FlutterwaveBillingProvider", lambda *a, **k: built.append(1) or real(*a, **k))
     spool = Path(tempfile.mkdtemp())
-    cli.main(["billing-drain", "drain", "--spool", str(spool)])
+    cli.main(["billing-drain", "drain", *flag, "--spool", str(spool)])
     assert built == [1] and "0 minted" in capsys.readouterr().out
 
 

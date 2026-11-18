@@ -182,7 +182,7 @@ def test_billing_drain_builds_its_signer_from_the_mintable_catalog(monkeypatch, 
     monkeypatch.setattr(BillingSigner, "__init__", _spy_init)
     spool = tmp_path / "spool"
     (spool / "incoming").mkdir(parents=True)
-    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1))
+    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1, provider="flutterwave"))
     assert seen["catalog"] == cat.mintable_entitlements()
     assert seen["expected"] == cat.mintable_expected()
     assert _monitoring_price() in seen["catalog"]

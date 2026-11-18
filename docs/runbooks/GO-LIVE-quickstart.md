@@ -362,7 +362,7 @@ secret manager at the cockpit/provisioner only (never the repo, never a plaintex
 # In the cockpit env, with the secret injected by your secret manager:
 export VIGIL_BILLING_DRAIN_ENABLED=1
 export VIGIL_BILLING_WEBHOOK_SECRET=…        # from the secret manager, NOT committed
-sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
+sigil billing-drain watch --provider flutterwave --spool "$SIGIL_HOME/billing-spool" --interval 2
 ```
 
 To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
@@ -417,7 +417,9 @@ nothing has credited. The drain records what each webhook it archives did (`<spo
 `processed/`), and a checkout is left out only when a webhook for it minted; the others are reported as `noop`
 (archived without crediting anything — the row names why, e.g. `underpaid_or_currency`, `unknown_price`),
 `processed_unrecorded` (archived before outcomes were recorded), `quarantined`, `retrying` or `no_webhook`. The
-same applies to the Flutterwave spool (without `--provider`). Webhook-driven cancellation is not acted on: a cancelled plan expires at
+same applies to the Flutterwave spool (with `--provider flutterwave`). Without `--provider`, the drain and this
+sweep both take the processor checkout uses (`VIGIL_BILLING_PROVIDER`: Stripe unless it names flutterwave), and an
+unknown value refuses. Webhook-driven cancellation is not acted on: a cancelled plan expires at
 the end of its paid period, as with Flutterwave.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

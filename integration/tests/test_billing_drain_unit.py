@@ -27,7 +27,30 @@ def test_runs_one_drain_pass_of_the_billing_spool():
     d = _directives(_UNIT)
     assert "Type=oneshot" in d and not any(ln.startswith("Restart=") for ln in d)
     exec_start = [ln for ln in d if ln.startswith("ExecStart=")]
-    assert exec_start == ["ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain"]
+    assert exec_start == ["ExecStart=%h/.sigil/venv/bin/sigil billing-drain drain --provider flutterwave"]
+
+
+def _named_provider(command: str) -> "str | None":
+    """The value of ``--provider`` in a ``sigil billing-drain`` command line (None when it names none)."""
+    argv = shlex.split(command)
+    return argv[argv.index("--provider") + 1] if "--provider" in argv[:-1] else None
+
+
+@pytest.mark.parametrize("unit, provider", [("vigil-billing-drain.service", "flutterwave"),
+                                            ("vigil-billing-drain-stripe.service", "stripe")])
+def test_each_billing_drain_unit_names_its_processor_and_doctor_names_the_same(unit, provider):
+    """A bare `sigil billing-drain` drains the processor CHECKOUT uses (config.billing_provider(): Stripe unless
+    VIGIL_BILLING_PROVIDER names flutterwave), so a unit that relied on that default would follow checkout off its
+    own spool (the Flutterwave unit on a Stripe-default install would drain the Stripe lane, and a Flutterwave plan's
+    renewal would be taken and never credited). Each unit therefore names its processor explicitly — and the re-run
+    hint `vigil doctor` prints for it ("the unit runs ...") names the same one, so an operator copying it drains the
+    same spool as the unit."""
+    from vigil_integration import doctor
+    starts = [ln for ln in _directives(_SYS / unit) if ln.startswith("ExecStart=")]
+    assert len(starts) == 1, starts
+    assert _named_provider(starts[0].split("=", 1)[1]) == provider
+    _journal, rerun, _timer = doctor._BILLING_DRAIN_UNITS[unit]
+    assert _named_provider(rerun) == provider
 
 
 def test_the_unit_names_no_spool_so_the_drain_derives_it_from_sigil_home():

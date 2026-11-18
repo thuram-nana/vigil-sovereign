@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 
-from .config import ensure_dirs
+from .config import BILLING_PROVIDERS, ensure_dirs
 from .ingest import cursor as cur
 from .ingest.corpus import real_projects, session_files
 from .ingest.docs import ingest_docs
@@ -2011,9 +2011,9 @@ def cmd_ops_sweep(a) -> None:
         if not a.checkouts or not a.spool:
             print("tx-refs requires --checkouts and --spool", file=sys.stderr)
             sys.exit(2)
+        provider = _billing_lane(a, "ops-sweep tx-refs")   # before any work: an unknown selector refuses (exit 2)
         out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(a.checkouts), spool_dir=a.spool,
-                                                now=now, ttl_s=a.ttl,
-                                                provider=getattr(a, "provider", "flutterwave"))
+                                                now=now, ttl_s=a.ttl, provider=provider)
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
@@ -2168,6 +2168,23 @@ _BILLING_LANES = {
 }
 
 
+def _billing_lane(a, verb: str) -> str:
+    """The processor lane of a money-IN ``billing-drain`` pass or an ``ops-sweep tx-refs`` report. An explicit
+    ``--provider`` names its lane: each drain unit pins its own processor's spool (a renewal of a plan sold through
+    Flutterwave must still be drained and credited after checkout moves to Stripe). Without one — a bare command,
+    whose argparse default is None — the lane is ``config.billing_provider()``, the resolver checkout uses, so a bare
+    drain or sweep follows checkout and never reconciles one processor's spool while checkout takes payments on the
+    other. An unknown ``VIGIL_BILLING_PROVIDER`` refuses (exit 2): never a fall-back to either processor."""
+    from . import config
+    lane = getattr(a, "provider", None) or config.billing_provider()
+    if lane is None:
+        print(f"{verb}: VIGIL_BILLING_PROVIDER names no known payment processor (stripe, the default, or "
+              f"flutterwave) and no --provider was given — refusing (fail-closed: never a fall-back to either "
+              f"processor)", file=sys.stderr)
+        sys.exit(2)
+    return lane
+
+
 def _resolve_billing_spool(arg: "str | None", lane: str = "flutterwave") -> str:
     """The ONE place the money-IN drain decides WHICH spool it drains, so it cannot run "healthy" on a directory
     the proxy never writes to (a paid webhook spooled, never credited, the unit exiting 0).
@@ -2310,11 +2327,14 @@ def cmd_billing_drain(a) -> None:
     ``FlutterwaveBillingProvider`` (verif-hash + MANDATORY server-side transaction re-verify) -> the OWNER
     CATALOG decides the entitlement -> one owner-signed mint. Default-OFF (``VIGIL_BILLING_DRAIN_ENABLED=1``)
     and fail-closed: the verif-hash secret comes ONLY from ``VIGIL_BILLING_WEBHOOK_SECRET`` (never argv, never
-    printed) and the drain refuses to run without a server-side transaction verifier. ``--provider stripe`` drains
-    the Stripe spool instead (``_stripe_billing_watcher``); the default Flutterwave lane is unchanged."""
+    printed) and the drain refuses to run without a server-side transaction verifier. The STRIPE lane drains the
+    Stripe spool instead (``_stripe_billing_watcher``). WHICH lane is ``_billing_lane``: an explicit ``--provider``,
+    else the processor checkout uses (``config.billing_provider()`` — Stripe unless VIGIL_BILLING_PROVIDER names
+    flutterwave), so a bare drain on a Stripe-default install runs the Stripe lane, which needs its ``--spool`` and
+    refuses without it; it never drains the Flutterwave spool. The Flutterwave unit pins ``--provider flutterwave``."""
     import os
 
-    if getattr(a, "provider", "flutterwave") == "stripe":
+    if _billing_lane(a, "billing-drain") == "stripe":
         _run_billing_watcher(a, _stripe_billing_watcher(a))
         return
     if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
@@ -4186,22 +4206,26 @@ def main(argv=None) -> None:
                      "a checkout is reported unless a drained webhook for it minted (statuses: noop, "
                      "processed_unrecorded, quarantined, retrying, no_webhook)")
     pos.add_argument("--spool", default="", help="(tx-refs) the billing webhook spool directory")
-    pos.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
-                     help="(tx-refs) which processor's webhook spool --spool is")
+    pos.add_argument("--provider", choices=BILLING_PROVIDERS, default=None,
+                     help="(tx-refs) which processor's webhook spool --spool is (default: the processor checkout "
+                          "uses, VIGIL_BILLING_PROVIDER — stripe unless it names flutterwave)")
     pos.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
     pos.set_defaults(fn=cmd_ops_sweep)
     pbd = sub.add_parser("billing-drain",
-                         help="drain/watch the inbound Flutterwave billing-webhook spool → server-side "
-                              "re-verify → owner-catalog mint (default-OFF: VIGIL_BILLING_DRAIN_ENABLED=1; "
-                              "secret from VIGIL_BILLING_WEBHOOK_SECRET only; fail-closed)")
+                         help="drain/watch an inbound billing-webhook spool → server-side re-verify → owner-catalog "
+                              "mint; --provider names the processor (default: the one checkout uses, "
+                              "VIGIL_BILLING_PROVIDER — stripe unless it names flutterwave); each lane is default-OFF "
+                              "and fail-closed")
     pbd.add_argument("billing_cmd", choices=["drain", "watch"], nargs="?", default="drain")
     pbd.add_argument("--spool", default="",
-                     help="the billing spool directory (its incoming/ is drained). Default: $VIGIL_BILLING_SPOOL, "
-                          "else the proxy's $VIGIL_BILLING_WEBHOOK_SPOOL, else $SIGIL_HOME/billing-spool "
-                          "(--provider stripe: required, its own Stripe spool)")
+                     help="the billing spool directory (its incoming/ is drained). Flutterwave lane default: "
+                          "$VIGIL_BILLING_SPOOL, else the proxy's $VIGIL_BILLING_WEBHOOK_SPOOL, else "
+                          "$SIGIL_HOME/billing-spool. Stripe lane: required, its own Stripe spool")
     pbd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
-    pbd.add_argument("--provider", choices=["flutterwave", "stripe"], default="flutterwave",
-                     help="which provider's spool this drains (stripe: default-OFF, VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
+    pbd.add_argument("--provider", choices=BILLING_PROVIDERS, default=None,
+                     help="which processor's spool this drains (default: the one checkout uses, "
+                          "VIGIL_BILLING_PROVIDER — stripe unless it names flutterwave; flutterwave: "
+                          "VIGIL_BILLING_DRAIN_ENABLED=1; stripe: VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
     pbd.set_defaults(fn=cmd_billing_drain)
     ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "
                                           "owner-signed account mode an enterprise tenant draws against in "
