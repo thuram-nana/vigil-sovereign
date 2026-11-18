@@ -585,6 +585,7 @@ jobs:
               integration/tests/test_redpen_reproduce.py \
               integration/tests/test_redpen_fix.py \
               integration/tests/test_redpen_retest.py \
+              integration/tests/test_retest_reproof.py \
               integration/tests/test_redpen_webhook_drain.py \
               integration/tests/test_redpen_review_worker_e2e.py \
               integration/tests/test_general_reexecutable.py \

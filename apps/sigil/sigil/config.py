@@ -417,6 +417,19 @@ def customer_retest_ui_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_retest_reproof_enabled() -> bool:
+    """True iff a customer retest runs the REAL cross-plane LIVE re-proof (`VIGIL_CUSTOMER_RETEST_REPROOF`
+    affirmative; C1b completion). Requires `customer_retest_ui_enabled` too (the UI flag gates the action; this
+    flag gates whether its re-verifier sends live traffic). When ON, ``provision.retest`` reserves an owner-signed
+    credit-launch lease for the one finding, publishes an owner-signed re-proof ticket to the ``retest-reproof``
+    seam, bounded-waits the keyless offense worker's inert outcome, and settles the lease (a model-free re-fire
+    refunds in full). When OFF (default), the re-verifier is the fail-closed stub (``_retest_reverify`` ->
+    ``"unavailable"``): the retest action still exists but honestly refuses as "not available", sending NO traffic
+    and reserving NO credit — byte-identical to the merged C1b UI/authz slice. Default-OFF so turning the retest
+    UI on never silently starts sending live offense traffic; the live re-proof is a separate, explicit opt-in."""
+    return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account

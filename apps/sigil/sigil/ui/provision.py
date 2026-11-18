@@ -43,7 +43,7 @@ import hashlib
 import math
 import secrets
 import time
-from typing import Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -148,26 +148,93 @@ def _credit_pause_notices(store, org_id: str, *, now: float) -> "list[dict]":
         return []
 
 
-def _retest_reverify(ctx: "dict") -> str:
-    """C1b — the SEAM that re-fires ONE finding's retained proof against the customer's live host and returns a
-    verdict: ``"cleared"`` (the proof DECISIVELY no longer works → the finding is marked fixed), ``"still_present"``
-    (the proof still fires → Still-Vulnerable), or ``"inconclusive"``/``"unavailable"`` (nothing is concluded →
-    the retest refuses, and the finding is NEVER marked fixed). ``ctx`` carries only inert identity
-    (``host``/``engagement_slug``/``finding_ref``/``bug_class``/``oracle_context_digest``) — no secret, no key.
+#: C1b — the sovereign bounded-wait for the keyless offense worker's re-proof outcome. A single-finding re-fire
+#: is short; this caps how long ``retest`` blocks before refusing honestly as "not available" (the offense drain
+#: must be running in production). Tests override via ``retest(_reproof_wait=(timeout, poll))``.
+_RETEST_REPROOF_WAIT_S = 45.0
+_RETEST_REPROOF_POLL_S = 0.25
 
-    FAIL-CLOSED DEFAULT. Re-collecting fresh evidence from a LIVE host is OFFENSE-plane work (a real re-proof —
-    ``remediation.prove_remediation``'s four-state REMEDIATED/STILL_VULNERABLE/INCONCLUSIVE/REFUSED), and the
-    sovereign plane must never import the engine (FATAL-2). So this default returns ``"unavailable"``: with the UI
-    flag on but no re-proof wired, a retest refuses honestly ("not available right now") and sends no traffic,
-    rather than ever guessing a fix. The real re-proof is wired by replacing this module-level seam
-    (``sigil.ui.provision._retest_reverify``) or by passing ``reverify=`` to :meth:`Provisioner.retest`; the
-    authorization, tenant binding, fail-closed mapping and the hash-chained verdict record around it are unchanged.
-    What that wiring must do (none of it is built here): reach the offense plane only through a cross-plane seam
-    (never an import); run the re-proof under a LaunchGate lease so the model gateway meters what it uses to the
-    org's wallet like any run (§11.4 I1/I9 — this seam reserves nothing, so an unmetered wiring would be free
-    traffic); and map only a DECISIVE REMEDIATED to ``cleared`` (STILL_VULNERABLE→``still_present``,
-    INCONCLUSIVE/REFUSED→``inconclusive``)."""
-    return "unavailable"
+
+def _retest_reproof_dir(base: "Any", subdir: str) -> "Any":
+    """One cross-plane retest seam directory under the shared seam base — through the ONE resolver every plane
+    uses (``vigil_core.seam_base``), so the cockpit and the keyless offense worker meet in the same tree."""
+    from pathlib import Path
+
+    from vigil_core.seam_base import resolve_seam_base
+    return Path(resolve_seam_base(base)) / subdir
+
+
+def _write_retest_ticket(base: "Any", ticket: "dict") -> None:
+    """Publish one owner-signed re-proof TICKET to the ``retest-reproof`` seam (atomic rename), keyed by its
+    nonce. The offense trigger reads it, re-fires THAT finding's proof against the verified host under the
+    ticket-carried lease, and writes an inert outcome back. FATAL-2: the sovereign only drops the ticket on the
+    seam — it never runs the engine."""
+    import json as _json
+
+    from vigil_core.retest_reproof import RETEST_REPROOF_SEAM_SUBDIR
+    seam = _retest_reproof_dir(base, RETEST_REPROOF_SEAM_SUBDIR)
+    seam.mkdir(parents=True, exist_ok=True)
+    nonce = str(ticket.get("nonce") or "")
+    tmp = seam / f".{nonce}.tmp"
+    tmp.write_text(_json.dumps(ticket), encoding="utf-8")
+    import os as _os
+    _os.replace(tmp, seam / f"{nonce}.json")
+
+
+def _read_retest_outcome(base: "Any", want: "Any", *, timeout: float, poll: float) -> str:
+    """Bounded-wait the ``retest-outcomes`` seam for the offense worker's inert outcome for ``want`` =
+    ``(slug, finding_ref, oracle_context_digest, nonce)`` and return its verdict token, or ``"unavailable"`` on
+    timeout / a missing / malformed / mis-identified outcome. The outcome's identity MUST match the ticket this
+    retest issued (slug + finding_ref + digest + nonce) — a stray or forged outcome for another finding is
+    ignored — so a verdict can only ever drive the mapping of the exact finding whose proof was re-fired. Reads
+    only (no key); the verdict is MAPPED by the caller (the sovereign is the sole authority on the mapping)."""
+    import json as _json
+    import time as _time
+
+    from vigil_core.retest_reproof import RETEST_OUTCOME_SEAM_SUBDIR, ticket_identity
+    if not (isinstance(want, (tuple, list)) and len(want) == 4):
+        return "unavailable"                        # a malformed re-proof context never confirms a fix
+    want = tuple(want)
+    seam = _retest_reproof_dir(base, RETEST_OUTCOME_SEAM_SUBDIR)
+    path = seam / f"{str(want[3])}.json"
+    deadline = _time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            outcome = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            outcome = None
+        if isinstance(outcome, dict) and ticket_identity(outcome) == tuple(want):
+            v = outcome.get("verdict")
+            return v if isinstance(v, str) else "unavailable"
+        if _time.monotonic() >= deadline:
+            return "unavailable"
+        _time.sleep(max(0.0, float(poll)))
+
+
+def _retest_reverify(ctx: "dict") -> str:
+    """C1b — the SEAM that produces ONE finding's live re-proof verdict: ``"cleared"`` (the proof DECISIVELY no
+    longer works → the finding is marked fixed), ``"still_present"`` (the proof still fires → Still-Vulnerable),
+    or ``"inconclusive"``/``"unavailable"`` (nothing is concluded → the retest refuses, and the finding is NEVER
+    marked fixed). ``ctx`` carries inert identity (``host``/``engagement_slug``/``finding_ref``/``bug_class``/
+    ``oracle_context_digest``) — no secret, no key — plus, on the REAL path, a ``_reproof`` sub-context the
+    sovereign :meth:`Provisioner.retest` added (the seam base + the ticket nonce + the bounded-wait budget) after
+    it reserved the lease and published the ticket.
+
+    FAIL-CLOSED. Re-collecting fresh evidence from a LIVE host is OFFENSE-plane work, and the sovereign plane must
+    never import the engine (FATAL-2). So this seam NEVER runs the engine: on the real path (``_reproof`` present)
+    it bounded-waits the ``retest-outcomes`` seam for the keyless offense worker's inert outcome
+    (``_read_retest_outcome`` — only an outcome whose identity matches the issued ticket counts) and returns its
+    verdict; absent the ``_reproof`` context (the re-proof flag off, or this seam called bare) it returns
+    ``"unavailable"`` — a retest then refuses honestly ("not available right now"), sends no traffic and reserves
+    no credit, rather than ever guessing a fix. A caller may still inject its own ``reverify=`` into
+    :meth:`Provisioner.retest`; the authorization, tenant binding, fail-closed mapping and the hash-chained
+    verdict record around this seam are unchanged, and the sovereign remains the sole authority on the mapping."""
+    rp = ctx.get("_reproof") if isinstance(ctx, dict) else None
+    if not isinstance(rp, dict):
+        return "unavailable"
+    return _read_retest_outcome(rp.get("base"), rp.get("want"),
+                                timeout=rp.get("timeout", 0.0), poll=rp.get("poll", 0.0))
+
 # A1 auto top-up: the newest receipts the billing read returns, and the newest per-charge notices the notification
 # centre carries (each with the stable id ``auto_topup:<crossing>``, so a viewer sees each receipt once).
 _AUTO_TOPUP_RECEIPTS = 20
@@ -2538,7 +2605,8 @@ class Provisioner:
 
     def retest(self, requester: str, requester_org_id: str, finding_ref: str, *, engagement_slug: str = "",
                oracle_context_digest: str = "", ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None,
-               reverify=None) -> dict:
+               reverify=None, _drive_reproof: "Optional[Callable[[Any], None]]" = None,
+               _reproof_wait: "Optional[tuple[float, float]]" = None) -> dict:
         """C1b — RETEST one of the session org's findings: re-run THAT finding's proof against the customer's
         verified host and mark it FIXED only when the proof stops working, else Still-Vulnerable. Behind
         ``customer_retest_ui_enabled`` (default OFF → the edge/cockpit action is a 404 unknown-action, and this
@@ -2604,16 +2672,27 @@ class Provisioner:
                 self._audit("retest", requester=requester, org_id=requester_org_id, target=host, outcome="denied")
                 raise ProvisionDenied(str(auth.get("error") or "retest authorization refused"))
             self._require_stepup(mfa_at, now=t)      # E3c: AFTER authority (no-op unless enforcement is on)
-        # 4) RE-FIRE the retained proof (confirm-by-re-execution). The seam is injected; the default fails closed.
-        rv = reverify if reverify is not None else _retest_reverify
-        try:
-            raw = rv({"host": host, "engagement_slug": slug, "finding_ref": ref,
-                      "bug_class": finding.get("bug_class"), "oracle_context_digest": digest})
-        except Exception as e:  # noqa: BLE001 — a re-proof that did not complete never green-lights a fix
-            self._audit("retest", requester=requester, org_id=requester_org_id, target=host,
-                        outcome="error", critical=True)
-            raise ProvisionDenied("could not confirm the fix: the retest did not complete; the finding is "
-                                  "unchanged") from e
+        # 4) RE-FIRE the retained proof (confirm-by-re-execution). An injected ``reverify`` is used verbatim (a
+        #    custom seam / tests); else, with the live re-proof flag on, the REAL cross-plane path reserves a lease,
+        #    publishes the ticket, bounded-waits the keyless offense worker's outcome and settles (full refund); off,
+        #    the fail-closed stub returns "unavailable". The default seam NEVER runs the engine (FATAL-2).
+        from .. import config
+        ctx = {"host": host, "engagement_slug": slug, "finding_ref": ref,
+               "bug_class": finding.get("bug_class"), "oracle_context_digest": digest}
+        if reverify is None and config.customer_retest_reproof_enabled():
+            # A reserve refusal (e.g. too few credits, a lapsed latch) is surfaced as itself (it raises
+            # ProvisionDenied); a completed-but-inconclusive re-proof falls through to the mapping below.
+            raw = self._retest_reproof(ctx, requester=requester, org_id=requester_org_id, host=host, slug=slug,
+                                       now=t, drive=_drive_reproof, wait=_reproof_wait)
+        else:
+            rv = reverify if reverify is not None else _retest_reverify
+            try:
+                raw = rv(ctx)
+            except Exception as e:  # noqa: BLE001 — a re-proof that did not complete never green-lights a fix
+                self._audit("retest", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="error", critical=True)
+                raise ProvisionDenied("could not confirm the fix: the retest did not complete; the finding is "
+                                      "unchanged") from e
         # 5) MAP (fixed ONLY on the EXACT token "cleared" — no case-folding, no str() of an object) + RECORD + return.
         verdict = raw if isinstance(raw, str) else ""
         if verdict == "cleared":
@@ -2633,6 +2712,58 @@ class Provisioner:
         self._audit("retest", requester=requester, org_id=requester_org_id, target=host,
                     outcome=status, critical=True)
         return {"finding_ref": ref, "host": host, "status": status}
+
+    def _retest_reproof(self, ctx: dict, *, requester: str, org_id: str, host: str, slug: str, now: float,
+                        drive: "Optional[Callable[[Any], None]]" = None,
+                        wait: "Optional[tuple[float, float]]" = None) -> str:
+        """C1b — the REAL cross-plane LIVE re-proof (behind ``customer_retest_reproof_enabled``): reserve an
+        owner-signed lease for THIS finding, publish an owner-signed re-proof TICKET to the ``retest-reproof``
+        seam, bounded-wait the keyless offense worker's inert OUTCOME, and SETTLE the lease. Returns the raw
+        verdict token (``cleared`` / ``still_present`` / ``inconclusive`` / ``unavailable``) for
+        :meth:`retest`'s mapping — the sovereign stays the sole authority on that mapping. Raises
+        ``ProvisionDenied`` on a RESERVE refusal (surfaced as itself — a credit / latch refusal is never masked
+        as "could not confirm").
+
+        FATAL-2: the sovereign only reserves (holds the owner key), publishes the ticket and reads the outcome —
+        it NEVER runs the engine. METERING: the lease is settled to ZERO consumption (a full refund) whatever the
+        verdict or a bounded-wait timeout — a single-finding re-fire is DETERMINISTIC and MODEL-FREE (no gateway
+        spend), so a retest never charges the customer, but it is never an unmetered / unbounded offense run (it
+        always holds the reserved, owner-signed, tenant-bound lease the offense worker re-verifies before any
+        traffic). ``drive`` is an offline-test seam the harness uses to run the offense worker inline after the
+        ticket is published (production relies on the real offense drain); ``wait`` overrides the bounded-wait."""
+        from vigil_core.retest_reproof import retest_reproof_ticket
+        from vigil_core.seam_base import resolve_seam_base
+
+        from .launch_gate import LaunchGate
+        gate = LaunchGate(self.store)
+        res = gate.reserve_retest(requester=requester, org_id=org_id, host=host, now=now)
+        if not res.get("ok"):
+            self._audit("retest", requester=requester, org_id=org_id, target=host, outcome="denied")
+            raise ProvisionDenied(str(res.get("error") or "retest reservation refused"))
+        signed_lease = res["lease"]
+        nonce = str(res["nonce"])
+        base = resolve_seam_base(None)
+        ref = str(ctx.get("finding_ref") or "")
+        digest = str(ctx.get("oracle_context_digest") or "")
+        ticket = retest_reproof_ticket(slug=slug, host=host, org_id=org_id, finding_ref=ref, nonce=nonce,
+                                       lease=signed_lease, oracle_context_digest=digest,
+                                       bug_class=str(ctx.get("bug_class") or ""))
+        timeout, poll = wait if wait is not None else (_RETEST_REPROOF_WAIT_S, _RETEST_REPROOF_POLL_S)
+        try:
+            _write_retest_ticket(base, ticket)
+            if drive is not None:
+                drive(base)                         # TEST seam: run the offense worker inline (prod: the drain)
+            want = (slug, ref, digest, nonce)
+            return _retest_reverify({**ctx, "_reproof": {"base": base, "want": want,
+                                                         "timeout": timeout, "poll": poll}})
+        finally:
+            # Settle to ZERO consumption: a FULL refund of the reservation, whatever happened — a model-free
+            # re-fire spends nothing, and a bounded-wait timeout must never strand the held credits. Idempotent
+            # per the lease's (slug, nonce); a settle hiccup never turns a completed re-proof into a crash.
+            try:
+                gate.settle_launch(signed_lease=signed_lease, consumed_units=0, now=now, expect_org_id=org_id)
+            except Exception:  # noqa: BLE001 — the lease window is tight; a re-settle is idempotent
+                pass
 
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
     def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
