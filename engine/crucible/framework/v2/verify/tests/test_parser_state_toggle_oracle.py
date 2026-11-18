@@ -198,3 +198,21 @@ def test_the_error_observed_path_is_unchanged_for_sql():
     ctx = {"bug_class": "error_based_sqli",
            "error_observed": "You have an error in your SQL syntax; check the manual", "error_control": "ok"}
     assert OracleVerifier().confirm(ctx).confirmed
+
+
+def test_a_model_dumped_plain_error_signature_context_still_refires_error_signature():
+    """REGRESSION (the ebsqli-1 witness-quorum drop): a PLAIN error_based finding serialized via
+    FindingContext.model_dump carries parser_state_toggle as a NULL field. The ERROR_SIGNATURE dispatch must
+    route to the toggle on `is not None`, NOT a bare `in ctx` key check, or the null hijacks an ordinary
+    error_based context onto the 3-leg toggle path and error_signature stops re-firing (dropping the quorum
+    from 2 kinds to 1). Pins that the serialized null is present AND that error_signature still re-fires."""
+    from framework.v2.verify.adapter import FindingContext
+    dumped = FindingContext(
+        bug_class="error_based_sqli",
+        error_observed="You have an error in your SQL syntax; check the manual").model_dump(mode="json")
+    assert "parser_state_toggle" in dumped and dumped["parser_state_toggle"] is None, (
+        "the regression precondition: model_dump must emit parser_state_toggle as a null field")
+    res = OracleVerifier().confirm(dumped)
+    assert res.confirmed
+    assert any(s.kind is OracleKind.ERROR_SIGNATURE and s.fired for s in res.signals), (
+        "error_signature must re-fire for a plain error_based context despite the null parser_state_toggle")

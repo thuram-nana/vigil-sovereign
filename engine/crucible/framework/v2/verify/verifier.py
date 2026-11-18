@@ -1627,7 +1627,12 @@ class OracleVerifier:
             #    inert on the gate path (byte-identical) and oracle_version(ERROR_SIGNATURE) is untouched; an
             #    ordinary error_signature finding (error_observed) is handled by the arm below. Proves a
             #    GENUINE query break, never mere CONDITIONAL emission of an error-shaped string.
-            if "parser_state_toggle" in ctx:
+            #    PRECISE routing (`is not None`, NOT `in ctx`): a plain error_signature context serialized via
+            #    FindingContext.model_dump carries EVERY optional field as null, including `parser_state_toggle`,
+            #    so a bare `in ctx` would hijack an ordinary error_based finding onto the toggle path (which
+            #    needs the 3-leg record) and stop error_signature re-firing — the ebsqli-1 witness-quorum
+            #    regression. None ⇒ absent ⇒ fall through to error_observed exactly as before (byte-identical).
+            if ctx.get("parser_state_toggle") is not None:
                 return oracles.parser_state_toggle_oracle(ctx["parser_state_toggle"])
             if "error_observed" in ctx:
                 return oracles.error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
