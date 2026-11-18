@@ -160,6 +160,7 @@ def _lock_held_elsewhere(path: Optional[Path] = None) -> bool:
 def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
     """One cached read per cached fold, each through the registry's public read path or its `_cached` hook, under
     the persisted owner identity (exactly the registries the request paths construct)."""
+    from ..inbound import monitoring_spool
     from ..ui import assessments, margin
     from . import (accounts, asset_ownership, billing_reversal, budget, capability, cost_ledger,
                    customer_credentials, customers, invoices, killswitch, metering, monitoring_authority,
@@ -198,6 +199,7 @@ def _warmers(store) -> "list[tuple[str, Callable[[], Any]]]":
                                                                   .strftime("%Y-%m-%d"))),
         ("assessments", lambda: assessments._indexed(store, "findings", ())),
         ("margin settles", lambda: margin._settle_events(store, owner_pubkey())),
+        ("monitoring events", lambda: monitoring_spool._monitoring_cached(store, lambda v: None)),
     ]
 
 

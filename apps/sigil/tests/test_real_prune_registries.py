@@ -70,6 +70,7 @@ from sigil.governor import postpaid as pp
 from sigil.governor import promotion as pr
 from sigil.governor import subscription as sb
 from sigil.governor import wallet as wl
+from sigil.inbound import monitoring_spool as mon
 from sigil.spine import fold_cache, prune
 from sigil.spine.snapshot import SnapshotError, SnapshotState
 from sigil.spine.store import SpineStore
@@ -972,6 +973,47 @@ def _ui_margin() -> Scenario:
         latest=ops["latest"])
 
 
+def _mon(org: str, i: int, *, host: str = "h.example.com", decision: str = "confirmed",
+         report_id: Optional[str] = None) -> Callable:
+    rid = report_id if report_id is not None else f"{org}-r{i}"
+    return lambda R: R.store.append(
+        kind="event", source="aegis", actor="AEGIS",
+        payload={"signal": mon.EVENT_SIGNAL, "source_class": "gateway_reported", "org_id": org, "host": host,
+                 "ts": 1000.0 + i, "decision": decision, "attack_class": "sqli", "action": "observe",
+                 "confidence": 0.9, "provenance_tier": "certified", "certificate_sha256": "c" * 64,
+                 "report_id": rid})
+
+
+def _mon_read(store, org: str, limit: int) -> list:
+    """`monitoring_events` with ``seq`` projected OUT — the one field that legitimately differs between the control
+    and the pruned spine (seals / checkpoints / the prune's own records shift absolute seqs). Order (newest-first)
+    and every other field are kept, so a mis-order / mis-dedup / tenant leak still shows. The seq-bearing output is
+    proven equal to the scan on ONE spine in test_monitoring_foldindex."""
+    return [{k: v for k, v in e.items() if k != "seq"} for e in mon.monitoring_events(store, org, limit=limit)]
+
+
+def _monitoring_events_live_window() -> Scenario:
+    """`monitoring_events` (the customer bell poll) reads an UNSEEDED ``live_window=True`` fold. Its events are all
+    written in the live window; below-K monitoring events (a 'ghost' org, pruned and never queried) make the prune
+    carry real state. ``seed_free``: the fold carries NO snapshot seed (it is pure live window), so a prune cannot
+    orphan state it should have kept — the reads depend on nothing below K, and query only orgs whose events are in
+    the live window. A report_id appears twice in one window (first-wins dedup) and twice across phases (the first,
+    earlier phase wins), so the incremental fold's dedup is exercised across the prune."""
+    def reads(R):
+        for o in ("acme", "globex", "nope"):
+            yield _r(_mon_read, R.store, o, 200)
+            yield _r(_mon_read, R.store, o, 2)
+    return Scenario(
+        name="inbound.monitoring_events [live_window fold], rows in the live window",
+        defining=_signal(mon.EVENT_SIGNAL), seed_free=True,
+        below=[_mon("ghost", 1), _mon("ghost", 2)],                           # pruned away; never read
+        live=[_mon("acme", 1), _mon("globex", 1), _mon("acme", 2, report_id="acme-r1")],   # in-window dup: first wins
+        after=[_mon("acme", 3), _mon("globex", 2)],
+        later=[_mon("globex", 3), _mon("acme", 4)],
+        latest=[_mon("acme", 5), _mon("acme", 3, report_id="acme-r3")],       # cross-phase dup: the 'after' one wins
+        reads=reads)
+
+
 SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "killswitch_engaged": _killswitch_engaged,
     "killswitch_released": _killswitch_released,
@@ -995,6 +1037,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "monitoring_authority": _monitoring_authority,
     "ui_assessments_live_window": _ui_assessments_live_window,
     "ui_margin": _ui_margin,
+    "monitoring_events_live_window": _monitoring_events_live_window,
 }
 _RESULTS: dict[str, dict] = {}
 
