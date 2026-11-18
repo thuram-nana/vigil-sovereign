@@ -114,6 +114,12 @@ INTENTIONALLY_HEADLESS = {
     # loopback hop (VIGIL_PROVISION_HOP_KEY); the CUSTOMER drives signup/login/member-mgmt from the custui
     # plane's own (future) SPA, never from app.js. Edge-only, hop-gated — no app.js affordance by design.
     (P_SOV, "/api/provision/"): "customer provisioner backend — keyless custui edge + hop only (no app.js UI)",
+    # O1 — the OWNER money view (rate-card revenue vs the gateway meter's confirmed provider cost, the margin and the
+    # at-risk spend). Owner-tier (manage_billing) and flag-gated (VIGIL_OWNER_MONEY_VIEW, default OFF => 404); the
+    # owner reads it with `sigil owner-money` (`vigil sigil owner-money`) on the host or this route with the owner
+    # token — no cockpit panel.
+    (P_SOV, "/api/billing/owner-money"): "O1 owner money view — owner-only + flag-gated; read via `sigil "
+                                         "owner-money` / the owner token (no app.js panel by design)",
 }
 
 # Whole planes that are headless by design (every route on them is exempt).

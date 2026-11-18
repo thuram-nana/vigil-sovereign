@@ -1378,6 +1378,44 @@ def cmd_gateway_loss(a) -> None:
           f"day and the alarm is cleared (recorded in {alarm_file.parent / (alarm_file.stem + '.ack.jsonl')}).")
 
 
+def cmd_owner_money(a) -> None:
+    """O1 — `sigil owner-money`: the OWNER's money view (loopback, read-only). Per org and in total it folds the
+    rate-card revenue (credits charged x the published rate) against the model gateway meter's CONFIRMED provider
+    cost, showing the gross margin between them and the at-risk (unconfirmed) provider spend VIGIL cannot bill. It
+    reads the signed spine + the meters on this host; it mints nothing. Behind `VIGIL_OWNER_MONEY_VIEW` (default
+    OFF): with the flag off the verb refuses, so the surface is byte-identical to a build without O1."""
+    import json as _json
+    from . import config
+    if not config.owner_money_view_enabled():
+        print("owner-money: the owner money view is off; set VIGIL_OWNER_MONEY_VIEW=1 to enable it (owner-only, "
+              "loopback).", file=sys.stderr)
+        sys.exit(2)
+    from .ui import owner_money as _om
+    from vigil_core.rate_card import format_credits
+    ov = _om.money_overview(SpineStore(), meter_dir=config.MODEL_METER_DIR)
+    if getattr(a, "json", False):
+        print(_json.dumps(ov, indent=2, sort_keys=True))
+        return
+    t = ov["totals"]
+    print(f"owner money view — {t['tenant_count']} tenant(s)")
+    if ov["meter_errors"]:
+        print(f"  WARNING: {ov['meter_errors']} meter file(s) could not be read — the view is partial", file=sys.stderr)
+    for o in ov["orgs"]:
+        print(f"  {o['name']} ({o['org_id']})")
+        print(f"      revenue {o['rate_card_revenue_usd']} ({format_credits(o['rate_card_revenue_mc'])} cr billed)"
+              f"   cost {o['provider_cost_usd']}   margin {o['gross_margin_usd']}"
+              + (f" ({o['gross_margin_pct']}%)" if o["gross_margin_pct"] is not None else ""))
+        print(f"      at risk {o['at_risk_usd']}   settled on spine {format_credits(o['settled_revenue_mc'])} cr"
+              + (f"   target revenue {_om._usd(o['target_revenue_nano'])}"
+                 if o["target_revenue_nano"] is not None else "   target: not set"))
+    print(f"  TOTAL revenue {t['rate_card_revenue_usd']}   cost {t['provider_cost_usd']}   "
+          f"margin {t['gross_margin_usd']}"
+          + (f" ({t['gross_margin_pct']}%)" if t["gross_margin_pct"] is not None else "")
+          + f"   at risk {t['at_risk_usd']}")
+    if not ov["target_margin_set"]:
+        print(f"  (target line not shown: {ov['target_margin_issue']})")
+
+
 def cmd_status(a) -> None:
     store, vi = SpineStore(), VectorIndex()
     ok, msg = store.verify()
@@ -4112,6 +4150,15 @@ def main(argv=None) -> None:
     pgl.add_argument("action", choices=["status", "ack"])
     pgl.add_argument("--by", default=None, help="who acknowledges it (default: the login name); recorded with the time")
     pgl.set_defaults(fn=cmd_gateway_loss)
+    from .config import owner_money_view_enabled
+    if owner_money_view_enabled():
+        # O1 — registered only with VIGIL_OWNER_MONEY_VIEW on, so with it off the verb set and `sigil --help` are
+        # exactly a build without O1 (`owner-money` is an unknown verb); cmd_owner_money re-checks the flag too.
+        pom = sub.add_parser("owner-money", help="the owner money view (O1): rate-card revenue vs the gateway "
+                                                 "meter's confirmed provider cost, the margin and the at-risk spend "
+                                                 "(owner-only, loopback, read-only)")
+        pom.add_argument("--json", action="store_true", help="print the full projection as JSON")
+        pom.set_defaults(fn=cmd_owner_money)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
     pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")

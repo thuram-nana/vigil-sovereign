@@ -224,6 +224,25 @@ class MeterTotals:
     unpriced_usage: mm.Usage = field(default_factory=mm.Usage)
 
 
+@dataclass(frozen=True)
+class MeterSpend:
+    """One launch's provider spend and customer charge on ONE UTC day — the read-only money fact the owner money
+    view (O1) sums across launches.
+
+    ``cost_nano`` is CONFIRMED provider spend (what the customer's charge is computed from); ``at_risk_nano`` is
+    UNCONFIRMED spend VIGIL must assume but cannot bill (a cut-off response's ``held_nano`` + an ``orphan``'s
+    reservation) — VIGIL's own cost, never the customer's; ``charge_mc`` is the published rate-card charge of the
+    confirmed responses, in milli-credits (what the customer was billed). A launch is one org, so every row of a
+    launch carries the same ``org_id``."""
+
+    org_id: str
+    day: str                #: the UTC day, ``"%Y-%m-%d"``
+    cost_nano: int          #: confirmed provider spend (nano-USD)
+    at_risk_nano: int       #: unconfirmed / at-risk provider spend (nano-USD) — VIGIL's cost, never billed
+    charge_mc: int          #: the rate-card charge for the confirmed responses (milli-credits)
+    responses: int          #: confirmed metered responses
+
+
 @dataclass
 class _LaunchState:
     spent_nano: int = 0
@@ -936,6 +955,74 @@ class GrantMeter:
         st = self._replay(mid)
         return MeterTotals(st.usage, st.spent_nano, st.requests, st.closed, st.unconfirmed_nano, len(st.opens),
                            st.charged_mc, st.pending_mc, st.unpriced_usage)
+
+    # -- the owner money view (O1), read-only --------------------------------------------------------------
+    def meter_ids(self) -> "list[str]":
+        """Every launch meter in this directory — the stems of its ``*.jsonl`` files, sorted. A PURE read (no lock,
+        no state): the owner money view walks it to fold each launch's confirmed / unconfirmed provider spend and
+        rate-card charge. A file whose name is not a 32-hex meter id is ignored."""
+        if not self.dir.exists():
+            return []
+        out: "list[str]" = []
+        for p in sorted(self.dir.glob("*.jsonl")):
+            stem = p.stem
+            if len(stem) == 32 and all(c in "0123456789abcdef" for c in stem):
+                out.append(stem)
+        return out
+
+    def spend_by_day(self, mid: str) -> "list[MeterSpend]":
+        """One launch's money breakdown per UTC day, read from disk with its hash chain checked (raises
+        ``ValueError`` if the chain is broken or a record malformed). For each day the launch ran it gives the
+        CONFIRMED provider spend (``cost_nano`` of its ``usage`` lines), the AT-RISK / unconfirmed spend (a cut-off
+        response's ``held_nano`` plus an ``orphan``'s ``reserved`` — VIGIL's own cost, never billed) and the
+        published rate-card charge (``charge_mc``) of the confirmed responses. A launch is one org (every line
+        carries the same ``org_id``), so each row is attributed to that org. A PURE read: no lock, no mutation.
+
+        It counts exactly as the meter's own replay (:meth:`_replay_records`, the totals the settle signs): a request
+        recorded AFTER it was given up as an orphan (a gateway that stopped with it in flight, orphaned meanwhile by
+        the settle step) supersedes its orphan — counted once, as what it really was — so a launch's days sum exactly
+        to its :meth:`verify` totals. (The loss alarm's per-day split, :meth:`_day_spend`, does not net that rare
+        case out, so on such a day it can read higher than this.) A day that nets to nothing is not listed."""
+        try:
+            lines = list(self._lines(mid))
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"meter file {mid[:8]}… is corrupt (a malformed record: {type(exc).__name__})") from None
+        org = ""
+        for line, _h in lines:                       # a launch is one org: the first line that names it is it
+            o = line.get("org_id")
+            if isinstance(o, str) and o:
+                org = o
+                break
+        per_day: "dict[str, list[int]]" = {}         # day -> [cost_nano, at_risk_nano, charge_mc, responses]
+        orphaned: "dict[str, tuple[str, int]]" = {}  # rid -> (the day its orphan was counted on, its reservation)
+        try:
+            for line, _h in lines:
+                kind = line["kind"]
+                if kind not in ("usage", "release", "orphan"):
+                    continue                         # open / close move no money
+                rid = str(line.get("rid"))
+                if kind != "orphan":
+                    prior = orphaned.pop(rid, None)
+                    if prior is not None:            # the record supersedes the orphan (as _replay_records does)
+                        per_day[prior[0]][1] -= prior[1]
+                    if kind == "release":
+                        continue                     # spent nothing
+                day = _utc_day(float(line["ts"]))
+                slot = per_day.setdefault(day, [0, 0, 0, 0])
+                if kind == "usage":
+                    slot[0] += int(line["cost_nano"])
+                    slot[1] += int(line.get("held_nano", 0))
+                    if "charge_mc" in line:
+                        slot[2] += int(line["charge_mc"])
+                    slot[3] += 1
+                else:                                 # orphan: a lost request's reservation — pure unconfirmed spend
+                    reserved = int(line["reserved"])
+                    slot[1] += reserved
+                    orphaned[rid] = (day, reserved)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"meter file {mid[:8]}… is corrupt (a malformed record: {type(exc).__name__})") from None
+        return [MeterSpend(org, day, c, a, ch, r) for day, (c, a, ch, r) in sorted(per_day.items())
+                if c or a or ch or r]
 
 
 class _Closed(Exception):

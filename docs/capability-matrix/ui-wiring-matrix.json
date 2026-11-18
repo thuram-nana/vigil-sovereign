@@ -307,10 +307,10 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 200,
+    "routes": 201,
     "routes_by_status": {
       "ORPHAN": 0,
-      "headless": 28,
+      "headless": 29,
       "pending": 0,
       "ui-driven": 172
     },
@@ -436,6 +436,14 @@
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/owner-money",
+      "plane": "sovereign",
+      "reason": "O1 owner money view \u2014 owner-only + flag-gated; read via `sigil owner-money` / the owner token (no app.js panel by design)",
+      "status": "headless"
     },
     {
       "kind": "exact",
