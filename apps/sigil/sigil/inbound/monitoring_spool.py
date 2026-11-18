@@ -30,11 +30,14 @@ import os
 import stat
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ..reuse import assert_no_offense
 
 assert_no_offense()
+
+from ..governor.fold_read import UNCACHED as _UNCACHED, cached_unsigned_read  # noqa: E402
+from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 
 REPORT_SCHEMA = "vigil.aegis.monitoring.v1"                 # MUST match framework.v2.aegis.monitoring_report
 REPORT_DOMAIN = b"vigil.aegis.monitoring-report.v1\x00"     # MUST match (pinned by a cross-plane round-trip test)
@@ -188,10 +191,102 @@ class MonitoringSpoolWatcher:
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs}
 
 
+# ================================================================================================================
+# Front C S0d follow-up — the verified INCREMENTAL FOLD INDEX behind the bell poll.
+#
+# `monitoring_events` was the last hot per-customer read still doing a plain O(N) `iter_records()` scan of the
+# whole spine on every poll. It now serves from a per-org fold of the monitoring line (exactly as the findings /
+# wallet / customer reads do): the fold verifies/folds only the records appended since the last read (O(records
+# since), not O(all)), and a poll reads O(its own events), not O(all monitoring records on the spine). It is an
+# UNSIGNED, `live_window` fold — monitoring events carry no owner signature (the drain already authenticated them)
+# and the scan loads no snapshot, so the full scan below answers whenever the cache declines. DEFAULT-OFF
+# (`VIGIL_FOLD_CACHE_ENABLED`): with the cache off the unchanged scan runs, byte-identical. FATAL-2: sovereign-only.
+# ================================================================================================================
+class _MonitoringLine:
+    """One org's drained monitoring events as the read projects them: ``events`` is the per-org list the scan
+    builds (oldest-first, report_id-deduped first-wins) and ``seen`` its report_ids — exactly the scan's per-query
+    ``out`` / ``seen`` for that org, built once and extended incrementally."""
+
+    __slots__ = ("events", "seen")
+
+    def __init__(self) -> None:
+        self.events: "list[dict]" = []
+        self.seen: set = set()
+
+
+class _MonitoringView:
+    """The per-org monitoring index ``monitoring_events`` reads instead of rescanning the whole spine per request.
+    ``by_org[org]`` = that org's :class:`_MonitoringLine`, folded from EXACTLY the records the scan keeps (same
+    signal / org / report_id checks; the projected row is the same pure expression). A record whose ``report_id``
+    is unhashable (the scan's ``rid in seen`` would raise on it) POISONS the view, so every read falls back to the
+    unchanged scan and raises exactly where it did."""
+
+    __slots__ = ("by_org", "poisoned")
+
+    def __init__(self) -> None:
+        self.by_org: "dict[str, _MonitoringLine]" = {}
+        self.poisoned = False
+
+    def page(self, org_id: str, limit: int) -> "list[dict]":
+        """The org's events newest-first, ``[:max(0, int(limit))]`` — IDENTICAL to the scan's
+        ``out.reverse(); out[:max(0, int(limit))]`` — as fresh COPIES (never a reference into the fold state, which
+        later reads extend in place). ``start = max(0, len-n)`` is the newest ``n`` oldest-first (``n==0`` -> [],
+        ``n > len`` -> all); ``reversed`` makes it newest-first."""
+        line = self.by_org.get(org_id)
+        if line is None:
+            return []
+        n = max(0, int(limit))
+        start = max(0, len(line.events) - n)
+        return [dict(e) for e in reversed(line.events[start:])]
+
+
+def _monitoring_step(view: "_MonitoringView", r, _ctx) -> None:
+    """Fold ONE spine record into the per-org index — the scan's own filter / dedup / projection, record by record.
+    No kind filter: the scan keys on the payload ``signal`` alone (a record of any kind), so this must too."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != EVENT_SIGNAL:
+        return
+    org = p.get("org_id")
+    if not isinstance(org, str):
+        return                                        # a str query can only equal a str org_id (the scan's `!=`)
+    rid = p.get("report_id")
+    try:
+        hash(rid)
+    except TypeError:
+        view.poisoned = True                          # the scan's `rid in seen` would raise: decline to the scan
+        return
+    line = view.by_org.get(org)
+    if line is None:
+        line = _MonitoringLine()
+        view.by_org[org] = line
+    if rid in line.seen:
+        return                                        # first occurrence (lowest seq) wins — exactly the scan
+    line.seen.add(rid)
+    line.events.append({k: p.get(k) for k in _FIELDS} | {"seq": r.seq, "source_class": p.get("source_class")})
+
+
+_MONITORING_FOLD = FoldCache("inbound.monitoring_events", step=_monitoring_step)
+
+
+def _monitoring_cached(store, reader: "Callable[[Any], Any]") -> Any:
+    """``reader(view)`` over the verified incremental fold of the monitoring line, or ``_UNCACHED`` (the flag is
+    off, the view is poisoned, or the rebuild's read was not contiguous). A ``live_window`` fold: the scan loads no
+    snapshot, so a snapshot that cannot be loaded declines rather than raises (the full scan still answers)."""
+    return cached_unsigned_read(_MONITORING_FOLD, store, seed=lambda snap: (_MonitoringView(), -1),
+                                live_window=True, reader=reader)
+
+
 def monitoring_events(store, org_id: str, *, limit: int = 200) -> list[dict]:
-    """The tenant's monitoring events, newest first, STRICTLY scoped to ``org_id`` (report_id-deduped)."""
+    """The tenant's monitoring events, newest first, STRICTLY scoped to ``org_id`` (report_id-deduped).
+
+    Served from a verified incremental per-org fold (Front C S0d; ``VIGIL_FOLD_CACHE_ENABLED``) so a bell poll
+    reads O(its own events), not the whole spine. With the cache off — or on any doubt (``_UNCACHED``) — the
+    unchanged O(N) scan below answers, byte-identical."""
     if not isinstance(org_id, str) or not org_id:
         return []
+    hit = _monitoring_cached(store, lambda v: v.page(org_id, limit))
+    if hit is not _UNCACHED:
+        return hit
     out, seen = [], set()
     for r in store.iter_records():
         p = r.payload
