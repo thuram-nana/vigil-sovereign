@@ -35,6 +35,11 @@ from ..governor.orgs import org_tenant_id  # noqa: E402
 from ..spine.fold_cache import FoldCache  # noqa: E402  (Front C S0d — the verified incremental fold)
 
 _FINDING_KIND = "finding"
+# C1b: the provisioner-written per-finding retest verdict record (``ui.provision.retest``). Tenant-scoped exactly
+# as a finding is (its ``engagement_slug`` must be in the reader's server-derived slug set), and read only when its
+# spine ``source`` is the provisioner's (the writer and this reader share these two names).
+RETEST_KIND = "finding_retest"
+RETEST_SOURCE = "provision"
 # The stable, inert cert fields a customer may read for one finding. An allowlist (never a raw cert dump) so a
 # future internal cert field can never leak and the API shape is fixed. Values are read fail-closed via .get.
 _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity", "title", "summary",
@@ -245,6 +250,97 @@ def assessment_outcomes(store, org_id: str, *, now: float, limit: int = 200) -> 
     rows.sort(key=lambda t: t[0], reverse=True)     # newest-first by spine seq
     n = max(1, min(int(limit), 1000))
     return {"org_id": org_id, "outcomes": [j for _s, j in rows[:n]], "count": len(rows)}
+
+
+def finding_identity(row: "dict[str, Any]") -> "tuple[str, str, str]":
+    """C1b — the identity a retest names ONE finding by: ``(engagement_slug, finding_ref, oracle_context_digest)``.
+    ``finding_ref`` alone is NOT unique (it is a check id, a finding slug or merely the bug class — two findings on
+    one host can share it), so the digest of the finding's retained proof context is part of the identity: a retest
+    re-runs exactly ONE proof, and its verdict may mark exactly that finding fixed, never a sibling sharing its ref.
+    A missing digest reads as "" on both sides (the lookup and the overlay agree)."""
+    return (str(row.get("engagement_slug") or ""), str(row.get("finding_ref") or ""),
+            str(row.get("oracle_context_digest") or ""))
+
+
+def find_finding(store, org_id: str, finding_ref: str, *, engagement_slug: str, oracle_context_digest: str = "",
+                 now: float) -> "Optional[dict[str, Any]]":
+    """C1b — the org's OWN finding with exactly this identity (:func:`finding_identity`), or None. The slug must be
+    one of the org's EVER-proven slugs (``ever_proven_hosts`` → ``_customer_slug``): another tenant's slug is a
+    one-way hash of THAT tenant's ``org_id\\x00host`` and is never in this org's set, so naming another tenant's
+    finding — even with its exact slug, ref and digest — returns None (the IDOR guard is structural). EVER-proven
+    (not only currently proven) so a finding on a host whose proof just lapsed is still FOUND, and the retest's
+    launch gate then gives the precise 'verify the host again' refusal rather than a confusing 'not found'. Returns
+    the NEWEST matching record's projected fields plus the resolved ``host``. PURE read; assumes the caller already
+    authorized ``org_id`` for ``view_assessments``."""
+    from .target_authorization import _customer_slug
+    want = (str(engagement_slug or ""), str(finding_ref or ""), str(oracle_context_digest or ""))
+    if not want[0] or not want[1]:
+        return None
+    host_of = {_customer_slug(org_id, h): h for h in AssetOwnershipRegistry(store, owner_key=None).ever_proven_hosts(org_id)}
+    host = host_of.get(want[0])
+    if host is None:                                # not this org's slug → structurally unreachable (IDOR)
+        return None
+    best: "Optional[tuple[int, dict[str, Any]]]" = None
+    for r in store.iter_records():
+        if getattr(r, "kind", None) != _FINDING_KIND:
+            continue
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        cert = p.get("certificate")
+        if not isinstance(cert, dict) or cert.get("engagement_slug") != want[0]:
+            continue
+        row = _finding_json(p, cert)
+        if finding_identity(row) != want:
+            continue
+        seq = int(getattr(r, "seq", 0))
+        if best is None or seq > best[0]:
+            best = (seq, {**row, "host": host})
+    return best[1] if best else None
+
+
+def overlay_retests(store, findings: "list[dict[str, Any]]", *, now: float) -> None:
+    """C1b — overlay each shown finding's NEWEST retest verdict in place as ``f["retest"] = {"status", "ts"}``
+    (``status`` ∈ {``fixed``, ``still_vulnerable``}), matched on the full :func:`finding_identity` — so a verdict
+    marks exactly the finding whose proof was re-run, never a sibling that shares its ``finding_ref``. ``findings``
+    is an ALREADY tenant-scoped page (from :func:`assessment_findings`): the scan is bounded to the
+    ``engagement_slug`` values present in it, so a ``finding_retest`` record for any other tenant's slug can match
+    nothing here (tenant isolation is structural, exactly as the findings read's). A no-op — leaving the page
+    byte-identical — when nothing on it was retested. Called ONLY from the customer findings projector while
+    ``customer_retest_ui_enabled`` is on, so the shared :func:`assessment_findings` and the owner read stay unchanged."""
+    want = {finding_identity(f)[0] for f in findings if isinstance(f, dict)}
+    want.discard("")
+    if not want:
+        return
+    latest: "dict[tuple, tuple]" = {}
+    for r in store.iter_records():
+        if getattr(r, "kind", None) != RETEST_KIND:
+            continue
+        # a second, independent refusal: only the provisioner's retest action writes verdicts (``source`` is digested
+        # record content) — a record of this kind from anywhere else, e.g. a drain that came to admit it, never counts
+        if getattr(r, "source", None) != RETEST_SOURCE:
+            continue
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        if p.get("engagement_slug") not in want:    # only the shown findings' own slugs → never another tenant's
+            continue
+        status = p.get("status")
+        if not isinstance(p.get("finding_ref"), str) or status not in ("fixed", "still_vulnerable"):
+            continue
+        seq = int(getattr(r, "seq", 0))
+        key = finding_identity(p)
+        prev = latest.get(key)
+        if prev is None or seq > prev[0]:           # newest verdict per finding wins
+            latest[key] = (seq, status, p.get("ts"))
+    if not latest:
+        return
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        v = latest.get(finding_identity(f))
+        if v is not None:
+            f["retest"] = {"status": v[1], "ts": v[2]}
 
 
 def assessment_summary(store, org_id: str, *, now: float, preview: bool = False) -> dict[str, Any]:

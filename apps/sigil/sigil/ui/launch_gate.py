@@ -508,6 +508,55 @@ class LaunchGate:
             "trust_root": trust_root.model_dump(mode="json"),
         }
 
+    def authorize_retest(self, *, requester: str, org_id: str, host: str, now: Any) -> dict:
+        """C1b — the AUTHORIZATION-only conjuncts a RETEST of a finding against ``host`` must pass, with NO
+        reserve, NO mint and NO credit draw (a single-finding re-verification is not a new launch; the re-proof
+        wiring, which does not exist yet, must run under a lease so its use is metered — see
+        ``ui.provision._retest_reverify``). Returns ``{"ok": True, "org_id", "host", "slug"}`` when all hold, else
+        ``{"ok": False, "error": <reason>}`` (fail-closed; it raises nothing).
+
+        It REUSES the launch chokepoint's testing conjuncts VERBATIM, resolved LIVE:
+          1. the owner's kill switch + ``customer_launch`` latch (``_new_launch_refusal``) — a retest re-fires a
+             proof against the host, i.e. it sends traffic, so it is halted in exactly the access-reducing
+             direction a new launch is (an in-flight run is never touched by it);
+          2. MEMBERSHIP on the TESTING axis — ``admit_customer(run_engagement)`` (a billing-only org_admin, a
+             viewer and a non-member are refused: billing is not testing);
+          3. a CURRENT infrastructure-bound OWNERSHIP PROOF for ``host`` (a lapsed proof refuses — the customer
+             re-verifies the host in Assets);
+          4. a CURRENT owner-pinned ENGAGEMENT AUTHORITY for exactly ``host`` (``_authority_ok`` against OUR
+             locally-pinned owner key, scope == [host], window covers now).
+        ``requester``/``org_id`` are authoritative sovereign inputs (the provisioner's hop-bound session
+        principal), never a client field. The credit conjunct is deliberately NOT applied here (design C1b)."""
+        from ..governor.orgs import _check_org_id
+        from ..governor.asset_ownership import _check_host
+        from .target_authorization import _customer_slug
+        if self.owner_key is None:
+            return {"ok": False, "error": "a retest needs the owner key to verify the target authority (internal)"}
+        try:
+            oid = _check_org_id(org_id)
+            h = _check_host(host)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        try:
+            t = self._as_dt(now)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        now_ts = t.timestamp()
+        slug = _customer_slug(oid, h)
+        switched = self._new_launch_refusal()
+        if switched is not None:
+            return {"ok": False, "error": switched}
+        if not self.orgs.admit_customer(username=requester, org_id=oid, permission="run_engagement"):
+            return {"ok": False, "error": "requester may not retest assessments for this org "
+                    "(membership is not testing authority)"}
+        if not self.ownership.has_current_proof(oid, h, now=now_ts):
+            return {"ok": False, "error": f"no current ownership proof for {h} (org {oid}): prove control of the "
+                    f"asset before its findings can be retested — ownership is separate from billing"}
+        if not self._authority_ok(h, slug, t):
+            return {"ok": False, "error": f"no current owner-signed engagement authority for {h} (org {oid}) — the "
+                    f"owner must authorize this target (offense_authority stays at the owner key)"}
+        return {"ok": True, "org_id": oid, "host": h, "slug": slug}
+
     def reserve_redpen_review(self, *, org_id: str, repo: str, now: Any, depth: str = "quick",
                               nonce: Optional[str] = None, duration_hours: Any = _DEFAULT_LEASE_HOURS) -> dict:
         """Red-Pen R2 — authorize + reserve + mint for ONE pull-request review of a CONNECTED repository, reusing

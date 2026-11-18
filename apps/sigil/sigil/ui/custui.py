@@ -180,9 +180,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     "Continue with Google" button), whether an installed app finishes it through the app hand-off, whether the
     onboarding guide is on (the first-sign-in tour, the Guide screen and the branded loader), whether the
     account-security screens are on (Account security and the step-up prompt) and, with them, whether this edge serves
-    passkeys, whether assessments are launched and controlled from the app (C1a), whether customer monitoring is on
-    (the Monitoring screen: the same VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes), and whether the Team
-    screen is on. Each is a non-secret on/off value and each counts in the build id."""
+    passkeys, whether assessments are launched and controlled from the app (C1a), whether a finding can be retested
+    from the app (C1b), whether customer monitoring is on (the Monitoring screen: the same
+    VIGIL_CUSTOMER_MONITORING_ENABLED that serves its routes), and whether the Team screen is on. Each is a non-secret
+    on/off value and each counts in the build id."""
     from .. import config as _config
     ios = _config.customer_ios_install_banner_enabled()
     google = _config.customer_oidc_enabled() and _google_redirect_ready(_config)
@@ -191,6 +192,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     security = _config.customer_security_ui_enabled()
     passkey = security and _config.customer_passkey_enabled()
     launch_ui = _config.customer_launch_ui_enabled()
+    retest_ui = _config.customer_retest_ui_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
@@ -206,6 +208,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_SECURITY__": "1" if security else "0",
                                      "__VIGIL_PASSKEY__": "1" if passkey else "0",
                                      "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0",
+                                     "__VIGIL_RETEST__": "1" if retest_ui else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0"})
@@ -996,6 +999,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
             return self._launch(action, body)
+        if action == "retest" and _retest_on():                       # C1b (flag OFF -> unknown-action 404)
+            return self._retest(body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
             return self._monitoring(action, body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
@@ -1097,6 +1102,24 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
         else:
             return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _retest(self, body: dict):
+        """C1b — retest ONE of the session org's findings. Like ``_launch``, the acting REQUESTER and the active
+        ORG come from the SERVER-side session — NEVER the body (tenant isolation at the edge): a customer retests a
+        finding of THEIR bound org only, and the sovereign resolves the finding within that org's own slug set, so
+        another org's finding is structurally unreachable. The finding's identity (``engagement_slug`` +
+        ``finding_ref`` + ``oracle_context_digest``, as the findings read gave it) is the customer's own data, carried
+        in the body; the E3c step-up stamp rides from the SESSION, never the body."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
+                   "finding_ref": body.get("finding_ref", ""), "engagement_slug": body.get("engagement_slug", ""),
+                   "oracle_context_digest": body.get("oracle_context_digest", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
+        c, r = self._provision("retest", requester, payload)
         return self._json(r, c)
 
     def _checkout(self, body: dict):
@@ -1293,6 +1316,11 @@ def _pause_resume_on() -> bool:
 def _launch_ui_on() -> bool:
     from .. import config as _config
     return _config.customer_launch_ui_enabled()
+
+
+def _retest_on() -> bool:
+    from .. import config as _config
+    return _config.customer_retest_ui_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

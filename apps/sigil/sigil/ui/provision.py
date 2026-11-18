@@ -100,6 +100,28 @@ _RECOVER_CODE_EMAIL = (
 _NOTIF_MAX = 100
 
 
+def _retest_reverify(ctx: "dict") -> str:
+    """C1b — the SEAM that re-fires ONE finding's retained proof against the customer's live host and returns a
+    verdict: ``"cleared"`` (the proof DECISIVELY no longer works → the finding is marked fixed), ``"still_present"``
+    (the proof still fires → Still-Vulnerable), or ``"inconclusive"``/``"unavailable"`` (nothing is concluded →
+    the retest refuses, and the finding is NEVER marked fixed). ``ctx`` carries only inert identity
+    (``host``/``engagement_slug``/``finding_ref``/``bug_class``/``oracle_context_digest``) — no secret, no key.
+
+    FAIL-CLOSED DEFAULT. Re-collecting fresh evidence from a LIVE host is OFFENSE-plane work (a real re-proof —
+    ``remediation.prove_remediation``'s four-state REMEDIATED/STILL_VULNERABLE/INCONCLUSIVE/REFUSED), and the
+    sovereign plane must never import the engine (FATAL-2). So this default returns ``"unavailable"``: with the UI
+    flag on but no re-proof wired, a retest refuses honestly ("not available right now") and sends no traffic,
+    rather than ever guessing a fix. The real re-proof is wired by replacing this module-level seam
+    (``sigil.ui.provision._retest_reverify``) or by passing ``reverify=`` to :meth:`Provisioner.retest`; the
+    authorization, tenant binding, fail-closed mapping and the hash-chained verdict record around it are unchanged.
+    What that wiring must do (none of it is built here): reach the offense plane only through a cross-plane seam
+    (never an import); run the re-proof under a LaunchGate lease so the model gateway meters what it uses to the
+    org's wallet like any run (§11.4 I1/I9 — this seam reserves nothing, so an unmetered wiring would be free
+    traffic); and map only a DECISIVE REMEDIATED to ``cleared`` (STILL_VULNERABLE→``still_present``,
+    INCONCLUSIVE/REFUSED→``inconclusive``)."""
+    return "unavailable"
+
+
 class ProvisionError(Exception):
     """A provisioning request was refused. The HTTP layer maps subclasses to 4xx without leaking internals."""
 
@@ -2317,6 +2339,104 @@ class Provisioner:
             out["detail"] = str(r.get("detail") or "")
         return out
 
+    def retest(self, requester: str, requester_org_id: str, finding_ref: str, *, engagement_slug: str = "",
+               oracle_context_digest: str = "", ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None,
+               reverify=None) -> dict:
+        """C1b — RETEST one of the session org's findings: re-run THAT finding's proof against the customer's
+        verified host and mark it FIXED only when the proof stops working, else Still-Vulnerable. Behind
+        ``customer_retest_ui_enabled`` (default OFF → the edge/cockpit action is a 404 unknown-action, and this
+        refuses even if reached). requester/org are the SERVER-authenticated session principal (never body fields);
+        the finding is named by its full identity — ``engagement_slug`` + ``finding_ref`` + ``oracle_context_digest``
+        (``assessments.finding_identity``; ``finding_ref`` alone is not unique) — exactly as the findings read gave
+        it to the customer (their own data, carried in the body like a launch's target host).
+
+        Order (fail-closed at each step):
+          1. ``admit_customer(view_assessments)`` on the session org; a trial-preview org whose report is still
+             locked is refused (retest re-runs the finding's proof, which is part of the full report — it unlocks
+             with the first purchase); then the finding is resolved WITHIN this org's own ever-proven slug set
+             (``assessments.find_finding``): another tenant's finding — even named by its exact identity — is
+             structurally not found → refused (the IDOR guard).
+          2. the LAUNCH-GATE authorization (``LaunchGate.authorize_retest``): the owner kill switch +
+             ``customer_launch`` latch, ``admit_customer(run_engagement)``, a CURRENT ownership proof for the
+             finding's host, and a CURRENT owner-pinned engagement authority. A lapsed proof/authority refuses
+             (the customer re-verifies the host in Assets). This is confirm-by-re-execution against an
+             owner-authorized target, never a new open-ended scan — and this action itself reserves and charges NO
+             credit (a single-finding re-verify; the re-proof wiring must meter what it uses — see
+             ``_retest_reverify``).
+          3. a fresh step-up (E3c), AFTER authority (a non-member is refused by admit, not told to step up).
+          4. re-fire the finding's retained proof through the injected ``reverify`` seam (default
+             ``_retest_reverify``: fail-closed 'unavailable' until the live offense re-proof is wired).
+             EXACTLY ``"cleared"`` → FIXED; exactly ``"still_present"`` → Still-Vulnerable; ``"unavailable"`` →
+             refused as not available; ANYTHING ELSE (inconclusive, a raised error, a non-string) → refused as
+             could-not-confirm. Every refusal leaves the finding UNCHANGED (never marked fixed on a guess).
+          5. append a ``finding_retest`` record to the sovereign spine (hash-chained; ``source`` = the
+             provisioner, the only writer the findings overlay accepts; written only for this org's own slug) so the
+             verdict persists and the findings read can show it; return the verdict.
+
+        Returns ``{"finding_ref", "host", "status"}`` with ``status`` ∈ {``fixed``, ``still_vulnerable``}. Credits
+        only — no amount, no units, no estimate, no model name ever appears (money/model doctrine)."""
+        from .. import config
+        if not config.customer_retest_ui_enabled():
+            raise ProvisionDenied("retesting findings from the app is not enabled")
+        t = self._now() if now is None else float(now)
+        ref = str(finding_ref or "")
+        want_slug = str(engagement_slug or "")
+        if not ref or not want_slug:
+            raise ProvisionError("a finding (its reference and its assessment) is required to retest")
+        from . import assessments as _assess
+        # 1) READ authority + IDOR-safe finding resolution (the finding must be THIS org's own).
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            self._audit("retest", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not read this org (view_assessments)")
+        if self._preview_locked(requester_org_id):
+            self._audit("retest", requester=requester, org_id=requester_org_id, target=ref, outcome="locked")
+            raise ProvisionDenied("retesting unlocks with the full report: buy credits to retest findings")
+        finding = _assess.find_finding(self.store, requester_org_id, ref, engagement_slug=want_slug,
+                                       oracle_context_digest=str(oracle_context_digest or ""), now=t)
+        if finding is None:
+            self._audit("retest", requester=requester, org_id=requester_org_id, target=ref, outcome="not_found")
+            raise ProvisionDenied("no such finding for this workspace")
+        host = str(finding.get("host") or "")
+        slug, _ref, digest = _assess.finding_identity(finding)
+        # 2) LAUNCH-GATE authorization + 3) step-up, under the spine lock (TOCTOU-consistent with launch_start).
+        from .launch_gate import LaunchGate
+        with self._lock:
+            auth = LaunchGate(self.store).authorize_retest(
+                requester=requester, org_id=requester_org_id, host=host, now=t)
+            if not auth.get("ok"):
+                self._audit("retest", requester=requester, org_id=requester_org_id, target=host, outcome="denied")
+                raise ProvisionDenied(str(auth.get("error") or "retest authorization refused"))
+            self._require_stepup(mfa_at, now=t)      # E3c: AFTER authority (no-op unless enforcement is on)
+        # 4) RE-FIRE the retained proof (confirm-by-re-execution). The seam is injected; the default fails closed.
+        rv = reverify if reverify is not None else _retest_reverify
+        try:
+            raw = rv({"host": host, "engagement_slug": slug, "finding_ref": ref,
+                      "bug_class": finding.get("bug_class"), "oracle_context_digest": digest})
+        except Exception as e:  # noqa: BLE001 — a re-proof that did not complete never green-lights a fix
+            self._audit("retest", requester=requester, org_id=requester_org_id, target=host,
+                        outcome="error", critical=True)
+            raise ProvisionDenied("could not confirm the fix: the retest did not complete; the finding is "
+                                  "unchanged") from e
+        # 5) MAP (fixed ONLY on the EXACT token "cleared" — no case-folding, no str() of an object) + RECORD + return.
+        verdict = raw if isinstance(raw, str) else ""
+        if verdict == "cleared":
+            status = "fixed"
+        elif verdict == "still_present":
+            status = "still_vulnerable"
+        elif verdict == "unavailable":               # no re-proof ran at all: say so, never "could not confirm"
+            self._audit("retest", requester=requester, org_id=requester_org_id, target=host, outcome="unavailable")
+            raise ProvisionDenied("retest is not available right now; the finding is unchanged")
+        else:
+            self._audit("retest", requester=requester, org_id=requester_org_id, target=host, outcome="inconclusive")
+            raise ProvisionDenied("could not confirm the fix: the retest was inconclusive; the finding is unchanged")
+        with self._lock:
+            self.store.append(kind=_assess.RETEST_KIND, source=_assess.RETEST_SOURCE, actor="WARDEN",
+                              payload={"engagement_slug": slug, "finding_ref": ref, "oracle_context_digest": digest,
+                                       "status": status, "nonce": secrets.token_urlsafe(12), "ts": t})
+        self._audit("retest", requester=requester, org_id=requester_org_id, target=host,
+                    outcome=status, critical=True)
+        return {"finding_ref": ref, "host": host, "status": status}
+
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
     def _monitor_admit(self, action: str, requester: str, org_id: str, host: str, permission: str) -> None:
         """Flag gate (default OFF) then ``admit_customer`` on the SESSION org. Caller holds the lock."""
@@ -2570,12 +2690,21 @@ class Provisioner:
 
     def customer_assessment_findings(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         import time as _t
+        from .. import config
         from . import assessments as _assess
-        return self._customer_read(
+        t = _t.time()
+        out = self._customer_read(
             requester, requester_org_id, "view_assessments",
             lambda s, o: _assess.assessment_findings(
-                s, o, now=_t.time(), preview=self._preview_locked(o),
+                s, o, now=t, preview=self._preview_locked(o),
                 can_buy=self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")))
+        # C1b — overlay each shown finding's newest retest verdict (``f["retest"]``) ONLY while the retest UI is on;
+        # off, the findings read is byte-identical (no overlay, no retest scan). Tenant isolation is structural: the
+        # overlay is bounded to the slugs of the ALREADY tenant-scoped page and matches a finding's full identity, so
+        # no other org's retest (and no sibling sharing a finding_ref) can attach; only provisioner-written count.
+        if config.customer_retest_ui_enabled() and isinstance(out, dict) and isinstance(out.get("findings"), list):
+            _assess.overlay_retests(self.store, out["findings"], now=t)
+        return out
 
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:
