@@ -298,6 +298,19 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_notify_enabled() -> bool:
+    """True iff the customer Notifications & integrations surfaces are ON (`VIGIL_CUSTOMER_NOTIFY` affirmative).
+    OFF by default (mirrors `redpen_enabled`): with it off EVERY notify route / channel registration / outbound
+    delivery / issue-tracker sync / notify-drain is absent (404 exactly as an unknown route), no channel config is
+    written, no outbound socket opens and no tracker issue is opened or closed — so the server is byte-identical to a
+    build without the notify consumer. The master flag over the whole PR-D pipeline (the per-tenant channel registry,
+    the SSRF-guarded delivery egress, the notify-drain and the Jira/Linear/GitHub issue sync). Read at call time.
+    Even when ON, each leg still fails closed unless its own delivery credential is provisioned (an SMTP relay, a
+    tracker API token) AND the target host is on the owner-reviewed outbound allowlist — a notification is a DELIVERY
+    of an oracle-minted FACT, never a FACT source (the oracle alone mints a finding)."""
+    return (os.environ.get("VIGIL_CUSTOMER_NOTIFY") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 # A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL
 # (`https://github.com/apps/<slug>/installations/new`) accepts — the numeric App id cannot build it. The owner sets
 # it when they register the real App (go-live, HANDOFF §6); unset ⇒ the Code screen's Connect GitHub refuses with a
@@ -1104,6 +1117,28 @@ STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
 # credentials (`VIGIL_GITHUB_APP_ID` + `VIGIL_GITHUB_APP_PRIVATE_KEY`/SSM): unset ⇒ nothing is wired and no GitHub
 # egress exists. There is no API-base override, so the credential-holding egress can only ever reach this host.
 GITHUB_APP_EGRESS_ALLOWLIST = frozenset({"api.github.com"})
+
+
+# --- Customer Notifications & integrations OUTBOUND egress (PR-D — SHIPPED OFF BY DEFAULT) --------------
+# The OWNER-REVIEWED outbound host allowlist for delivering an oracle-minted FACT finding to a tenant's out-of-band
+# channels — Slack / Discord / a generic customer webhook — enforced by `governor.notify_channels.guard_outbound_url`
+# BEFORE any socket opens (mirrors GITHUB_APP_EGRESS_ALLOWLIST above). A tenant SUPPLIES a webhook URL, but it can
+# only ever reach a host the OWNER has reviewed here (exact host, or an allowed suffix) AND that resolves ENTIRELY to
+# PUBLIC addresses — so a tenant can never steer the delivery egress at an internal / loopback / cloud-metadata
+# (169.254.169.254) host (the SSRF class). Gated DEFAULT-OFF on `customer_notify_enabled()`: unset ⇒ nothing is
+# wired and no notify egress exists. A generic customer webhook host the owner has reviewed is added here (exact).
+NOTIFY_WEBHOOK_HOST_ALLOWLIST = frozenset({"hooks.slack.com"})
+# Suffixes the owner has reviewed for providers that mint many sender hosts; a host is allowed iff it EQUALS a
+# member above OR ends with ("." + a member here) — ".discord.com" admits discord.com's own webhook host without
+# admitting a look-alike like `discord.com.evil.test` (that ends with `.evil.test`, never `.discord.com`).
+NOTIFY_WEBHOOK_HOST_ALLOWLIST_SUFFIXES = frozenset({"discord.com", "discordapp.com"})
+# The issue-tracker API hosts the sync may reach (exact host). A customer's self-hosted Jira host is NOT here by
+# default — the owner adds the specific host after review; this is the OWNER's allowlist, never a tenant free-form.
+NOTIFY_ISSUE_API_ALLOWLIST = frozenset({
+    "api.github.com",            # GitHub issues REST
+    "api.atlassian.com",         # Jira Cloud REST (api.atlassian.com/ex/jira/{cloudid})
+    "api.linear.app",            # Linear GraphQL
+})
 
 
 def customer_oidc_enabled() -> bool:
