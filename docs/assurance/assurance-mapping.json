@@ -3775,6 +3775,7 @@
         "LIMIT-a11y-capture-unwired",
         "LIMIT-agent-body-scaffold",
         "LIMIT-external-audit-team",
+        "LIMIT-frontc-shard-cross-host-deploy",
         "LIMIT-gesture-native-inject-unwired",
         "LIMIT-restore-hard-pruned-spine",
         "LIMIT-sigil-voice-probe-egress-not-gatewayed"

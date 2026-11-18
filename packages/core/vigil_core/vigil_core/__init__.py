@@ -62,6 +62,10 @@ from .connected_repo_record import (
     BlockThreshold, ConnectedRepoRecord, SignedConnectedRepoRecord, check_repo as check_connected_repo,
     connected_repo_signing_bytes, repo_owner_name, sign_connected_repo_record, verify_connected_repo_record,
 )
+from .shard_assignment_record import (
+    ShardAssignmentRecord, SignedShardAssignmentRecord, check_tenant_component,
+    shard_assignment_signing_bytes, sign_shard_assignment_record, verify_shard_assignment_record,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -123,6 +127,8 @@ __all__ = [
     "sign_monitoring_authority", "verify_monitoring_authority",
     "BlockThreshold", "ConnectedRepoRecord", "SignedConnectedRepoRecord", "check_connected_repo",
     "connected_repo_signing_bytes", "repo_owner_name", "sign_connected_repo_record", "verify_connected_repo_record",
+    "ShardAssignmentRecord", "SignedShardAssignmentRecord", "check_tenant_component",
+    "shard_assignment_signing_bytes", "sign_shard_assignment_record", "verify_shard_assignment_record",
     "REDPEN_ACTION_SEAM_SUBDIR", "REDPEN_FIX_ACTION", "REDPEN_RETEST_ACTION", "redpen_action_marker",
     "RETEST_REPROOF_SEAM_SUBDIR", "RETEST_OUTCOME_SEAM_SUBDIR",
     "retest_reproof_ticket", "retest_reproof_outcome", "ticket_identity",

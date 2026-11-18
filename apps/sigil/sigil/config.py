@@ -501,6 +501,21 @@ def customer_plan_checkout_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def multi_shard_enabled() -> bool:
+    """True iff Front C multi-shard routing + live migration is on (`VIGIL_MULTI_SHARD` affirmative; S2/S3).
+
+    OFF by default — the historical SINGLETON deployment, byte-identical: the routing resolver returns the single
+    shared ``CRUCIBLE_ROOT`` for EVERY tenant regardless of any shard-assignment record on the spine (nothing is
+    routed, no assignment is consulted), and the live-migration orchestrator refuses to run. ON, the resolver
+    directs each tenant to its OWN shard via its owner-signed ``ShardAssignment`` and FAILS CLOSED for an
+    unassigned tenant (never defaulted onto a shard), and the migration orchestrator is enabled.
+
+    The actual cross-HOST dispatch + copy and the keyless routing-edge wiring are owner deploy work (this flag
+    gates only the in-repo resolution + orchestration code); the production flip stays the OWNER's, after S4 is
+    green (HANDOFF §13.1)."""
+    return (os.environ.get("VIGIL_MULTI_SHARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def billing_plan_alarm_enabled() -> bool:
     """Whether the billing drain QUARANTINES (alarms on) an unaccountable paid PLAN charge. ON whenever plan
     checkout is ON, and independently via `VIGIL_BILLING_PLAN_ALARM` — keep it ON for as long as any plan sold

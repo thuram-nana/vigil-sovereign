@@ -558,6 +558,22 @@
       "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-frontc-shard-cross-host-deploy",
+      "title": "Front C S2/S3 multi-shard routing + migration is proven in-repo but the cross-host dispatch/copy and the routing-edge wiring are owner deploy work",
+      "summary": "The owner-signed ShardAssignment record + fold, the pure routing resolver (tenant -> dedicated CRUCIBLE_ROOT on its shard, fail-closed on an unassigned tenant), the per-shard job-queue key, and the live-migration orchestrator (pause -> drain -> copy+hash-verify -> owner-signed epoch bump -> resume, crash-safe, idempotent, no split-brain) are all built and tested offline with two in-process shards (two root dirs), behind VIGIL_MULTI_SHARD (default-OFF, byte-identical singleton when off). What remains owner deploy and is NOT claimed here: the real cross-HOST copy/dispatch (the orchestrator's _copy_tree is a local shutil.copytree a deploy swaps for its host-to-host transport, which the same hash-verify + atomic-publish + epoch discipline then guards), the keyless routing-EDGE wiring (uiproxy/custui/provision) and the offense worker's assert_tenant_fleet_isolated startup call, and the S4 cluster acceptance at the owner's N. The production multi-shard flip stays the owner's, after S4 is green.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/shard_routing.py",
+        "symbol": "resolve"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
