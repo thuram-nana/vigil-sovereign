@@ -653,6 +653,7 @@ jobs:
               integration/tests/test_credential_acceptance_arm.py \
               integration/tests/test_oob_redrive_arm.py \
               integration/tests/test_oob_autonomous_feeder.py \
+              integration/tests/test_apex_oob_ssti.py \
               integration/tests/test_fleet_kill_sign.py \
               integration/tests/test_coders_egress_gateway.py \
               integration/tests/test_live_think_gateway.py \

