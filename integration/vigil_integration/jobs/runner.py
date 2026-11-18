@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .authorize import LEASE_PAUSED_DENIAL, JobAuthorization, authorize_job
+from .engage_worker import CreditPaused
 from .model import SecurityJob
 from .queue import ClaimedJob, SecurityJobQueue
 
@@ -82,6 +83,14 @@ class JobRunner:
             # AUTHORIZED — and only now, holding the slug lease, is the worker invoked.
             try:
                 result = self.worker(job)
+                # W3 — a METERED run PARKED for want of prepaid credit (the engage worker's ``CreditPaused``) keeps no
+                # one-shot delivery: the halt marker the model gateway recorded BEFORE its terminal credit stop parks it
+                # (the seam poller's verify refuses a paused lease, so it is not re-driven into the empty wallet), and
+                # once a top-up + resume lifts that marker the poller re-produces it and the worker re-arms it with
+                # ``resume``. The cooperative pause releases its delivery the same way (its raise, below). Any other
+                # result keeps its delivery exactly as before.
+                if isinstance(result, CreditPaused):
+                    self.queue.release_delivery(claimed)
                 return JobOutcome(state="done", job=job, result=result)
             except Exception as e:  # noqa: BLE001 — a worker error is a job outcome, never a loop crash
                 # a FAILED scan was not successfully handled — release its permanent delivery marker so a

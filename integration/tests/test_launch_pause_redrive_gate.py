@@ -329,3 +329,59 @@ def test_e2e_queued_pause_is_held_then_readmitted_and_runs_exactly_once(monkeypa
     # exactly-once after the run: the still-published lease re-polls as a duplicate, never a second run
     assert drain.drain() == {"enqueued": 0, "duplicate": 1, "deferred": 0}
     assert runner.run_one().state == "empty"
+
+
+# ------------------------------------------------------------------ W3: a CREDIT pause parks, a resume re-drives --
+# (HANDOFF §11.6) A metered run the model gateway stopped for want of prepaid credit returns the engage worker's
+# ``CreditPaused`` (M1c-2b). The gateway recorded the halt marker BEFORE that terminal stop, so ``run_one`` releases
+# the one-shot delivery: the paused lease is not re-produced (no re-drive into the empty wallet), and once a top-up +
+# resume lifts the marker the poller re-produces it and the worker re-arms it with ``resume``.
+# Mutation-verify target: run_one keeps the delivery of a CreditPaused -> the two tests below go red.
+def test_run_one_releases_the_delivery_of_a_credit_paused_run_and_only_of_it(tmp_path):
+    from vigil_integration.jobs.engage_worker import PAUSED_CREDIT_OUTCOME, CreditPaused
+    q = SecurityJobQueue(str(tmp_path / "q"))
+    assert q.enqueue(_untagged_job()).enqueued is True
+    paused = JobRunner(queue=q, gate=lambda j: GateOutcome(True, "ok"),
+                       worker=lambda j: CreditPaused(engagement_slug=j.slug, nonce="n1"), assert_tenant=lambda: None)
+    out = paused.run_one()
+    assert out.state == "done" and isinstance(out.result, CreditPaused) and out.result.outcome == PAUSED_CREDIT_OUTCOME
+    assert q.enqueue(_untagged_job()).enqueued is True          # released ⇒ the poller can re-produce it on resume
+    # any other result keeps its delivery exactly as before — even one that merely LOOKS like the pause outcome
+    other = JobRunner(queue=q, gate=lambda j: GateOutcome(True, "ok"),
+                      worker=lambda j: {"outcome": PAUSED_CREDIT_OUTCOME}, assert_tenant=lambda: None)
+    assert other.run_one().state == "done"
+    assert q.enqueue(_untagged_job()).enqueued is False         # kept ⇒ a re-delivery coalesces
+
+
+def test_w3_e2e_a_credit_paused_run_is_parked_then_resumed_with_resume_after_a_top_up(monkeypatch, tmp_path):
+    from framework.v2.common.errors import CreditsExhausted
+    from vigil_integration.jobs.launch_runner import make_engage_scan_runner
+    from vigil_integration.launch_drain import LaunchSeamDrain
+    owner = generate_keypair()
+    base = _live_rig(monkeypatch, owner, tmp_path)
+    ran: list = []
+    emits: list = []
+    monkeypatch.setattr("vigil_integration.jobs.completion_signal.emit_completion_signal",
+                        lambda **kw: emits.append(kw["outcome"]))
+
+    def run(**kw):
+        ran.append(kw)
+        if len(ran) == 1:
+            record_lease_pause(base, SLUG, "n1")                # the gateway's record, BEFORE its terminal stop
+            raise CreditsExhausted("the model gateway stopped the run: credits exhausted")
+        return {"ok": 1}
+
+    runner = make_engage_scan_runner(str(tmp_path / "queue"), trust_root=object(), assert_tenant=lambda: None,
+                                     run=run, base_dir=base)
+    drain = LaunchSeamDrain(base_dir=base, queue=runner.queue)
+    assert drain.drain() == {"enqueued": 1, "duplicate": 0, "deferred": 0}
+    out = runner.run_one()
+    assert out.state == "done" and out.result.outcome == "paused_credit"
+    assert emits == []                                          # no completion: neither charged nor refunded
+    assert drain.drain() == {"enqueued": 0, "duplicate": 0, "deferred": 0}     # parked: nothing re-produced
+    assert runner.run_one().state == "empty"                    # ... and nothing re-driven into the empty wallet
+    clear_lease_pause(base, SLUG, "n1")                         # a top-up + resume lifts the halt
+    assert drain.drain() == {"enqueued": 1, "duplicate": 0, "deferred": 0}     # RE-PRODUCED (delivery was released)
+    assert runner.run_one().state == "done"
+    assert len(ran) == 2 and ran[0]["resume"] is False and ran[1]["resume"] is True   # re-armed with RESUME
+    assert emits == ["completed"]                               # exactly one settle signal, after the resumed run

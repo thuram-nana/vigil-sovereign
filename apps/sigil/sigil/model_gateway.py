@@ -2130,6 +2130,22 @@ class _Handler(BaseHTTPRequestHandler):
         if reason == "closed":
             raise _Refusal(403, "permission_error", "this run's model grant is closed (the run was settled)")
         if reason == "allowance":
+            # W3 (§11.6): before the TERMINAL credit stop, the sovereign records the pause through the allowance source
+            # (the pause time + reason, and the halt marker), so the stop always lands on a launch that is provably
+            # PARKED — the worker then returns its held, unsettled CreditPaused and the run's one-shot delivery is
+            # released for the resume. A pause that cannot be recorded right now is refused as RETRYABLE, never with
+            # the terminal stop: an unrecorded launch must not park out of every reader's sight. A source without the
+            # hook keeps the terminal stop as before.
+            note = getattr(gw.config.allowance, "note_credit_pause", None)
+            if note is not None:
+                try:
+                    recorded = bool(note(grant, now))
+                except Exception:  # noqa: BLE001 — a hook that breaks has recorded nothing (fail closed: retryable)
+                    _log.warning("model gateway: the credit pause of a run could not be recorded", exc_info=True)
+                    recorded = False
+                if not recorded:
+                    raise _Refusal(529, "overloaded_error", "VIGIL cannot pause this scan for credit right now; retry "
+                                   "shortly", retry_after=5)
             raise _Refusal(403, "permission_error", CREDITS_EXHAUSTED, stop=STOP_CREDITS_EXHAUSTED)
         if reason:
             raise _Refusal(403, "permission_error", "this run's budget is reached")

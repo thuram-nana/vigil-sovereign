@@ -63,6 +63,14 @@ __all__ = [
     "is_lease_paused",
     "unreadable_pause_markers",
     "pause_store_unreadable",
+    # W3 — the credit-pause record (reason + pause time), a SIBLING of the halt marker.
+    "CREDIT_PAUSE_REASON",
+    "credit_pause_ttl_s",
+    "record_credit_pause",
+    "credit_pause_at",
+    "credit_pause_reason",
+    "clear_credit_pause",
+    "credit_paused_launches",
 ]
 
 _PAUSE_DIRNAME = "credit-lease-pauses"
@@ -72,6 +80,40 @@ _PAST_EXPIRY_DIRNAME = "credit-lease-paused-past-expiry"
 _PAST_EXPIRY_SCHEMA = "vigil-credit-lease-paused-past-expiry-v1"
 _PAUSE_SCHEMA = "vigil-credit-lease-pause-v1"
 _SCHEMA_VERSION = 1
+
+# W3 (§11.6) — the credit-pause record: a SIBLING of the halt-marker dir (so the halt-marker enumerations never
+# pick it up). It records, per paused nonce, WHEN the launch paused for want of prepaid credit and WHY, so (a) the
+# 7-day close counts the owner's grace from the PAUSE (not the 8-hour lease window — the pause can outlive it), and
+# (b) resume + the UI can tell a credit pause from a cooperative/operator pause and from a W5 billing hold. It
+# carries NO amount / signature (like the halt marker, it is money-doctrine-neutral): the money stays on the held,
+# unsettled lease + its meter. A credit pause sets BOTH the existing halt marker (``record_lease_pause`` — the arm /
+# poll / extend already halt on it) AND this record (the time + reason).
+_CREDIT_PAUSE_DIRNAME = "credit-pauses"
+_CREDIT_PAUSE_SCHEMA = "vigil-credit-pause-v1"
+
+#: The reason a credit pause records (owner decision 2026-11-16: the wallet ran dry mid-run). The ONLY reason this
+#: record is written for; kept as a constant so the writer, the reader and the tests name the same string.
+CREDIT_PAUSE_REASON = "insufficient_credits"
+
+#: VIGIL_CREDIT_PAUSE_TTL_S default — the owner's grace for a credit-paused launch to be topped up before it is
+#: closed and charged for what it used (§11.2: "Waits 7 days"). 604800 s = 7 days.
+_DEFAULT_CREDIT_PAUSE_TTL_S = 604_800.0
+
+
+def credit_pause_ttl_s() -> float:
+    """The credit-pause grace in seconds: ``VIGIL_CREDIT_PAUSE_TTL_S`` when it is a finite number > 0, else
+    :data:`_DEFAULT_CREDIT_PAUSE_TTL_S` (604800 = 7 days). Mirrors ``credit_lease_expiry.settle_grace_seconds``:
+    an unreadable / non-positive value NEVER shortens the grace (fail-safe toward the customer keeping their held
+    work longer, never toward an early close). Total; never raises."""
+    import math
+    raw = os.environ.get("VIGIL_CREDIT_PAUSE_TTL_S")
+    if raw is None:
+        return _DEFAULT_CREDIT_PAUSE_TTL_S
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_CREDIT_PAUSE_TTL_S
+    return v if math.isfinite(v) and v > 0 else _DEFAULT_CREDIT_PAUSE_TTL_S
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -266,6 +308,150 @@ def paused_past_expiry(base_dir: Any, slug: Any, nonce: Any) -> Optional[bool]:
         return None
     nonces = _past_expiry_nonces(path)
     return None if nonces is None else str(nonce) in nonces
+
+
+# ---------------------------------------------------------------------------------------------------
+# W3 — the credit-pause record (the pause time + reason, per nonce). A SIBLING of the halt-marker dir.
+# ---------------------------------------------------------------------------------------------------
+
+
+def credit_pauses_root(base_dir: Any) -> Path:
+    """The credit-pause-record root ``<base>/credit-pauses`` (a SIBLING of the halt-marker, leases and settlements
+    dirs, so a ``*.json`` glob of any of those never picks up a credit-pause record). ``base_dir=None`` resolves
+    to the default seam base exactly as the lease verify does (:func:`_seam_base`)."""
+    return Path(_seam_base(base_dir)) / _CREDIT_PAUSE_DIRNAME
+
+
+def credit_pause_path(base_dir: Any, slug: Any) -> Optional[Path]:
+    """The credit-pause-record path for ``slug``, or None if the slug is unsafe as a path component."""
+    safe = _safe_component(slug)
+    if not safe:
+        return None
+    return _contained_child(credit_pauses_root(base_dir), f"{safe}.json")
+
+
+def _credit_pause_map(path: Path) -> "Optional[dict[str, dict]]":
+    """The ``{nonce: {at, reason}}`` map of ``slug``, or None when the file exists but cannot be read cleanly.
+
+    ``{}`` for no file (nothing credit-paused for this slug). An existing-but-unreadable/corrupt/foreign record
+    returns None (the caller decides; the readers fail-soft, the writers refuse to overwrite). Never raises."""
+    try:
+        if not path.is_file():
+            return {}
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(obj, dict) or obj.get("kind") != _CREDIT_PAUSE_SCHEMA:
+            raise ValueError("foreign or malformed credit-pause record")
+        pauses = obj.get("pauses")
+        if not isinstance(pauses, dict):
+            raise ValueError("malformed credit-pause record body")
+    except (OSError, ValueError):
+        return None
+    out: "dict[str, dict]" = {}
+    for n, entry in pauses.items():
+        if isinstance(entry, dict):
+            out[str(n)] = entry
+    return out
+
+
+def record_credit_pause(base_dir: Any, slug: Any, nonce: Any, at: float,
+                        reason: str = CREDIT_PAUSE_REASON) -> Path:
+    """Durably record that the lease ``(slug, nonce)`` paused for want of prepaid credit AT ``at`` (a POSIX time)
+    FOR ``reason``. FIRST-``at``-WINS, idempotent per nonce: re-recording a nonce already present KEEPS its first
+    recorded ``at`` and ``reason`` (so concurrent gateway refusals of the same pause episode never move the 7-day
+    clock, and the TTL always counts from the FIRST pause). Raises ValueError on an unsafe slug, and on an existing
+    record that cannot be read cleanly (rewriting it would drop other launches' pause times), so the caller refuses
+    and changes nothing (the gateway then issues a retryable stop, never the terminal one). Reversible by
+    :func:`clear_credit_pause`."""
+    path = credit_pause_path(base_dir, slug)
+    if path is None:
+        raise ValueError(f"unsafe lease slug: {slug!r}")
+    af = float(at)
+    import math
+    if not math.isfinite(af):
+        raise ValueError("the credit-pause time must be a finite POSIX timestamp")
+    with _marker_lock(path):
+        current = _credit_pause_map(path)
+        if current is None:
+            raise ValueError("the credit-pause record exists but cannot be read; refusing to overwrite it")
+        if str(nonce) not in current:                 # FIRST-at-wins: never move an existing pause time
+            current[str(nonce)] = {"at": af, "reason": str(reason)}
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _CREDIT_PAUSE_SCHEMA,
+                                  "slug": _safe_component(slug), "pauses": current})
+    return path
+
+
+def clear_credit_pause(base_dir: Any, slug: Any, nonce: Any) -> Path:
+    """Durably clear the credit-pause record of ``(slug, nonce)`` (on resume or on the 7-day close) — remove this
+    nonce while OTHER credit-paused nonces of the slug are untouched. Idempotent (clearing an absent nonce rewrites
+    the same reduced map). Raises ValueError on an unsafe slug, and on an existing record that cannot be read
+    cleanly (never clobbers other launches' pause times)."""
+    path = credit_pause_path(base_dir, slug)
+    if path is None:
+        raise ValueError(f"unsafe lease slug: {slug!r}")
+    with _marker_lock(path):
+        current = _credit_pause_map(path)
+        if current is None:
+            raise ValueError("the credit-pause record exists but cannot be read; refusing to overwrite it")
+        current.pop(str(nonce), None)
+        _atomic_write_json(path, {"schema_version": _SCHEMA_VERSION, "kind": _CREDIT_PAUSE_SCHEMA,
+                                  "slug": _safe_component(slug), "pauses": current})
+    return path
+
+
+def credit_pause_at(base_dir: Any, slug: Any, nonce: Any) -> Optional[float]:
+    """The POSIX time ``(slug, nonce)`` paused for credit, or None when it is not credit-paused (no record / a clean
+    record without it) OR the record cannot be read. Total; never raises. FAIL-SOFT to None: callers (the 7-day-close
+    due predicate, resume) treat None as 'not a credit pause' — a credit pause whose record is briefly unreadable
+    then falls back to the lease-window close rule, which still charges exactly what was used (only the TIMING is
+    affected, never the amount)."""
+    path = credit_pause_path(base_dir, slug)
+    if path is None:
+        return None
+    cur = _credit_pause_map(path)
+    if not cur:
+        return None
+    entry = cur.get(str(nonce))
+    if not isinstance(entry, dict):
+        return None
+    try:
+        import math
+        v = float(entry.get("at"))
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def credit_pause_reason(base_dir: Any, slug: Any, nonce: Any) -> Optional[str]:
+    """The reason recorded for a credit pause of ``(slug, nonce)``, or None when it is not credit-paused / unreadable.
+    Total; never raises."""
+    path = credit_pause_path(base_dir, slug)
+    if path is None:
+        return None
+    cur = _credit_pause_map(path)
+    if not cur:
+        return None
+    entry = cur.get(str(nonce))
+    if not isinstance(entry, dict):
+        return None
+    r = entry.get("reason")
+    return str(r) if isinstance(r, str) and r else None
+
+
+def credit_paused_launches(base_dir: Any) -> "list[tuple[str, list[str]]]":
+    """Observability (``vigil doctor`` / the billing dashboard): the currently credit-paused launches as
+    ``(slug, [nonces])``. READ-ONLY, TOTAL, fail-SAFE to ``[]`` (an absent / unreadable dir or record contributes
+    nothing). DEFAULT-OFF: no records ⇒ ``[]``. A credit-paused launch is a POSITIVELY-recorded held reservation
+    awaiting a top-up (expected), never a stuck lease."""
+    out: "list[tuple[str, list[str]]]" = []
+    try:
+        entries = sorted(credit_pauses_root(base_dir).glob("*.json"))
+    except OSError:
+        return out
+    for p in entries:
+        cur = _credit_pause_map(p)
+        if cur:
+            out.append((p.stem, sorted(cur.keys())))
+    return out
 
 
 def is_lease_paused(base_dir: Any, slug: Any, nonce: Any) -> bool:

@@ -98,6 +98,54 @@ _RECOVER_CODE_EMAIL = (
 # The notification centre returns at most this many items (most-severe-first); ``count`` is the true total
 # so the UI badge is honest. A cap bounds the read so a noisy tenant can never return an unbounded list.
 _NOTIF_MAX = 100
+# W3 — the notice of an assessment parked for want of prepaid credit. Credits only, no amount, no host, no estimate:
+# it says what happened, what to do, and the owner's rule for a pause that is never resumed (the wait is the
+# VIGIL_CREDIT_PAUSE_TTL_S grace, stated in whole days — or hours below a day).
+_CREDIT_PAUSE_TITLE = "Assessment paused: out of credits"
+_CREDIT_PAUSE_BODY = ("An assessment ran out of credits and is paused; the work it has done so far is kept. Top up your "
+                      "credits, then resume it from Assessments. If it is not resumed within {wait}, it closes and is "
+                      "charged only for what it used.")
+
+
+def _credit_pause_wait(ttl_s: float) -> str:
+    """The credit-pause grace in plain words: whole days, or whole hours (at least one) below a day."""
+    if ttl_s >= 86_400:
+        days = int(ttl_s // 86_400)
+        return f"{days} day" + ("" if days == 1 else "s")
+    hours = max(1, int(ttl_s // 3_600))
+    return f"{hours} hour" + ("" if hours == 1 else "s")
+
+
+def _credit_pause_notices(store, org_id: str, *, now: float) -> "list[dict]":
+    """W3 — one ``assessment`` notice per launch of ``org_id`` PARKED for want of prepaid credit (the sovereign
+    ``credit-pauses`` records on the seam), tenant-scoped by the org's OWN server-derived slug set (``assessments.
+    _org_slug_set``: its current ownership proofs — never a seam field); a launch already settled is not listed. A
+    stable id ``credit_pause:<slug>:<nonce>`` for read-tracking, ``ts`` = the pause time. READ-ONLY and total: an
+    absent / unreadable seam contributes nothing (no record ⇒ no notice, so without metered billing nothing changes)."""
+    try:
+        from vigil_core.seam_base import resolve_seam_base
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+        from vigil_integration.live.credit_lease_pause import (credit_pause_at, credit_pause_ttl_s,
+                                                               credit_paused_launches)
+        base = resolve_seam_base(None)
+        paused = credit_paused_launches(base)
+        if not paused:
+            return []
+        from . import assessments as _assess
+        mine = _assess._org_slug_set(store, org_id, now=now)
+        body = _CREDIT_PAUSE_BODY.format(wait=_credit_pause_wait(credit_pause_ttl_s()))
+        out: "list[dict]" = []
+        for slug, nonces in paused:
+            if slug not in mine:
+                continue
+            for nonce in nonces:
+                if is_lease_settled(base, slug, nonce):
+                    continue
+                out.append({"id": f"credit_pause:{slug}:{nonce}", "kind": "assessment", "severity": "high",
+                            "title": _CREDIT_PAUSE_TITLE, "body": body, "ts": credit_pause_at(base, slug, nonce)})
+        return out
+    except Exception:  # noqa: BLE001 — an advisory projection never breaks the notification read
+        return []
 
 
 class ProvisionError(Exception):
@@ -2293,7 +2341,12 @@ class Provisioner:
         ``launch_pause`` (flag + ``admit_customer`` + tenant-bind + step-up). Idempotent: resuming a non-paused
         launch is a harmless no-op. On an EXPIRED lease the pause is still lifted (so a run in progress past
         ``not_after`` is never left halted for good), and the reply carries ``expired: True`` plus a ``detail``
-        saying that a launch which has not started will not start; an in-window reply is unchanged."""
+        saying that a launch which has not started will not start; an in-window reply is unchanged.
+
+        W3 — a launch PARKED for want of prepaid credit resumes after a top-up (``LaunchGate.resume_launch`` → its
+        credit path) and the reply carries ``credit_resumed: True``; an amount is never part of the reply. Refused —
+        nothing changed, still parked — while the wallet still cannot cover one model request, while the org is on a
+        billing hold, and once its wait for a top-up has ended."""
         from .. import config
         if not config.customer_pause_resume_enabled():
             raise ProvisionDenied("customer pause/resume is not enabled")
@@ -2315,6 +2368,8 @@ class Provisioner:
         if r.get("expired"):
             out["expired"] = True
             out["detail"] = str(r.get("detail") or "")
+        if r.get("credit_resumed"):
+            out["credit_resumed"] = True
         return out
 
     # -- AEGIS-SaaS AE-1: DEFENSIVE monitoring authority (own != offense-test != observe != block) -------
@@ -2773,6 +2828,16 @@ class Provisioner:
                                        "An assessment run completed. View any findings in your assessments.")
                 items.append({"id": "outcome:" + slug + ":" + nonce, "kind": "assessment",
                               "severity": sev, "title": head, "body": body, "ts": o.get("ts")})
+
+        # 5) Assessments PAUSED FOR CREDIT (W3) — a metered run whose prepaid credits ran out is parked with its work
+        #    so far kept, waiting for a top-up and a resume. Derived from the sovereign credit-pause records of THIS
+        #    org's own server-derived slug set (never a seam field decides the tenant). Shown to a member who can top
+        #    up (view_billing) or who follows assessments (view_assessments); it carries NO amount and names no host.
+        #    Absent unless a credit pause exists, and only metered billing ever records one.
+        if (self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_billing")
+                or self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="view_assessments")):
+            items.extend(_credit_pause_notices(self.store, requester_org_id, now=t))
 
         # Stable, severity-ranked order; a stable sort keeps within-source order (findings + monitoring are
         # already newest-first). Cap the returned list; ``count`` is the TRUE pre-cap total for the UI badge.

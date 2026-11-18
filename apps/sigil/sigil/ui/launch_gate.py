@@ -733,7 +733,8 @@ class LaunchGate:
         ext, _pruned = self.extension_total(org_id, slug, nonce)
         return int(units_reserved) + ext
 
-    def extend_reservation(self, *, org_id: str, slug: str, nonce: str, credits: int, now: Any) -> dict:
+    def extend_reservation(self, *, org_id: str, slug: str, nonce: str, credits: int, now: Any,
+                           credit_resume: bool = False) -> dict:
         """W2b — extend a RUNNING metered launch's allowance by ``credits`` from the org's WALLET: one more
         owner-signed reserve debit of the SAME launch, ``reserve-wallet:{slug}:{nonce}:x{k}`` (k = the next index),
         which the launch's one exactly-once settle refunds or keeps with the rest of its reservation.
@@ -748,7 +749,14 @@ class LaunchGate:
         the org is on a billing HOLD (it owes credits after a reversal) — ``{ok: False, insufficient: True,
         billing_hold: True, reason: "billing_hold"}``: the gateway stops the run exactly as when the wallet is empty,
         and W3 pauses it for the hold. Returns ``{ok, k, credits, extended, reserved_base_known}`` or ``{ok: False,
-        error, insufficient?}`` (``insufficient``: the wallet cannot cover it — the caller pauses the run, W3)."""
+        error, insufficient?}`` (``insufficient``: the wallet cannot cover it — the caller pauses the run, W3).
+
+        ``credit_resume`` (W3, internal — only :meth:`resume_launch` passes it): the first allowance after a top-up of
+        a launch PARKED for want of credit, taken while its halt marker is still set, then UN-PARKING it — the
+        credit-pause record cleared first, then the halt marker — all inside this ONE settle-locked section, so it
+        linearizes with the 7-day close and every settle. It changes nothing (``not_credit_paused``) unless the launch
+        is still credit-paused, and refuses (``credit_pause_expired``) once its wait for a top-up has ended (the close
+        then charges it for what it used). Every other refusal above applies unchanged (a W5 billing hold included)."""
         from contextlib import ExitStack
         from .. import config
         from ..governor.launch_reservations import extension_entry_id
@@ -798,10 +806,23 @@ class LaunchGate:
                     return {"ok": False, "error": "this launch is settled"}
                 from vigil_integration.live.credit_lease_pause import lease_pause_state
                 paused = lease_pause_state(self._seam_base(), s, non)
-                if paused is True:
+                if paused is True and not credit_resume:
                     return {"ok": False, "paused": True, "error": "this launch is paused"}
-                if paused is not False:
+                if paused is not True and paused is not False:
                     return {"ok": False, "retry": True, "error": "this launch's pause state cannot be read"}
+                if credit_resume:
+                    # W3: only a launch STILL parked for credit is un-parked here — a second resume, or one that lost a
+                    # race with another, finds the record gone and changes nothing; and never once its wait for a
+                    # top-up has ended (the 7-day close, which may already have closed its meter, charges it instead).
+                    from vigil_integration.live.credit_lease_pause import credit_pause_at, credit_pause_ttl_s
+                    paused_at = credit_pause_at(self._seam_base(), s, non)
+                    if paused_at is None:
+                        return {"ok": False, "not_credit_paused": True,
+                                "error": "this launch is not paused for credit (already resumed or closed)"}
+                    if now_ts >= paused_at + credit_pause_ttl_s():
+                        return {"ok": False, "credit_pause_expired": True,
+                                "error": "this assessment waited too long for credit: it is closed and charged only "
+                                         "for what it used"}
             except (OSError, ValueError):
                 return busy
             hold = self._billing_hold_refusal(oid)   # W5: decided under the settle lock the reversals write under
@@ -826,6 +847,18 @@ class LaunchGate:
             if before - self.wallet.available(oid) < credits:
                 return {"ok": False, "error": "this allowance extension did not apply (fail-closed)"}
             extended, _pruned = self.extension_total(oid, s, non)
+            if credit_resume:
+                # W3: un-park, still under the settle lock. The RECORD goes first: if the halt cannot be lifted after
+                # it, the launch stays parked and a retried resume lifts the halt through the ordinary pause path; the
+                # reverse order could leave a running launch behind a stale record whose first pause time a later
+                # pause would keep (closing it early). Either failure leaves this extension held — released or kept
+                # at the launch's one settle like every other.
+                from vigil_integration.live.credit_lease_pause import clear_credit_pause, clear_lease_pause
+                try:
+                    clear_credit_pause(self._seam_base(), s, non)
+                    clear_lease_pause(self._seam_base(), s, non)
+                except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-claim
+                    return {"ok": False, "error": f"could not lift the launch's pause (fail-closed): {type(e).__name__}"}
         return {"ok": True, "action": "allowance_extended", "org_id": oid, "slug": s, "nonce": non, "k": k,
                 "credits": credits, "extended": extended}
 
@@ -2021,7 +2054,12 @@ class LaunchGate:
         cannot make an expired lease runnable: the seam poller, the pickup gate and the arm all refuse the window,
         so a launch that has not started still never starts. ``now`` is a datetime / POSIX timestamp (``None`` ⇒
         the current time); an unreadable ``now`` or lease window refuses and clears nothing (fail-closed),
-        because the reply could not say which of the two cases applies."""
+        because the reply could not say which of the two cases applies.
+
+        W3 (§11.6) — a launch PARKED for want of prepaid credit (a credit-pause record names it) resumes through
+        :meth:`_resume_credit_pause` instead: the top-up is checked, a closed window is continued, the first allowance
+        after the top-up is taken and the launch un-parked — see there. Once a resume has continued a launch, its live
+        window is its continuation's (same nonce, on the seam), which is what ``expired`` is judged against."""
         doc, err = self._verify_lease_for_pause(signed_lease, expect_org_id)
         if err is not None:
             return err
@@ -2029,9 +2067,22 @@ class LaunchGate:
         try:
             # a NaN / infinite ``now`` cannot become a datetime (ValueError / OverflowError), so it refuses here
             now_ts = (datetime.now(timezone.utc) if now is None else self._as_dt(now)).timestamp()
-            expired = now_ts >= doc.not_after.timestamp()
+            not_after = doc.not_after.timestamp()
         except (TypeError, ValueError, OSError, OverflowError, AttributeError):
             return {"ok": False, "error": "could not read the lease validity window for resume (fail-closed)"}
+        if now_ts >= not_after:
+            # W3: a credit-pause resume may have continued this launch with a fresh window (same nonce); its window,
+            # not the customer's copy of the original lease, is the launch's. None (no continuation) ⇒ unchanged.
+            cont = self._seam_continuation(s, non)
+            if cont is not None:
+                not_after = max(not_after, cont.not_after.timestamp())
+        expired = now_ts >= not_after
+        from vigil_integration.live.credit_lease_pause import credit_pause_at
+        if credit_pause_at(self._seam_base(), s, non) is not None:
+            credit = self._resume_credit_pause(doc, now_ts, expired)
+            if credit is not None:
+                return credit
+            # None: another resume un-parked it first — lift any halt left behind through the ordinary path below
         try:
             from vigil_integration.live.credit_lease_pause import (clear_lease_pause, lease_pause_state,
                                                                    record_paused_past_expiry)
@@ -2050,6 +2101,168 @@ class LaunchGate:
         if expired:
             out["expired"] = True
             out["detail"] = _RESUMED_EXPIRED_DETAIL
+        return out
+
+    # -- W3: pause on insufficient credit, resume after a top-up (pricing design §0, HANDOFF §11.6) ----------------
+    def record_credit_pause(self, *, slug: str, nonce: str, now: Any) -> dict:
+        """W3 — the SOVEREIGN record that metered launch ``(slug, nonce)`` is PARKED for want of prepaid credit: the
+        model gateway calls it (through :class:`LaunchAllowance`) right before it refuses the run's request with the
+        terminal credit stop, so a stop always lands on a launch that is provably parked.
+
+        Writes, durably and in this order: the credit-pause RECORD — the pause time and the reason
+        ``insufficient_credits`` (first pause time wins: concurrent refusals of one pause never move the clock the
+        7-day close counts from) — and the reversible HALT marker the seam poller, the pickup gate, the arm, the
+        engine's halt checks and the allowance extension already refuse. The worker meanwhile returns the held,
+        unsettled ``CreditPaused`` (no completion, the floor held re-armable), so the lease is neither charged nor
+        refunded until a top-up resumes it or its wait ends. Moves NO money and holds no lock beyond the per-file
+        marker locks (it runs on the gateway's request path).
+
+        ``{ok: True}`` only once BOTH are durable; ``{ok: False}`` otherwise (the gateway then refuses with a retryable
+        stop, never the terminal one, so an unrecorded launch is never parked out of every reader's sight). Refused
+        for a launch not published metered (only a metered run can run out of credit) and for one already settling or
+        settled (its meter closed / its settlement marked: there is nothing left to pause)."""
+        from .. import config
+        from ..model_gateway import GrantMeter
+        from vigil_core.model_grant import meter_id
+        from vigil_integration.live.credit_lease_broker import is_lease_settled
+        s, non = str(slug or ""), str(nonce or "")
+        if not s or not non or ":" in s or ":" in non:
+            return {"ok": False, "error": "a launch is named by a non-empty slug and nonce without ':'"}
+        try:
+            at = self._as_dt(now).timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        try:
+            if not self._launch_was_metered(s, non):
+                return {"ok": False, "error": "only a metered launch pauses for credit"}
+            if GrantMeter(config.MODEL_METER_DIR).is_closed(meter_id(s, non)) or is_lease_settled(
+                    self._seam_base(), s, non):
+                return {"ok": False, "error": "this launch is settling or settled: there is nothing to pause"}
+        except (OSError, ValueError) as e:
+            return {"ok": False, "error": f"could not read this launch's billing state: {type(e).__name__}"}
+        from vigil_integration.live.credit_lease_pause import (CREDIT_PAUSE_REASON, record_credit_pause,
+                                                               record_lease_pause)
+        base = self._seam_base()
+        try:
+            record_credit_pause(base, s, non, at, reason=CREDIT_PAUSE_REASON)   # the pause time + reason (first wins)
+            record_lease_pause(base, s, non)                                  # the halt every later step refuses
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-record
+            return {"ok": False, "error": f"could not record the credit pause (fail-closed): {type(e).__name__}"}
+        return {"ok": True, "action": "credit_paused", "slug": s, "nonce": non}
+
+    def _seam_continuation(self, slug: str, nonce: str) -> Optional[Any]:
+        """W3 — the lease document the seam holds for ``slug`` when it is a credit-pause CONTINUATION of launch
+        ``nonce`` that verifies under OUR owner key (same nonce, ``continue_of`` == ``nonce``), else None. Total: an
+        absent / unreadable / foreign lease is None."""
+        from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
+        from vigil_integration.live.credit_lease_broker import read_credit_lease
+        kp = self.owner_key
+        if kp is None:
+            return None
+        try:
+            b = read_credit_lease(self._seam_base(), str(slug))
+            if b is None:
+                return None
+            root = TrustRoot(threshold=1, authorizers=[
+                AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+            ok, _why = verify_credit_launch_lease(b.signed_lease, root)
+            d = b.signed_lease.document
+        except Exception:  # noqa: BLE001 — an unreadable seam lease is no continuation
+            return None
+        if not ok or str(d.nonce) != str(nonce) or d.continue_of != str(nonce):
+            return None
+        return d
+
+    def _remint_continuation_lease(self, doc: Any, now_ts: float) -> dict:
+        """W3 — continue the credit-paused launch ``doc`` with a FRESH lease window so a resume after its 8-hour
+        window (and its model grant) ran out can still re-arm: the SAME lease re-signed with only ``not_before`` /
+        ``not_after`` = ``[now, now + 8 h]`` and ``continue_of`` = its own nonce. Everything else is kept verbatim —
+        so it stays bound to the SAME model meter, grant id and reservation (one continuous statement; nothing is
+        re-debited: publishing never debits), and to the same single-use floor: ``issued_at`` is unchanged, so a
+        fresh arm of the continuation is refused as a replay exactly like one of the original, and only the RESUME
+        arm (the worker's resume-required marker) runs it. Published through :meth:`publish_lease`, which re-checks
+        settlement and the kill switch and re-publishes the run's grant valid from the new window's start."""
+        from vigil_core import CreditLaunchLease, sign_credit_launch_lease
+        kp = self.owner_key
+        if kp is None:
+            return {"ok": False, "error": "a continuation lease must be owner-signed (internal: no owner key)"}
+        t = datetime.fromtimestamp(float(now_ts), tz=timezone.utc)
+        fields = doc.model_dump()
+        fields.update(not_before=t, not_after=t + timedelta(hours=_DEFAULT_LEASE_HOURS), continue_of=str(doc.nonce))
+        signed = sign_credit_launch_lease(CreditLaunchLease(**fields), {"owner": kp.private_key_b64})
+        return self.publish_lease(signed_lease=signed.model_dump(mode="json"), expect_org_id=str(doc.org_id))
+
+    def _resume_credit_pause(self, doc: Any, now_ts: float, expired: bool) -> Optional[dict]:
+        """W3 — RESUME launch ``doc``, parked for want of prepaid credit, once the customer has topped up:
+
+          1. the wallet must now cover one useful model request (the start check of a metered reserve), else the
+             launch stays parked, unchanged (``insufficient``) — the 7-day clock keeps its first pause time;
+          2. a closed lease window is CONTINUED (:meth:`_remint_continuation_lease`: same nonce, fresh window and
+             grant), so the re-arm passes the seam poller, the pickup gate and the arm however long it waited;
+          3. ONE allowance extension (the first after the top-up: at most the allowance chunk) is taken and the launch
+             un-parked — the record, then the halt — inside one settle-locked step
+             (``extend_reservation(credit_resume=True)``), which also refuses a W5 billing hold, a launch already
+             closed by the 7-day close and one whose wait has just ended.
+
+        The seam poller then re-produces the launch (its one-shot delivery was released when it parked) and the
+        worker re-arms it with ``resume``: completed phases are not re-run, the single-use floor is not re-burned and
+        no request is re-charged (per-request meter lines). Returns the reply, or None when another resume un-parked
+        it first (the caller then lifts any leftover halt through the ordinary path). A postpaid launch's allowance
+        is not extended (W2), so it is refused here and waits for the 7-day close."""
+        from vigil_core import model_metering as mm
+        from vigil_core.rate_card import rate_card
+        from vigil_integration.live.credit_lease_pause import credit_pause_at, credit_pause_ttl_s
+        from ..model_gateway import min_request_mc
+        s, non, oid = str(doc.engagement_slug), str(doc.nonce), str(doc.org_id)
+        base_reply = {"org_id": oid, "slug": s, "nonce": non}
+        paused_at = credit_pause_at(self._seam_base(), s, non)
+        if paused_at is not None and now_ts >= paused_at + credit_pause_ttl_s():
+            return {"ok": False, "credit_pause_expired": True, **base_reply,
+                    "error": "this assessment waited too long for credit: it is closed and charged only for what it "
+                             "used"}
+        if self.arrears.was_accrued(oid, f"{RESERVE_ENTRY_PREFIX}{s}:{non}"):
+            return {"ok": False, **base_reply,
+                    "error": "this assessment draws on a credit line, which a wallet top-up does not extend: it stays "
+                             "paused and closes at the end of its wait, charged only for what it used"}
+        try:
+            need = max(1, -(-min_request_mc(rate_card()) // MC_PER_CREDIT))   # whole credits for one useful request
+            chunk = mm.allowance_chunk_credits()
+        except (ValueError, mm.MeteringError):
+            return {"ok": False, **base_reply,
+                    "error": "assessments cannot resume right now: the published usage rates cannot be read "
+                             "(fail-closed)"}
+        spendable = int(self.wallet.balance(oid).spendable)            # a fast check; re-checked under the lock
+        if spendable < need:
+            return {"ok": False, "insufficient": True, **base_reply,
+                    "error": "this assessment is still paused for credit: top up your credits, then resume it"}
+        if expired:
+            rm = self._remint_continuation_lease(doc, now_ts)
+            if not rm.get("ok"):
+                out = {"ok": False, **base_reply,
+                       "error": "could not continue this assessment for resume: " + str(rm.get("error") or "")}
+                if rm.get("retry"):
+                    out["retry"] = True
+                return out
+        ext = self.extend_reservation(org_id=oid, slug=s, nonce=non, credits=min(chunk, spendable), now=now_ts,
+                                      credit_resume=True)
+        if ext.get("ok"):
+            return {"ok": True, "action": "launch_resumed", "credit_resumed": True, **base_reply}
+        if ext.get("not_credit_paused"):
+            return None
+        if ext.get("billing_hold"):
+            # W5 (#1151, as briefed): a held org's extension is refused {insufficient, billing_hold, reason} — a credit
+            # top-up does not lift a hold, so the launch stays parked and the reply says what to do instead
+            return {"ok": False, "billing_hold": True, **base_reply,
+                    "error": "billing for your organization is on hold, so this assessment stays paused: adding "
+                             "credits does not lift a hold"}
+        if ext.get("credit_pause_expired"):
+            return {"ok": False, "credit_pause_expired": True, **base_reply, "error": str(ext.get("error") or "")}
+        if ext.get("insufficient"):
+            return {"ok": False, "insufficient": True, **base_reply,
+                    "error": "this assessment is still paused for credit: top up your credits, then resume it"}
+        out = {"ok": False, **base_reply, "error": "could not resume this assessment: " + str(ext.get("error") or "")}
+        if ext.get("retry"):
+            out["retry"] = True
         return out
 
 
@@ -2096,3 +2309,10 @@ class LaunchAllowance:
         import time as _time
         return self.gate.extend_reservation(org_id=grant.org_id, slug=grant.engagement_slug, nonce=grant.nonce,
                                             credits=int(credits), now=_time.time())
+
+    def note_credit_pause(self, grant: Any, now: float) -> bool:
+        """W3 — the gateway is about to refuse this run with the TERMINAL credit stop: record the sovereign credit
+        pause first (:meth:`LaunchGate.record_credit_pause`). True only when it is durably recorded; False (or a
+        raise) makes the gateway refuse with a retryable stop instead."""
+        r = self.gate.record_credit_pause(slug=str(grant.engagement_slug), nonce=str(grant.nonce), now=float(now))
+        return bool(r.get("ok"))

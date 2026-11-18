@@ -298,6 +298,7 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
     while that journal exists but cannot be read, no launch is settled (``journal_unreadable``)."""
     from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
     from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
+    from vigil_integration.live.credit_lease_pause import credit_pause_at, credit_pause_ttl_s
     from . import config
 
     if ttl_s < 0:
@@ -353,6 +354,11 @@ def sweep_abandoned_reservations(gate: Any, *, now: float, ttl_s: float, apply: 
             continue
         if doc.not_after.timestamp() + ttl_s > now:
             continue                                       # still live / inside the grace TTL
+        # W3 (§11.6): a launch PARKED for want of credit waits the owner's grace counted from its PAUSE (default 7 days)
+        # for a top-up, however long ago its lease window closed — it is not abandoned until that wait has ended.
+        paused_at = credit_pause_at(base, str(doc.engagement_slug), str(doc.nonce))
+        if paused_at is not None and now < paused_at + credit_pause_ttl_s():
+            continue                                       # still waiting for a top-up
         if (doc.engagement_slug, str(doc.nonce)) in pending:
             rows.append({**row, "status": "completion_pending"})
             continue

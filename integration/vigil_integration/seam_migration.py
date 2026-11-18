@@ -78,7 +78,9 @@ class SeamClass:
 #: legacy (slug, nonce) carried ONCE, journaled), ``lease`` (lease bundles: create-if-absent, same nonce only),
 #: ``rederive`` (owner-sealed publications: rebuilt from the spine, never copied), ``model_grant`` (copied only for
 #: a live, unsettled lease), ``copy_if_absent`` (owner-signed files: copied when absent, a differing copy is a
-#: conflict) and ``key`` (the offense-governance key: the same, for one file).
+#: conflict) and ``key`` (the offense-governance key: the same, for one file). W3's credit-pause records (the pause
+#: time + reason of a launch parked for want of credit) are carried ``copy_if_absent`` too: a record the seam lacks is
+#: copied, a differing one is held as a conflict for the owner — a pause time is never merged by guess.
 SEAM_CLASSES: "tuple[SeamClass, ...]" = (
     SeamClass("settlements", "credit-lease-settlements", "union_nonces", "*.json"),
     SeamClass("paused_past_expiry", "credit-lease-paused-past-expiry", "union_nonces", "*.json"),
@@ -88,6 +90,7 @@ SEAM_CLASSES: "tuple[SeamClass, ...]" = (
     SeamClass("eval_grant_floors", ".eval-grant-highwater", "floor_max", "*.json"),
     SeamClass("eval_attestation_floors", ".eval-offense-highwater", "floor_max", "*.json"),
     SeamClass("pauses", "credit-lease-pauses", "pause_delta", "*.json"),
+    SeamClass("credit_pauses", "credit-pauses", "copy_if_absent", "*.json"),
     SeamClass("leases", "credit-launch-leases", "lease", "*.json"),
     SeamClass("eval_grants", "eval-capability-grants", "rederive", "*.json"),
     SeamClass("eval_attestations", "eval-offense-attestations", "rederive", "*.json"),
