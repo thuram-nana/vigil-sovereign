@@ -17,7 +17,13 @@ counter:
     an integer nano-USD subtraction (it may be negative — a run that cost more than it billed).
   * **at-risk / unconfirmed spend** — provider spend VIGIL must assume but cannot bill (a cut-off response's
     ``held_nano`` + an ``orphan``'s reservation): VIGIL's own cost, never the customer's (the G1 loss split). It is
-    the loss the owner watches.
+    the provider-side loss the owner watches.
+  * **arrears / owed** — the PURCHASE-SIDE loss, BESIDE the provider-side at-risk and never conflated with it: the
+    credits an org OWES after a dispute / refund (W5) removed credits it had already SPENT (so they could not leave
+    the wallet, ``governor/billing_reversal.py``), net of repayments. Folded per org from the owner-signed reversal
+    ledger (``BillingReversalLedger.holds`` / ``.owed`` — booked minus repaid), never a stored counter; an absent /
+    empty ledger owes nothing, so with W5's reversals off the column is inert. Reported in credits (the ledger's unit)
+    and, at the published credit unit, in nano-USD for a dollar view next to the provider-side loss.
 
 This is an OWNER / OPERATOR surface, never a customer one, so it MAY show currency and the owner's target line: the
 HTTP route authorizes the caller OWNER-tier (``role_can(principal.role, 'manage_billing')``) BEFORE calling these
@@ -52,6 +58,7 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
+from ..governor.billing_reversal import BillingReversalLedger  # noqa: E402  (W5's owner-signed reversal ledger: the per-org OWED / arrears balance, read-only)
 from ..governor.identity import owner_pubkey  # noqa: E402  (reads verify under the trusted pubkey, never the key)
 from ..governor.orgs import OrgRegistry  # noqa: E402
 from ..governor.wallet import WalletRegistry  # noqa: E402  (the signed-spine SETTLED metered-revenue cross-check)
@@ -122,6 +129,20 @@ def _row_money(charge_mc: int, cost_nano: int, at_risk_nano: int, responses: int
     }
 
 
+def _arrears(owed_credits: int) -> "dict[str, Any]":
+    """The customer-side ARREARS an org OWES after reversals (W5): credits a dispute / refund removed that were
+    already SPENT (so could not leave the wallet) and are not yet repaid — the PURCHASE-SIDE loss, a DIFFERENT loss
+    from the provider-side ``at_risk`` spend it sits beside. Reported in credits (the reversal ledger's native unit)
+    and, at the published credit unit (one credit is ``model_metering.CREDIT_NANO_USD`` nano-USD), in nano-USD for a
+    dollar display next to the provider-side loss. Pure arithmetic; no I/O."""
+    nano = owed_credits * _mm.CREDIT_NANO_USD
+    return {
+        "arrears_credits": owed_credits,
+        "arrears_nano": nano,
+        "arrears_usd": _usd(nano),
+    }
+
+
 def _meter_spend(meter_dir, org_filter: Optional[str] = None) -> "tuple[dict, int]":
     """Fold every launch meter under ``meter_dir`` into ``{(org_id, day): [cost_nano, at_risk_nano, charge_mc,
     responses]}`` and the count of meter files that could not be read. A PURE read: a read-only ``GrantMeter``
@@ -167,10 +188,15 @@ def money_overview(store, *, meter_dir, target_margin: Any = _UNSET,
     # usage but no wallet grant / debit, and its settled revenue must not drop out of the reconciliation.
     balances = {b.org_id: b for b in WalletRegistry(store, trusted_pubkey=trusted).positions()}
     names = {o.org_id: o.name for o in OrgRegistry(store).orgs()}
+    # W5 arrears (the PURCHASE-SIDE loss): per org the credits it OWES after a dispute / refund removed already-spent
+    # credits, net of repayments — folded from the owner-signed reversal ledger (``ReversalFold.owed`` = booked minus
+    # repaid), never a stored counter. A read, not a mint. An absent / empty ledger owes nothing, so with W5's
+    # reversals off every org's arrears is 0 and the column is inert. It sits BESIDE the provider-side at-risk spend.
+    arrears = dict(BillingReversalLedger(store, trusted_pubkey=trusted).holds())
 
-    org_ids = sorted({oid for (oid, _day) in per_org_day} | set(balances))
+    org_ids = sorted({oid for (oid, _day) in per_org_day} | set(balances) | set(arrears))
     orgs: "list[dict[str, Any]]" = []
-    tot_charge = tot_cost = tot_risk = tot_responses = tot_settled = 0
+    tot_charge = tot_cost = tot_risk = tot_responses = tot_settled = tot_arrears = 0
     for oid in org_ids:
         days = sorted(day for (o, day) in per_org_day if o == oid)
         periods: "list[dict[str, Any]]" = []
@@ -184,9 +210,12 @@ def money_overview(store, *, meter_dir, target_margin: Any = _UNSET,
             o_responses += r
         bal = balances.get(oid)
         settled_mc = bal.usage_mc if bal is not None else 0
+        o_arrears = arrears.get(oid, 0)               # this org's OWN arrears (tenant isolation) — 0 when it owes none
         orgs.append({
             "org_id": oid, "name": names.get(oid, oid),
             **_row_money(o_charge, o_cost, o_risk, o_responses, m),
+            # the customer-side arrears beside the provider-side at-risk above (two DIFFERENT losses, not conflated)
+            **_arrears(o_arrears),
             # the signed-spine SETTLED metered revenue (the authoritative cross-check) + the current wallet position
             "settled_revenue_mc": settled_mc,
             "balance_credits": (bal.available if bal is not None else 0),
@@ -198,6 +227,7 @@ def money_overview(store, *, meter_dir, target_margin: Any = _UNSET,
         tot_risk += o_risk
         tot_responses += o_responses
         tot_settled += settled_mc
+        tot_arrears += o_arrears
 
     return {
         "revenue_basis": "rate-card charge for metered work (credits charged x the published rate), from the meters",
@@ -205,6 +235,8 @@ def money_overview(store, *, meter_dir, target_margin: Any = _UNSET,
                                  "authoritative cross-check",
         "cost_basis": "the model gateway meter's confirmed provider spend (nano-USD)",
         "at_risk_basis": "unconfirmed provider spend VIGIL cannot bill (cut-off + orphaned requests) — VIGIL's cost",
+        "arrears_basis": "credits an org OWES after a dispute / refund removed already-spent credits (the W5 reversal "
+                         "ledger), net of repayments — the purchase-side loss, distinct from the provider-side at-risk",
         "credits_per_usd": 100,
         "nano_per_mc": _NANO_PER_MC,
         "target_margin_set": m is not None,
@@ -225,6 +257,7 @@ def money_overview(store, *, meter_dir, target_margin: Any = _UNSET,
         "totals": {
             "tenant_count": len(orgs),
             **_row_money(tot_charge, tot_cost, tot_risk, tot_responses, m),
+            **_arrears(tot_arrears),           # total arrears across tenants — the sum of the orgs' own arrears
             "settled_revenue_mc": tot_settled,
         },
     }

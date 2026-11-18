@@ -1405,13 +1405,15 @@ def cmd_owner_money(a) -> None:
         print(f"      revenue {o['rate_card_revenue_usd']} ({format_credits(o['rate_card_revenue_mc'])} cr billed)"
               f"   cost {o['provider_cost_usd']}   margin {o['gross_margin_usd']}"
               + (f" ({o['gross_margin_pct']}%)" if o["gross_margin_pct"] is not None else ""))
-        print(f"      at risk {o['at_risk_usd']}   settled on spine {format_credits(o['settled_revenue_mc'])} cr"
+        print(f"      at risk {o['at_risk_usd']} (provider-side)   owed {o['arrears_usd']} "
+              f"({format_credits(o['arrears_credits'] * 1000)} cr arrears, customer-side)")
+        print(f"      settled on spine {format_credits(o['settled_revenue_mc'])} cr"
               + (f"   target revenue {_om._usd(o['target_revenue_nano'])}"
                  if o["target_revenue_nano"] is not None else "   target: not set"))
     print(f"  TOTAL revenue {t['rate_card_revenue_usd']}   cost {t['provider_cost_usd']}   "
           f"margin {t['gross_margin_usd']}"
           + (f" ({t['gross_margin_pct']}%)" if t["gross_margin_pct"] is not None else "")
-          + f"   at risk {t['at_risk_usd']}")
+          + f"   at risk {t['at_risk_usd']} (provider-side)   owed {t['arrears_usd']} (customer-side)")
     if not ov["target_margin_set"]:
         print(f"  (target line not shown: {ov['target_margin_issue']})")
 
