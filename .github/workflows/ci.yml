@@ -582,6 +582,8 @@ jobs:
               integration/tests/test_redpen_engine.py \
               integration/tests/test_redpen_certify.py \
               integration/tests/test_redpen_reproduce.py \
+              integration/tests/test_redpen_fix.py \
+              integration/tests/test_redpen_retest.py \
               integration/tests/test_general_reexecutable.py \
               integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \

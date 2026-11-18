@@ -62,6 +62,9 @@ from .connected_repo_record import (
     BlockThreshold, ConnectedRepoRecord, SignedConnectedRepoRecord, check_repo as check_connected_repo,
     connected_repo_signing_bytes, repo_owner_name, sign_connected_repo_record, verify_connected_repo_record,
 )
+from .redpen_action import (
+    REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
+)
 from .engagement_completion import (
     EngagementCompletion, EngagementOutcome, SignedEngagementCompletion,
     engagement_completion_signing_bytes, sign_engagement_completion, verify_engagement_completion,
@@ -116,6 +119,7 @@ __all__ = [
     "sign_monitoring_authority", "verify_monitoring_authority",
     "BlockThreshold", "ConnectedRepoRecord", "SignedConnectedRepoRecord", "check_connected_repo",
     "connected_repo_signing_bytes", "repo_owner_name", "sign_connected_repo_record", "verify_connected_repo_record",
+    "REDPEN_ACTION_SEAM_SUBDIR", "REDPEN_FIX_ACTION", "REDPEN_RETEST_ACTION", "redpen_action_marker",
     "EngagementCompletion", "EngagementOutcome", "SignedEngagementCompletion",
     "engagement_completion_signing_bytes", "sign_engagement_completion", "verify_engagement_completion",
     "CredentialHeader", "CredentialRole", "SignedTargetCredentials", "TargetCredentials",

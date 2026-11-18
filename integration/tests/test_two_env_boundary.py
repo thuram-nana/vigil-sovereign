@@ -185,6 +185,9 @@ assert "framework" not in _m, "jobs.ci_runner must not import framework at modul
 assert "strix" not in _m, "jobs.ci_runner must not import strix at module scope"
 import vigil_integration.live.github_client  # repo-connect Slice 3a: the gated READ-only GitHub client
 assert "framework" not in _m, "live.github_client must not import framework at module scope (gated client builds it lazily)"
+import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
+assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
+assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
