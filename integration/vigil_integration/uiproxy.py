@@ -208,6 +208,21 @@ _GH_WEBHOOK_SECRET_ENV = "VIGIL_GH_WEBHOOK_SECRET"      # the HMAC secret (off-s
 _GH_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.github.v1"  # the inert-envelope schema tag the drain validates
 _GH_WEBHOOK_MAX_ENVELOPE = 256 * 1024                   # == inert_finding.MAX_ENVELOPE_BYTES (the spool validator cap)
 _GH_WEBHOOK_MAX_BODY = 5 * 1024 * 1024                  # pre-auth body cap for the webhook route (GitHub payloads are small)
+# Red-Pen (R3): the customer-facing GitHub App's INBOUND webhook, /webhooks/github-app — served by the SAME
+# authenticate-then-spool handler as /webhooks/github (`_webhooks_github(redpen=True)`: identical HMAC / delivery-id /
+# body-cap / JSON refusals, same VIGIL_GH_WEBHOOK_SECRET), but it spools an inert Red-Pen envelope (schema below) into
+# the <spool>/redpen subtree for the Red-Pen review drain — carrying the PR `action` (the drain enqueues only
+# opened/synchronize/reopened) and, for installation/installation_repositories events, the installation id + the
+# affected repos (a connect/disconnect SYNC signal; a connect is owner-signed sovereign-side). It is MOUNTED ONLY when
+# VIGIL_REDPEN_ENABLED is on (and a webhook spool dir is configured): with the flag OFF the path falls through to the
+# usual 404, exactly as before. /webhooks/github itself is UNTOUCHED in every flag state, so the repo-connect drain
+# keeps receiving exactly what it always did; the Red-Pen spool is a SUBTREE of the same spool dir (no new
+# server/env plumbing) and the two drains never claim each other's files.
+_REDPEN_ENABLED_ENV = "VIGIL_REDPEN_ENABLED"
+_GH_APP_WEBHOOK_PATH = "/webhooks/github-app"           # the Red-Pen GitHub App's webhook URL path (owner registers it)
+_GH_WEBHOOK_REDPEN_ENVELOPE_SCHEMA = "vigil.webhook.github.redpen.v1"  # == redpen_webhook_drain._REDPEN_SCHEMA
+_GH_WEBHOOK_REDPEN_SUBDIR = "redpen"                    # <webhook_spool_dir>/redpen is the Red-Pen review spool root
+_REDPEN_TRUTHY = frozenset({"1", "true", "yes", "on"})
 # SaaS Slice C — the INBOUND Flutterwave BILLING webhook adapter (OFF by default, enabled by pointing the spool
 # env at a directory). Flutterwave authenticates a webhook by echoing the configured Secret Hash verbatim in the
 # `verif-hash` header (PLAINTEXT equality). This route constant-time-compares it as a cheap ANTI-FLOOD pre-filter
@@ -1417,6 +1432,54 @@ def _github_event_coords(event: str, payload: dict) -> "Optional[dict]":
             "commit": commit, "pr_number": pr_number}
 
 
+def _redpen_webhook_enabled() -> bool:
+    """True iff the Red-Pen GitHub App webhook is mounted (``VIGIL_REDPEN_ENABLED`` ∈ {1,true,yes,on}). Default OFF:
+    ``/webhooks/github-app`` then falls through to the usual 404 and nothing is ever written under ``redpen/`` —
+    byte-identical to the pre-Red-Pen proxy. Read per request (like the webhook secret). Pure env read — the proxy
+    stays pure-stdlib and holds no key."""
+    return (os.environ.get(_REDPEN_ENABLED_ENV) or "").strip().lower() in _REDPEN_TRUTHY
+
+
+def _redpen_event_coords(event: str, payload: dict) -> "Optional[dict]":
+    """Shape the INERT Red-Pen envelope coords for a webhook payload, or None when there is nothing for Red-Pen.
+
+      * a ``pull_request``-class event WITH a PR number → ``{kind:"pr", action, repo, commit, pr_number}`` (the
+        standard coords plus the PR ``action`` the drain filters on — opened / synchronize / reopened trigger a
+        review; everything else is acknowledged). A bare push (no PR) is NOT a Red-Pen PR trigger (the whole-repo
+        scheduled scan is a separate slice), so it yields None here;
+      * an ``installation`` / ``installation_repositories`` event → ``{kind:"installation", action,
+        installation_id, repos:[github.com/<full_name>...]}`` — the connect/disconnect SYNC signal the sovereign
+        reconciles (a connect is owner-signed sovereign-side).
+
+    TOTAL + defensive (mirrors ``_github_event_coords``): every field UTF-8-sanitized + bounded, NO input raises."""
+    if not isinstance(payload, dict):
+        return None
+    action = _clean(payload.get("action"), 64).strip().lower()
+    if event in ("installation", "installation_repositories"):
+        inst = payload.get("installation")
+        iid = None
+        if isinstance(inst, dict) and inst.get("id") is not None:
+            try:
+                iid = int(inst["id"])
+            except (TypeError, ValueError, OverflowError):
+                iid = None
+        repos: "list[str]" = []
+        for key in ("repositories", "repositories_added", "repositories_removed"):
+            arr = payload.get(key)
+            if isinstance(arr, list):
+                for r in arr[:200]:
+                    fn = r.get("full_name") if isinstance(r, dict) else None
+                    if fn:
+                        repos.append(_clean("github.com/" + str(fn).strip().strip("/"), 512))
+        if iid is None and not repos:
+            return None
+        return {"kind": "installation", "action": action, "installation_id": iid, "repos": repos}
+    base = _github_event_coords(event, payload)
+    if base is None or base.get("pr_number") is None:   # Red-Pen reviews PRs only; a bare push is not a trigger
+        return None
+    return {"kind": "pr", "action": action, **base}
+
+
 class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Threaded so SSE long-lived streams and normal requests can run concurrently."""
     daemon_threads = True
@@ -1587,6 +1650,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # never routes/forwards/spawns. Absent config ⇒ falls through to route()/static (404).
             if split.path == "/webhooks/github" and getattr(self.server, "webhook_spool_dir", None):
                 self._webhooks_github()
+                return
+            # Red-Pen (R3): the customer-facing GitHub App's INBOUND webhook — probe-safe like the route above and
+            # served by the same handler in its Red-Pen mode. Mounted ONLY when VIGIL_REDPEN_ENABLED is on AND a spool
+            # dir is configured; otherwise it falls through to route()/static (404), exactly as before Red-Pen.
+            if (split.path == _GH_APP_WEBHOOK_PATH and getattr(self.server, "webhook_spool_dir", None)
+                    and _redpen_webhook_enabled()):
+                self._webhooks_github(redpen=True)
                 return
             # SaaS Slice C: INBOUND Flutterwave billing webhook — probe-safe, mounted ONLY when the billing spool
             # dir is configured; verif-hash-authenticates + SPOOLS one inert body-only event, never mints/forwards.
@@ -2064,7 +2134,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         body = {"ok": ok, "checks": [{"name": "sovereign", "ok": ok}]}
         self._plane_json(body, status=200 if ok else 503)
 
-    def _webhooks_github(self):
+    def _webhooks_github(self, redpen: bool = False):
         """INBOUND GitHub webhook — authenticate by HMAC and SPOOL ONE inert event, nothing more.
 
         Lives in the PROBE-SAFE band (ahead of plane control, routing, per-user auth, and the Host/Origin
@@ -2075,7 +2145,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         side effect is writing a signed, INERT JSON envelope to the webhook spool, which a separate drain
         worker later turns into an enqueued ``SecurityJob`` (only THEN, through the authorized runner, is
         anything ever executed). Fail-closed: wrong method, oversized body, unset secret, missing/invalid
-        signature, missing delivery id, or a non-JSON payload all refuse; only a verified delivery spools."""
+        signature, missing delivery id, or a non-JSON payload all refuse; only a verified delivery spools.
+
+        ``redpen=True`` is the Red-Pen GitHub App mode (R3, ``/webhooks/github-app``, mounted only when
+        ``VIGIL_REDPEN_ENABLED`` is on): every refusal above is IDENTICAL, and only the final step differs — the
+        verified delivery is spooled as a Red-Pen envelope into the ``redpen`` subtree
+        (:meth:`_webhooks_github_redpen`). The default ``redpen=False`` path is the original route, unchanged."""
         # Bound the pre-auth body read so a slow/incomplete body cannot pin this proxy thread. Safe as a
         # per-request socket deadline here because the route ALWAYS closes the connection and never streams
         # (unlike the SSE relay path, which deliberately has no read timeout).
@@ -2128,6 +2203,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._plane_json({"ok": False, "error": "payload is not valid JSON"}, status=422, drained=True)
             return
+        # Red-Pen (R3): the GitHub App mode spools an inert Red-Pen envelope (the PR `action`, or the installation
+        # connect/disconnect SYNC signal) into the <spool>/redpen subtree for the Red-Pen review drain, still never
+        # routing/forwarding/spawning. The flag is RE-CHECKED here (defence in depth: the mount already required it),
+        # so a flag flipped off between dispatch and spool writes nothing. /webhooks/github never takes this branch.
+        if redpen:
+            if not _redpen_webhook_enabled():
+                self._plane_json({"ok": False, "error": "not found"}, status=404, drained=True)
+                return
+            self._webhooks_github_redpen(event, payload if isinstance(payload, dict) else {}, delivery_id)
+            return
         # 6) The ping handshake and any event without a repository carry nothing to scan — ack 202 WITHOUT
         #    spooling (the sender still sees success, but no job is produced).
         coords = _github_event_coords(event, payload if isinstance(payload, dict) else {})
@@ -2163,6 +2248,63 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         incoming.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(incoming, 0o700)
+        except OSError:
+            pass
+        final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
+        if final.exists():
+            return   # content-addressed idempotency — the identical envelope is already spooled
+        tmp = incoming / (".tmp-" + secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+
+    def _webhooks_github_redpen(self, event: str, payload: dict, delivery_id: str) -> None:
+        """Red-Pen (R3) GitHub App inbound handling: SPOOL ONE inert Red-Pen envelope for a PR event or an
+        installation connect/disconnect SYNC signal, nothing more. Reached ONLY via ``/webhooks/github-app`` with
+        ``VIGIL_REDPEN_ENABLED`` on, and ONLY after ``_webhooks_github`` has already HMAC-authenticated the delivery
+        + parsed the payload — so this stays in the probe-safe band and never routes/forwards/spawns. A
+        ``pull_request`` event carries the ``action`` (the drain enqueues only opened/synchronize/reopened); an
+        installation event carries the installation id + the affected repos (a connect is owner-signed
+        sovereign-side — the drain never mints one). The App's ping, a bare push, or any other event acks 202
+        WITHOUT spooling. The envelope goes to the ``<spool>/redpen`` subtree, so the Red-Pen review drain and the
+        repo-connect drain never claim each other's files."""
+        coords = _redpen_event_coords(event, payload)
+        if coords is None:
+            self._plane_json({"ok": True, "spooled": False, "event": event or "unknown"}, status=202, drained=True)
+            return
+        envelope = {"schema": _GH_WEBHOOK_REDPEN_ENVELOPE_SCHEMA, "delivery_id": delivery_id, "event": event,
+                    "action": coords.get("action", ""), "kind": coords["kind"]}
+        if coords["kind"] == "pr":
+            envelope.update(repo=coords["repo"], commit=coords.get("commit", ""),
+                            pr_number=coords.get("pr_number"))
+        else:   # installation sync
+            envelope.update(installation_id=coords.get("installation_id"), repos=coords.get("repos", []))
+        try:
+            self._spool_redpen_event(json.dumps(envelope, ensure_ascii=True, sort_keys=True))
+        except OSError:   # a spool write failure is retryable (GitHub redelivers) — 503, do NOT 202
+            self._plane_json({"ok": False, "error": "spool write failed"}, status=503, drained=True)
+            return
+        self._plane_json({"ok": True, "spooled": True, "delivery_id": delivery_id, "kind": coords["kind"]},
+                         status=202, drained=True)
+
+    def _spool_redpen_event(self, envelope: str) -> None:
+        """Write one inert Red-Pen envelope to ``<spool>/redpen/incoming/<sha256(bytes)[:32]>.json`` atomically
+        (0600 file in a 0700 dir; ``O_EXCL`` temp + fsync + ``os.replace``) — the on-disk contract
+        ``redpen_webhook_drain`` enforces, byte-compatible with ``_spool_webhook_event`` but in the ``redpen``
+        subtree. Content-addressed ⇒ idempotent. Raises ``OSError`` on any write failure (→ 503, GitHub
+        redelivers)."""
+        data = envelope.encode("utf-8")
+        if len(data) > _GH_WEBHOOK_MAX_ENVELOPE:
+            raise OSError("red-pen webhook envelope exceeds the spool size cap")
+        incoming = Path(self.server.webhook_spool_dir) / _GH_WEBHOOK_REDPEN_SUBDIR / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(incoming, 0o700)
+            os.chmod(incoming.parent, 0o700)
         except OSError:
             pass
         final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")

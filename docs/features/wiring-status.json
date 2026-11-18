@@ -385,6 +385,32 @@
       "rationale": "Native verb dispatched in-process; drains the SecurityJob queue through the authorized JobRunner (the gate is the sole executor), diff-scanning each queued PR and posting gated review comments for oracle-verified findings (comment leg OFF unless --comment + an owner-signed grant + approval). Parser registered and handler resolves."
     },
     {
+      "id": "cli.redpen-review",
+      "name": "vigil redpen-review",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "redpen-review",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_redpen_review"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; drains the Red-Pen SecurityJob queue through the authorized JobRunner (the gate is the sole executor), diff-scanning each PR and posting gated review comments only for reproduced FACTs. Behind VIGIL_REDPEN_ENABLED (refuses when off). Parser registered and handler resolves."
+    },
+    {
+      "id": "cli.redpen-webhook-drain",
+      "name": "vigil redpen-webhook-drain",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "redpen-webhook-drain",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_redpen_webhook_drain"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; drains the Red-Pen inbound-webhook spool into its own profile=redpen SecurityJob queue (enqueue-only; redpen-review executes). Behind VIGIL_REDPEN_ENABLED (refuses when off). Fail-closed, idempotent by delivery_id. Parser registered and handler resolves."
+    },
+    {
       "id": "cli.ledger",
       "name": "vigil ledger",
       "surface": "cli-native",
