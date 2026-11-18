@@ -3518,6 +3518,72 @@ def _redpen_doctor() -> "tuple[bool, str, str]":
     return True, "ON", f"App key via {_ga.credential_source()}, webhook secret set" + (f"; {info}" if info else "")
 
 
+def _billing_checkout_preconditions(kind: str) -> "list[str]":
+    """The provisioning preconditions NOT met for the resolved processor ``kind``, each named by its ENV VAR only
+    (NEVER a value) — the SAME preconditions ``provision._stripe_checkout_provider`` / ``._checkout_provider``
+    require before they hand checkout a live provider, PLUS the money-IN DRAIN's own enable flag (the drain that
+    CREDITS these payments — ``VIGIL_STRIPE_BILLING_DRAIN_ENABLED`` / ``VIGIL_BILLING_DRAIN_ENABLED``), which
+    checkout provisioning deliberately does NOT gate. An empty list ⇒ a payment taken can be credited end to end.
+    Reads the environment + the ``stripe_egress`` presence predicates only; no secret value is read or returned."""
+    import os
+    gaps: "list[str]" = []
+    if kind == "stripe":
+        from .governor import stripe_egress as se
+        if (os.environ.get("VIGIL_BILLING_ENABLE_STRIPE") or "").strip().lower() not in ("1", "true", "yes"):
+            gaps.append("VIGIL_BILLING_ENABLE_STRIPE (the Stripe adapter opt-in is not affirmative)")
+        if not (os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET") or "").strip():
+            gaps.append("VIGIL_STRIPE_WEBHOOK_SECRET (the webhook secret the crediting drain verifies with)")
+        if not se.stripe_secret_configured():
+            gaps.append("VIGIL_STRIPE_SECRET_KEY (the Stripe API key is not set)")
+        elif se.stripe_key_mode() is None:
+            gaps.append("VIGIL_STRIPE_SECRET_KEY (not a recognisable live or test key)")
+        try:
+            se._api_version()
+        except se.StripeEgressError:
+            gaps.append("VIGIL_STRIPE_API_VERSION (unset or malformed)")
+        if os.environ.get("VIGIL_STRIPE_BILLING_DRAIN_ENABLED", "") != "1":
+            gaps.append("VIGIL_STRIPE_BILLING_DRAIN_ENABLED (the money-IN drain that CREDITS Stripe payments is off)")
+    elif kind == "flutterwave":
+        if not (os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip():
+            gaps.append("VIGIL_BILLING_WEBHOOK_SECRET (the webhook verif-hash secret)")
+        if not (os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
+            gaps.append("VIGIL_FLW_SECRET_KEY (the Flutterwave secret key)")
+        if os.environ.get("VIGIL_BILLING_DRAIN_ENABLED", "") != "1":
+            gaps.append("VIGIL_BILLING_DRAIN_ENABLED (the money-IN drain that CREDITS Flutterwave payments is off)")
+    return gaps
+
+
+def _posture_billing_checkout() -> "tuple[bool, str, str]":
+    """Checkout-vs-provider preflight: CHECKOUT ENABLED must imply the selected processor is fully provisioned to
+    CREDIT the payments it takes. Returns ``(ok, state, detail)``. DIAGNOSTIC ONLY — changes no runtime behaviour
+    (checkout + the drain already fail closed); it just makes the gap VISIBLE before go-live.
+
+    The processor is resolved ONLY through ``config.billing_provider()`` — the ONE resolver checkout
+    (``provision._checkout_provider``) and the bare money-IN drain use — so doctor and checkout can never disagree on
+    WHICH processor is live. A LOUD failure when checkout is on but the provider is unrecognised, a checkout
+    precondition is unmet, or the crediting drain is off: a customer could PAY and never be credited. The message
+    names the missing ENV VAR(s); it NEVER prints a secret value."""
+    from . import config
+    if not config.customer_checkout_enabled():            # nothing takes a payment: nothing to provision
+        return True, "OFF", "customer checkout is OFF — no payment can be taken (VIGIL_CUSTOMER_CHECKOUT_ENABLED)"
+    kind = config.billing_provider()
+    if kind is None:
+        import os
+        raw = (os.environ.get("VIGIL_BILLING_PROVIDER") or "").strip()
+        return (False, "MISCONFIGURED",
+                (f"customer checkout is ON but VIGIL_BILLING_PROVIDER={raw!r} names no known payment processor "
+                 f"(stripe — the default — or flutterwave): checkout opens nothing and every payment is refused. "
+                 f"Set VIGIL_BILLING_PROVIDER to stripe or flutterwave."))
+    gaps = _billing_checkout_preconditions(kind)
+    if gaps:
+        return (False, "UNPROVISIONED",
+                (f"customer checkout is ON and the processor is {kind}, but it is NOT fully provisioned to credit "
+                 f"its payments — a customer could PAY and never be credited. Provision (missing): "
+                 + "; ".join(gaps)))
+    return (True, "OK",
+            f"customer checkout is ON; the {kind} lane is fully provisioned and its crediting drain is enabled")
+
+
 def _owner_pub_for_doctor() -> "str | None":
     """The owner pubkey for the Red-Pen doctor's pure-READ registry folds, fail-closed to None."""
     try:
@@ -3572,6 +3638,11 @@ def sigil_doctor_report() -> dict:
                         state=("OK" if _shok else "NO-HEAD"), detail=_shdetail))
     _rpok, _rpstate, _rpdetail = _redpen_doctor()
     checks.append(Check(id="redpen", ok=_rpok, required=False, state=_rpstate, detail=_rpdetail))
+    # Money-safety preflight: checkout ENABLED ⇒ the selected processor (config.billing_provider()) must be fully
+    # provisioned to CREDIT its payments, else a customer could pay and never be credited. REQUIRED (a red failure
+    # flips the exit) — but a no-op when checkout is off (the default), so the verdict is byte-identical then.
+    _bcok, _bcstate, _bcdetail = _posture_billing_checkout()
+    checks.append(Check(id="billing_checkout", ok=_bcok, required=True, state=_bcstate, detail=_bcdetail))
     drift = list(config_drift())
     from vigil_integration import doctor as _idoc
     repo = _idoc.find_repo_root()
