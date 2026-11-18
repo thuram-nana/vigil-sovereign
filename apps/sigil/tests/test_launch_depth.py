@@ -36,6 +36,8 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * a metered product reserves its own units          -> test_a_metered_product_selects_its_depth_not_its_units
   * a postpaid launch draws the chunk past the line   -> test_a_postpaid_launch_draws_at_most_the_lines_headroom
   * the postpaid one-useful-request threshold          -> test_a_postpaid_launch_draws_at_most_the_lines_headroom
+  * L1: the Max product reserves without the owner flag -> test_the_max_product_is_denied_until_the_owner_enables_max_depth
+  * L1: an enabled Max product names another depth     -> test_an_enabled_max_product_names_the_max_depth_not_its_units
 """
 from __future__ import annotations
 
@@ -87,7 +89,7 @@ def _iso(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "MODEL_METER_DIR", tmp_path / "model_meter")
     for k in ("VIGIL_METERED_BILLING", mm.MARGIN_ENV, mm.CANCEL_ENV, "VIGIL_RUN_FLOOR_CREDITS", "VIGIL_MODEL_PRICES",
               "VIGIL_MODEL_GATEWAY_ENABLED", "VIGIL_RUN_MODEL", mm.ALLOWANCE_CHUNK_ENV, RATE_CARD_ENV,
-              "VIGIL_TIERED_PRODUCTS", "VIGIL_QUICK_MAX_UNITS", "VIGIL_CUSTOMER_STEPUP_REQUIRED",
+              "VIGIL_TIERED_PRODUCTS", "VIGIL_QUICK_MAX_UNITS", "VIGIL_CUSTOMER_STEPUP_REQUIRED", "VIGIL_MAX_DEPTH",
               *mm.OBSOLETE_PRICING_ENVS):
         monkeypatch.delenv(k, raising=False)
 
@@ -444,6 +446,33 @@ def test_a_flat_launch_through_the_provisioner_is_unchanged(monkeypatch):
     assert seen == {"units": config.LAUNCH_UNITS}         # no depth: byte-identical to the flat call (I7)
     p.launch_reserve(admin, org, "acme.example", product_id="vigil_launch_deep")
     assert seen == {"units": 20}                          # a flat product still reserves its catalog units
+
+
+def test_the_max_product_is_denied_until_the_owner_enables_max_depth(monkeypatch):
+    # L1 — the launch gate honours the owner flag: with tiered products on but VIGIL_MAX_DEPTH unset, the Max product is
+    # not on offer, so launch_reserve refuses it (fail closed) BEFORE any reservation — the gate is never reached and
+    # nothing is held. It never silently falls back to another depth either.
+    _metered(monkeypatch)
+    monkeypatch.setenv("VIGIL_TIERED_PRODUCTS", "1")
+    p, admin, org = _prov(monkeypatch)
+    seen = _capture(monkeypatch)
+    with pytest.raises(ProvisionDenied, match="launch product"):
+        p.launch_reserve(admin, org, "acme.example", product_id="vigil_launch_max")
+    assert seen == {}                                     # LaunchGate.reserve_launch was never called
+
+
+def test_an_enabled_max_product_names_the_max_depth_not_its_units(monkeypatch):
+    # L1 — with the owner flag on, the Max product selects the "max" DEPTH (signed into the lease by the gate, which the
+    # engine reads to hold the run to one per-engagement rate limit + governed tools only) and the allowance chunk —
+    # never its placeholder units.
+    _metered(monkeypatch)
+    monkeypatch.setenv("VIGIL_TIERED_PRODUCTS", "1")
+    monkeypatch.setenv("VIGIL_MAX_DEPTH", "1")
+    p, admin, org = _prov(monkeypatch)
+    seen = _capture(monkeypatch)
+    out = p.launch_reserve(admin, org, "acme.example", product_id="vigil_launch_max")
+    assert seen == {"units": mm.DEFAULT_ALLOWANCE_CHUNK_CREDITS, "depth": "max"}
+    assert out["product_id"] == "vigil_launch_max"
 
 
 @pytest.mark.parametrize("bad", ["0", "1000001", "x"])

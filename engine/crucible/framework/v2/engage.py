@@ -25,6 +25,7 @@ Fail-closed by construction:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,6 +244,47 @@ def profile_kwargs(profile: str) -> "dict[str, bool]":
     return {_PROFILE_FLAG_KWARG[dest]: True
             for dest in _PROFILE_FLAGS.get(name, ())
             if dest in _PROFILE_FLAG_KWARG}
+
+
+def _governed_tool_overlay(
+    enable_arsenal: bool, enable_browser_xss: bool, enable_spa_crawl: bool, *, governed_tools_only: bool,
+) -> "tuple[bool, bool, bool]":
+    """L1 (live Max) — the governed-tools-only narrowing (pricing design §6). A Max engagement may use ONLY
+    VIGIL's governed tools (the one gated executor — scope / WARDEN / rate-limited). Two kinds of pass would
+    escape it, so with ``governed_tools_only`` BOTH are forced OFF — returned ``(arsenal, browser_xss, spa_crawl)``
+    all ``False``:
+
+      * the ungoverned/aggressive raw-socket ARSENAL (smuggling / CSWSH / race speak bytes on the wire
+        DIRECTLY, bypassing the gated executor's ``send``) — the "no raw network" rule of §6;
+      * the directly-navigating BROWSER passes (``browser_xss`` / ``spa_crawl`` navigate OUTSIDE the one gated
+        executor — a SECOND, un-throttled egress path), so "exactly one rate limit per engagement" stays sound
+        however many agents run.
+
+    This ONLY ever REMOVES capability (narrow, never widen). ``governed_tools_only`` False returns the inputs
+    unchanged, so every non-Max run is byte-identical. PURE — the single testable + mutatable chokepoint for the
+    governed-tool restriction."""
+    if not governed_tools_only:
+        return enable_arsenal, enable_browser_xss, enable_spa_crawl
+    return False, False, False
+
+
+def _check_engage_controls(governed_tools_only: bool, rate_floor_s: object, connection_cap: object) -> None:
+    """L1 (live Max) — FAIL CLOSED on a governed run whose per-engagement controls are missing or malformed. A run
+    held to governed tools only is a live Max run, and pricing design §6 holds every such run to ONE rate limit and
+    ONE connection cap for the whole engagement — so it must carry a positive, finite rate floor (seconds) and a
+    positive int connection cap. Anything else raises :class:`EngagementRefused` — called inside preflight, so it
+    fires BEFORE the lease arm (no single-use floor is burned) and before any traffic — instead of running a Max
+    engagement with a missing or silently zeroed throttle. A non-governed run (every non-Max run) is not checked: its
+    controls are the inert defaults, so it is byte-identical."""
+    if not governed_tools_only:
+        return
+    floor_ok = (isinstance(rate_floor_s, (int, float)) and not isinstance(rate_floor_s, bool)
+                and math.isfinite(rate_floor_s) and rate_floor_s > 0)
+    cap_ok = isinstance(connection_cap, int) and not isinstance(connection_cap, bool) and connection_cap > 0
+    if not (floor_ok and cap_ok):
+        raise EngagementRefused(
+            "a governed (live Max) engagement must carry one positive per-engagement rate limit and connection cap "
+            f"(got rate floor {rate_floor_s!r}, connection cap {connection_cap!r}) — refusing before any traffic")
 
 
 def _record_engagement_profile(run_dir: "str | None", profile: str, flags: dict, deferred: list) -> None:
@@ -1335,6 +1377,16 @@ def run_engagement(
     resume: bool = False,
     run_dir: "str | None" = None,
     profile: str = "surface",
+    # L1 (live Max) — the per-ENGAGEMENT controls a Max depth is held to (pricing design §6). All default INERT
+    # ⇒ byte-identical: every non-Max run is unchanged. The keyless engage worker passes these from the launch's
+    # owner-signed depth (vigil_core.run_tier.engage_controls_for). `governed_tools_only` restricts the run to
+    # VIGIL's governed tools (the gated executor) — the ungoverned raw-socket arsenal and the directly-navigating
+    # browser passes are forced OFF (narrowed, never widened), so the single gated executor is the SOLE egress
+    # path. `per_engagement_rate_floor_s` + `per_engagement_connection_cap` are the ONE rate limit + connection
+    # cap the whole engagement's single gated executor holds (a single global throttle, not per-tool).
+    governed_tools_only: bool = False,
+    per_engagement_rate_floor_s: float = 0.0,
+    per_engagement_connection_cap: int = 0,
     # M3.1 — fleet admission (all default to None/"default" ⇒ byte-identical no-op).
     # When an operator runs N engagements at once against one estate they install a
     # FleetConcurrencyGovernor (and, when a signed authority is live, feed its
@@ -1447,6 +1499,9 @@ def run_engagement(
     # cost to skip. Recorded (started/completed) purely for the process box + audit trail.
     ledger.start(P_PREFLIGHT)
     try:
+        # L1 (live Max) — a governed run must carry its one per-engagement rate limit + connection cap; refuse it
+        # FIRST (before the lease arm burns the single-use floor, before any traffic). No-op for every non-Max run.
+        _check_engage_controls(governed_tools_only, per_engagement_rate_floor_s, per_engagement_connection_cap)
         preflight(slug, seed_url)
         # K2: a cust_ launch needs a verified credit lease. Thread `resume` so a --resume RE-VALIDATES the
         # lease (owner-pin + bind + window) but does NOT re-burn the single-use floor the first arm consumed
@@ -1516,10 +1571,18 @@ def run_engagement(
             raise EngagementRefused(
                 f"OOB {label} host not on charter allowlist ({d.refusal_kind}): {d.reason}")
 
+    # L1 (live Max) — governed-tools-only narrowing (pricing design §6). With ``governed_tools_only`` the run may
+    # use ONLY the one gated executor, so the ungoverned raw-socket arsenal AND the directly-navigating browser
+    # passes (a second, un-throttled egress path) are forced OFF here — narrowed, never widened. Every effective
+    # knob below rides these, so the single gated executor is the SOLE target-traffic path and "one rate limit
+    # per engagement" is sound. ``governed_tools_only`` False (every non-Max run) returns the inputs unchanged.
+    _eff_arsenal, _eff_browser_xss, _eff_spa_crawl = _governed_tool_overlay(
+        enable_arsenal, enable_browser_xss, enable_spa_crawl, governed_tools_only=governed_tools_only)
+
     # The dynamic browser passes navigate DIRECTLY (not via the gated executor),
     # so on a remote target the browser is confined at the resolver layer to the
     # in-scope host — it cannot pull the browser off to third-party hosts.
-    browser_allowed_hosts = {urlsplit(seed_url).hostname} if (enable_browser_xss or enable_spa_crawl) else None
+    browser_allowed_hosts = {urlsplit(seed_url).hostname} if (_eff_browser_xss or _eff_spa_crawl) else None
     browser_allowed_hosts = {h for h in (browser_allowed_hosts or set()) if h}
 
     # Slice 0.2 — the run dir for THIS engage process (explicit thread first, env last resort), used for
@@ -1532,11 +1595,13 @@ def run_engagement(
     _record_engagement_profile(rd, profile, {
         "enable_domxss": enable_domxss,
         "enable_oob": enable_oob,
-        "enable_browser_xss": enable_browser_xss,
-        "enable_spa_crawl": enable_spa_crawl,
+        # L1 — record the EFFECTIVE (governed) roster so the manifest is honest about what actually ran: under
+        # governed_tools_only the arsenal + directly-navigating browser passes are OFF, however they were asked.
+        "enable_browser_xss": _eff_browser_xss,
+        "enable_spa_crawl": _eff_spa_crawl,
         "enable_chaining": enable_chaining,
         "enable_recon": enable_recon,
-        "enable_arsenal": enable_arsenal,
+        "enable_arsenal": _eff_arsenal,
         "enable_sso": enable_sso,
         "enable_graphql_dos": enable_graphql_dos,
         "use_library": use_library,
@@ -1551,7 +1616,7 @@ def run_engagement(
     # is recorded INCONCLUSIVE, never CLEAN, never a silent skip. Empty when no browser pass is enabled or
     # the browser is usable → the passes run and adjudicate per the oracle (byte-identical default path).
     _browser_inconclusive = browser_surfaces_if_unusable(
-        enable_browser_xss=enable_browser_xss, enable_spa_crawl=enable_spa_crawl)
+        enable_browser_xss=_eff_browser_xss, enable_spa_crawl=_eff_spa_crawl)
 
     # The single run-owned world-model: intel recon projects assets onto it, and finding
     # chaining accretes attack facts onto the SAME graph (disjoint id namespaces). Built
@@ -1613,7 +1678,7 @@ def run_engagement(
         # uses — kill-switch + charter/scope/posture — evaluated per host with NO traffic.
         # A tripped kill-switch or an out-of-scope host means no probe leaves the box.
         arsenal_authz = None
-        if enable_arsenal:
+        if _eff_arsenal:   # L1: governed_tools_only forces the ungoverned raw-socket arsenal OFF (see above)
             _posture = parse_posture(slug)
             _killswitch = KillSwitch(slug)
 
@@ -1644,6 +1709,10 @@ def run_engagement(
             # action if THIS customer launch's lease is paused mid-run. None for greenfield/operator runs and
             # for customer runs until pause/resume is enabled ⇒ byte-identical.
             halt_check=_pause_halt_check,
+            # L1 (live Max) — the ONE per-engagement rate limit + connection cap this single executor holds, so a
+            # Max run can never hammer a live target however many agents call it (default 0.0 / 0 ⇒ byte-identical).
+            per_engagement_rate_floor_s=per_engagement_rate_floor_s,
+            per_engagement_connection_cap=per_engagement_connection_cap,
         )
         # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
         # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
@@ -1717,8 +1786,8 @@ def run_engagement(
                 max_audit_requests=max_audit_requests,
                 enable_oob=enable_oob,
                 enable_domxss=enable_domxss,
-                enable_browser_xss=enable_browser_xss,
-                enable_spa_crawl=enable_spa_crawl,
+                enable_browser_xss=_eff_browser_xss,     # L1: OFF under governed_tools_only (executor-bypassing pass)
+                enable_spa_crawl=_eff_spa_crawl,         # L1: OFF under governed_tools_only (executor-bypassing pass)
                 browser_allowed_hosts=browser_allowed_hosts or None,
                 bandit_path=bandit_path,
                 bandit_context=slug,
@@ -1730,7 +1799,7 @@ def run_engagement(
                 **_engage_oob_authority(slug),
                 waf_adaptive=waf_adaptive,
                 grammar_fuzz=grammar_fuzz,
-                enable_arsenal=enable_arsenal,
+                enable_arsenal=_eff_arsenal,             # L1: OFF under governed_tools_only (ungoverned raw-socket)
                 arsenal_authz=arsenal_authz,
                 arsenal_race_targets=arsenal_race_targets,
                 enable_sso=enable_sso,

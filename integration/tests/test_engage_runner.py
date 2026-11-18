@@ -637,3 +637,85 @@ def test_worker_completed_settle_emits_after_a_successful_crossing(monkeypatch, 
     assert crossed["n"] == 1, "the crossing ran before the settle signal"
     envs = _completion_envelopes(cs)
     assert len(envs) == 1 and envs[0]["document"]["outcome"] == "completed"
+
+
+# ---- L1 (live Max): the worker carries the depth's per-engagement controls into the run -------------------------
+# Mutation-verify targets (each neuter reds a NAMED test below):
+#   * the worker drops / never reads engage_controls_for            -> test_worker_holds_a_signed_max_run_to_one_rate_limit_and_governed_tools_only
+#   * the worker passes the controls for a non-Max depth            -> test_worker_adds_no_engagement_controls_for_any_other_depth
+#   * an injected profile_kwargs can shed the Max controls          -> test_an_injected_aggressive_profile_cannot_shed_the_max_controls
+
+_L1_KEYS = ("governed_tools_only", "per_engagement_rate_floor_s", "per_engagement_connection_cap")
+
+
+def test_worker_holds_a_signed_max_run_to_one_rate_limit_and_governed_tools_only(monkeypatch):
+    # A REAL owner-signed lease naming the Max depth (read through read_verified_launch_depth): the run is held to the
+    # §6 controls — governed tools only, ONE 10-req/s rate floor and ONE 8-connection cap for the whole engagement — on
+    # the full roster, and every control is a parameter the real run_engagement accepts (the worker can never pass one
+    # the engine would drop or crash on).
+    import inspect
+    from framework.v2.engage import run_engagement
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=3, run_tier="max")
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                           run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    kw = calls[0]
+    assert kw["profile"] == "full"
+    assert kw["governed_tools_only"] is True
+    assert kw["per_engagement_rate_floor_s"] == pytest.approx(0.1)
+    assert kw["per_engagement_connection_cap"] == 8
+    assert set(_L1_KEYS) <= set(inspect.signature(run_engagement).parameters)
+
+
+@pytest.mark.parametrize("named,units,read", [
+    ("quick", 100, None), ("deep", 3, None), (None, 20, None), (None, 3, None),
+    (None, 20, lambda *a, **k: "ultra"), (None, 20, lambda *a, **k: None),
+])
+def test_worker_adds_no_engagement_controls_for_any_other_depth(monkeypatch, named, units, read):
+    # Quick / Deep (named or derived from the units band) and any unknown / unreadable depth add NONE of the L1 kwargs —
+    # their run_engagement call is exactly what it was before L1.
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=units, run_tier=named)
+    calls, routing_seen = [], []
+    extra = {} if read is None else {"read_depth": read}
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                           run=_capturing_run(calls, routing_seen), **extra)
+    assert w(_job())["facts"] == 0
+    assert not set(_L1_KEYS) & set(calls[0])
+
+
+def test_worker_with_tiering_off_runs_a_max_lease_on_the_default_roster(monkeypatch):
+    # Tiering OFF (the real default env read): the worker derives no depth, so even a lease naming Max runs exactly the
+    # pre-EC-7 call — the default roster, which turns on NO executor-bypassing pass (no arsenal, no browser), on the one
+    # gated executor at the charter posture's rate. Fail-safe: never a fuller run than the default, never a raw path.
+    monkeypatch.delenv("VIGIL_TIERED_PRODUCTS", raising=False)
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=3, run_tier="max")
+    calls, routing_seen = [], []
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    assert calls == [{"slug": SLUG, "seed_url": f"https://{HOST}", "resume": False, "launch_nonce": "n1"}]
+
+
+def test_an_injected_aggressive_profile_cannot_shed_the_max_controls(monkeypatch):
+    # A deployment-injected profile that asks for the raw-socket arsenal does not lift the Max controls: the worker
+    # still passes governed_tools_only (the engine's overlay then forces the arsenal OFF — pinned engine-side), and the
+    # injected profile cannot pre-set a weaker control either.
+    monkeypatch.delenv("CRUCIBLE_MODEL_ROUTING", raising=False)
+    owner = generate_keypair()
+    base = _rig(monkeypatch, owner, env="twin", units=3, run_tier="max")
+    calls, routing_seen = [], []
+    injected = {"enable_arsenal": True, "governed_tools_only": False, "per_engagement_rate_floor_s": 0.0,
+                "per_engagement_connection_cap": 0}
+    w = make_engage_worker(trust_root=object(), base_dir=base, now=1000.0, run_tier_enabled=lambda: True,
+                           profile_kwargs=injected, run=_capturing_run(calls, routing_seen))
+    assert w(_job())["facts"] == 0
+    kw = calls[0]
+    assert kw["governed_tools_only"] is True
+    assert kw["per_engagement_rate_floor_s"] == pytest.approx(0.1) and kw["per_engagement_connection_cap"] == 8

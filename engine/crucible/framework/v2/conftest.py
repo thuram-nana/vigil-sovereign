@@ -64,10 +64,12 @@ def _zero_http_rate_floor(
     floor ``(0.0, 0.0)`` for the duration of each test; ``monkeypatch.setitem`` auto-restores after.
     The throttle MECHANISM still runs and stays covered: ``HttpExecutor._sleep_for_rate_limit`` still
     takes the lock, still reads ``_RATE_PROFILES[posture]`` at sleep time, still computes
-    ``floor = max(profile_floor, self._operator_min_interval)`` and still RESERVES the request's start
-    instant on the anchor. Only the wall-clock wait vanishes: with the profile at 0.0 and the default
-    operator interval 0.0 the floor is 0.0, so ``total <= 0`` and the ``if total > 0: time.sleep(total)``
-    branch is never taken. (Verified against agents/http_executor.py:1182 ``_sleep_for_rate_limit``.)
+    ``floor = self._rate_floor()`` (the max of the profile floor, ``self._operator_min_interval`` and the
+    L1 per-engagement floor) and still RESERVES the request's start instant on the anchor. Only the
+    wall-clock wait vanishes: with the profile at 0.0 and the default operator interval and per-engagement
+    floor both 0.0 the floor is 0.0, so ``total <= 0`` and the ``if total > 0: time.sleep(total)`` branch
+    is never taken. (Verified against agents/http_executor.py ``_rate_floor`` / ``_sleep_for_rate_limit``.)
+    An executor built WITH a per-engagement floor (a live-Max run) still sleeps that floor here — by design.
 
     NO PRODUCTION CODE CHANGES. The existing ``VIGIL_MIN_REQUEST_INTERVAL_S`` operator hook cannot be
     used to reach zero: it can only TIGHTEN (raise) the floor, never lower it. Monkeypatching the

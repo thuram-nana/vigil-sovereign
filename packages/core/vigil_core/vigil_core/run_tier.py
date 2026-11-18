@@ -14,7 +14,7 @@ nothing about its depth: its owner-signed lease names the depth explicitly (``Cr
 :func:`lease_depth` reads it. A lease that names none (every flat launch, every lease minted before W2b-3) keeps the
 tier derived from its units — never ``"max"``, which only an explicit depth selects.
 
-FATAL-2: stdlib ONLY (``os``) — NO ``framework.*``, NO ``sigil.*``, NO offense symbol. The run tier maps to
+FATAL-2: stdlib ONLY (``os``, ``dataclasses``) — NO ``framework.*``, NO ``sigil.*``, NO offense symbol. The run tier maps to
 the engine's engagement-profile vocabulary (``engage`` profiles ``surface|deep|full``) and to the EC-2a
 model-routing ON/OFF lever (``kernel.routing``) as plain values — a stable cross-module contract. An
 ENGINE-side conformance test pins that the profile name this leaf emits is a real ``engage`` profile, so the
@@ -35,6 +35,7 @@ unit sizes the catalog offers; the catalog validator enforces that consistency f
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 # The PRODUCT run-tier vocabulary (fixed; an unknown tier is rejected fail-closed by the catalog validator).
@@ -147,3 +148,66 @@ def routing_enabled_for(run_tier: str) -> bool:
 def profile_for_units(units: int) -> str:
     """Convenience: ``units_reserved`` → engagement profile, via the band + the run-tier→profile map."""
     return engage_profile_for(run_tier_for_units(units))
+
+
+# ==================================================================================================
+# L1 (live Max) — the per-ENGAGEMENT controls a run of a given assessment depth is held to (pricing design §6).
+#
+# A Max run launches MANY agents in parallel against a LIVE system, so more agents must never mean more load on
+# the customer's production: the WHOLE engagement shares ONE rate limit and ONE connection cap (NEVER one per
+# tool / per agent — a single global throttle across the whole run), and the agents may use ONLY VIGIL's
+# governed tools (the gated executor — scope / WARDEN / rate-limited), never a raw shell or raw network. Quick
+# and Deep run ONE agent and impose NO extra engagement-wide control here (the charter posture's own rate still
+# applies), so their controls are the inert baseline and every non-Max run is byte-identical.
+#
+# This is the pure, shared CONTRACT both planes read: the engine honours it (the gated executor's single
+# per-engagement rate limiter + the governed-tool narrowing), and the keyless engage worker carries it from the
+# launch's owner-signed depth into the run. It is keyed on the DEPTH string, not on any flag — the catalog
+# half (whether a customer may SELECT Max) is flag-gated separately in ``sigil.config`` / ``governor.catalog``.
+# ==================================================================================================
+
+#: The L1 live-Max defaults (pricing design §6): one rate limit of 10 requests/second (⇒ a 0.1 s minimum
+#: inter-request interval) and one connection cap of 8, PER ENGAGEMENT, however many agents run. A charter may
+#: tune these later; this leaf ships the decided defaults as the Max depth's controls.
+_MAX_RATE_REQUESTS_PER_SECOND: float = 10.0
+_MAX_CONNECTION_CAP: int = 8
+
+
+@dataclass(frozen=True)
+class EngageControls:
+    """The per-engagement controls a run of one assessment depth is held to (L1, pricing design §6).
+
+    * ``governed_tools_only`` — the run may use ONLY the governed/safe tool set (the gated executor); the
+      ungoverned/aggressive raw-socket arsenal and any executor-bypassing pass are forbidden (no raw network).
+    * ``min_request_interval_s`` — the ONE minimum inter-request interval (seconds; ``1 / rps``) the whole
+      engagement's single rate limiter holds. ``0.0`` ⇒ no engagement-wide floor (the charter posture stands).
+    * ``connection_cap`` — the ONE cap on concurrent connections to the target the whole engagement holds.
+      ``0`` ⇒ no extra cap (the default pool). All three are advisory to the engine, which ENFORCES them.
+    """
+
+    governed_tools_only: bool
+    min_request_interval_s: float
+    connection_cap: int
+
+
+#: The inert baseline: no engagement-wide control. Quick / Deep (and any unknown depth) get this ⇒ byte-identical.
+_BASELINE_CONTROLS = EngageControls(governed_tools_only=False, min_request_interval_s=0.0, connection_cap=0)
+
+#: The L1 live-Max controls: governed tools only, the single 10-req/s per-engagement rate floor, the 8-connection
+#: per-engagement cap (pricing design §6).
+_MAX_CONTROLS = EngageControls(
+    governed_tools_only=True,
+    min_request_interval_s=1.0 / _MAX_RATE_REQUESTS_PER_SECOND,
+    connection_cap=_MAX_CONNECTION_CAP,
+)
+
+
+def engage_controls_for(depth: str) -> EngageControls:
+    """The per-engagement controls a run of assessment ``depth`` is held to (L1, pricing design §6).
+
+    ``"max"`` ⇒ the live-Max controls (ONE per-engagement rate limit + connection cap, governed tools only);
+    every OTHER depth — quick, deep, or any unknown / malformed value — ⇒ the inert baseline (no
+    engagement-wide control ⇒ byte-identical). Fail-safe in BOTH directions: only the explicit ``"max"`` depth
+    carries the controls, so a malformed value can neither silently REMOVE them from a Max run nor silently ADD
+    them to a quick/deep one."""
+    return _MAX_CONTROLS if depth == "max" else _BASELINE_CONTROLS

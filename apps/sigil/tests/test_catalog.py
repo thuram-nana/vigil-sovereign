@@ -224,3 +224,122 @@ def test_tiered_products_flag_cross_plane_agreement():
         assert run_tier.tiered_products_enabled() == _config.tiered_products_enabled(), repr(v)
     _os.environ.pop("VIGIL_TIERED_PRODUCTS", None)
     assert run_tier.tiered_products_enabled() == _config.tiered_products_enabled()   # unset agrees too
+
+
+# ==================================================================================================
+# L1 — the Max DEPTH launch product (default-OFF behind VIGIL_MAX_DEPTH; byte-identical when off).
+# Mutation-verify targets (each neuter reds a NAMED test below):
+#   * launch_products() drops the config.max_depth_enabled() check  -> test_max_is_not_offered_until_the_owner_enables_it_and_the_catalog_is_byte_identical
+#   * config.max_depth_enabled() widened (always on / looser set)    -> test_max_depth_flag_reads_only_an_affirmative_value
+#   * Max offered without the tiered launch surface                 -> test_max_needs_the_tiered_launch_surface_too
+#   * the Max validator accepts a units-band tier / non-depth / bad units -> test_max_product_structure_validates_fail_closed
+#   * the Max validator drops the re-derive / full-roster checks     -> test_max_product_validator_catches_a_drifted_depth_or_roster
+#   * the cross-tuple product-id check is dropped                    -> test_launch_product_ids_are_globally_unique_across_quick_deep_and_max
+# ==================================================================================================
+
+def _max_env(monkeypatch, *, tiered: bool, max_depth: bool) -> None:
+    for k, on in (("VIGIL_TIERED_PRODUCTS", tiered), ("VIGIL_MAX_DEPTH", max_depth)):
+        if on:
+            monkeypatch.setenv(k, "1")
+        else:
+            monkeypatch.delenv(k, raising=False)
+
+
+def test_max_is_not_offered_until_the_owner_enables_it_and_the_catalog_is_byte_identical(monkeypatch):
+    # The byte-identical proof: with VIGIL_MAX_DEPTH unset the offered launch products are EXACTLY the EC-7 Quick/Deep
+    # tuple, the Max product id resolves to nothing (so provision.launch_reserve denies it), and no payment surface
+    # moves when the flag is turned on.
+    _max_env(monkeypatch, tiered=True, max_depth=False)
+    assert cat.launch_products() == cat._LAUNCH_PRODUCTS
+    assert [p.product_id for p in cat.launch_products()] == ["vigil_launch_quick", "vigil_launch_deep"]
+    assert cat.launch_product("vigil_launch_max") is None
+    plans_off, amts_off, ents_off = cat.plans(), cat.expected_amounts(), cat.entitlements()
+    _max_env(monkeypatch, tiered=True, max_depth=True)
+    assert cat.launch_product("vigil_launch_max") is not None
+    assert cat.plans() == plans_off and cat.expected_amounts() == amts_off and cat.entitlements() == ents_off
+
+
+def test_max_is_offered_only_when_the_owner_enables_max_depth(monkeypatch):
+    _max_env(monkeypatch, tiered=True, max_depth=True)
+    assert [p.product_id for p in cat.launch_products()] == ["vigil_launch_quick", "vigil_launch_deep",
+                                                             "vigil_launch_max"]
+    mx = cat.launch_product("vigil_launch_max")
+    assert mx is not None and mx.run_tier == "max" and mx.public()["profile"] == "full"   # the full roster
+    assert cat.launch_product("vigil_launch_quick").run_tier == "quick"                   # Quick / Deep untouched
+    assert cat.launch_product("vigil_launch_deep").run_tier == "deep"
+
+
+def test_max_needs_the_tiered_launch_surface_too(monkeypatch):
+    # VIGIL_MAX_DEPTH alone offers nothing: Max is part of the tiered launch-product surface, which is off.
+    _max_env(monkeypatch, tiered=False, max_depth=True)
+    assert cat.launch_products() == ()
+    assert cat.launch_product("vigil_launch_max") is None
+
+
+def test_max_depth_flag_reads_only_an_affirmative_value(monkeypatch):
+    from sigil import config
+    for v in ("1", "true", "TRUE", "yes", "on", "enabled", " on "):
+        monkeypatch.setenv("VIGIL_MAX_DEPTH", v)
+        assert config.max_depth_enabled() is True, repr(v)
+    for v in ("", "0", "no", "off", "false", "y", "2", "max"):
+        monkeypatch.setenv("VIGIL_MAX_DEPTH", v)
+        assert config.max_depth_enabled() is False, repr(v)
+    monkeypatch.delenv("VIGIL_MAX_DEPTH", raising=False)
+    assert config.max_depth_enabled() is False
+
+
+def test_the_max_product_tier_is_rederived_from_the_signed_depth_never_from_its_units(monkeypatch):
+    # The Max analogue of "declared tier == band-derived tier": a Max product's tier is the DEPTH the owner-signed lease
+    # names, which run_tier.depth_of / lease_depth re-derive to itself — never the units band, which cannot derive
+    # "max". So a FLAT lease of the same units (no named depth) can never escalate to Max.
+    from types import SimpleNamespace
+    from vigil_core import run_tier
+    monkeypatch.delenv("VIGIL_QUICK_MAX_UNITS", raising=False)
+    assert cat._MAX_LAUNCH_PRODUCTS, "the Max product must be defined"
+    for p in cat._MAX_LAUNCH_PRODUCTS:
+        assert p.run_tier == "max"
+        assert run_tier.depth_of(p.run_tier, p.units) == p.run_tier
+        assert run_tier.lease_depth(SimpleNamespace(run_tier=p.run_tier, units_reserved=p.units)) == "max"
+        assert run_tier.run_tier_for_units(p.units) != "max"
+        assert run_tier.lease_depth(SimpleNamespace(run_tier=None, units_reserved=p.units)) != "max"
+
+
+def test_max_product_structure_validates_fail_closed():
+    # ENV-INDEPENDENT structural validation of the Max products (runs at import unconditionally; reads no env var).
+    LP = cat.LaunchProduct
+    cat._validate_launch_product_max_structure((LP("m", "M", "max", units=20),))
+    cat._validate_launch_product_max_structure(cat._MAX_LAUNCH_PRODUCTS)          # the shipped product
+    for bad in (
+        (LP("m", "M", "max", 20), LP("m", "M2", "max", 20)),     # duplicate id
+        (LP("", "M", "max", 20),),                               # empty id
+        (LP("m", "M", "quick", 3),),                             # a units-band tier is not the Max depth
+        (LP("m", "M", "deep", 20),),                             # a units-band tier is not the Max depth
+        (LP("m", "M", "ultra", 20),),                            # not a depth at all
+        (LP("m", "M", "max", 0),), (LP("m", "M", "max", -1),), (LP("m", "M", "max", True),),   # units: int >= 1
+    ):
+        with pytest.raises(ValueError):
+            cat._validate_launch_product_max_structure(bad)
+
+
+def test_max_product_validator_catches_a_drifted_depth_or_roster(monkeypatch):
+    # Cross-module drift guards (the depth analogue of the band check): if the shared leaf ever stopped re-deriving
+    # "max" to itself, or mapped Max to anything but the full roster, the catalog must refuse to ship a Max product.
+    from vigil_core import run_tier
+    LP = cat.LaunchProduct
+    good = (LP("m", "M", "max", 20),)
+    with monkeypatch.context() as m:
+        m.setattr(run_tier, "depth_of", lambda explicit, units: "deep")       # Max no longer re-derives to itself
+        with pytest.raises(ValueError, match="re-derive"):
+            cat._validate_launch_product_max_structure(good)
+    with monkeypatch.context() as m:
+        m.setitem(run_tier._ENGAGE_PROFILE, "max", "surface")                 # Max no longer runs the full roster
+        with pytest.raises(ValueError, match="full roster"):
+            cat._validate_launch_product_max_structure(good)
+    cat._validate_launch_product_max_structure(good)                          # restored ⇒ valid again
+
+
+def test_launch_product_ids_are_globally_unique_across_quick_deep_and_max():
+    LP = cat.LaunchProduct
+    cat._validate_launch_product_ids_unique(cat._LAUNCH_PRODUCTS, cat._MAX_LAUNCH_PRODUCTS)   # the shipped catalog
+    with pytest.raises(ValueError, match="vigil_launch_deep"):
+        cat._validate_launch_product_ids_unique(cat._LAUNCH_PRODUCTS, (LP("vigil_launch_deep", "Max", "max", 20),))

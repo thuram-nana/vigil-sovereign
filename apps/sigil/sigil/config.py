@@ -481,6 +481,17 @@ def tiered_products_enabled() -> bool:
     return (os.environ.get("VIGIL_TIERED_PRODUCTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def max_depth_enabled() -> bool:
+    """L1 — True iff the **Max** assessment DEPTH is OFFERED as a launch product (``VIGIL_MAX_DEPTH`` affirmative).
+    OFF by default: ``catalog.launch_products()`` offers only Quick/Deep (byte-identical to EC-7), so a customer
+    cannot SELECT Max until the owner enables it, and ``provision.launch_reserve`` denies the Max product id. Max
+    on a LIVE system runs under the L1 controls — one rate limit per engagement and governed tools only (pricing
+    design §6) — which the ENGINE enforces for ANY ``max``-depth run (keyed on the owner-signed lease depth, not
+    this flag); this flag only gates whether Max can be CHOSEN. Mirrors ``tiered_products_enabled`` (Max is only
+    offered when the tiered-products launch surface is also on)."""
+    return (os.environ.get("VIGIL_MAX_DEPTH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def _seam_base() -> str:
     from vigil_core.seam_base import resolve_seam_base
     return resolve_seam_base()
