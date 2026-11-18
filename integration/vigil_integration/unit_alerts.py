@@ -193,6 +193,13 @@ HA_UNITS: tuple[UnitSpec, ...] = (
     UnitSpec("vigil-billing-drain-stripe.service", "vigil-billing-drain-stripe.timer", 60, 15,
              "SaaS: drain the inbound Stripe webhook spool → Stripe re-fetch → owner-signed credit mint (60s; opt-in)",
              optional=True, enable_env="VIGIL_STRIPE_BILLING_DRAIN_ENABLED"),
+    # ── Red-Pen R4: the System-review scheduler (owner-signed weekly/monthly schedules → reserve → owner-signed
+    # ticket). OPTIONAL: watched fail-closed once VIGIL_REDPEN_ENABLED is set — the SAME master flag that lets a
+    # customer set a schedule at all, so a Red-Pen deployment whose scheduler never fires (schedules silently ignored)
+    # is a true dead-man event, while an install without Red-Pen gets no false ABSENT alarm ──
+    UnitSpec("vigil-redpen-schedule.service", "vigil-redpen-schedule.timer", 3600, 0,
+             "Red-Pen: reserve + ticket each due weekly/monthly whole-repository review (hourly; opt-in)",
+             optional=True, enable_env="VIGIL_REDPEN_ENABLED"),
     # ── DEP-3 (#73): the on-box upgrade/rollback drill. OPTIONAL like the SaaS drains: an install that never
     # enabled it gets no false ABSENT alarm; VIGIL_UPGRADE_DRILL_ENABLED arms it fail-closed from the start ──
     UnitSpec("vigil-upgrade-drill.service", "vigil-upgrade-drill.timer", 7 * 24 * 3600, 1800,

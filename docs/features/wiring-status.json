@@ -359,6 +359,19 @@
       "rationale": "Native verb dispatched in-process; drains the inbound webhook spool into the SecurityJob queue (enqueue-only). Parser registered and handler resolves."
     },
     {
+      "id": "cli.redpen-schedule",
+      "name": "vigil redpen-schedule",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "redpen-schedule",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_redpen_schedule"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; drains the redpen-system ticket seam into one SecurityJob(profile=full) per open-window ticket (enqueue-only; the authorized JobRunner is the sole executor, its gate re-verifies the ticket's owner-signed lease). Behind VIGIL_REDPEN_ENABLED (refuses when off). Idempotent by content-addressed (slug,nonce); imports no framework at module scope. Parser registered and handler resolves."
+    },
+    {
       "id": "cli.reconcile",
       "name": "vigil reconcile",
       "surface": "cli-native",

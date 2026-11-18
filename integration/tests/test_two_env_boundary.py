@@ -74,6 +74,13 @@ assert "framework" not in __import__("sys").modules, "R3 worker/drain must not i
 import sigil.governor.redpen_check            # R3: the SOVEREIGN "VIGIL Red-Pen" check writer (O-5)
 assert "framework" not in __import__("sys").modules, "redpen_check must not import framework at module scope"
 assert "strix" not in __import__("sys").modules, "redpen_check must not import strix at module scope"
+import vigil_integration.live.redpen_system_seam    # R4: the System-review ticket seam (both planes; vigil_core+stdlib)
+import vigil_integration.jobs.redpen_system         # R4: the whole-tree System-review worker — the engine LAZY
+import vigil_integration.jobs.redpen_system_trigger  # R4: the System-review trigger + enqueue drain — the queue LAZY
+assert "framework" not in __import__("sys").modules, "redpen_system* must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "redpen_system* must not import strix at module scope"
+import sigil.ui.redpen_scheduler              # R4: the sovereign System-review producer (owner key) stays offense-free
+assert "framework" not in __import__("sys").modules, "redpen_scheduler must not import framework at module scope"
 import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
 _m = __import__("sys").modules
 assert "framework" not in _m, "warden_gate must not import framework at module scope"

@@ -4195,6 +4195,40 @@ def _cmd_launch_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_redpen_schedule(args: argparse.Namespace) -> int:
+    """`vigil redpen-schedule` — the Red-Pen SYSTEM-review ENQUEUE drain (R4; the integration half of the scheduler —
+    the sovereign `sigil redpen-schedule tick` and the on-demand action reserve each review and drop an owner-signed
+    ticket on the redpen-system seam). Polls that seam and ENQUEUES one `SecurityJob(profile="full")` per ticket whose
+    lease window is open — NEVER executed here: execution is SOLELY the authorized runner's (`JobRunner.run_one` →
+    `authorize_job` + the gate, which re-verifies the ticket's owner-signed lease). Idempotent by the content-addressed
+    (slug, nonce) delivery_id; a transient enqueue failure is deferred to the next drain. Default-OFF
+    (VIGIL_REDPEN_ENABLED): off it refuses (rc 2) and builds no queue. Imports no framework at module scope (the queue
+    defers it), so the two-env boundary holds."""
+    import json
+
+    from .jobs.redpen_system_trigger import RedPenSystemDrain
+    from .redpen import redpen_enabled
+
+    if not redpen_enabled():
+        print("vigil redpen-schedule: Red-Pen is off (VIGIL_REDPEN_ENABLED) — refusing (nothing enqueued)",
+              file=sys.stderr)
+        return 2
+    # #75: an omitted --queue-root defaults to <base_dir>/jobs (backup-covered), exactly as `launch-drain` does — a
+    # reserved, owner-signed System review must never sit in an un-backed-up queue.
+    queue_root = _resolve_queue_root(args.queue_root, args.base_dir)
+    drain = RedPenSystemDrain(base_dir=args.base_dir, queue_root=queue_root)
+    if args.watch:
+        print(f"  polling Red-Pen System-review tickets on {args.base_dir} → SecurityJob queue "
+              f"({queue_root}); Ctrl-C to stop")
+        try:
+            drain.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(drain.drain(), indent=2))
+    return 0
+
+
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     """`vigil reconcile` — the SAFETY-NET poller (Slice 2b): per connected repo, list the PRs changed since
     a resume checkpoint and ENQUEUE a SecurityJob for each; it is NEVER executed here (the authorized runner
@@ -6162,6 +6196,21 @@ def build_parser() -> argparse.ArgumentParser:
     pxd.add_argument("--watch", action="store_true", help="keep polling as new leases are published; Ctrl-C to stop")
     pxd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
     pxd.set_defaults(func=_cmd_launch_drain)
+
+    prsd = sub.add_parser("redpen-schedule",
+                          help="Red-Pen System reviews (default-OFF: VIGIL_REDPEN_ENABLED): poll the redpen-system "
+                               "ticket seam (the sovereign `sigil redpen-schedule tick` / on-demand action reserve "
+                               "each whole-repository review and drop an owner-signed ticket) and ENQUEUE one "
+                               "SecurityJob per open-window ticket (enqueue-only; the authorized runner executes "
+                               "behind the gate). Idempotent by the (slug, nonce) delivery_id.")
+    prsd.add_argument("--base-dir", required=True,
+                      help="the seam root the sovereign plane writes System-review tickets to (= VIGIL_BASE_DIR)")
+    prsd.add_argument("--queue-root", default="",
+                      help="the SecurityJob queue root (shared with `launch-drain` / `webhook-drain`). Default: "
+                           "<base-dir>/jobs — UNDER base_dir so a reserved review's queue is backup-covered (#75).")
+    prsd.add_argument("--watch", action="store_true", help="keep polling as new tickets are written; Ctrl-C to stop")
+    prsd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
+    prsd.set_defaults(func=_cmd_redpen_schedule)
 
     prc = sub.add_parser("reconcile",
                          help="safety-net reconciliation: per connected repo, list PRs changed since the "

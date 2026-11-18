@@ -105,6 +105,10 @@ SEAM_CLASSES: "tuple[SeamClass, ...]" = (
               "VIGIL_MONITORING_PUBLISH_DIR"),
     SeamClass("aegis_report_secrets", "aegis/report_secrets", "copy_if_absent", "*", "VIGIL_MONITORING_SECRETS_DIR"),
     SeamClass("governance_key", "offense-governance.key", "key", ""),
+    # Red-Pen R4: an owner-signed System-review ticket is a RESERVED review awaiting the enqueue drain — carried, so a
+    # moved seam never strands a held review (the drain then enqueues it while its lease window is open; the job gate
+    # re-verifies its lease). A differing copy on the seam is a conflict, as for every owner-signed file.
+    SeamClass("redpen_system_tickets", "redpen-system-tickets", "copy_if_absent", "*.json"),
 )
 
 #: What a former seam directory may also hold that is NOT seam state: never inventoried, read, copied or touched.

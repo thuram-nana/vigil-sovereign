@@ -203,6 +203,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand connected repositor(ies) {stranded_cr}: their only owner-signed "
                           f"active record sits below K and is not re-asserted live (dropping the connection or "
                           f"resetting the per-(org,repo) anti-replay high-water); lower K or re-sign above K")
+    # (c, Red-Pen R4) the SAME referential floor for governor.redpen_schedule: a System-review schedule whose only
+    # authoritative owner-signed ACTIVE record sits below K and is not re-asserted live would be silently cleared
+    # (the registry folds a genesis scan with no seed in this slice) or, by resetting the per-(org,repo) high-water,
+    # re-open replay-resurrection of a cleared schedule (a review that fires again). Fail-closed, like the floors
+    # above; empty in the happy path (no schedules, or every active record sits >= K).
+    stranded_rps = stranded_active_redpen_schedules(store, archived, K)
+    if stranded_rps:
+        raise PruneUnsafe(f"K={K} would strand Red-Pen schedule(s) {stranded_rps}: their only owner-signed active "
+                          f"record sits below K and is not re-asserted live (dropping the schedule or resetting the "
+                          f"per-(org,repo) anti-replay high-water); lower K or re-sign above K")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -629,6 +639,53 @@ def stranded_active_connected_repos(store, archived: list[Segment], K: int) -> l
         below.extend(read_segment_records(store._layout.seg_path(seg)))
     below_hw = _connected_repo_active_hw(below, resolver)
     live_hw = _connected_repo_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
+    neg = float("-inf")
+    return sorted(f"{k[1]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
+
+
+def _redpen_schedule_active_hw(records, resolver) -> "dict[tuple, float]":
+    """``{(org_id, repo): max VERIFIED-active issued_at}`` over ``records`` (Red-Pen R4). Only owner-signed active
+    schedule records (``authn`` bare-canonical, verified under the owner pubkey valid at their seq) count; a
+    disable / forged / unsigned record contributes nothing. Pure read, never raises out of the scan."""
+    from ..governor.redpen_schedule import SIGNAL as RPS_SIGNAL, _CORE as RPS_CORE
+    from ..governor.authn import as_issued_at, verify_signed
+    hw: "dict[tuple, float]" = {}
+    for r in sorted(records, key=lambda r: r.seq):
+        p = getattr(r, "payload", None)
+        if not isinstance(p, dict) or p.get("signal") != RPS_SIGNAL or p.get("state") != "active":
+            continue
+        oid, repo = p.get("org_id"), p.get("repo")
+        if not (isinstance(oid, str) and oid and isinstance(repo, str) and repo):
+            continue
+        if not verify_signed(p, RPS_CORE, resolver.at(r.seq)):
+            continue
+        key = (oid, repo)
+        at = as_issued_at(p.get("issued_at"))
+        if at > hw.get(key, float("-inf")):
+            hw[key] = at
+    return hw
+
+
+def stranded_active_redpen_schedules(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Red-Pen R4) — the Red-Pen System-review schedules (`governor/redpen_schedule.py`) a hard prune to K
+    would STRAND: those whose only authoritative owner-signed ACTIVE record sits in the pruned prefix [0..K) and is
+    NOT superseded by a live (>= K) active record with an equal-or-higher ``issued_at``. The fail-closed durability
+    floor for the schedule registry, which (in this slice) folds a signature-verifying genesis scan with NO snapshot
+    seed — so a prune that dropped a (org, repo)'s deciding active record would either silently CLEAR an active
+    schedule or, by resetting the per-(org, repo) anti-replay high-water, re-open REPLAY-RESURRECTION of a captured
+    active record for a cleared schedule (a review that fires again). Both are caught by the one condition
+    ``max(below-K active issued_at) > max(live active issued_at)``. EMPTY in the happy path. Returns keys as
+    ``repo@org_id``. VERIFIED-active only (a forged record never blocks a prune). Read-only. Mirrors
+    ``stranded_active_connected_repos``."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    below_hw = _redpen_schedule_active_hw(below, resolver)
+    live_hw = _redpen_schedule_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
     neg = float("-inf")
     return sorted(f"{k[1]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
 
