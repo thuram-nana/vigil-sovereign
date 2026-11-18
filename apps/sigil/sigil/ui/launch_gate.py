@@ -62,6 +62,13 @@ from vigil_core.rate_card import MC_PER_CREDIT  # noqa: E402  (W2b-3: one credit
 
 _MAX_UNITS = 1_000_000          # a sane upper bound on a single launch's reservation (fail-closed on garbage)
 _DEFAULT_LEASE_HOURS = 8.0
+#: C1b — the per-finding RETEST re-proof reservation (the HANDOFF §11.2 published Retest budget). It is the
+#: CAP a single-finding re-proof holds while it runs; a deterministic, model-free re-fire consumes none of it
+#: and the whole reservation is refunded on settle (see ``provision.retest``). An internal units value — never
+#: shown to a customer (money/units doctrine).
+_RETEST_REPROOF_UNITS = 200
+#: A retest re-proof is a short single-finding re-verify, not a week-long engagement: a tight lease window.
+_RETEST_LEASE_HOURS = 1.0
 _MAX_LEASE_HOURS = 24.0 * 7     # a launch lease caps at a week; a longer engagement re-leases
 #: What ``resume_launch`` tells the customer when it lifts the pause of a lease whose window has closed.
 _RESUMED_EXPIRED_DETAIL = ("this launch's lease window has closed: the pause is lifted, so a run still in "
@@ -556,6 +563,26 @@ class LaunchGate:
             return {"ok": False, "error": f"no current owner-signed engagement authority for {h} (org {oid}) — the "
                     f"owner must authorize this target (offense_authority stays at the owner key)"}
         return {"ok": True, "org_id": oid, "host": h, "slug": slug}
+
+    def reserve_retest(self, *, requester: str, org_id: str, host: str, now: Any,
+                       nonce: Optional[str] = None) -> dict:
+        """C1b — authorize AND reserve a metered owner-signed lease for ONE finding's LIVE re-proof, so the
+        keyless offense worker can re-fire that finding's proof against ``host`` only under a reserved,
+        owner-signed, tenant-bound capability (never free / unbounded traffic — the stub docstring's I1/I9
+        concern). It reuses the launch chokepoint VERBATIM — :meth:`reserve_launch` with the published per-finding
+        Retest reservation (``_RETEST_REPROOF_UNITS``) as a FLAT cap and a tight window — so it runs EXACTLY the
+        same conjuncts :meth:`authorize_retest` does (kill switch + ``customer_launch`` latch + run_engagement +
+        current ownership proof + current owner-pinned authority) PLUS the credit conjunct (an org with too few
+        credits is refused, nothing debited). Returns reserve_launch's ``{ok, lease, slug, ...}`` (the signed
+        lease the sovereign drops into the re-proof ticket), or ``{ok: False, error}`` (fail-closed).
+
+        It is FLAT (``depth=None``) deliberately: a single-finding re-fire is DETERMINISTIC and MODEL-FREE (no
+        gateway spend — exactly like the R5 retest), so there is nothing for the model gateway to meter; the lease
+        is the authorization + reservation substrate, and ``provision.retest`` settles it to ZERO consumption (a
+        full refund) after the re-proof. The reservation bounds the traffic; a model-reaching re-proof would be
+        metered through the lease's grant."""
+        return self.reserve_launch(requester=requester, org_id=org_id, host=host, units=_RETEST_REPROOF_UNITS,
+                                   now=now, duration_hours=_RETEST_LEASE_HOURS, nonce=nonce, depth=None)
 
     def reserve_redpen_review(self, *, org_id: str, repo: str, now: Any, depth: str = "quick",
                               nonce: Optional[str] = None, duration_hours: Any = _DEFAULT_LEASE_HOURS) -> dict:
