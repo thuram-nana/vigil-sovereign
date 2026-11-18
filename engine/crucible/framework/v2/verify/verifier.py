@@ -1619,6 +1619,16 @@ class OracleVerifier:
                 )
             return None
         if kind is OracleKind.ERROR_SIGNATURE:
+            # -- Parser-state toggle (nosqli/ldap_injection/xpath_injection datastore QUERY BREAK) — REUSES
+            #    the FROZEN ERROR_SIGNATURE kind (as smuggling_desync reuses DIFFERENTIAL_RESPONSE), but
+            #    fires ONLY when the ctx carries the fresh `parser_state_toggle` record: the three retained
+            #    legs (break/balanced/control) + the three payloads over which it re-derives the break-vs-
+            #    repair toggle OFFLINE. No benchmark/scan/engage finding carries this key, so this branch is
+            #    inert on the gate path (byte-identical) and oracle_version(ERROR_SIGNATURE) is untouched; an
+            #    ordinary error_signature finding (error_observed) is handled by the arm below. Proves a
+            #    GENUINE query break, never mere CONDITIONAL emission of an error-shaped string.
+            if "parser_state_toggle" in ctx:
+                return oracles.parser_state_toggle_oracle(ctx["parser_state_toggle"])
             if "error_observed" in ctx:
                 return oracles.error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
             return None

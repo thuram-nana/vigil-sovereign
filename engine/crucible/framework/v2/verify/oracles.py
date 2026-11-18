@@ -4481,6 +4481,182 @@ def error_signature_oracle(observed_body: Any, control_body: Any = None) -> Orac
 
 
 # ---------------------------------------------------------------------------
+# 4c. Parser-state toggle — a datastore QUERY BREAK attributable to injected syntax
+# ---------------------------------------------------------------------------
+#
+# ``error_signature_oracle`` above proves only that a datastore/parser error-shaped STRING was emitted
+# CONDITIONALLY on a payload (present on the probe, absent from a benign control). For the non-SQL
+# injection classes (nosqli / ldap_injection / xpath_injection) that is NOT a sound FACT: a
+# WAF/security-filter block page that names the engine, an input-validator rejection, or an unrelated
+# 500 whose stack trace merely names the driver PACKAGE (com.mongodb / javax.naming / MS.Internal.Xml)
+# all emit an error-shaped string conditionally on the metacharacter and pass the benign-control twin
+# (four such false FACTs were reproduced at rate 1.0). The error names a SUBSYSTEM, not a QUERY BREAK.
+#
+# This oracle proves the error is a GENUINE QUERY-SYNTAX BREAK by a BREAK-vs-REPAIR PARSER-STATE TOGGLE,
+# re-executed OFFLINE over THREE retained legs and the three payloads that drove them:
+#   * BREAK    — an UNBALANCED metacharacter payload -> a genuine datastore parser error.
+#   * BALANCED — the SAME metacharacter SET, RE-BALANCED so the query parses -> NO parser error.
+#   * CONTROL  — a benign metacharacter-free value -> NO parser error.
+# A source keying on metacharacter PRESENCE (a WAF/validator) reacts to BOTH break AND balanced (both
+# carry the same metacharacters), so it cannot produce the toggle; a static error banner fires on all
+# three. ONLY a real query parser — which cares about the ARRANGEMENT (balance) of the metacharacters,
+# not their mere presence — errors on the unbalanced payload and accepts the re-balanced one. The three
+# payloads are RETAINED so the same-metacharacter-SET property is RE-DERIVED at verify time, never
+# trusted from the producer.
+#
+# Two further guards the branch ``blocking_work`` names: the matched signature must be a genuine
+# PARSER-ERROR MESSAGE (``_PARSER_BREAK_SIGNATURES`` — the bare package/class names are deliberately NOT
+# in the set), and a BLOCK/REJECTION response on the break leg (a 4xx access/validation status, or
+# explicit block wording) is REFUSED (a WAF block is not a parser break).
+#
+# REUSE, NO DRIFT: like ``smuggling_desync_oracle`` reuses the frozen DIFFERENTIAL_RESPONSE kind, this
+# returns the frozen ERROR_SIGNATURE kind and is reached ONLY via the verifier's ``parser_state_toggle``
+# ctx key, which no benchmark/scan/engage finding carries — so ``make gate`` stays byte-identical and
+# ``oracle_version(ERROR_SIGNATURE)`` (which the SQL error_signature certificates bind) is UNTOUCHED
+# (this function is NOT in the ERROR_SIGNATURE version closure; it defines its OWN constants below).
+
+# Grammar-significant delimiters a datastore query parser (and a presence-keying WAF) reacts to. The
+# metacharacter SET of the break and balanced payloads must be EQUAL and NON-EMPTY, and the control's
+# EMPTY — re-derived here from the retained payloads, never trusted from the producer.
+_INJECTION_METACHARS = frozenset("'\"`(){}[]|&*/\\;$<>")
+
+# GENUINE datastore query-PARSER-break messages (NOT bare driver/package names). Ordered strongest-first.
+# A bare `com.mongodb` / `MongoError` / `BSONError` / `E11000` / `javax.naming.directory` /
+# `com.sun.jndi.ldap` / `LDAPException` / `MS.Internal.Xml` / lone `XPathException` is DELIBERATELY
+# ABSENT — it names a subsystem, not a query break, and the toggle rests on a PARSE failure.
+_PARSER_BREAK_SIGNATURES: "list[tuple[re.Pattern[str], str]]" = [
+    # --- NoSQL: MongoDB BSON/query parser + the $where JS parser / JSON.parse ---
+    (re.compile(r"\bMongoParseError\b", re.I), "mongodb"),
+    (re.compile(r"\bFailedToParse\b", re.I), "mongodb"),
+    (re.compile(r"Failed to parse[^\n]{0,60}\b(?:query|filter|operator|pipeline|BSON|JSON)\b", re.I), "mongodb"),
+    (re.compile(r"\bunknown (?:top level )?operator:?\s*\$\w+", re.I), "mongodb"),
+    (re.compile(r"\bSyntaxError:\s*Unexpected (?:token|end of (?:JSON )?input)", re.I), "mongodb"),
+    (re.compile(r"Unexpected token[^\n]{0,20}\bin JSON\b", re.I), "mongodb"),
+    (re.compile(r"\bUnterminated string in JSON\b", re.I), "mongodb"),
+    # --- LDAP: filter/DN parse break (error code 87 = LDAP_FILTER_ERROR, 34 = invalid DN syntax) ---
+    (re.compile(r"\bBad search filter\b", re.I), "ldap"),
+    (re.compile(r"\b(?:LDAP:\s*)?error code 87\b", re.I), "ldap"),
+    (re.compile(r"\bInvalidSearchFilterException\b|\bInvalid(?:\s+search)?\s+filter\b", re.I), "ldap"),
+    (re.compile(r"\bFilter Error\b", re.I), "ldap"),
+    (re.compile(r"\binvalid DN syntax\b|\b(?:LDAP:\s*)?error code 34\b", re.I), "ldap"),
+    # --- XPath: expression parse break ---
+    (re.compile(r"\bInvalid (?:XPath )?expression\b", re.I), "xpath"),
+    (re.compile(r"\bSyntaxError:\s*(?:Invalid|Unexpected)[^\n]{0,30}\b(?:expression|token)\b", re.I), "xpath"),
+    (re.compile(r"\bXPath[^\n]{0,40}\b(?:syntax error|Unclosed|unexpected token|malformed|not well[- ]formed)\b", re.I), "xpath"),
+    (re.compile(r"\bxmlXPath(?:Eval|CompOpEval)\b[^\n]{0,40}\b(?:error|failed|invalid)\b", re.I), "xpath"),
+]
+
+# Statuses / wording that mark a BLOCK or VALIDATION REJECTION — never a datastore parser break.
+_PST_BLOCK_STATUSES = frozenset({401, 403, 405, 406, 429})
+_PST_BLOCK_WORDING_RE = re.compile(
+    r"\b(?:request blocked|access denied|forbidden|not acceptable|blocked by|web application firewall|"
+    r"WAF|security (?:policy|rule|filter|violation)|request (?:rejected|denied)|"
+    r"detected an attack|mod_?security)\b", re.I)
+
+
+def _pst_leg(leg: Any) -> "dict | None":
+    """Normalise one retained leg to ``{"body": str, "status": int|None, "channel": bool}`` or None."""
+    if not isinstance(leg, Mapping):
+        return None
+    body = _coerce_text(leg.get("body"))
+    raw_status = leg.get("status")
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return {"body": body, "status": status, "channel": bool(body)}
+
+
+def _pst_metachars(payload: Any) -> frozenset:
+    """The SET of grammar-significant metacharacters present in ``payload`` (re-derived, never trusted)."""
+    return frozenset(c for c in _coerce_text(payload) if c in _INJECTION_METACHARS)
+
+
+def _pst_break_match(body: str) -> "tuple[str, str] | None":
+    """The first genuine datastore parser-break signature in ``body`` as ``(engine, matched_line)``, or None."""
+    for pattern, engine in _PARSER_BREAK_SIGNATURES:
+        m = pattern.search(body)
+        if m:
+            return engine, _line_of(body, m.start()).strip()[:200]
+    return None
+
+
+def _pst_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    # REUSE the FROZEN ERROR_SIGNATURE kind (as smuggling_desync reuses DIFFERENTIAL_RESPONSE), reached
+    # ONLY via the verifier's `parser_state_toggle` ctx key no benchmark/scan/engage finding carries, so
+    # make gate stays byte-identical and oracle_version(ERROR_SIGNATURE) is untouched. POSITIVE-only: a
+    # non-fire is INCONCLUSIVE (conclusive=False), never a CLEAN — injection can hide on a boolean/OOB
+    # channel this response-triple cannot see.
+    return OracleSignal(kind=OracleKind.ERROR_SIGNATURE, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=fired, evidence=evidence, observed=observed)
+
+
+def parser_state_toggle_oracle(observed: Any) -> OracleSignal:
+    """Confirm a datastore QUERY BREAK (nosqli / ldap_injection / xpath_injection) by a BREAK-vs-REPAIR
+    PARSER-STATE TOGGLE re-executed OFFLINE over three retained legs + the payloads that drove them. See
+    the module comment above for the full contract. Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    brk = _pst_leg(obs.get("break"))
+    bal = _pst_leg(obs.get("balanced"))
+    ctl = _pst_leg(obs.get("control"))
+    base = {"engine_expected": _coerce_text(obs.get("engine"))[:20]}
+    if brk is None or bal is None or ctl is None:
+        return _pst_signal(False, observed=base,
+                           evidence="the break / balanced / control leg record is missing — no toggle to "
+                                    "adjudicate (inconclusive)")
+    # 1. All three legs must have answered with a readable body, else the toggle cannot be read.
+    if not (brk["channel"] and bal["channel"] and ctl["channel"]):
+        return _pst_signal(False, observed={**base, "break_channel": brk["channel"],
+                                            "balanced_channel": bal["channel"], "control_channel": ctl["channel"]},
+                           evidence="a leg established no readable body — cannot adjudicate the parser-state "
+                                    "toggle (inconclusive)")
+    # 2. The payload SET invariant, re-derived OFFLINE from the retained payloads (never trusted): break and
+    #    balanced must carry the SAME NON-EMPTY metacharacter set, and the control NONE. This is what makes a
+    #    break-only error attributable to the ARRANGEMENT (balance) rather than the mere PRESENCE of
+    #    metacharacters — a presence-keying WAF/validator reacts to both break and balanced and so cannot
+    #    pass step 4 (its balanced leg errors too).
+    mc_break = _pst_metachars(obs.get("break_payload"))
+    mc_balanced = _pst_metachars(obs.get("balanced_payload"))
+    mc_control = _pst_metachars(obs.get("control_payload"))
+    detail = {**base, "break_status": brk["status"], "balanced_status": bal["status"],
+              "control_status": ctl["status"], "metachars": "".join(sorted(mc_break))}
+    if not mc_break or mc_break != mc_balanced or mc_control:
+        return _pst_signal(False, observed={**detail, "balanced_metachars": "".join(sorted(mc_balanced)),
+                                            "control_metachars": "".join(sorted(mc_control))},
+                           evidence="the break and balanced payloads must carry the SAME non-empty "
+                                    "metacharacter set and the control none — the retained payloads do not, so "
+                                    "a break-only error is not attributable to query balance (refuse)")
+    # 3. A BLOCK / VALIDATION REJECTION on the break leg is a WAF/validator answer, not a parser break.
+    if brk["status"] in _PST_BLOCK_STATUSES or _PST_BLOCK_WORDING_RE.search(brk["body"]):
+        return _pst_signal(False, observed=detail,
+                           evidence=f"the break leg is a block/rejection response (status {brk['status']} / "
+                                    "block wording) — a WAF/validator block is not a datastore query break (refuse)")
+    # 4. THE TOGGLE. A genuine datastore parser-break MESSAGE on the UNBALANCED break leg, and NONE on the
+    #    balanced leg (same metacharacters, re-balanced) nor on the benign control. Only a real query parser
+    #    produces this pattern; a presence filter / static banner / unrelated-500 / bare package name cannot.
+    hit = _pst_break_match(brk["body"])
+    if hit is None:
+        return _pst_signal(False, observed=detail,
+                           evidence="no genuine datastore parser-break message on the break leg (a bare "
+                                    "driver/package name is not a query break) — did not fire")
+    engine, line = hit
+    if _pst_break_match(bal["body"]) is not None:
+        return _pst_signal(False, observed={**detail, "engine": engine},
+                           evidence=f"a {engine} parser-break message appears on the BALANCED leg too — the "
+                                    "error tracks metacharacter PRESENCE, not a genuine query break (refuse)")
+    if _pst_break_match(ctl["body"]) is not None:
+        return _pst_signal(False, observed={**detail, "engine": engine},
+                           evidence=f"a {engine} parser-break message appears on the benign CONTROL leg — the "
+                                    "error is unconditional, not attributable to the payload (refuse)")
+    return _pst_signal(True, observed={**detail, "engine": engine, "break_line": line},
+                       evidence=(f"{engine} QUERY BREAK: the UNBALANCED break payload provoked a genuine "
+                                 f"parser-break error ({line!r}); the BALANCED payload (same metacharacter set, "
+                                 "re-balanced) and the benign control did NOT — a break-vs-repair parser-state "
+                                 "toggle that a presence-keying WAF/validator or a static banner cannot fake"))
+
+
+# ---------------------------------------------------------------------------
 # 5. Out-of-band callback — inbound interaction against a unique token
 # ---------------------------------------------------------------------------
 
