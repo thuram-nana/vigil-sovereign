@@ -201,6 +201,12 @@ assert "framework" not in _m, "live.github_client must not import framework at m
 import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
 assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
 assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
+import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
+assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
+assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
+import sigil.governor.shard_on_signup  # PR-F: the SOVEREIGN owner-side shard-placement-on-signup policy
+assert "framework" not in _m, "governor.shard_on_signup must not import framework at module scope (owner-signed, no engine)"
+assert "strix" not in _m, "governor.shard_on_signup must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
