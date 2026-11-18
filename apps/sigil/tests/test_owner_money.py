@@ -397,6 +397,126 @@ def test_read_only_no_mint(tmp_path):
     assert store.next_seq == before
 
 
+# ============ W5 arrears: the purchase-side owed, BESIDE the provider-side at-risk =====================
+def _seed_reversal(store, owner, org: str, *, granted: int, spent: int, disputed: int, topup: int = 0) -> int:
+    """One org's disputed purchase on the REAL W5 ledger: a grant, a spend, then a dispute OPEN that removes
+    ``disputed`` credits (the already-spent part booked as OWED / arrears); an optional top-up then repays what it
+    can. Records are owner-signed under the persisted identity, so ``money_overview``'s own read verifies them.
+    Returns the org's arrears (owed credits) after the steps."""
+    from sigil.governor.billing_reversal import BillingReversalLedger, REASON_DISPUTE
+    from sigil.governor.wallet import WalletRegistry
+    w = WalletRegistry(store, owner_key=owner)
+    ledger = BillingReversalLedger(store, wallet=w, owner_key=owner)
+    ref = f"cs_{org}_1"
+    w.grant(org, granted, "topup", entry_id=ref, issued_at=float(next(_iss)))
+    if spent:
+        w.debit(org, spent, entry_id=f"spend_{org}", issued_at=float(next(_iss)))
+    ledger.reconcile(org, ref, cap=granted, reason=REASON_DISPUTE, now=float(next(_iss)), disputed=disputed)
+    if topup:
+        top = f"cs_{org}_2"
+        w.grant(org, topup, "topup", entry_id=top, issued_at=float(next(_iss)))
+        ledger.repay(org, top, now=float(next(_iss)))
+    return ledger.owed(org)
+
+
+def test_arrears_owed_from_a_disputed_then_partially_repaid_purchase(tmp_path):
+    """An org whose purchase was disputed (the already-spent part booked as OWED) and then only partially repaid
+    shows the correct arrears — in credits and, at the published credit unit, in nano-USD — per org and in total."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    OrgRegistry(store, owner_key=owner).create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    # grant 1000, spend 900 (spendable 100); a full dispute removes 1000 => 100 from the wallet, 900 OWED; a 500
+    # top-up repays 500 => 400 still owed.
+    assert _seed_reversal(store, owner, "acme", granted=1000, spent=900, disputed=1000, topup=500) == 400
+    ov = om.money_overview(store, meter_dir=tmp_path / "model_meter", target_margin=None)
+    acme = next(o for o in ov["orgs"] if o["org_id"] == "acme")
+    # MUTATION-VERIFY (wrong ledger / not read): reading nothing from the reversal ledger reds the owed credits;
+    # MUTATION-VERIFY (repayments not netted): counting booked arrears without subtracting the repay reds it (900).
+    assert acme["arrears_credits"] == 400
+    assert acme["arrears_nano"] == 400 * mm.CREDIT_NANO_USD == 4_000_000_000
+    assert acme["arrears_usd"] == om._usd(4_000_000_000)
+    assert ov["totals"]["arrears_credits"] == 400 and ov["totals"]["arrears_nano"] == 4_000_000_000
+
+
+def test_arrears_is_distinct_from_the_provider_side_at_risk(tmp_path):
+    """The customer-side arrears and the provider-side at-risk are two DIFFERENT losses, each in its own field — a
+    both-nonzero org carries both, correct and not conflated into one number."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    OrgRegistry(store, owner_key=owner).create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    meter_dir = tmp_path / "model_meter"
+    # provider-side at-risk: a cut-off (held) part of a confirmed response.
+    _seed_meter(meter_dir, "acme", "acme_run", "n1", [(mm.Usage(output_tokens=8_640), 216_000_000, 1_000_000, DAY1)])
+    # customer-side arrears: a disputed-then-partially-repaid purchase (400 owed).
+    assert _seed_reversal(store, owner, "acme", granted=1000, spent=900, disputed=1000, topup=500) == 400
+    ov = om.money_overview(store, meter_dir=meter_dir, target_margin=None)
+    acme = next(o for o in ov["orgs"] if o["org_id"] == "acme")
+    # MUTATION-VERIFY (conflated): folding arrears into the at-risk field (or vice-versa) reds one of these.
+    assert acme["at_risk_nano"] == 1_000_000                        # provider-side, from the meter — unchanged
+    assert acme["arrears_credits"] == 400 and acme["arrears_nano"] == 400 * mm.CREDIT_NANO_USD
+    assert acme["arrears_nano"] != acme["at_risk_nano"]             # two different losses, never one number
+
+
+def test_total_arrears_sums_the_orgs(tmp_path):
+    """Total arrears is the sum of the per-org arrears across tenants."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    orgs = OrgRegistry(store, owner_key=owner)
+    orgs.create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    orgs.create_org("globex", "Globex", owner="o", issued_at=float(next(_iss)))
+    assert _seed_reversal(store, owner, "acme", granted=1000, spent=900, disputed=1000, topup=500) == 400
+    assert _seed_reversal(store, owner, "globex", granted=500, spent=500, disputed=500) == 500
+    ov = om.money_overview(store, meter_dir=tmp_path / "model_meter", target_margin=None)
+    by = {o["org_id"]: o["arrears_credits"] for o in ov["orgs"]}
+    assert by == {"acme": 400, "globex": 500}
+    # MUTATION-VERIFY (total): the grand total is exactly the sum of the orgs' own arrears.
+    assert ov["totals"]["arrears_credits"] == 400 + 500 == 900
+    assert ov["totals"]["arrears_nano"] == 900 * mm.CREDIT_NANO_USD
+
+
+def test_arrears_tenant_isolation(tmp_path):
+    """Each org's arrears is its OWN: an org that owes nothing shows 0 even while another tenant owes — never the
+    other's, never a sum."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    orgs = OrgRegistry(store, owner_key=owner)
+    orgs.create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    orgs.create_org("globex", "Globex", owner="o", issued_at=float(next(_iss)))
+    meter_dir = tmp_path / "model_meter"
+    # acme owes 400; globex has metered activity but no reversal, so it owes nothing.
+    assert _seed_reversal(store, owner, "acme", granted=1000, spent=900, disputed=1000, topup=500) == 400
+    _seed_meter(meter_dir, "globex", "gx_run", "n9", [(mm.Usage(output_tokens=8_640), 216_000_000, 0, DAY1)])
+    ov = om.money_overview(store, meter_dir=meter_dir, target_margin=None)
+    by = {o["org_id"]: o["arrears_credits"] for o in ov["orgs"]}
+    # MUTATION-VERIFY (cross-org leak): attributing one tenant's arrears (or the total) to another reds globex's 0.
+    assert by["acme"] == 400 and by["globex"] == 0
+
+
+def test_zero_arrears_when_no_reversal_exists(tmp_path):
+    """With no reversal on the spine (the W5 reversals feature off => no records) every org's arrears — and the
+    total — is 0, so the column is inert and nothing changes."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    OrgRegistry(store, owner_key=owner).create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    meter_dir = tmp_path / "model_meter"
+    _seed_meter(meter_dir, "acme", "acme_run", "n1", [(mm.Usage(output_tokens=8_640), 216_000_000, 0, DAY1)])
+    ov = om.money_overview(store, meter_dir=meter_dir, target_margin=None)
+    acme = next(o for o in ov["orgs"] if o["org_id"] == "acme")
+    assert acme["arrears_credits"] == 0 and acme["arrears_nano"] == 0 and acme["arrears_usd"] == om._usd(0)
+    assert ov["totals"]["arrears_credits"] == 0 and ov["totals"]["arrears_nano"] == 0
+
+
+def test_arrears_read_is_pure_the_spine_head_does_not_move(tmp_path):
+    """Folding the arrears mints nothing: with a reversal on the spine, ``money_overview`` does not append a record."""
+    store = _store()
+    owner = ensure_owner_keypair()
+    OrgRegistry(store, owner_key=owner).create_org("acme", "Acme", owner="o", issued_at=float(next(_iss)))
+    _seed_reversal(store, owner, "acme", granted=1000, spent=900, disputed=1000, topup=500)
+    before = store.next_seq
+    om.money_overview(store, meter_dir=tmp_path / "model_meter", target_margin=None)
+    assert store.next_seq == before
+
+
 # ============ the owner-tier HTTP route (/api/billing/owner-money) ====================================
 def _serve(spine_path):
     srv = build_server(token=TOKEN, port=0, spine_path=spine_path)
@@ -448,6 +568,9 @@ def test_owner_money_route_owner_only_when_enabled(tmp_path, monkeypatch):
             assert code == 200, (code, body)
             assert body["totals"]["tenant_count"] == 1
             assert any(o["org_id"] == "acme" and o["rate_card_revenue_mc"] == 54_000 for o in body["orgs"])
+            # the arrears column is carried over the route too (0 here: no reversal) — beside the at-risk figure.
+            assert body["totals"]["arrears_credits"] == 0
+            assert all("arrears_credits" in o and "at_risk_nano" in o for o in body["orgs"])
             # MUTATION-VERIFY (owner-gate): weakening manage_billing to view_billing/read would 200 the operator.
             for role in ("operator", "analyst", "viewer"):
                 tok = _bearer(port, f"u_{role}", role)
@@ -526,6 +649,8 @@ def test_cli_owner_money_prints_totals_when_on(tmp_path, monkeypatch, capsys):
         cli.cmd_owner_money(type("A", (), {"json": False})())
     out = capsys.readouterr().out
     assert "owner money view" in out and "Acme Corp" in out and "TOTAL" in out
+    # the purchase-side arrears is surfaced beside the provider-side at-risk (two labelled losses).
+    assert "at risk" in out and "owed" in out
 
 
 # ============ money hygiene: the deploy's margin is read, never leaked; no value in the slice's files ===
