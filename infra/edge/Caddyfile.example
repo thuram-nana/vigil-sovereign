@@ -1,0 +1,31 @@
+# VIGIL edge — reverse proxy + automatic TLS for the three origins, in front of a single `vigil up` host.
+#
+# Copy to /etc/caddy/Caddyfile (system Caddy) or ~/.config/caddy/Caddyfile, replace the three hostnames
+# and the console allow-list, then `sudo systemctl reload caddy` (or `caddy reload`). Caddy obtains and
+# renews Let's Encrypt certificates automatically — ports 80 and 443 must be reachable from the internet
+# and the three DNS records must already point at this host.
+#
+# SECURITY MODEL: the three app ports (8735 / 8734 / 8770) bind to 127.0.0.1 ONLY on the box and are never
+# in a security group. Caddy is the one public listener; it terminates TLS and proxies to the loopback
+# ports. The console is the owner control plane — keep its allow-list tight.
+
+# --- the public / marketing site -> pubui (:8735) ---
+vigil.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8735
+}
+
+# --- the customer app -> custui (:8734) ---
+app.vigil.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8734
+}
+
+# --- the operator console -> vigil-up (:8770). Owner control plane: restrict by source IP. ---
+console.vigil.example.com {
+	encode zstd gzip
+	# Replace with YOUR office / VPN CIDR(s). Everything else gets a flat 403 before it reaches the console.
+	@blocked not remote_ip 203.0.113.0/24
+	respond @blocked "forbidden" 403
+	reverse_proxy 127.0.0.1:8770
+}

@@ -1,0 +1,66 @@
+# deploy-ec2 — OPT-IN continuous delivery to a single EC2 host running `vigil up`.
+#
+# Full operator guide: docs/runbooks/AWS-EC2-DEPLOY.md.
+#
+# DEFAULT-OFF + FAIL-CLOSED. This workflow ships INERT: the deploy job no-ops unless the operator has set
+# the three enabling repo *variables* (VIGIL_DEPLOY_AWS_ROLE_ARN / VIGIL_DEPLOY_AWS_REGION /
+# VIGIL_DEPLOY_SSM_TARGET). With them unset it prints "CD not configured" and does nothing — it cannot
+# deploy, assume a role, or touch anything. So merging this changes nothing until AWS is wired.
+#
+# NEVER on a red or non-main CI. It fires ONLY after the REQUIRED `vigil-ci` workflow CONCLUDES SUCCESS on
+# the `main` branch (workflow_run), or by a deliberate manual `workflow_dispatch`. It never runs on a
+# pull_request, so it is registered in KNOWN_NONPR_ADVISORY of
+# docs/tests/test_required_checks_canonical.py and is not a merge-blocking check.
+#
+# NO LONG-LIVED KEYS. Auth is GitHub OIDC -> a scoped AWS role (sts:AssumeRoleWithWebIdentity), minted per
+# run and valid 15 minutes. The deploy itself is an SSM RunShellScript that runs the box-side
+# tools/remote-deploy.sh (git reset --hard origin/main -> make deploy-console -> make smoke ->
+# rollback-on-failure). The runner never opens an SSH port and holds no durable secret.
+
+name: deploy-ec2
+
+on:
+  workflow_run:
+    workflows: ["vigil-ci"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy to EC2 on green main (opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
+    steps:
+      - name: preflight — is CD configured? (fail-closed; skip if not)
+        id: pf
+        env:
+          ROLE: ${{ vars.VIGIL_DEPLOY_AWS_ROLE_ARN }}
+          REGION: ${{ vars.VIGIL_DEPLOY_AWS_REGION }}
+          TARGET: ${{ vars.VIGIL_DEPLOY_SSM_TARGET }}
+        run: |
+          if [ -z "$ROLE" ] || [ -z "$REGION" ] || [ -z "$TARGET" ]; then
+            echo "CD not configured — set repo variables VIGIL_DEPLOY_AWS_ROLE_ARN, VIGIL_DEPLOY_AWS_REGION and VIGIL_DEPLOY_SSM_TARGET to enable. Skipping; nothing deployed."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: checkout (the deploy scripts)
+        if: ${{ steps.pf.outputs.configured == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: deploy to the EC2 host via SSM (OIDC, short-lived credentials)
+        if: ${{ steps.pf.outputs.configured == 'true' }}
+        env:
+          VIGIL_DEPLOY_AWS_ROLE_ARN: ${{ vars.VIGIL_DEPLOY_AWS_ROLE_ARN }}
+          VIGIL_DEPLOY_AWS_REGION: ${{ vars.VIGIL_DEPLOY_AWS_REGION }}
+          VIGIL_DEPLOY_SSM_TARGET: ${{ vars.VIGIL_DEPLOY_SSM_TARGET }}
+          VIGIL_DEPLOY_OS_USER: ${{ vars.VIGIL_DEPLOY_OS_USER }}
+        run: bash .github/scripts/ssm-deploy.sh

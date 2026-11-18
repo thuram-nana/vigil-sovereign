@@ -217,6 +217,15 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "smoke command's exit code is honoured and drives the rollback — runs on every PR in the required "
         "'SIGIL governor gates (P7 — offense gate + authn)' job via apps/sigil/tests/test_deploy_verify.py."
     ),
+    "deploy to EC2 on green main (opt-in)": (
+        "deploy-ec2.yml — workflow_run (after the required `vigil-ci` concludes success on main) / "
+        "workflow_dispatch only; it never runs on a pull_request, so it cannot be a PR status check. "
+        "Opt-in + fail-closed: the job no-ops unless the operator sets the VIGIL_DEPLOY_AWS_ROLE_ARN / "
+        "VIGIL_DEPLOY_AWS_REGION / VIGIL_DEPLOY_SSM_TARGET repo variables, and it only fires after the "
+        "REQUIRED vigil-ci concludes success on main. It adds no deploy logic of its own — it drives the "
+        "box-side tools/remote-deploy.sh (git reset --hard origin/main + make deploy-console + make smoke "
+        "+ rollback-on-failure) over AWS SSM under short-lived OIDC credentials."
+    ),
     "mutation-testing + coverage-fuzzing (scheduled, non-blocking)": (
         "mutation-fuzz.yml (W11-3 #484) — schedule/workflow_dispatch only; mutmut/cosmic-ray/cargo-fuzz/"
         "atheris re-run the suite per mutant or need a nightly libFuzzer toolchain, so they cannot run on "
