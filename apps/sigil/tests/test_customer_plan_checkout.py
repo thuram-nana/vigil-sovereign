@@ -4,8 +4,9 @@ A plan checkout subscribes the payer to the processor's recurring plan: the cata
 the Flutterwave ``payment_plan`` id, so the first charge AND every renewal re-verify with ``payment_plan ==
 price_id`` and map back (via the tx_ref / meta we set) to the SAME catalog entitlement -> owner-signed subscribe +
 allotment. Pinned:
-  * plans are offered only with BOTH flags (base checkout + VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED), never the AEGIS
-    monitoring plans (the drain does not wire that line — one would be charged for nothing);
+  * credit plans are offered only with BOTH flags (base checkout + VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED); the AEGIS
+    monitoring plans sell on their OWN flag (VIGIL_CUSTOMER_MONITORING_ENABLED), independent of the credit-plan flag
+    (see test_customer_monitoring_sale.py for the AEGIS sale end to end);
   * the checkout posts ``payment_plan`` = the catalog price id, at the CATALOG amount;
   * END TO END: checkout -> verified first charge -> SUBSCRIBED with the catalog allotment; a renewal (new tx, same
     tx_ref) keeps it active;
@@ -78,18 +79,28 @@ def test_topups_never_carry_a_payment_plan(monkeypatch):
     assert "payment_plan" not in posted[0]
 
 
-def test_monitoring_plans_are_never_sold_here(monkeypatch):
+def test_monitoring_plans_need_the_monitoring_flag_not_the_credit_plan_flag(monkeypatch):
+    """An AEGIS monitoring plan sells on its OWN flag (VIGIL_CUSTOMER_MONITORING_ENABLED), INDEPENDENT of the
+    credit-plan flag: with only the credit-plan flag it is NOT offered (refused); with the monitoring flag it
+    sells as a recurring payment_plan at the catalog amount."""
     from sigil.ui.provision import ProvisionDenied
-    _plans_on(monkeypatch)
-    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
     mon = sorted(catalog.monitoring_price_ids())
-    assert mon and set(mon) <= set(catalog.expected_amounts())        # offered + priced in the catalog ...
+    assert mon                                                        # the catalog has AEGIS monitoring plans
+    # credit-plan flag ON, monitoring flag OFF: an AEGIS price is not in the offered set here -> refused
+    _plans_on(monkeypatch)
     p, admin, _t, org, _o, _w = _provisioner()
     posted: list = []
     p._checkout_provider = lambda: _real_provider(posted)
     with pytest.raises(ProvisionDenied, match="checkout refused"):
         p.billing_checkout(admin, org, mon[0])
-    assert posted == []                                               # ... yet never charged through this edge
+    assert posted == []                                              # never charged through this edge while OFF
+    # monitoring flag ON: the AEGIS plan sells (its own recurring line, at the owner-catalog amount)
+    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
+    assert set(mon) <= set(catalog.expected_amounts())               # now offered + priced in the catalog
+    r = p.billing_checkout(admin, org, mon[0])
+    amount_minor, currency = catalog.expected_amounts()[mon[0]]
+    assert r["checkout_url"] == _LINK and posted[-1]["payment_plan"] == mon[0]
+    assert posted[-1]["amount"] == _to_major(amount_minor, currency) and posted[-1]["currency"] == currency
 
 
 def test_payment_plan_is_validated():

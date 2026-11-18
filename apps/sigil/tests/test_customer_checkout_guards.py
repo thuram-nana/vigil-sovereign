@@ -691,7 +691,7 @@ def test_a_spine_read_fault_refuses_the_plan_and_frees_the_claim(monkeypatch):
     posted: list = []
     p._checkout_provider = lambda: _real_provider(posted)
 
-    def broken(org_id, t):
+    def broken(org_id, t, *, monitoring):
         raise OSError("segment unreadable")                   # e.g. a manifest-referenced segment is missing
     p._spine_plan_checkouts = broken
     seen = _audits(p)

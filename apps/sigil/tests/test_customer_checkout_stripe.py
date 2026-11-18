@@ -3,7 +3,7 @@
 Unset or `flutterwave` is the Flutterwave provider exactly as before; `stripe` builds the Stripe provider only when
 every precondition of the Stripe lane holds; any other value is "not configured" and never falls back to the other
 processor (which would take a payment the configured drain does not credit). The customer-facing checkout edge
-(admit, offers, the second-plan guard, monitoring never sold) is unchanged when Stripe serves it.
+(admit, offers, the second-plan guard, the AEGIS monitoring plan on its own flag) is unchanged when Stripe serves it.
 """
 from __future__ import annotations
 
@@ -104,17 +104,27 @@ def test_a_stripe_plan_checkout_is_a_subscription_and_the_second_plan_guard_hold
     assert len(fake.calls) == 1
 
 
-def test_monitoring_is_never_sold_through_stripe(monkeypatch):
+def test_monitoring_sells_through_stripe_on_its_own_flag(monkeypatch):
+    """An AEGIS monitoring plan sells through the Stripe lane on its OWN flag — a recurring subscription session at
+    the owner-catalog amount, independent of the credit-plan flag; with the monitoring flag off it is not offered
+    (refused), nothing posted."""
+    from sigil.governor.identity import ensure_owner_keypair
     from sigil.ui.provision import ProvisionDenied
     _on(monkeypatch)
-    monkeypatch.setenv("VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED", "1")
-    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")
     _stripe_on(monkeypatch)
+    ensure_owner_keypair()                                            # the identity the per-kind guard reads with
     fake = _with_fake_stripe(monkeypatch)
     p, admin, _t, org, _o, _w = _provisioner()
-    with pytest.raises(ProvisionDenied, match="checkout refused"):
-        p.billing_checkout(admin, org, sorted(catalog.monitoring_price_ids())[0])
+    mon = sorted(catalog.monitoring_price_ids())[0]
+    with pytest.raises(ProvisionDenied, match="checkout refused"):   # monitoring flag OFF -> not offered
+        p.billing_checkout(admin, org, mon, now=1000.0)
     assert fake.calls == []
+    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")      # ON (credit-plan flag untouched): sells
+    amount, _ccy = catalog.expected_amounts()[mon]
+    r = p.billing_checkout(admin, org, mon, now=1000.0)
+    assert r["checkout_url"].startswith("https://checkout.stripe.com/c/pay/")
+    assert fake.calls[-1]["mode"] == "subscription"                  # a recurring AEGIS subscription
+    assert fake.calls[-1]["line_items"][0]["price_data"]["unit_amount"] == amount
 
 
 @pytest.mark.parametrize("value", ["strpe", "stripe-test", "paypal", "flutterwave,stripe"])

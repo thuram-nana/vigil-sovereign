@@ -554,8 +554,9 @@ def test_one_plan_kind_never_hides_the_other():
 
 
 def test_without_aegis_offers_the_buy_list_is_what_it_was():
-    """The server sells no AEGIS plan through checkout, so for every payload it can send today the list is exactly the
-    one the previous filter showed: top-ups always, credit plans unless a credit plan is live or being checked out."""
+    """With the monitoring flag off the server offers no AEGIS plan, so for every payload it can then send the list is
+    exactly the one the previous filter showed: top-ups always, credit plans unless a credit plan is live or being
+    checked out."""
     cases = {}
     for live in (False, True):
         for pending in (False, True):

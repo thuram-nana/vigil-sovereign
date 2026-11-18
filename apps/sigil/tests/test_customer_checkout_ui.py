@@ -4,8 +4,9 @@ What these pin:
   * the offers read is gated EXACTLY like checkout (checkout flag default-OFF -> absent; ``admit_customer``
     ``manage_billing`` for the SESSION org) and lists EXACTLY the set ``billing_checkout`` accepts — so the UI can
     never show a buy button that checkout refuses, nor hide one it would accept (one shared helper);
-  * prices come from the OWNER catalog (the page sends no amount), monitoring plans are never offered, plans
-    only with the plan flag, and an org with a live plan is told so (checkout refuses a second plan);
+  * prices come from the OWNER catalog (the page sends no amount); credit plans only with the plan flag and the
+    AEGIS monitoring plans only with the monitoring flag; an org with a live plan is told so per kind (checkout
+    refuses a second plan of that kind);
   * over the REAL edge -> cockpit HTTP hop: a billing admin gets the list, a testing-only member is refused,
     and the route is a 404 while checkout is off;
   * the SPA only ever navigates to an https checkout link, sends only a ``price_id``, and its return page never
@@ -78,16 +79,34 @@ def test_offers_are_exactly_what_checkout_accepts_at_catalog_prices(monkeypatch)
     assert {x["meta"]["price_id"] for x in posted} == ids
 
 
-def test_plans_are_listed_only_with_the_plan_flag_and_monitoring_never(monkeypatch):
+def test_plans_are_listed_only_with_the_plan_flag(monkeypatch):
     from sigil.governor import catalog
-    _plans_on(monkeypatch)
-    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")       # monitoring ON for sale elsewhere...
+    _plans_on(monkeypatch)                                            # base + credit-plan flag, monitoring OFF
     p, admin, _t, org, _o, _w = _provisioner()
     d = p.customer_billing_offers(admin, org)
+    ids = {o["price_id"] for o in d["offers"]}
     kinds = {o["kind"] for o in d["offers"]}
     assert d["plans_enabled"] is True and kinds == {"topup_purchased", "subscription_active"}
-    assert not {o["price_id"] for o in d["offers"]} & catalog.monitoring_price_ids()   # ...but never sold here
-    assert {o["price_id"] for o in d["offers"]} == set(p._checkout_offered()[0])
+    assert not ids & catalog.monitoring_price_ids()                   # monitoring OFF -> no AEGIS plan offered
+    assert "has_monitoring_plan" not in d and "monitoring_checkout_pending" not in d   # and no AEGIS flags emitted
+    assert ids == set(p._checkout_offered()[0])
+
+
+def test_monitoring_plans_and_their_flags_are_listed_only_with_the_monitoring_flag(monkeypatch):
+    from sigil.governor import catalog
+    _plans_on(monkeypatch)
+    monkeypatch.setenv("VIGIL_CUSTOMER_MONITORING_ENABLED", "1")       # the AEGIS plans sell on THIS flag
+    p, admin, _t, org, _o, _w = _provisioner()
+    d = p.customer_billing_offers(admin, org)
+    ids = {o["price_id"] for o in d["offers"]}
+    assert catalog.monitoring_price_ids() <= ids                      # AEGIS plans ARE offered now
+    assert ids == set(p._checkout_offered()[0])                       # exactly the checkout-accepted set
+    # the per-kind flags the SPA's offerShown() consumes (independent of the credit-plan fields)
+    assert d["has_monitoring_plan"] is False and d["monitoring_checkout_pending"] is False
+    assert d["has_active_plan"] is False and d["plan_checkout_pending"] is False
+    # an AEGIS offer carries the host-slot shape the SPA renders (never credits)
+    aegis = next(o for o in d["offers"] if o["price_id"] in catalog.monitoring_price_ids())
+    assert aegis["monitor_hosts"] >= 1 and "credits" not in aegis
 
 
 @pytest.mark.parametrize("who", ["tester", "other_tenant", "nonexistent"])

@@ -2067,6 +2067,7 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
     from .governor.billing import BillingSigner
     from .governor.invoices import InvoiceRegistry
     from .governor.metering import PlanCreditLedger
+    from .governor.monitoring_subscription import MonitoringSubscriptionRegistry
     from .governor.report_unlock import ReportUnlockRegistry
     from .governor.subscription import SubscriptionRegistry
     from .governor.wallet import WalletRegistry
@@ -2081,6 +2082,9 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
                          wallet=wallet, subscriptions=SubscriptionRegistry(store),
                          plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
                          expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
+                         # AEGIS: a paid monitoring price mints its OWN line, never the credit plan (flag-free,
+                         # like mintable_entitlements(): a sold AEGIS plan's renewals keep minting).
+                         monitoring_subscriptions=MonitoringSubscriptionRegistry(store),
                          # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
                          # unlock is recorded whatever the preview flag says; the records stay inert until read.
                          report_unlocks=ReportUnlockRegistry(store),
