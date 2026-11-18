@@ -205,6 +205,13 @@ assert "framework" not in _m, "live.github_client must not import framework at m
 import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
 assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
 assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
+import vigil_integration.apex_flags  # APEX PR-3: the keyless master flag (stdlib only)
+import vigil_integration.remediation.apex_pcr  # APEX PR-3: the PCR close-the-loop — framework (cert/oracle/autopatch) LAZY
+assert "framework" not in _m, "remediation.apex_pcr must not import framework at module scope (cert/oracle/autopatch are lazy)"
+assert "strix" not in _m, "remediation.apex_pcr must not import strix at module scope"
+import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
+assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
+assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
