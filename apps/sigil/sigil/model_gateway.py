@@ -1621,6 +1621,9 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "VIGIL-model-gateway"
     sys_version = ""
+    # Declared on the class so its type is fixed regardless of method order: _free_before_reply (above do_POST)
+    # clears it to None, do_POST re-seeds it per request, and the G1 paths assign a live lane.
+    _g1_lane: "Optional[gc.CapacityLane]" = None
 
     @property
     def gw(self) -> ModelGateway:
@@ -1722,7 +1725,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._streaming = False
         self._prefix: Optional[tuple] = None
         self._g1_account: "Optional[gc.ProviderAccount]" = None   # G1: the chosen pool account and its capacity lane
-        self._g1_lane: "Optional[gc.CapacityLane]" = None
+        self._g1_lane = None                                       # type fixed by the class-level declaration above
         self._g1_reserved: "tuple[int, int]" = (0, 0)             # the (input, output) tokens reserved on the lane
         self._g1_tried: "list[str]" = []
         give_back: "Optional[Callable[[], None]]" = None
