@@ -1497,6 +1497,18 @@ class WebScanCampaign:
                     oob_ttl_seconds=self.oob_ttl_seconds, oob_skew_seconds=self.oob_skew_seconds,
                     oob_not_before=self.oob_not_before, oob_not_after=self.oob_not_after)
                 selector = select_checks if self.targeted else None
+                # #827 — when the operator's SEED URL itself carries a query (e.g.
+                # `.../records/search?q=1`), that query value is the surface they explicitly
+                # pointed at. The insertion sweep is path→query, so on the gated `engage` path
+                # a multi-segment seed's path segments can exhaust the executor's request_budget
+                # before the sweep ever reaches the seed's query value — `scan` (unbounded
+                # loopback) reaches it, `engage` did not, so the q-param SQLi/XSS was missed.
+                # Audit the SEED request's query points FIRST so the explicit parameter is reached
+                # within budget. Only the seed request, only when the seed carries a query: a
+                # path-only / site-root seed (every benchmark/gate seed, where query params come
+                # from CRAWLING, not the seed) keeps the byte-identical path→query order, and no
+                # crawled request is reordered, so nothing is double-audited.
+                seed_query_present = bool(urlsplit(seed_url).query)
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once
                     # per host (on the first request seen for that host) — not per
@@ -1507,9 +1519,13 @@ class WebScanCampaign:
                         + tuple(self._sso_request_checks)
                         if host not in seen_hosts else ())
                     seen_hosts.add(host)
+                    priority_kinds = (
+                        (InsertionKind.QUERY_VALUE, InsertionKind.QUERY_NAME)
+                        if seed_query_present and req.url == seed_url else ())
                     new_findings = engine.audit(
                         req, checks=active_checks, insertion_kinds=self.insertion_kinds,
-                        selector=selector, request_checks=point_request_checks)
+                        selector=selector, request_checks=point_request_checks,
+                        priority_kinds=priority_kinds)
                     if self._progress is not None:  # rare event: only on a confirmed finding
                         for f in new_findings:
                             self._progress.finding(f.bug_class, f.confirmed_by, f.param,
