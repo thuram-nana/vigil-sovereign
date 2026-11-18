@@ -502,15 +502,32 @@ class AuditEngine:
         insertion_kinds: tuple[InsertionKind, ...] | None = None,
         selector: CheckSelector | None = None,
         request_checks: tuple = (),
+        priority_kinds: tuple[InsertionKind, ...] = (),
     ) -> list[AuditFinding]:
         """Sweep ``checks`` across ``request``'s insertion points and return the
         oracle-confirmed findings, de-duplicated per (bug_class, insertion point).
 
         Deterministic given ``send``: insertion points and checks are iterated in
         a stable order. Stops early (returning what is confirmed) if the request
-        budget is exhausted."""
+        budget is exhausted.
+
+        ``priority_kinds`` moves the named insertion kinds to the FRONT of the
+        sweep (stable within each group), so under a finite request budget (the
+        gated executor's ``request_budget`` on the ``engage`` path) the high-value
+        points are audited before a lower-value kind can exhaust the budget. The
+        default ``()`` leaves the enumeration order untouched — byte-identical.
+        This is the point-level analogue of the cost-ascending CHECK ordering
+        below: order effort so a budget never silently starves a higher-yield
+        probe (the false-clean failure)."""
         template = RequestTemplate(request)
         points = template.insertion_points(kinds=insertion_kinds)
+        if priority_kinds:
+            # Stable partition: priority kinds first (in their enumerated order),
+            # then every other point in its enumerated order. Same SET of points,
+            # same count — only the order the budget-bounded sweep reaches them.
+            _pset = frozenset(priority_kinds)
+            points = ([p for p in points if p.kind in _pset]
+                      + [p for p in points if p.kind not in _pset])
         seen: set[tuple[str, str]] = set()
         findings: list[AuditFinding] = []
         try:
