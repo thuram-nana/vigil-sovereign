@@ -24,10 +24,12 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
 from framework.v2 import engage as engage_mod
+from framework.v2 import engage_autonomous as auto_mod
 from framework.v2.common import paths as _paths
-from framework.v2.engage import run_engagement
+from framework.v2.engage import EngagementResult, run_engagement
+from framework.v2.scanner.campaign import ScanReport
 from framework.v2.scanner.engine import AuditFinding
-from framework.v2.worldmodel import Node, NodeKind
+from framework.v2.worldmodel import Node, NodeKind, WorldModel
 
 _CHARTER = """\
 # Engagement charter — `{slug}`
@@ -232,3 +234,79 @@ def test_apex_driver_shares_the_scan_executor_budget_not_a_throwaway(
     assert auto is not None
     assert auto.shared_budget == budget, "the loop did not inherit the ENGAGEMENT's request budget"
     assert 0 < auto.shared_requests_before < auto.shared_requests_made <= budget
+
+
+# ---------------------------------------------------------------------------
+# EC-3 MONEY-SEAM — a RUN-SCOPED HARD token-budget stop inside the driver must be HONORED, not swallowed:
+# it PROPAGATES out of the driver (not caught by the best-effort net) and surfaces as a CLEAN partial result,
+# exactly as when the scan itself hits the ceiling — so the launch settles COMPLETED, never continues past the
+# ceiling. Control: an ordinary best-effort error inside the driver IS swallowed (telemetry is value-add).
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecutor:
+    """A stand-in for the kept-open scan executor: a callable gated_fetch + a stats() dict, nothing else."""
+
+    def gated_fetch(self, req):  # pragma: no cover - never reached (the cycle is monkeypatched to raise)
+        return {"status": 0, "body": "", "headers": []}
+
+    def stats(self):
+        return {"requests_made": 5, "budget": 100}
+
+    def close(self):
+        pass
+
+
+def _result_stub() -> EngagementResult:
+    return EngagementResult(report=ScanReport(target="http://127.0.0.1/", active_findings=[]), world=WorldModel())
+
+
+def test_run_apex_driver_propagates_run_budget_exceeded(monkeypatch: pytest.MonkeyPatch):
+    """A RunBudgetExceeded raised inside the loop PROPAGATES out of _run_apex_driver (it is NOT caught by the
+    best-effort ``except Exception: return None`` — RunBudgetExceeded IS an Exception subclass, so the broad
+    net would otherwise swallow the credit hard-stop and let the run continue past the ceiling)."""
+    def _raise(*a, **k):
+        raise engage_mod._RunBudgetExceeded(1000, 1200)   # (ceiling, spent) — the real EC-3 signature
+    monkeypatch.setattr(auto_mod, "run_autonomous_cycle", _raise)
+    with pytest.raises(engage_mod._RunBudgetExceeded):
+        engage_mod._run_apex_driver(
+            _result_stub(), slug="disco", seed_url="http://127.0.0.1/", executor=_FakeExecutor(),
+            request_budget=100, prompt_callback=None, spine=None, run_dir=None)
+
+
+def test_run_apex_driver_swallows_ordinary_errors(monkeypatch: pytest.MonkeyPatch):
+    """CONTROL: an ORDINARY error inside the loop is best-effort — it is swallowed (returns None), so a value-add
+    telemetry hiccup never sinks the already-authoritative engagement. This is the behaviour RunBudgetExceeded
+    must NOT share."""
+    def _raise(*a, **k):
+        raise ValueError("some value-add hiccup")
+    monkeypatch.setattr(auto_mod, "run_autonomous_cycle", _raise)
+    out = engage_mod._run_apex_driver(
+        _result_stub(), slug="disco", seed_url="http://127.0.0.1/", executor=_FakeExecutor(),
+        request_budget=100, prompt_callback=None, spine=None, run_dir=None)
+    assert out is None
+
+
+def test_driver_budget_stop_surfaces_partial_result_not_a_crash(
+    isolated_engagement, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch,
+):
+    """END TO END: with the flag ON, a RunBudgetExceeded raised by the in-engagement driver does NOT crash
+    run_engagement — it is caught at the driver call site and surfaces as a CLEAN partial EngagementResult with
+    ``stopped_reason`` set (the money-seam: the worker then emits COMPLETED → settle consumed-so-far), EXACTLY
+    as when the scan itself hits the ceiling. The kept-open executor is still released (no leak)."""
+    monkeypatch.setenv("VIGIL_APEX_AUTONOMOUS", "1")
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/benign").respond_with_handler(_benign)
+
+    def _driver_hits_ceiling(*a, **k):
+        raise engage_mod._RunBudgetExceeded(1000, 1200)   # (ceiling, spent) — the real EC-3 signature
+    monkeypatch.setattr(engage_mod, "_run_apex_driver", _driver_hits_ceiling)
+
+    # returns NORMALLY (no raise), with a partial-result stopped_reason — not a crash
+    result = run_engagement(
+        "disco", f"http://127.0.0.1:{port}/benign",
+        max_pages=5, enable_oob=False, prompt_callback=_deny)
+    assert result.stopped_reason is not None, "the driver's token-budget stop did not surface as a partial result"
+    assert "budget" in result.stopped_reason.lower() or "ceiling" in result.stopped_reason.lower()
+    assert result.autonomy is None  # the driver did not complete, so no telemetry was attached

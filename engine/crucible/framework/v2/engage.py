@@ -1995,6 +1995,12 @@ def run_engagement(
                 result, slug=slug, seed_url=seed_url, executor=_apex_hold["ex"],
                 request_budget=request_budget, prompt_callback=prompt_callback,
                 spine=spine, run_dir=(run_dir or _engage_run_dir()))
+        except _RunBudgetExceeded as _rbx:
+            # EC-3 money-seam — a RUN-SCOPED HARD token-budget stop inside the driver is a CLEAN terminal stop,
+            # NOT a crash: record it and fall through to the tail, which sets ``stopped_reason`` and returns the
+            # PARTIAL result normally (the worker then emits COMPLETED → settle consumed-so-far), EXACTLY as when
+            # the scan itself hits the ceiling. Default-OFF: unarmed runs never raise this, so this is inert.
+            _rb_stopped = _rbx
         finally:
             _apex_release_executor()
 
@@ -2359,6 +2365,14 @@ def _run_apex_driver(
         except Exception:
             pass
         return out
+    except (_RunBudgetExceeded, EngagementPaused, EngagementRefused):
+        # EC-3 money-seam + pause/authorization control: these are NOT best-effort errors — a hard token-budget
+        # stop, a cooperative pause, or an authorization refusal raised inside the loop must PROPAGATE so the run
+        # honors it exactly as on the non-driver path (``RunBudgetExceeded`` surfaces as a CLEAN partial result;
+        # a pause/refusal unwinds). Swallowing any of them into ``return None`` would let the run continue past a
+        # credit ceiling / past a revoked authorization — the exact seam this re-raise closes. Re-raised BEFORE
+        # the broad best-effort catch below.
+        raise
     except Exception:
         return None
 
