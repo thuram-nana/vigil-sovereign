@@ -133,7 +133,7 @@ def test_billing_drain_exits_nonzero_on_a_standing_quarantine(tmp_path, monkeypa
     monkeypatch.setattr(cli, "_billing_transaction_verifier", lambda: (lambda txid: {}))  # never called (empty)
     spool = tmp_path / "billing"
     _seed_quarantine(spool)
-    a = types.SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1)
+    a = types.SimpleNamespace(billing_cmd="drain", spool=str(spool), interval=0.1, provider="flutterwave")
     with pytest.raises(SystemExit) as ei:
         cli.cmd_billing_drain(a)
     assert ei.value.code == 1

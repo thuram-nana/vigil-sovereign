@@ -338,13 +338,35 @@ def trial_product_id() -> str:
     return (os.environ.get("VIGIL_TRIAL_PRODUCT_ID") or "").strip()
 
 
+#: The payment processors VIGIL takes money through, and the DEFAULT one (owner decision 2026-11-16: Stripe;
+#: Flutterwave is retained, its development paused).
+BILLING_PROVIDERS = ("stripe", "flutterwave")
+DEFAULT_BILLING_PROVIDER = "stripe"
+
+
+def billing_provider() -> "str | None":
+    """The ONE answer to "which payment processor" (`VIGIL_BILLING_PROVIDER`, case and surrounding whitespace
+    ignored): unset or blank is the DEFAULT, ``"stripe"``; ``"stripe"`` / ``"flutterwave"`` name themselves; anything
+    else is None — not configured, and every caller REFUSES (checkout opens nothing; a bare ``billing-drain`` or
+    ``ops-sweep tx-refs`` exits 2), never a fall-back to either processor.
+    Checkout (``provision._checkout_provider``) and the bare money-IN drain and tx-refs sweep (``cli._billing_lane``)
+    all resolve here, so the processor checkout takes payments on and the spool a bare drain credits from agree by
+    construction. An explicit ``--provider`` on the drain or the sweep still names its own lane: each drain unit
+    pins its own processor's spool (a renewal of a plan sold through Flutterwave must be credited after a switch)."""
+    choice = (os.environ.get("VIGIL_BILLING_PROVIDER") or "").strip().lower()
+    if not choice:
+        return DEFAULT_BILLING_PROVIDER
+    return choice if choice in BILLING_PROVIDERS else None
+
+
 def customer_checkout_enabled() -> bool:
     """True iff the CUSTOMER hosted-checkout action is ON (`VIGIL_CUSTOMER_CHECKOUT_ENABLED` affirmative). OFF by
     default (Front B CHK-1): the edge route and the provisioner action are absent (404) exactly as an unknown route,
     and nothing ever posts to the payment processor. Even when ON, checkout still refuses unless the owner has
-    provisioned the processor named by VIGIL_BILLING_PROVIDER (unset = Flutterwave: VIGIL_BILLING_WEBHOOK_SECRET +
-    VIGIL_FLW_SECRET_KEY; stripe: the Stripe adapter opt-in, VIGIL_STRIPE_WEBHOOK_SECRET, VIGIL_STRIPE_SECRET_KEY and
-    VIGIL_STRIPE_API_VERSION; any other value: not configured) — the amount is always the OWNER CATALOG's, and
+    provisioned the processor ``billing_provider()`` resolves (VIGIL_BILLING_PROVIDER unset = Stripe, the default:
+    the Stripe adapter opt-in VIGIL_BILLING_ENABLE_STRIPE, VIGIL_STRIPE_WEBHOOK_SECRET, VIGIL_STRIPE_SECRET_KEY and
+    VIGIL_STRIPE_API_VERSION; flutterwave: VIGIL_BILLING_WEBHOOK_SECRET + VIGIL_FLW_SECRET_KEY; any other value:
+    not configured) — the amount is always the OWNER CATALOG's, and
     credit is granted ONLY by the verified inbound webhook drain, never here."""
     return (os.environ.get("VIGIL_CUSTOMER_CHECKOUT_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 

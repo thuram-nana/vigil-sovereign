@@ -348,6 +348,11 @@ folder outside the spool (it minted nothing).
 
 ## 9. Flutterwave webhook drain + transaction verifier (payments; default-OFF)
 
+> Flutterwave is the **retained, paused** processor. Customer checkout uses it only when you set
+> `VIGIL_BILLING_PROVIDER=flutterwave` explicitly — the **default** (unset `VIGIL_BILLING_PROVIDER`) is Stripe, §9b —
+> and this drain runs only when you enable it below. Skip this section unless you are deliberately running the
+> Flutterwave lane.
+
 `sigil billing-drain` ingests the inbound webhook spool, **server-side re-verifies** each transaction,
 and mints only via the owner catalog. It is fail-closed and mints **nothing** until you provision the
 real Flutterwave `/v3/transactions/{id}/verify` caller with your **secret key** — inject it via your KMS/
@@ -357,7 +362,7 @@ secret manager at the cockpit/provisioner only (never the repo, never a plaintex
 # In the cockpit env, with the secret injected by your secret manager:
 export VIGIL_BILLING_DRAIN_ENABLED=1
 export VIGIL_BILLING_WEBHOOK_SECRET=…        # from the secret manager, NOT committed
-sigil billing-drain watch --spool "$SIGIL_HOME/billing-spool" --interval 2
+sigil billing-drain watch --provider flutterwave --spool "$SIGIL_HOME/billing-spool" --interval 2
 ```
 
 To run it unattended, use the shipped `vigil-billing-drain` timer instead of `watch` (one pass every 60 s,
@@ -373,9 +378,9 @@ and a `watch` that keeps finding it held warns on stderr every 120 s. See
 operator webhook ingress (see `REMOTE-HOSTING.md`). Until the verifier is provisioned, there is
 **no live paid path** — by design.
 
-## 9b. (Optional) Stripe instead of Flutterwave (default-OFF)
+## 9b. Stripe checkout + webhook drain (the default processor; still default-OFF until provisioned)
 
-Stripe is a second processor with the same money rules: the proxy checks each delivery's `Stripe-Signature`
+Stripe is the **default** processor (`VIGIL_BILLING_PROVIDER` unset selects it) with the same money rules: the proxy checks each delivery's `Stripe-Signature`
 and spools it; the drain re-verifies that signature, **re-fetches** the Checkout Session / Invoice /
 Subscription from Stripe with your key, and only then lets the owner catalog decide the credit. Nothing is
 ever minted from the webhook body. Every setting below is default-OFF; secrets come from your secret manager.
@@ -403,16 +408,18 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    alarms (rotate both together). The Stripe drain always alarms on a paid charge it cannot credit.
 4. **Prove it in test mode first**: a top-up purchase, a plan purchase, a renewal and a failed renewal (Stripe
    test clocks), each credited exactly once and visible in the tenant's billing history.
-5. **Checkout.** Only then set `VIGIL_BILLING_PROVIDER=stripe` for the customer checkout (cockpit env), and
-   finally swap in the live key and live endpoint secret. Enabling checkout before the drain would take payment
-   with no credit.
+5. **Checkout.** Only then enable the customer checkout (cockpit env). `VIGIL_BILLING_PROVIDER` unset already
+   selects Stripe (the default); set `VIGIL_BILLING_PROVIDER=stripe` only if you want it explicit. Finally swap in
+   the live key and live endpoint secret. Enabling checkout before the drain would take payment with no credit.
 
 `sigil ops-sweep tx-refs --provider stripe --spool <stripe spool> --checkouts <file>` reports Stripe checkouts
 nothing has credited. The drain records what each webhook it archives did (`<spool>/outcomes/`, beside
 `processed/`), and a checkout is left out only when a webhook for it minted; the others are reported as `noop`
 (archived without crediting anything — the row names why, e.g. `underpaid_or_currency`, `unknown_price`),
 `processed_unrecorded` (archived before outcomes were recorded), `quarantined`, `retrying` or `no_webhook`. The
-same applies to the Flutterwave spool (without `--provider`). Webhook-driven cancellation is not acted on: a cancelled plan expires at
+same applies to the Flutterwave spool (with `--provider flutterwave`). Without `--provider`, the drain and this
+sweep both take the processor checkout uses (`VIGIL_BILLING_PROVIDER`: Stripe unless it names flutterwave), and an
+unknown value refuses. Webhook-driven cancellation is not acted on: a cancelled plan expires at
 the end of its paid period, as with Flutterwave.
 
 ## 10. The five production preconditions → `VIGIL_POSTURE=production`

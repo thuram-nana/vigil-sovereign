@@ -157,7 +157,8 @@ def test_dangling_tx_refs_report_only(tmp_path):
         {"tx_ref": "vigil:org_a:lost", "created": 0}, {"tx_ref": "vigil:org_a:fresh", "created": 990},
         {"tx_ref": "vigil:org_a:lost", "created": 0}]) + "\nbroken\n")
     before = sorted(p.name for p in spool.rglob("*"))
-    out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(co), spool_dir=spool, now=1000, ttl_s=100)
+    out = ops_sweeps.sweep_dangling_tx_refs(ops_sweeps.load_checkouts(co), spool_dir=spool, now=1000, ttl_s=100,
+                                            provider="flutterwave")
     assert out == {"applied": False, "items": [
         {"tx_ref": "vigil:org_a:quar", "created": 0.0, "status": "quarantined"},
         {"tx_ref": "vigil:org_a:lost", "created": 0.0, "status": "no_webhook"}]}
@@ -166,7 +167,7 @@ def test_dangling_tx_refs_report_only(tmp_path):
 
 def test_dangling_tx_refs_read_stripe_bodies_with_the_stripe_provider(tmp_path):
     """Stripe parity: a Stripe event carries the reference as data.object.client_reference_id (a checkout) or
-    data.object.metadata.tx_ref; the default (Flutterwave) reading never matches a Stripe body, and vice versa."""
+    data.object.metadata.tx_ref; the Flutterwave reading never matches a Stripe body, and vice versa."""
     spool = tmp_path / "spool"
     for d in ("processed", "rejected", "retry"):
         (spool / d).mkdir(parents=True)
@@ -185,10 +186,17 @@ def test_dangling_tx_refs_read_stripe_bodies_with_the_stripe_provider(tmp_path):
     out = ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100, provider="stripe")
     assert {(i["tx_ref"].rsplit(":", 1)[1], i["status"]) for i in out["items"]} == {
         ("quar", "quarantined"), ("wait", "retrying"), ("lost", "no_webhook"), ("flw", "no_webhook")}
-    flw = ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100)
+    flw = ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100, provider="flutterwave")
     assert "vigil:org_a:paid" in {i["tx_ref"] for i in flw["items"]}       # a Stripe body is not a Flutterwave one
     with pytest.raises(ValueError):
         ops_sweeps.sweep_dangling_tx_refs(checkouts, spool_dir=spool, now=1000, ttl_s=100, provider="paypal")
+
+
+def test_the_tx_refs_sweep_has_no_processor_default(tmp_path):
+    """The sweep API names no processor of its own: a call that names none is refused, so no caller can silently
+    read one processor's envelope format (the CLI always passes its --provider or config.billing_provider())."""
+    with pytest.raises(TypeError, match="provider"):
+        ops_sweeps.sweep_dangling_tx_refs([], spool_dir=tmp_path, now=1000, ttl_s=100)   # type: ignore[call-arg]
 
 
 def _cli(*args, env_extra=None):

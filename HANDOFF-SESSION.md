@@ -297,8 +297,14 @@ record and is kept as history.
   `VIGIL_STRIPE_WEBHOOK_SECRET`, `VIGIL_STRIPE_API_VERSION`, `VIGIL_STRIPE_BILLING_DRAIN_ENABLED`
   (`governor/billing.py::StripeBillingProvider` — acts on `checkout.session.completed`,
   `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, re-fetching each object from
-  Stripe; `governor/stripe_egress.py`). The code still DEFAULTS to Flutterwave when `VIGIL_BILLING_PROVIDER` is unset
-  (fails closed without its secrets); making Stripe the default is its own small slice (or part of W5).
+  Stripe; `governor/stripe_egress.py`). `VIGIL_BILLING_PROVIDER` unset now DEFAULTS to Stripe (fails closed without
+  its Stripe secrets + the `VIGIL_BILLING_ENABLE_STRIPE` opt-in, exactly as the old Flutterwave default failed closed
+  without its secrets); Flutterwave is retained and selectable with `VIGIL_BILLING_PROVIDER=flutterwave`. ONE resolver,
+  `config.billing_provider()` (unset/`stripe` → stripe, `flutterwave` → flutterwave, anything else → refuse), serves
+  checkout (`provision._checkout_provider`) AND a bare `billing-drain` / `ops-sweep tx-refs` (`cli._billing_lane`;
+  argparse default None), so checkout and the drain that credits it agree by construction; an explicit `--provider`
+  still names its lane. `vigil-billing-drain.service` pins `--provider flutterwave` (doctor's re-run hint says the
+  same), so it keeps crediting Flutterwave renewals whatever checkout uses.
 - **Hosted checkout** (#1056) — `provision.billing_checkout`; hosted payment (Stripe; the paused Flutterwave lane is
   `VIGIL_FLW_SECRET_KEY`, `VIGIL_FLW_API_BASE`), amounts always from the **owner catalog**
   (`governor/catalog.py`), never a client field; credit is granted **only** by the verified inbound webhook drain.

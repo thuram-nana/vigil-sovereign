@@ -482,7 +482,7 @@ def test_the_checkout_sweep_reports_a_parked_tx_ref_as_retrying(tmp_path, monkey
     _spool(spool, _envelope())
     watcher.drain()
     out = ops_sweeps.sweep_dangling_tx_refs([{"tx_ref": "vigil:acme:n1", "created": 0.0}], spool_dir=spool,
-                                            now=10_000.0, ttl_s=100.0)
+                                            now=10_000.0, ttl_s=100.0, provider="flutterwave")
     assert out == {"applied": False, "items": [{"tx_ref": "vigil:acme:n1", "created": 0.0, "status": "retrying"}]}
 
 @pytest.mark.parametrize("skew", [-86_400.0, -301.0])

@@ -8,12 +8,14 @@ driven by an owner-controlled price→entitlement CATALOG.
 
   * `BillingProvider` (ABC) + `BillingEvent` (normalised) — a swappable, CAPABILITY-DECLARING provider interface
     (each adapter declares the operations it supports, so an unsupported flow raises `UnsupportedCapability`
-    rather than silently simulating success). `FlutterwaveBillingProvider` is the PRIMARY production adapter
-    (Flutterwave v3: `verif-hash` constant-time compare + MANDATORY server-side transaction re-verify before any
-    mint; card + Francophone Mobile Money; Payment-Plan recurring). `StripeBillingProvider` is the second
-    adapter, DISABLED BY DEFAULT (refused unless explicitly enabled): `Stripe-Signature` HMAC + a MANDATORY
-    server-side re-fetch of the Checkout Session / Invoice / Subscription, minting from the fetched objects only.
-    `MockBillingProvider` is the deterministic sandbox for tests.
+    rather than silently simulating success). `StripeBillingProvider` is the DEFAULT production adapter (selected
+    when `VIGIL_BILLING_PROVIDER` is unset): `Stripe-Signature` HMAC + a MANDATORY server-side re-fetch of the
+    Checkout Session / Invoice / Subscription, minting from the fetched objects only — but still refusing to
+    construct without an explicit opt-in (`enable_reference_adapter` / `VIGIL_BILLING_ENABLE_STRIPE`), a
+    money-safety belt. `FlutterwaveBillingProvider` is the RETAINED Flutterwave adapter (development paused per the
+    owner's decision; selectable with `VIGIL_BILLING_PROVIDER=flutterwave`): Flutterwave v3 `verif-hash`
+    constant-time compare + MANDATORY server-side transaction re-verify before any mint; card + Francophone Mobile
+    Money; Payment-Plan recurring. `MockBillingProvider` is the deterministic sandbox for tests.
     All adapters satisfy one contract: verify → return a normalised `BillingEvent`, or None (mint nothing).
   * `BillingSigner.ingest(raw_body, sig_header, now)` — the crux. It (1) VERIFIES the provider signature and
     REJECTS (mints nothing) on any failure — a forged/tampered/stale webhook cannot credit; (2) maps the verified
@@ -294,8 +296,10 @@ class StripeBillingProvider(BillingProvider):
     `StripeEventRefused`; a fetch failure RAISES (transient or definitive, never a silent no-op). With
     `alarm_unaccounted_plans`, a PAID object with no tenant, timestamp or currency raises `UnaccountedPayment`.
 
-    Stripe is an optional adapter, DISABLED BY DEFAULT (Flutterwave is the primary provider): it refuses to
-    construct without `enable_reference_adapter=True` or `VIGIL_BILLING_ENABLE_STRIPE=1`."""
+    Stripe is the DEFAULT provider (selected when `VIGIL_BILLING_PROVIDER` is unset), but constructing the adapter
+    still requires an explicit opt-in — `enable_reference_adapter=True` or `VIGIL_BILLING_ENABLE_STRIPE=1` — a
+    deliberate money-safety belt: Stripe keys present in the environment never build the adapter (and so never open
+    a checkout) without that opt-in."""
 
     def __init__(self, signing_secret: str, *, fetcher: StripeObjectFetcher, expected_mode: str,
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
@@ -305,8 +309,8 @@ class StripeBillingProvider(BillingProvider):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
-                "StripeBillingProvider is a disabled-by-default reference adapter; Flutterwave is the primary "
-                "provider. Enable explicitly with enable_reference_adapter=True or VIGIL_BILLING_ENABLE_STRIPE=1.")
+                "StripeBillingProvider is the default provider but still requires an explicit construction opt-in "
+                "(a money-safety belt). Enable it with enable_reference_adapter=True or VIGIL_BILLING_ENABLE_STRIPE=1.")
         if not isinstance(signing_secret, str) or not signing_secret:
             raise ValueError("Stripe signing secret (whsec_...) is required")
         if not callable(fetcher):
@@ -1042,7 +1046,8 @@ def _flw_created(data: Mapping[str, Any]) -> Optional[float]:
 
 
 class FlutterwaveBillingProvider(BillingProvider):
-    """Flutterwave v3 webhook verification — the PRIMARY production adapter.
+    """Flutterwave v3 webhook verification — the RETAINED Flutterwave adapter (development paused; selectable with
+    ``VIGIL_BILLING_PROVIDER=flutterwave``, no longer the default — Stripe is).
 
     v3 authenticates a webhook by sending the configured Secret Hash verbatim in the `verif-hash` header
     (PLAINTEXT equality, NOT an HMAC over the body, no timestamp / replay bound). That header alone is a WEAK

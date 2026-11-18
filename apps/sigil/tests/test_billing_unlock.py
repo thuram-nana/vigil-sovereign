@@ -243,7 +243,8 @@ def test_the_drain_wires_the_unlock_ledger_unconditionally(monkeypatch, tmp_path
 
     monkeypatch.setattr(BillingSigner, "__init__", spy)
     (tmp_path / "spool" / "incoming").mkdir(parents=True)
-    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(tmp_path / "spool"), interval=0.1))
+    cli.cmd_billing_drain(SimpleNamespace(billing_cmd="drain", spool=str(tmp_path / "spool"), interval=0.1,
+                                          provider="flutterwave"))
     assert isinstance(seen["ru"], ReportUnlockRegistry)
 
 

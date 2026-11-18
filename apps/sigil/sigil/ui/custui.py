@@ -73,7 +73,7 @@ _MAX_BODY = 65536
 # local actions keep the short default so a wedged cockpit still fails fast.
 _HOP_TIMEOUT_S = 10.0
 _SLOW_HOP_TIMEOUTS_S = {
-    # Flutterwave hosted-checkout POST: 15 s per blocking socket op (connect, then read) -> 30 s + margin.
+    # hosted-checkout POST (Stripe or Flutterwave): 15 s per blocking socket op (connect, then read) -> 30 s + margin.
     "billing_checkout": 45.0,
     # OIDC: token exchange POST + JWKS GET, 10 s per blocking op each -> 40 s + margin.
     "oidc_finish": 45.0,

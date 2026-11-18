@@ -1148,9 +1148,12 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
 # run). Both processor lanes' drains are money-IN drains alike.
 _MONEY_DRAIN_UNITS = ("vigil-settle-drain.service", "vigil-finding-drain.service", "vigil-billing-drain.service",
                       "vigil-billing-drain-stripe.service")
-# The money-IN drains, one per processor lane: unit -> (its journal name, the pass the unit runs, its timer).
+# The money-IN drains, one per processor lane: unit -> (its journal name, the pass the unit runs, its timer). Each
+# unit names its processor (--provider): a bare `sigil billing-drain` drains the processor checkout uses, which is
+# Stripe unless VIGIL_BILLING_PROVIDER names flutterwave, so a bare re-run hint would point at the wrong lane.
 _BILLING_DRAIN_UNITS = {
-    "vigil-billing-drain.service": ("vigil-billing-drain", "sigil billing-drain drain", "vigil-billing-drain.timer"),
+    "vigil-billing-drain.service": ("vigil-billing-drain", "sigil billing-drain drain --provider flutterwave",
+                                    "vigil-billing-drain.timer"),
     "vigil-billing-drain-stripe.service": ("vigil-billing-drain-stripe", "sigil billing-drain drain --provider stripe",
                                            "vigil-billing-drain-stripe.timer"),
 }

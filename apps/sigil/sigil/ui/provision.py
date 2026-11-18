@@ -1864,14 +1864,19 @@ class Provisioner:
         processor secrets. Overridable (tests inject a fake: ``self._checkout_provider = lambda: provider``). The
         verif-hash secret and the processor key are read from the environment and never logged or returned.
 
-        ``VIGIL_BILLING_PROVIDER`` picks the processor: unset or ``flutterwave`` is the Flutterwave provider below;
-        ``stripe`` is :meth:`_stripe_checkout_provider`; any other value is "not configured" (None) — never a
-        fallback to the other processor, which would take a payment the configured drain does not credit."""
+        The processor is ``config.billing_provider()`` — the one resolver the bare billing drain and tx-refs sweep use
+        too, so checkout and the drain that credits its payments agree by construction: ``"stripe"`` (the DEFAULT,
+        ``VIGIL_BILLING_PROVIDER`` unset) is :meth:`_stripe_checkout_provider`; ``"flutterwave"`` is the Flutterwave
+        provider below (retained and selectable, no longer the default — Flutterwave development is paused); None
+        (any other value) is "not configured" — never a fallback to the other processor, which would take a payment
+        the configured drain does not credit."""
         import os as _os
-        choice = (_os.environ.get("VIGIL_BILLING_PROVIDER") or "").strip().lower()
-        if choice == "stripe":
+
+        from .. import config
+        kind = config.billing_provider()
+        if kind == "stripe":
             return self._stripe_checkout_provider()
-        if choice not in ("", "flutterwave"):
+        if kind != "flutterwave":
             return None
         secret = (_os.environ.get("VIGIL_BILLING_WEBHOOK_SECRET") or "").strip()
         if not secret or not (_os.environ.get("VIGIL_FLW_SECRET_KEY") or "").strip():
@@ -1883,10 +1888,12 @@ class Provisioner:
 
     @staticmethod
     def _stripe_checkout_provider():
-        """The Stripe hosted-checkout provider, or None unless every precondition of the Stripe lane holds: the
-        adapter opt-in (``VIGIL_BILLING_ENABLE_STRIPE``), the Stripe webhook secret (the drain that credits these
-        payments needs it), the API key with a recognisable live/test mode, and a pinned API version. Plan
-        periods come from the owner catalog. Secrets are read from the environment and never logged or returned."""
+        """The Stripe hosted-checkout provider (the DEFAULT, served when ``VIGIL_BILLING_PROVIDER`` is unset), or
+        None unless every precondition of the Stripe lane holds: the adapter opt-in (``VIGIL_BILLING_ENABLE_STRIPE``,
+        a deliberate money-safety belt kept even now that Stripe is the default), the Stripe webhook secret (the
+        drain that credits these payments needs it), the API key with a recognisable live/test mode, and a pinned
+        API version. Plan periods come from the owner catalog. Secrets are read from the environment and never
+        logged or returned."""
         import os as _os
         if (_os.environ.get("VIGIL_BILLING_ENABLE_STRIPE") or "").strip().lower() not in ("1", "true", "yes"):
             return None
