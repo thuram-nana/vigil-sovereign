@@ -2098,9 +2098,11 @@ def _stripe_checkout_creator():
 
 
 def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bool = False,
-                    alarm_topups: bool = False):
+                    alarm_topups: bool = False, on_saved_payment_method=None):
     """The ONE billing signer both drain lanes use: the owner catalog (mintable view), the expected amounts, the
-    owner-signed registries, the plan alarm and the top-up alarm. Only the provider differs between lanes."""
+    owner-signed registries, the plan alarm and the top-up alarm. Only the provider differs between lanes.
+    ``on_saved_payment_method`` (A1, Stripe lane only; None keeps every other caller byte-identical) records a
+    card saved during a top-up checkout."""
     from .governor import catalog
     from .governor.billing import BillingSigner
     from .governor.invoices import InvoiceRegistry
@@ -2126,7 +2128,31 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
                          # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
                          # unlock is recorded whatever the preview flag says; the records stay inert until read.
                          report_unlocks=ReportUnlockRegistry(store),
-                         require_verified_amount=require_verified_amount, alarm_unaccounted_topups=alarm_topups)
+                         require_verified_amount=require_verified_amount, alarm_unaccounted_topups=alarm_topups,
+                         on_saved_payment_method=on_saved_payment_method)
+
+
+def _auto_topup_capture_hook(store, fetcher):
+    """A1: the ``BillingSigner.on_saved_payment_method`` hook — resolve the saved payment-method id from the
+    checkout's PaymentIntent (server-side re-fetch with our key) and record it owner-signed per org. Fail-closed:
+    a fetch / shape problem records nothing (the signer swallows it; the capture retries on the provider's
+    at-least-once webhook redelivery)."""
+    from typing import Mapping as _Mapping
+
+    from .governor.auto_topup import _STRIPE_CUS_ID, _STRIPE_PM_ID, AutoTopUpRegistry
+    reg = AutoTopUpRegistry(store)
+
+    def hook(org_id, customer_id, payment_intent_id, created):
+        pi = fetcher("payment_intent", payment_intent_id)
+        if not isinstance(pi, _Mapping):
+            return
+        pm = pi.get("payment_method")
+        cus = pi.get("customer") if isinstance(pi.get("customer"), str) else customer_id
+        if isinstance(pm, str) and _STRIPE_PM_ID.fullmatch(pm) and isinstance(cus, str) \
+                and _STRIPE_CUS_ID.fullmatch(cus):
+            reg.capture_payment_method(org_id, cus, pm, issued_at=float(created))
+
+    return hook
 
 
 def _same_dir(a: str, b: str) -> bool:
@@ -2188,10 +2214,19 @@ def _stripe_billing_watcher(a):
     # off-catalog or underpaid plan or top-up, a monitoring price with no line) quarantines and alarms, never a
     # silent no-op — whatever the plan-checkout or top-up alarm flags in this unit's environment say.
     alarm = True
+    # A1: in auto-top-up mode the Stripe drain ALSO credits the off-session top-up (payment_intent.succeeded) and
+    # captures a card saved during a top-up checkout. DEFAULT-OFF (VIGIL_BILLING_AUTO_TOPUP): byte-identical drain.
+    from . import config
+    auto = config.billing_auto_topup_enabled()
     provider = StripeBillingProvider(secret, fetcher=fetcher, expected_mode=str(mode), alarm_unaccounted_plans=alarm,
-                                     strict=True, reversals=config.billing_reversals_enabled())
+                                     strict=True, reversals=config.billing_reversals_enabled(),
+                                     auto_topup=auto,
+                                     payment_intent_creator=(se.make_payment_intent_creator() if auto else None))
     del secret
-    signer = _billing_signer(provider, SpineStore(), alarm=alarm, require_verified_amount=True, alarm_topups=alarm)
+    store = SpineStore()
+    hook = _auto_topup_capture_hook(store, fetcher) if auto else None
+    signer = _billing_signer(provider, store, alarm=alarm, require_verified_amount=True, alarm_topups=alarm,
+                             on_saved_payment_method=hook)
     return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
 
 
@@ -2358,6 +2393,92 @@ def _require_billing_owner_home(spool: str, lane: str = "flutterwave") -> None:
 # How long a drain pass waits for ANOTHER drainer's pass to finish before it gives up LOUDLY. A healthy pass is a
 # handful of bounded (15 s) re-verifies; well inside the unit's TimeoutStartSec.
 _BILLING_LOCK_WAIT_S = 120.0
+
+
+def _auto_topup_refusal() -> str | None:
+    """``None`` iff every precondition of the Stripe auto-top-up lane holds; otherwise a FIXED, generic reason —
+    the adapter opt-in, the Stripe webhook secret (the drain that CREDITS these charges needs it: a charge nobody
+    can credit is never made), a recognisable live/test key and a pinned API version. Every returned string is a
+    LITERAL that names the missing env var; a secret VALUE is never read into the reason, so printing it leaks
+    nothing (and CodeQL's clear-text-logging taint cannot reach a caller through this function)."""
+    import os
+
+    from .governor import stripe_egress as se
+    if os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
+        return "the Stripe adapter is not enabled (VIGIL_BILLING_ENABLE_STRIPE)"
+    if not os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET", "").strip():
+        return "VIGIL_STRIPE_WEBHOOK_SECRET is not set (the drain that credits an automatic top-up needs it)"
+    if not se.stripe_secret_configured() or se.stripe_key_mode() is None:
+        return "VIGIL_STRIPE_SECRET_KEY is not a recognisable live or test key"
+    try:
+        se._api_version()
+    except se.StripeEgressError:
+        return "VIGIL_STRIPE_API_VERSION is unset or malformed"
+    return None
+
+
+def _auto_topup_provider():
+    """The Stripe adapter in AUTO-TOP-UP mode for the ``auto-topup-run`` sweep. Call ONLY after
+    :func:`_auto_topup_refusal` returned ``None`` (every precondition holds). Secrets are read from the environment
+    here and never printed (the signing secret is held ``repr=False``)."""
+    import os
+
+    from .governor import stripe_egress as se
+    from .governor.billing import StripeBillingProvider
+    whsec = os.environ.get("VIGIL_STRIPE_WEBHOOK_SECRET", "").strip()
+    return StripeBillingProvider(whsec, fetcher=se.make_object_fetcher(), expected_mode=se.stripe_key_mode(),
+                                 auto_topup=True, payment_intent_creator=se.make_payment_intent_creator())
+
+
+def cmd_auto_topup_run(a) -> None:
+    """A1 — ONE pass of the auto-top-up sweep. For every org whose owner-signed auto-top-up settings are enabled:
+    when its balance has crossed below its trigger, charge its saved card OFF-SESSION for its pack — once per
+    crossing, never above its monthly limit — and record the owner-signed outcome (the customer's receipt). CREDIT is
+    minted only by the Stripe billing drain from the verified ``payment_intent.succeeded`` webhook, never here.
+
+    DEFAULT-OFF and fail-closed: refuses (exit 2) unless ``VIGIL_BILLING_AUTO_TOPUP`` is on, ``SIGIL_HOME`` is set
+    explicitly (the records go onto the cockpit's spine) and the Stripe preconditions hold. The owner's ``checkout``
+    latch, while OFF, stops every new automatic charge (exit 0, nothing charged). Prints one JSON summary line; exits
+    1 when any org errored (the unit goes FAILED)."""
+    import json
+    import os
+    import time
+
+    from . import config
+    if not config.billing_auto_topup_enabled():
+        print("auto-topup-run is disabled (set VIGIL_BILLING_AUTO_TOPUP=1 to enable)", file=sys.stderr)
+        sys.exit(2)
+    if not os.environ.get("SIGIL_HOME", "").strip():
+        print("auto-topup-run: SIGIL_HOME is not set in this process's environment — refusing (fail-closed: the "
+              "charge records go onto the cockpit's spine)", file=sys.stderr)
+        sys.exit(2)
+    refusal = _auto_topup_refusal()               # a FIXED reason (never a secret); None once every precondition holds
+    if refusal is not None:
+        print(f"auto-topup-run: {refusal} — refusing (fail-closed)", file=sys.stderr)
+        sys.exit(2)
+    provider = _auto_topup_provider()
+    from .governor.auto_topup import AutoTopUpRegistry, maybe_auto_topup
+    from .governor.customer_latch import is_open
+    from .governor.wallet import WalletRegistry
+    store = SpineStore()
+    if not is_open(store, "checkout"):
+        print(json.dumps({"paused": True, "reason": "the checkout latch is off — no new automatic charge"}))
+        return
+    now = float(a.now) if getattr(a, "now", None) is not None else time.time()
+    reg, wallet = AutoTopUpRegistry(store), WalletRegistry(store)
+    out: "dict[str, list[str]]" = {}
+    errors = 0
+    for org in reg.enabled_orgs():
+        try:
+            res = maybe_auto_topup(reg, wallet, provider, org, now=now)
+        except Exception as exc:  # noqa: BLE001 — one org's fault never stops the sweep; the unit still FAILS
+            errors += 1
+            out.setdefault("error", []).append(f"{org}: {type(exc).__name__}")
+            continue
+        out.setdefault(res.reason, []).append(org)
+    print(json.dumps({"orgs": sum(len(v) for v in out.values()), **{k: sorted(v) for k, v in sorted(out.items())}}))
+    if errors:
+        sys.exit(1)
 
 
 def cmd_billing_drain(a) -> None:
@@ -4274,6 +4395,12 @@ def main(argv=None) -> None:
                           "VIGIL_BILLING_PROVIDER — stripe unless it names flutterwave; flutterwave: "
                           "VIGIL_BILLING_DRAIN_ENABLED=1; stripe: VIGIL_STRIPE_BILLING_DRAIN_ENABLED=1)")
     pbd.set_defaults(fn=cmd_billing_drain)
+    pat = sub.add_parser("auto-topup-run",
+                         help="one pass of the A1 auto top-up sweep: charge an opted-in org's saved card "
+                              "off-session for its pack once per balance crossing, never above its monthly limit "
+                              "(default-OFF: VIGIL_BILLING_AUTO_TOPUP=1; credit comes only from the billing drain)")
+    pat.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)
+    pat.set_defaults(fn=cmd_auto_topup_run)
     ppp = sub.add_parser("postpaid", help="enterprise POSTPAID credit line: set|disable|status|invoice|pay — the "
                                           "owner-signed account mode an enterprise tenant draws against in "
                                           "arrears (paying never grants a line)")

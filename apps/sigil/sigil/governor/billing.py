@@ -183,7 +183,8 @@ class BillingProvider(ABC):
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
                         nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
-                        session_minutes: "Optional[int]" = None) -> "CheckoutSession":
+                        session_minutes: "Optional[int]" = None,
+                        save_future_payments: bool = False) -> "CheckoutSession":
         """Open a tenant-bound hosted checkout. The base adapter has none: it refuses with `UnsupportedCapability`
         (an explicit refusal, never an AttributeError from a duck-typed call). Adapters that can override it.
         `session_minutes` (plan checkouts only; None leaves the payload unchanged) bounds how long the hosted page
@@ -226,6 +227,10 @@ class StripeEventRefused(ValueError):
 # at period_end, exactly as on Flutterwave) maps to nothing.
 _STRIPE_EVENT_TYPES = frozenset({"checkout.session.completed", "checkout.session.async_payment_succeeded",
                                  "invoice.paid", "invoice.payment_failed"})
+# A1 auto top-up: the OFF-SESSION charge's success event. Handled ONLY when the adapter is built with
+# `auto_topup=True` (else it is not in the instance's handled set → byte-identical webhook behaviour, and a normal
+# checkout's own PaymentIntent is never minted here). An auto-top-up PaymentIntent carries `metadata.vigil_auto_topup`.
+_STRIPE_PI_SUCCEEDED = "payment_intent.succeeded"
 _STRIPE_CS_ID = re.compile(r"cs_(?:test|live)_[A-Za-z0-9]{1,255}")
 _STRIPE_IN_ID = re.compile(r"in_[A-Za-z0-9]{1,255}")
 _STRIPE_SUB_ID = re.compile(r"sub_[A-Za-z0-9]{1,255}")
@@ -239,6 +244,9 @@ _STRIPE_DISPUTE_ID = re.compile(r"(?:du|dp)_[A-Za-z0-9]{1,255}")
 _STRIPE_REFUND_ID = re.compile(r"(?:re|pyr)_[A-Za-z0-9]{1,255}")
 _STRIPE_CHARGE_ID = re.compile(r"(?:ch|py)_[A-Za-z0-9]{1,255}")
 _STRIPE_PI_ID = re.compile(r"pi_[A-Za-z0-9]{1,255}")
+# A1 auto top-up: the saved Stripe Customer + PaymentMethod ids (captured from a top-up checkout, never card data).
+_STRIPE_CUS_ID = re.compile(r"cus_[A-Za-z0-9]{1,255}")
+_STRIPE_PM_ID = re.compile(r"pm_[A-Za-z0-9]{1,255}")
 # The dispute statuses (docs.stripe.com/api/disputes/object). The owner's decision (2026-11-16): the disputed credits
 # leave when the dispute OPENS (an inquiry too) and stay out while it is open, under appeal or LOST; they come back
 # when it is WON, when an inquiry closes without becoming a dispute (warning_closed) and when it was PREVENTED from
@@ -305,7 +313,9 @@ class StripeBillingProvider(BillingProvider):
                  tolerance_s: float = _DEFAULT_TOLERANCE_S, enable_reference_adapter: bool = False,
                  alarm_unaccounted_plans: bool = False, checkout_creator: "Optional[StripeCheckoutCreator]" = None,
                  plan_periods: "Optional[Mapping[str, float]]" = None, strict: bool = False,
-                 reversals: bool = False):
+                 reversals: bool = False,
+                 auto_topup: bool = False,
+                 payment_intent_creator: "Optional[StripeCheckoutCreator]" = None):
         if not enable_reference_adapter and \
                 os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
             raise UnsupportedCapability(
@@ -337,20 +347,32 @@ class StripeBillingProvider(BillingProvider):
         # W5 (config.billing_reversals_enabled): act on the dispute and refund events. False (the default) maps them to
         # None exactly as every other unhandled event type.
         self._reversals = bool(reversals)
+        # A1 auto top-up: the OFF-SESSION PaymentIntent poster (stripe_egress.make_payment_intent_creator). None =>
+        # create_off_session_topup refuses (never simulates a charge). `auto_topup` gates whether this adapter
+        # HANDLES the off-session success webhook at all — off => payment_intent.succeeded is NOT in the instance's
+        # handled set (byte-identical webhook behaviour), so a normal checkout's own PaymentIntent is never minted
+        # here (its checkout.session.* event mints the credit, keyed on the session id — no double mint).
+        self._payment_intent_creator = payment_intent_creator
+        self._auto_topup = bool(auto_topup)
+        self._event_types = (_STRIPE_EVENT_TYPES | {_STRIPE_PI_SUCCEEDED}) if self._auto_topup \
+            else _STRIPE_EVENT_TYPES
 
     def capabilities(self) -> frozenset[str]:
         # Webhook verification + the server-side object re-fetch, and hosted checkout (card, one-off or recurring)
-        # once a creator is injected. No CAP_UNATTENDED_TOPUP (off-session charging is approval-gated at the
-        # provider); refund / reconcile are not implemented, so never declared.
+        # once a creator is injected. CAP_UNATTENDED_TOPUP (off-session charging) ONLY when the A1 adapter is built
+        # with a payment-intent creator; refund / reconcile are not implemented, so never declared.
         caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION}
         if self._checkout_creator is not None:
             caps |= {CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD, CAP_RECURRING_PLAN}
+        if self._auto_topup and self._payment_intent_creator is not None:
+            caps.add(CAP_UNATTENDED_TOPUP)
         return frozenset(caps)
 
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
                         nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
-                        session_minutes: "Optional[int]" = None) -> "CheckoutSession":
+                        session_minutes: "Optional[int]" = None,
+                        save_future_payments: bool = False) -> "CheckoutSession":
         """Create a tenant-bound Stripe Checkout Session for `price_id` — the same contract as the Flutterwave
         adapter (the checkout endpoint authorizes first; this primitive BINDS).
 
@@ -402,17 +424,29 @@ class StripeBillingProvider(BillingProvider):
             price_data["recurring"] = {"interval": "day", "interval_count": _stripe_plan_days(
                 self._plan_periods.get(price_id), price_id)}
             mode = "subscription"
+        # A1: a TOP-UP checkout may ask Stripe to SAVE the card for later off-session auto top-ups. Only for a
+        # one-off payment (a plan already saves its method), and only when the caller opts in — default False keeps
+        # the payload byte-identical. `vigil_save_method` rides the session metadata so the inbound mapper can carry
+        # the Customer + PaymentIntent to the capture hook.
+        save = bool(save_future_payments) and mode == "payment"
+        if save:
+            meta["vigil_save_method"] = "1"
+        intent_data: "dict[str, Any]" = {"metadata": dict(meta)}
+        if save:
+            intent_data["setup_future_usage"] = "off_session"   # attach the PaymentMethod to the Customer, reusable
         params: "dict[str, Any]" = {
             "mode": mode,
             "line_items": [{"price_data": price_data, "quantity": 1}],
             "client_reference_id": tx_ref,
             "metadata": meta,
-            ("subscription_data" if mode == "subscription" else "payment_intent_data"): {"metadata": dict(meta)},
+            ("subscription_data" if mode == "subscription" else "payment_intent_data"): intent_data,
             "success_url": success_url,
             "cancel_url": cancel_url,
             # the charge must be in the catalog currency: never let Stripe localise it on this session
             "adaptive_pricing": {"enabled": False},
         }
+        if save:
+            params["customer_creation"] = "always"   # a saved PaymentMethod needs a Customer to attach to
         if mode == "subscription":
             # a plan is paid by card only (this adapter's hosted checkout is card), so its first invoice is
             # settled when the checkout completes rather than days later by a delayed-notification method
@@ -512,8 +546,8 @@ class StripeBillingProvider(BillingProvider):
         if obj.get("livemode") is not self._livemode:
             raise StripeEventRefused(f"signed Stripe event is not a {self._mode}-mode event")
         etype = obj.get("type")
-        if etype not in _STRIPE_EVENT_TYPES:
-            if self._reversals and etype in _STRIPE_REVERSAL_TYPES:
+        if etype not in self._event_types:           # A1: payment_intent.succeeded is handled only in auto_topup mode
+            if self._reversals and etype in _STRIPE_REVERSAL_TYPES:   # W5: a dispute/refund event
                 return self._reversal(str(etype), obj)
             return None
         data = obj.get("data")
@@ -526,6 +560,11 @@ class StripeBillingProvider(BillingProvider):
                 return None
             session = self._fetched("checkout_session", object_id, "checkout.session")
             return None if session is None else self._map_checkout(session)
+        if etype == _STRIPE_PI_SUCCEEDED:
+            if not _STRIPE_PI_ID.fullmatch(object_id):
+                return None
+            pi = self._fetched("payment_intent", object_id, "payment_intent")
+            return None if pi is None else self._map_payment_intent(pi)
         if not _STRIPE_IN_ID.fullmatch(object_id):
             return None
         invoice = self._fetched("invoice", object_id, "invoice")
@@ -691,9 +730,18 @@ class StripeBillingProvider(BillingProvider):
         amount, ccy = _stripe_amount(s.get("amount_total"), s.get("currency"))
         if not ccy:
             return self._unaccounted(f"paid Stripe checkout session {sid} for org {org!r} has no currency")
+        data: "dict[str, Any]" = {"tx_ref": s.get("client_reference_id")}
+        # A1: when this checkout asked Stripe to SAVE the card (metadata.vigil_save_method), carry the Customer and
+        # PaymentIntent ids so the signer's capture hook can record the saved method. Purely ADDITIVE and only when
+        # the marker is present (an A1-created checkout) — a normal checkout's event.data is byte-identical.
+        if _stripe_meta(meta, "vigil_save_method") == "1":
+            cus, pi = s.get("customer"), s.get("payment_intent")
+            if isinstance(cus, str) and _STRIPE_CUS_ID.fullmatch(cus) and isinstance(pi, str) \
+                    and _STRIPE_PI_ID.fullmatch(pi):
+                data["save_method_customer"] = cus
+                data["save_method_payment_intent"] = pi
         return BillingEvent(event_id=sid, kind=EVENT_TOPUP, org_id=org, created=created,
-                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
-                            data={"tx_ref": s.get("client_reference_id")})
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy, data=data)
 
     def _map_invoice_paid(self, inv: "Mapping[str, Any]") -> Optional[BillingEvent]:
         if inv.get("status") != "paid" or inv.get("billing_reason") not in _STRIPE_NEW_PERIOD_REASONS:
@@ -731,6 +779,97 @@ class StripeBillingProvider(BillingProvider):
         return BillingEvent(event_id=str(inv["id"]), kind=EVENT_PAYMENT_FAILED, org_id=org, created=created,
                             price_id=_stripe_meta(meta, "price_id"),
                             data={"subscription": sub.get("id"), "tx_ref": _stripe_meta(meta, "tx_ref")})
+
+    def _map_payment_intent(self, pi: "Mapping[str, Any]") -> Optional[BillingEvent]:
+        """Map a fetched OFF-SESSION auto-top-up PaymentIntent -> EVENT_TOPUP (A1). ONLY an auto-top-up-marked PI
+        (`metadata.vigil_auto_topup == "1"`) mints here — a normal checkout's own PaymentIntent is credited by its
+        `checkout.session.*` event, so minting it here too would DOUBLE-credit; the marker gate refuses it. Every
+        money/tenant field comes from the fetched object (never the webhook body). The idempotency anchor is the
+        PaymentIntent id, so the wallet grant folds once however many times the webhook is delivered."""
+        meta = pi.get("metadata")
+        if _stripe_meta(meta, "vigil_auto_topup") != "1":
+            return None                              # not our off-session top-up -> never mint (no double credit)
+        if pi.get("status") != "succeeded":
+            return None                              # only a captured success mints (a decline never reaches here)
+        pid = str(pi["id"])
+        org = _stripe_tenant(None, meta)
+        if org is None:
+            return self._unaccounted(f"paid Stripe off-session top-up {pid} has no single recoverable tenant")
+        created = _stripe_ts(pi.get("created"))
+        if created is None:
+            return self._unaccounted(f"paid Stripe off-session top-up {pid} has no usable timestamp")
+        amount, ccy = _stripe_amount(pi.get("amount_received"), pi.get("currency"))
+        if not ccy:
+            return self._unaccounted(f"paid Stripe off-session top-up {pid} for org {org!r} has no currency")
+        return BillingEvent(event_id=pid, kind=EVENT_TOPUP, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"tx_ref": _stripe_meta(meta, "tx_ref"), "auto_topup": "1"})
+
+    def create_off_session_topup(self, org_id: str, price_id: str, *, customer_id: str, payment_method_id: str,
+                                 expected: Mapping[str, Any], nonce: "Optional[str]" = None) -> OffSessionCharge:
+        """Create an OFF-SESSION Stripe PaymentIntent that charges a saved card for a credit pack (A1 — the
+        auto-top-up money-out surface). MONEY DOCTRINE: the amount + currency come from the OWNER CATALOG
+        (`expected[price_id]`), never the caller; an unknown price is refused. The tenant is bound into
+        `metadata.org_id` + `metadata.tx_ref` (= `vigil:<org>:<nonce>`) and marked `vigil_auto_topup=1`, so the
+        inbound `payment_intent.succeeded` mints exactly this org's top-up and a checkout's own PaymentIntent is
+        never minted on this path. `off_session=true` + `confirm=true` charges the saved PaymentMethod immediately;
+        the Idempotency-Key `vigil-at-<nonce>` makes a retried create reuse the ONE PaymentIntent (one crossing
+        charges once). Returns an `OffSessionCharge` (`accepted` iff Stripe took the charge). CREDIT is minted ONLY
+        by the verified webhook, never from this call. Fail-closed: no creator / invalid org / unknown or
+        non-USD-minor-unit price / bad Stripe ids raise; a decline raises `StripeEgressError` (the charger records
+        it). This primitive CHARGES; the caller (AutoTopUpCharger) AUTHORIZES via the owner-signed settings."""
+        self.require(CAP_UNATTENDED_TOPUP)
+        creator = self._payment_intent_creator
+        if creator is None:                            # unreachable once require() passed; kept for type narrowing
+            raise UnsupportedCapability("off-session top-up requires an injected payment_intent_creator")
+        try:
+            org = org_tenant_id(org_id)
+        except ValueError as exc:
+            raise ValueError(f"invalid org_id for off-session top-up: {exc}") from None
+        exp = expected.get(price_id) if hasattr(expected, "get") else None
+        if exp is None:
+            raise ValueError(f"unknown price_id {price_id!r}: not in the owner catalog — off-session top-up refused "
+                             "(the catalog, never the caller, decides what may be charged)")
+        amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
+        if amount_minor <= 0 or not currency:
+            raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        if currency not in _STRIPE_CHECKOUT_CURRENCIES:
+            raise ValueError(f"Stripe off-session top-up is not enabled for {currency}: its Stripe minor unit must "
+                             "first be confirmed to match the catalog's — refused")
+        if not (isinstance(customer_id, str) and _STRIPE_CUS_ID.fullmatch(customer_id)):
+            raise ValueError("a saved Stripe customer id (cus_...) is required for an off-session charge")
+        if not (isinstance(payment_method_id, str) and _STRIPE_PM_ID.fullmatch(payment_method_id)):
+            raise ValueError("a saved Stripe payment method id (pm_...) is required for an off-session charge")
+        n = nonce or secrets.token_urlsafe(18)
+        if not isinstance(n, str) or ":" in n or not n or any(not (0x21 <= ord(c) <= 0x7e) for c in n):
+            raise ValueError("off-session nonce must be a non-empty printable string without ':' (the tx_ref "
+                             "delimiter)")
+        tx_ref = checkout_tx_ref(org, n)
+        params: "dict[str, Any]" = {
+            "amount": amount_minor,
+            "currency": currency.lower(),
+            "customer": customer_id,
+            "payment_method": payment_method_id,
+            "payment_method_types": ["card"],
+            "off_session": True,
+            "confirm": True,
+            "metadata": {"org_id": org, "price_id": price_id, "tx_ref": tx_ref, "vigil_auto_topup": "1"},
+        }
+        resp = creator(params, idempotency_key=f"vigil-at-{n}")   # a decline/egress fault raises (the charger maps it)
+        return self._off_session_result(resp, amount_minor=amount_minor, currency=currency)
+
+    @staticmethod
+    def _off_session_result(resp: object, *, amount_minor: int, currency: str) -> OffSessionCharge:
+        """Parse the PaymentIntent the creator returned into an ``OffSessionCharge``, fail-closed (a response that
+        is not our auto-top-up PaymentIntent is NOT accepted)."""
+        if not isinstance(resp, Mapping) or resp.get("object") != "payment_intent":
+            return OffSessionCharge("", amount_minor, currency, "unknown", False)
+        pid = resp.get("id")
+        if not isinstance(pid, str) or not _STRIPE_PI_ID.fullmatch(pid):
+            return OffSessionCharge("", amount_minor, currency, "unknown", False)
+        status = str(resp.get("status") or "")
+        accepted = status in ("succeeded", "processing", "requires_capture")
+        return OffSessionCharge(pid, amount_minor, currency, status, accepted)
 
 
 def _stripe_return_urls(redirect_url: object) -> "tuple[str, str]":
@@ -947,6 +1086,19 @@ def checkout_tx_ref(org_id: str, nonce: str) -> str:
     if not isinstance(nonce, str) or ":" in nonce or not nonce:
         raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
     return f"{_TX_REF_PREFIX}:{org}:{nonce}"
+
+
+@dataclass(frozen=True)
+class OffSessionCharge:
+    """The result of an A1 OFF-SESSION top-up charge (``StripeBillingProvider.create_off_session_topup``). ``accepted``
+    is True iff Stripe took the charge (status ``succeeded`` / ``processing`` / ``requires_capture``); the CREDIT is
+    still minted only by the verified ``payment_intent.succeeded`` webhook, keyed on this ``payment_intent_id``. The
+    ``amount_minor`` / ``currency`` are the OWNER-CATALOG values this charge collected — never caller-supplied."""
+    payment_intent_id: str
+    amount_minor: int
+    currency: str
+    status: str
+    accepted: bool
 
 
 @dataclass(frozen=True)
@@ -1202,8 +1354,12 @@ class FlutterwaveBillingProvider(BillingProvider):
     def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
                         customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
                         nonce: "Optional[str]" = None, payment_plan: "Optional[str]" = None,
-                        session_minutes: "Optional[int]" = None) -> CheckoutSession:
+                        session_minutes: "Optional[int]" = None,
+                        save_future_payments: bool = False) -> CheckoutSession:
         """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
+
+        ``save_future_payments`` (A1) is a Stripe-only concern (saving a card for off-session auto top-ups); the
+        Flutterwave flow saves no card here, so it is accepted and IGNORED (the payload is unchanged).
 
         MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
         i.e. `catalog.expected_amounts()`), NEVER from the caller — a customer can name neither a price nor an
@@ -1300,12 +1456,19 @@ class BillingSigner:
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
                  expected: "Optional[Mapping[str, Any]]" = None, invoices=None, monitoring_subscriptions=None,
                  on_monitoring_change=None, alarm_unaccounted_plans: bool = False, report_unlocks=None,
-                 require_verified_amount: bool = False, alarm_unaccounted_topups: bool = False, reversals=None):
+                 require_verified_amount: bool = False, alarm_unaccounted_topups: bool = False, reversals=None,
+                 on_saved_payment_method=None):
         self.provider = provider
         # W5: the owner-signed reversal ledger (governor.billing_reversal), given only while
         # config.billing_reversals_enabled(). With it, a verified EVENT_REVERSAL moves credits out of (or back into)
         # the wallet, and every top-up first repays what the org owes. None keeps every path byte-identical.
         self.reversals = reversals
+        # A1: the saved-payment-method capture hook. When wired (A1 on), a TOP-UP checkout mint whose session asked
+        # Stripe to save the card calls `on_saved_payment_method(org_id, customer_id, payment_intent_id, created)`;
+        # the hook resolves the pm id (a PaymentIntent fetch) and records it owner-signed. None (default) => no-op,
+        # byte-identical: the mint path is unchanged and a session that did not ask to save the card never reaches
+        # the hook anyway (the ids are absent from event.data).
+        self.on_saved_payment_method = on_saved_payment_method
         # Pricing S4: the owner-signed report-unlock ledger (governor.report_unlock). When injected, the FIRST
         # verified credit purchase of an org (a top-up, or a credit-plan period the fold honours) also records a
         # billing unlock — decided once, here, at mint time. None keeps every record byte-identical to before.
@@ -1479,6 +1642,7 @@ class BillingSigner:
             if seq is not None:                       # record the history line only for a mint that took effect
                 self._maybe_unlock(oid, event, "topup")
                 self._record_invoice(oid, event, "topup", credits=int(ent.credits))
+                self._maybe_capture_method(oid, event)   # A1: capture a saved card from this checkout (hook-gated)
             self._repay_arrears(oid, event, now=now)  # W5: a top-up first repays what the org owes (re-drive safe)
             return self._done(seq)
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
@@ -1622,6 +1786,24 @@ class BillingSigner:
         if self.report_unlocks is None or not self._unlock_eligible(event):
             return
         self.report_unlocks.unlock(oid, source_kind, source_ref=event.event_id, issued_at=event.created)
+
+    def _maybe_capture_method(self, oid: str, event: BillingEvent) -> None:
+        """A1: hand a saved card to the capture hook after a TOP-UP checkout mint whose session asked Stripe to
+        save it (`_map_checkout` put the Customer + PaymentIntent ids on `event.data`). No hook, or no save-method
+        ids on the event, is a no-op (byte-identical). The hook resolves the pm id and records it owner-signed; a
+        hook fault must never undo the already-committed credit, so it is swallowed (the capture retries on the
+        provider's at-least-once webhook redelivery)."""
+        if self.on_saved_payment_method is None:
+            return
+        data = event.data if isinstance(event.data, Mapping) else {}
+        cus = data.get("save_method_customer")
+        pi = data.get("save_method_payment_intent")
+        if not (isinstance(cus, str) and cus and isinstance(pi, str) and pi):
+            return
+        try:
+            self.on_saved_payment_method(oid, cus, pi, event.created)
+        except Exception:  # noqa: BLE001 — capture is best-effort; the credit mint already committed
+            pass
 
     def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
                         period_start: float = 0.0, period_end: float = 0.0) -> None:

@@ -917,6 +917,16 @@ def metered_billing_enabled() -> bool:
     return (os.environ.get("VIGIL_METERED_BILLING") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def billing_auto_topup_enabled() -> bool:
+    """True iff AUTO TOP-UP is wired (`VIGIL_BILLING_AUTO_TOPUP` affirmative; A1). OFF by default — with it unset
+    the Stripe adapter does not handle `payment_intent.succeeded` (byte-identical webhook behaviour), a checkout
+    never asks Stripe to save the card (the checkout payload is byte-identical), the saved-method capture hook is
+    never wired, and the `auto-topup-run` sweep refuses. Even ON, a charge fires only for an org whose owner-signed
+    auto-top-up settings are `enabled`, only up to the org's monthly cap, and CREDIT is minted solely by the
+    verified webhook drain — never by the off-session charge call. Read at call time."""
+    return (os.environ.get("VIGIL_BILLING_AUTO_TOPUP") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def model_gateway_enabled() -> bool:
     """True iff the cockpit starts the sovereign model gateway (`sigil.model_gateway`) at boot
     (`VIGIL_MODEL_GATEWAY_ENABLED` affirmative). OFF by default: nothing listens."""
