@@ -47,6 +47,10 @@
  * lists the workspace's launches from api/customer/launches with the controls the server accepts (Start / Cancel
  * before a launch starts, Pause / Resume while it runs), refreshing while one runs and the screen is visible. Off, the
  * screen is read-only exactly as before and that read is never made.
+ * RETEST. When the edge has retest on (data-retest="1", VIGIL_CUSTOMER_RETEST_UI), each finding shows Retest: VIGIL
+ * re-runs that finding's proof against the host and marks it fixed only when the proof stops working, else still
+ * vulnerable — no price, no new scan. Off, retestBadge / retestControls return null and a finding card is exactly as
+ * before (the kit drops the null children).
  * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
  * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
  * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
@@ -1070,10 +1074,96 @@
         kv("Severity", f.severity), kv("Class", f.bug_class), kv("Surface", f.surface), kv("Confidence", f.confidence),
         f.summary ? h("p", { text: f.summary }) : null,
         f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
+        retestBadge(f.retest),                         // C1b: the persisted verdict (null, so dropped, when off/none)
+        retestControls(f),                             // C1b: the Retest button + its result (null when off)
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
   }
+
+  // ---- Assessments: retest a finding (C1b) ----------------------------------------------------------------------
+  // Shown only while the edge writes data-retest="1" (VIGIL_CUSTOMER_RETEST_UI). Each finding gets Retest: VIGIL
+  // re-runs THAT finding's proof against the host (confirm-by-re-execution — never a price, credits, units or a new
+  // scan: VIGIL never estimates what an assessment costs) and marks it fixed ONLY when the proof stops working, else
+  // still vulnerable. A refusal is told in fixed words chosen from what the server refused (proof / authority -> verify
+  // in Assets; a step-up -> the authenticator, as a purchase asks; could-not-confirm -> nothing changed), never the
+  // server's own text (it can name amounts and internals). Off: retestBadge / retestControls return null, so the kit
+  // drops them and findingsBlock renders exactly the pre-C1b card.
+  var RETEST_ON = pageFlag("retest");
+  function retestBadge(rt) {
+    if (!RETEST_ON || !rt || !rt.status) return null;     // off: ignored even if a read carried a verdict
+    var fixed = rt.status === "fixed";
+    return h("span.cust-badge.cust-badge-" + (fixed ? "verified" : "expired"),
+      { text: fixed ? "✓ Fixed" : "⚠ Still vulnerable" });
+  }
+  function retestControls(f) {
+    if (!RETEST_ON || !f.finding_ref || !f.engagement_slug) return null;   // a finding it cannot name gets no button
+    var holder = h("div", { role: "status" });
+    var btn = h("button.btn", { type: "button", text: "Retest",
+      onClick: function () { retestFinding(f, btn, holder); } });
+    return h("div.row", {}, [btn, holder]);
+  }
+  async function retestFinding(f, btn, holder) {
+    btn.disabled = true;
+    VUI.mount(holder, h("p.cust-muted", { text: "Verifying…" }));
+    try {
+      // the finding's identity exactly as the read gave it (its reference alone is not unique) — never an org or a user
+      var r = await VUI.postJSON(API + "/retest", { engagement_slug: f.engagement_slug, finding_ref: f.finding_ref,
+                                                    oracle_context_digest: f.oracle_context_digest || "" });
+      var st = r && r.status;
+      if (st === "fixed" || st === "still_vulnerable") {   // only a verdict the server gave is ever shown
+        VUI.mount(holder, h("div", {}, [retestBadge({ status: st }),
+          h("p.cust-muted", { text: st === "fixed" ? "The proof no longer works." : "The proof still works." })]));
+      } else {
+        VUI.mount(holder, h("p.cust-muted", { text: "Retest could not run. Nothing changed." }));
+      }
+    } catch (e) {
+      if (e && e.status === 401 && !(e.data && e.data.step_up_required)) { await refreshWho(); nav("#/login"); btn.disabled = false; return; }
+      var m = retestMessage(e);
+      VUI.mount(holder, h("div", {}, [h("p.cust-muted", { text: m.text }),
+        m.go ? h("button.btn", { type: "button", text: m.goText, onClick: function () { nav(m.go); } }) : null]));
+    }
+    btn.disabled = false;
+  }
+  // Fixed words for each refusal the server gives a retest, mirroring launchMessage: every phrase matched has a space
+  // in it, so no host name or org id inside a refusal can be mistaken for another refusal.
+  function retestMessage(e) {
+    var status = e && e.status, data = (e && e.data) || {};
+    var why = String(data.error || "").toLowerCase();
+    var assets = { go: "#/assets", goText: "Go to Assets" };
+    function has(s) { return why.indexOf(s) >= 0; }
+    function msg(text, where) { return { text: text, go: where ? where.go : null, goText: where ? where.goText : null }; }
+    if (status === 401 && data.step_up_required) {
+      return msg("For your security, this needs a fresh second-factor check. Verify with your authenticator, then try again.");
+    }
+    if (status === 503) return msg("VIGIL is updating. Try again in a few seconds.");
+    if (status === 429) return msg("Too many attempts — wait a moment and try again.");
+    if (status === 404 || has("not enabled") || has("not available")) return msg("Retest is not available right now.");
+    if (has("ownership proof")) {
+      return msg("This host's proof of control is missing or has expired. Verify it again in Assets, then retest.", assets);
+    }
+    if (has("engagement authority")) {
+      return msg("Testing is not authorized for this host right now. Verify it again in Assets, confirming you are "
+        + "authorized to test it, then retest.", assets);
+    }
+    if (has("may not")) {
+      return msg("Your role cannot retest findings. The founder can, and so can a teammate VIGIL has made an Operator.");
+    }
+    if (has("no such finding")) return msg("This finding is no longer available to retest.");
+    if (has("unlocks with the full report")) {
+      return msg("Retests unlock with the full report. Buy credits in Billing to retest a finding.",
+        { go: "#/billing", goText: "Go to Billing" });
+    }
+    if (has("new assessment launches are paused") || has("global cost pool")) {
+      return msg("Retests cannot run right now. Please try again later.");
+    }
+    if (has("could not confirm")) {
+      return msg("VIGIL could not confirm a fix this time, so the finding is unchanged. Check that your host is "
+        + "reachable, then retest.");
+    }
+    return msg("Retest could not run. Nothing changed.");
+  }
+  // ---- end of retest (C1b) --------------------------------------------------------------------------------------
 
   // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
   // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:

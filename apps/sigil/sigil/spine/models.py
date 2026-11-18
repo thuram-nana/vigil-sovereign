@@ -24,6 +24,8 @@ KINDS = frozenset({
     "owner_key_history",        # W9-1: a cross-signed owner-key succession record (rotation / re-genesis)
     "assessment_outcome",       # NTF-3: a tenant-scoped assessment-outcome projection written by the settle
                                 #        drain when a verified completion settles (advisory; carries NO amount)
+    "finding_retest",           # C1b: a tenant-scoped retest verdict for ONE finding (fixed / still_vulnerable),
+                                #      written by the provisioner retest action (confirm-by-re-execution; NO amount)
 })
 
 # W5-1: per-record schema version. `SCHEMA_VERSION` is stamped on every NEW append; `KNOWN_SCHEMA_VERSIONS`

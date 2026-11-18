@@ -241,6 +241,7 @@ _REVIEWED_DYNAMIC = frozenset({
     "ingest/transcript.py",           # kind in {message, tool_call, tool_result}
     "spine/store.py",                 # the store itself
     "ui/authn_audit.py",              # source=_AUTHN_SOURCE ("authn")
+    "ui/provision.py",                # C1b retest: kind=RETEST_KIND ("finding_retest"), source=RETEST_SOURCE ("provision")
 })
 
 

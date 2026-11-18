@@ -403,6 +403,20 @@ def customer_launch_ui_enabled() -> bool:
     is exactly as before. Read by the customer edge when it starts (it is written into the page) and by the cockpit
     on each request."""
     return (os.environ.get("VIGIL_CUSTOMER_LAUNCH_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_retest_ui_enabled() -> bool:
+    """True iff customers may RETEST a finding from the app (`VIGIL_CUSTOMER_RETEST_UI` affirmative; C1b): the
+    Assessments screen shows a Retest button on each finding, which re-runs THAT finding's proof against the
+    customer's verified host (``retest`` → the launch-gate authorization + a confirm-by-re-execution of the
+    finding's retained proof); a finding is marked fixed ONLY when its proof stops working, else Still-Vulnerable.
+    OFF by default: the edge ``retest`` action and the cockpit ``retest`` dispatch are absent (404, exactly as an
+    unknown action), nothing is re-fired and no retest record is written — so the app is byte-identical to a build
+    without it. Read by the customer edge when it starts (it is written into the page) and by the cockpit on each
+    request, the same way ``customer_launch_ui_enabled`` is."""
+    return (os.environ.get("VIGIL_CUSTOMER_RETEST_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account

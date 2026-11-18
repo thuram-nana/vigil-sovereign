@@ -1722,6 +1722,18 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.customer_launch_ui_enabled():
                 return None
             return p.customer_launches(requester, str(body.get("org_id", "")), ip=ip)
+        # C1b — retest ONE of the session org's findings (re-run its proof; mark fixed when it stops working).
+        # Absent (unknown action -> 404) unless VIGIL_CUSTOMER_RETEST_UI is on, the same flag that gates the edge
+        # action; requester is the hop principal, org from the edge SESSION, the finding's identity (slug + ref +
+        # proof digest — the customer's own finding, as the findings read gave it) and the step-up stamp from the body.
+        if action == "retest":
+            from .. import config as _config
+            if not _config.customer_retest_ui_enabled():
+                return None
+            return p.retest(requester, str(body.get("org_id", "")), str(body.get("finding_ref", "")),
+                            engagement_slug=str(body.get("engagement_slug", "")),
+                            oracle_context_digest=str(body.get("oracle_context_digest", "")),
+                            ip=ip, mfa_at=body.get("mfa_at"))
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
         if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
