@@ -1601,7 +1601,18 @@ class Handler(BaseHTTPRequestHandler):
         # E3b — customer MFA (TOTP). requester is the HMAC-bound hop principal (the session username), NEVER
         # a body field: a customer enrolls/verifies MFA for THEIR OWN account only (account-level, not org).
         if action == "mfa_enroll_totp":
-            return p.enroll_totp(requester, ip=ip)
+            # mfa_at (the SESSION step-up stamp, never a body field a customer controls) lets the enrolment
+            # hardening gate replacing a factor on a fresh second-factor proof; it is ignored while the flag is off.
+            return p.enroll_totp(requester, ip=ip, mfa_at=body.get("mfa_at"))
+        if action == "mfa_totp_confirm":
+            # Confirm-before-activate: activate a pending TOTP enrolment with a fresh code. Absent (unknown
+            # action -> 404) unless the hardening flag is on, the same flag that gates the edge route — so with
+            # the flag off this new action is byte-identical to its not existing.
+            from .. import config as _config
+            if not _config.customer_mfa_enroll_stepup_enabled():
+                return None
+            # mfa_at (the SESSION step-up stamp) lets confirm re-check step-up at the moment of activation.
+            return p.confirm_totp(requester, code=str(body.get("code", "")), mfa_at=body.get("mfa_at"))
         if action == "mfa_verify":
             return p.verify_mfa(requester, code=str(body.get("code", "")))
         # The onboarding tour's server-side state (has this account finished or skipped it?). Account-level like
@@ -1630,7 +1641,8 @@ class Handler(BaseHTTPRequestHandler):
                                     public_key_spki_b64=str(body.get("public_key_spki_b64", "")),
                                     cose_alg=body.get("cose_alg"), uv=bool(body.get("uv")),
                                     client_data_json=str(body.get("client_data_json", "")),
-                                    expected_challenge=str(body.get("challenge", "")))
+                                    expected_challenge=str(body.get("challenge", "")),
+                                    mfa_at=body.get("mfa_at"))
         if action == "passkey_login":
             return p.passkey_login(credential_id=str(body.get("credential_id", "")),
                                    authenticator_data=str(body.get("authenticator_data", "")),
