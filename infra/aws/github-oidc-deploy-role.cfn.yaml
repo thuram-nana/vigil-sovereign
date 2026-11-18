@@ -6,6 +6,10 @@ Description: >-
   SSH; nothing else. Create this stack once, then set the repo variable VIGIL_DEPLOY_AWS_ROLE_ARN to the
   RoleArn output. Fully optional — the deploy workflow stays inert until that variable is set.
 
+  NOTE: this template uses the LONG-FORM intrinsic functions (Fn::Sub / Ref / Fn::If / Fn::GetAtt) rather
+  than the !Sub/!Ref short tags, so it is plain YAML the repo's check-yaml hook can parse. It is equally
+  valid CloudFormation.
+
 Parameters:
   GitHubRepo:
     Type: String
@@ -27,7 +31,10 @@ Parameters:
     Description: when CreateOIDCProvider=false, the ARN of the account's existing GitHub OIDC provider.
 
 Conditions:
-  MakeProvider: !Equals [!Ref CreateOIDCProvider, "true"]
+  MakeProvider:
+    Fn::Equals:
+      - Ref: CreateOIDCProvider
+      - "true"
 
 Resources:
   GitHubOIDCProvider:
@@ -44,24 +51,27 @@ Resources:
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "vigil-cd-deploy-${AWS::Region}"
+      RoleName:
+        Fn::Sub: "vigil-cd-deploy-${AWS::Region}"
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !If
-                - MakeProvider
-                - !Ref GitHubOIDCProvider
-                - !Ref ExistingOIDCProviderArn
+              Federated:
+                Fn::If:
+                  - MakeProvider
+                  - Ref: GitHubOIDCProvider
+                  - Ref: ExistingOIDCProviderArn
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 # Only a run on THIS repo's main branch may assume the role.
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+                token.actions.githubusercontent.com:sub:
+                  Fn::Sub: "repo:${GitHubRepo}:ref:refs/heads/main"
       Policies:
         - PolicyName: vigil-cd-ssm-sendcommand
           PolicyDocument:
@@ -71,8 +81,8 @@ Resources:
               - Effect: Allow
                 Action: ssm:SendCommand
                 Resource:
-                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
-                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${TargetInstanceId}"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
+                  - Fn::Sub: "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${TargetInstanceId}"
               # Read the result of a command this role issued.
               - Effect: Allow
                 Action:
@@ -83,4 +93,7 @@ Resources:
 Outputs:
   RoleArn:
     Description: Set repo variable VIGIL_DEPLOY_AWS_ROLE_ARN to this.
-    Value: !GetAtt DeployRole.Arn
+    Value:
+      Fn::GetAtt:
+        - DeployRole
+        - Arn
