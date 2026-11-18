@@ -46,6 +46,8 @@ from typing import Any, Optional
 from vigil_integration.live.credit_lease_broker import is_lease_settled, list_credit_leases
 from vigil_integration.live.credit_lease_pause import (
     _past_expiry_path,
+    credit_pause_at,
+    credit_pause_ttl_s,
     lease_pause_state,
     pause_path,
     paused_past_expiry,
@@ -93,6 +95,15 @@ def settle_due_at(base_dir: Any, slug: Any, nonce: Any, not_after: float, *,
     try:
         g = settle_grace_seconds() if grace is None else float(grace)
         s, n = str(slug), str(nonce)
+        # W3 (§11.6) — a CREDIT pause is closed by the owner's PAUSE-anchored grace (default 7 days from the pause),
+        # NOT the lease window + the ops grace: the pause can outlive the 8-hour window (and the resume re-mints a
+        # fresh one), so anchoring the close to the window would charge-and-close it hours after the top-up could
+        # still arrive. When the credit-pause record names this nonce, its close is exactly ``pause_at + TTL``;
+        # resume clears the record, reverting to the window rule. A credit pause ALSO sets the halt marker, so the
+        # existing branch below would otherwise close it early — this override takes precedence.
+        cp = credit_pause_at(base_dir, s, n)
+        if cp is not None:
+            return cp + credit_pause_ttl_s()
         times: "list[float]" = []
         if lease_pause_state(base_dir, s, n) is True:            # READ ORDER: the pause marker first ...
             t = _mtime(pause_path(base_dir, s))

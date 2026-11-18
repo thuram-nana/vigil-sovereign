@@ -301,3 +301,33 @@ def test_read_verified_launch_depth_is_none_without_a_verified_bound_lease(monke
     base2 = tempfile.mkdtemp()
     write_credit_lease(base2, SLUG, _depth_lease(forger, units=3, run_tier="max"), _owner_root(forger))
     assert LL.read_verified_launch_depth(SLUG, HOST, ORG, base_dir=base2, now=1000.0) is None          # not owner's
+
+
+# ---- W3: a credit-pause CONTINUATION keeps the launch's single-use floor ----------------------------------------
+def test_a_credit_pause_continuation_runs_only_as_a_resume(monkeypatch):
+    """W3 (HANDOFF §11.6): a launch parked for want of credit and resumed after its window closed is continued by
+    the sovereign gate as the SAME owner-signed lease with only a fresh window and ``continue_of`` = its own nonce —
+    ``issued_at`` unchanged. So the keyless arm runs it ONLY as a resume (verify + bind, no consume: the worker's
+    resume-required marker); a FRESH arm of it is a replay of the original (refused), exactly as for the original.
+    The last step shows the hazard the kept ``issued_at`` closes: re-signed with a newer one, a fresh arm would pass
+    and the run would start over on the same meter."""
+    owner = generate_keypair()
+    original = _lease(owner, nonce="n1", issued=1000.0)
+    base = _rig(monkeypatch, owner, original)
+    assert LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=1000.0)[0]          # the first arm
+    later = 1000.0 + 7 * 86_400 + 5_400                                                             # window long closed
+    assert not LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=later, consume=False)[0]
+    t = datetime.fromtimestamp(later, tz=timezone.utc)
+    fields = original.document.model_dump()
+    fields.update(not_before=t, not_after=t + timedelta(hours=8), continue_of="n1")
+    write_credit_lease(base, SLUG, sign_credit_launch_lease(CreditLaunchLease(**fields), {"owner": owner.private_key_b64}),
+                       _owner_root(owner))
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=later, consume=False,
+                                                 expect_nonce="n1")
+    assert ok, reason                                                                               # the RESUME arm
+    ok, reason = LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=later, expect_nonce="n1")
+    assert not ok and "single-use" in reason                                                        # a FRESH arm
+    fields.update(issued_at=later)
+    write_credit_lease(base, SLUG, sign_credit_launch_lease(CreditLaunchLease(**fields), {"owner": owner.private_key_b64}),
+                       _owner_root(owner))
+    assert LL.verify_customer_launch_lease(SLUG, HOST, ORG, base_dir=base, now=later, expect_nonce="n1")[0]

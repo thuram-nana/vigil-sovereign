@@ -103,7 +103,10 @@ class CreditLaunchLease(BaseModel):
     plan_period_end: Optional[float] = Field(default=None, description="The period_end of the plan tranche the "
                                              "plan share came from; set exactly when plan_reserved > 0.")
     continue_of: Optional[str] = Field(default=None, min_length=1, description="The nonce of the same engagement's "
-                                       "earlier launch this one continues, when it is a continuation.")
+                                       "earlier launch this one continues, when it is a continuation. W3: a launch "
+                                       "parked for want of credit and resumed after its window closed is continued "
+                                       "with a fresh window under its OWN nonce (continue_of == nonce), so it stays "
+                                       "bound to the same model meter, grant id, reservation and single-use floor.")
     # --- optional v3 field (see ``LEASE_V3_OPTIONAL_FIELDS``) ------------------------------------------------------
     version: Optional[int] = Field(default=None, description="The lease document version: absent on a lease that "
                                    "names no depth (the v1 / v2 formats); LEASE_DEPTH_VERSION on one that names its "
