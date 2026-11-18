@@ -144,6 +144,7 @@ let renders = 0; function render() { renders++; }
 let whoRefreshes = 0; async function refreshWho() { whoRefreshes++; }
 function shell(inner, current) { return h("div.shell", { dataset: { current: current } }, inner); }
 var GUIDE_ON = false;
+var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false;   // every other page flag: off
 const VUI = window.VUI;
 const calls = [], toasts = [], errs = [];
 let server = {};            // "GET <path>" / "POST <path>" -> {data} | {status, data} | {wait: <promise>}
@@ -621,4 +622,5 @@ process.stdout.write(JSON.stringify(out));
     # app.js tells the guide which screens it hides
     src = _src()
     assert "shown: routeShown" in _fn(src, "viewGuideScreen")
-    assert re.search(r'function routeShown\(route\) \{ return route !== "#/monitoring" \|\| MONITORING_ON; \}', src)
+    assert re.search(r'function routeShown\(route\) \{ return \(route !== "#/monitoring" \|\| MONITORING_ON\) '
+                     r'&& \(route !== "#/code" \|\| CODE_ON\); \}', src)

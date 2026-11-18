@@ -1749,6 +1749,15 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # C6 — the customer Code (Red-Pen) screen. Absent (unknown action -> 404) unless VIGIL_REDPEN_ENABLED is on, the
+        # same master flag that gates the edge routes. requester is the hop principal and org the edge SESSION's (never a
+        # free body field) — except redpen_connect_record, the GitHub post-install callback, which has no session and
+        # takes its org from the owner-signed state the provisioner verifies.
+        if action.startswith("redpen_"):
+            from .. import config as _config
+            if not _config.redpen_enabled():
+                return None
+            return self._redpen_dispatch(p, action, requester, body, ip)
         # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
         # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
         if action == "billing_checkout":
@@ -1795,6 +1804,36 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        return None
+
+    @staticmethod
+    def _redpen_dispatch(p, action: str, requester: str, body: dict, ip: str):
+        """C6 — the Code screen's provisioner actions over a CLOSED exact-match set (unknown → None → 404). Called only
+        while VIGIL_REDPEN_ENABLED is on. Every string field is read as ``str(x or "")`` so an absent or null field is
+        empty (fail-closed in the provisioner), never the text "None"."""
+        def s(k: str) -> str:
+            return str(body.get(k) or "")
+        org, mfa_at = s("org_id"), body.get("mfa_at")
+        if action == "redpen_code_overview":
+            return p.redpen_code_overview(requester, org, ip=ip)
+        if action == "redpen_connect":
+            return p.redpen_connect(requester, org, ip=ip, mfa_at=mfa_at)
+        if action == "redpen_connect_record":       # no session: the org comes from the verified, owner-signed state
+            return p.redpen_connect_record(state=s("state"), installation_id=s("installation_id"),
+                                           setup_action=s("setup_action"), code=s("code"), ip=ip)
+        if action == "redpen_set_settings":
+            return p.redpen_set_settings(requester, org, s("repo"), block_threshold=s("block_threshold"),
+                                         monthly_limit_credits=body.get("monthly_limit_credits"), ip=ip, mfa_at=mfa_at)
+        if action == "redpen_disconnect":
+            return p.redpen_disconnect(requester, org, s("repo"), ip=ip)
+        if action == "redpen_review":
+            return p.redpen_review(requester, org, s("repo"), ip=ip, mfa_at=mfa_at)
+        if action == "redpen_schedule":
+            return p.redpen_schedule(requester, org, s("repo"), cadence=s("cadence"), ip=ip, mfa_at=mfa_at)
+        if action == "redpen_fix_this":
+            return p.redpen_fix_this(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
+        if action == "redpen_retest":
+            return p.redpen_retest(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
         return None
 
     def _durability_post(self, path):

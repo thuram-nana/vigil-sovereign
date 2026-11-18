@@ -14,6 +14,7 @@ and `doctor()` self-checks the runtime.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -295,6 +296,21 @@ def redpen_enabled() -> bool:
     Even when ON, each leg still fails closed unless its own credential is provisioned (the App id + private key, the
     webhook secret) — the owner registers the real GitHub App (with `checks:write`) as the last step before go-live."""
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL
+# (`https://github.com/apps/<slug>/installations/new`) accepts — the numeric App id cannot build it. The owner sets
+# it when they register the real App (go-live, HANDOFF §6); unset ⇒ the Code screen's Connect GitHub refuses with a
+# clean "not set up yet" rather than a dead link. A presence/format accessor only — never a secret (the App PRIVATE
+# key lives in `governor.github_app`, env/SSM, call-time read).
+_GITHUB_APP_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,38})")
+
+
+def github_app_slug() -> str:
+    """The customer-facing GitHub App slug (`VIGIL_GITHUB_APP_SLUG`), lower-cased and format-checked, or ""
+    when unset/malformed (⇒ Connect GitHub is unavailable and says so). Read at call time."""
+    raw = (os.environ.get("VIGIL_GITHUB_APP_SLUG") or "").strip().lower()
+    return raw if _GITHUB_APP_SLUG_RE.fullmatch(raw) else ""
 
 
 def customer_pause_resume_enabled() -> bool:
