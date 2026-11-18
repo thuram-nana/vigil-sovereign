@@ -513,6 +513,21 @@ def margin_dashboard_enabled() -> bool:
     return (os.environ.get("VIGIL_MARGIN_DASHBOARD_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def owner_money_view_enabled() -> bool:
+    """True iff the O1 OWNER MONEY VIEW is ON (`VIGIL_OWNER_MONEY_VIEW` affirmative). OFF by default (mirrors
+    `margin_dashboard_enabled`): with it off the owner-tier `/api/billing/owner-money` read is absent (404
+    exactly as an unknown route) and the `sigil owner-money` verb (`vigil sigil owner-money`) is not registered (an
+    unknown verb, its handler refusing too), so the surface is byte-identical to a build without O1. The verb is
+    registered when the CLI starts, the route is decided per request. This is the OWNER's own money reconciliation —
+    rate-card revenue (credits charged) vs the gateway meter's confirmed provider cost, the gross margin between
+    them and the at-risk (unconfirmed) spend, folded from the signed spine + the meters. It is an operator surface,
+    never a customer one, so it may show
+    currency and the owner's target line; it is owner-gated AND fail-closed even when on (an unset target line is
+    omitted, never fabricated). This flag only decides whether the surface exists at all (a pure READ projection;
+    nothing is ever minted). Read at call time."""
+    return (os.environ.get("VIGIL_OWNER_MONEY_VIEW") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def tiered_products_enabled() -> bool:
     """True iff the EC-7 tiered Quick/Deep LAUNCH PRODUCTS are offered (`VIGIL_TIERED_PRODUCTS` affirmative).
     OFF by default: `catalog.launch_products()` returns `()` and the existing pricing surface (plans() /

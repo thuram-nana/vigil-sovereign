@@ -47,7 +47,7 @@ from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
 
 from ..bridge.daemon import bind_ok
-from ..config import SPINE_PATH, margin_dashboard_enabled, oidc_enabled
+from ..config import SPINE_PATH, margin_dashboard_enabled, oidc_enabled, owner_money_view_enabled
 from ..reuse import verify_one
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
@@ -661,6 +661,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "owner only")
             from . import margin as _margin
             return self._json(_margin.margin_overview(self.server.store()))
+        if path == "/api/billing/owner-money" and owner_money_view_enabled():
+            # O1 — the OWNER MONEY VIEW: rate-card revenue (credits charged) vs the gateway meter's CONFIRMED
+            # provider cost, the gross margin between them and the at-risk (unconfirmed) spend, per org + per
+            # UTC-day period + total, folded from the signed spine + the meters. OWNER-tier (`manage_billing`) —
+            # the operator's OWN cross-tenant money view, NOT a customer surface (so it may show currency + the
+            # owner's target line). Same global-account-role gate as /api/billing/margin (manage_billing is
+            # OWNER-ONLY; a per-org member or a customer never carries it). A pure READ projection — mints
+            # nothing, surfaces no margin VALUE and no secret, and marks the target line / cost fail-closed.
+            # Behind VIGIL_OWNER_MONEY_VIEW (default OFF => this path falls through to the 404 as an unknown route).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_billing"):
+                return self._deny(403, "owner only")
+            from . import owner_money as _owner_money
+            from ..config import MODEL_METER_DIR
+            return self._json(_owner_money.money_overview(self.server.store(), meter_dir=MODEL_METER_DIR))
         if path == "/api/billing/plans":
             # The owner-controlled PRICE->ENTITLEMENT catalog, projected for display (the pricing list). Any
             # authenticated principal may read it (viewer+); it is global, carries NO tenant data and NO secret

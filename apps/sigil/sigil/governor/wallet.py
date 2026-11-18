@@ -426,9 +426,22 @@ class WalletRegistry:
         granted, debited, _, usage = self._fold()
         return _balances(granted, debited, usage)
 
+    def positions(self) -> list[Balance]:
+        """O1 — every tenant with ANY wallet-fold position, in org_id order: a grant, a debit OR exact metered usage
+        (the W2c-1 ``usage_mc`` of its settles). :meth:`balances` lists only tenants with grant / debit activity (the
+        per-tenant billing view, unchanged); this also lists a tenant whose metered runs were funded from plan
+        credits alone, so its settled usage is never dropped from the owner's money reconciliation. One fold read
+        (the verified fold cache when on); PURE."""
+        hit = self._cached(lambda v: _balances(v.granted, v.debited, v.usage, with_usage=True))
+        if hit is not _UNCACHED:
+            return hit
+        granted, debited, _, usage = self._fold()
+        return _balances(granted, debited, usage, with_usage=True)
 
-def _balances(granted: dict, debited: dict, usage: "Optional[dict]" = None) -> list[Balance]:
+
+def _balances(granted: dict, debited: dict, usage: "Optional[dict]" = None, *,
+              with_usage: bool = False) -> list[Balance]:
     usage = usage or {}
-    orgs = sorted(set(granted) | set(debited))
+    orgs = sorted(set(granted) | set(debited) | (set(usage) if with_usage else set()))
     return [Balance(org_id=str(o), granted=granted.get(o, 0), debited=debited.get(o, 0),
                     usage_mc=usage.get(o, 0)) for o in orgs]
