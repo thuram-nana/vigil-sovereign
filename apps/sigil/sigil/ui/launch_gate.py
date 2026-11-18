@@ -686,13 +686,15 @@ class LaunchGate:
 
     @staticmethod
     def metered_use_mc(slug: str, nonce: str) -> int:
-        """W2c-1 — what metered launch ``(slug, nonce)`` used, EXACTLY, in milli-credits: the sum of its meter's
-        responses, each priced as the customer's statement prices it (``ui.billing._priced_lines``): the charge
-        recorded with a response the gateway priced (W2a — never re-priced), else its usage priced line by line with
-        the rate card in force. Only confirmed usage is on the meter (I9). Call it once the meter is CLOSED, so the
-        total is final. Raises ``MeteringError`` while a retired pricing setting is present and ``RateCardError`` on a
-        malformed card (the caller defers: never a guessed charge — both are ``ValueError``s, so catch them first), and
-        ``ValueError`` on a broken meter (quarantine)."""
+        """W2c-1 / W4 — what metered launch ``(slug, nonce)`` used, EXACTLY, in milli-credits: the sum of every charge
+        on its meter, each priced as the customer's statement prices it (``ui.billing``) — the metered AI responses
+        (``RateCard.ai_lines``), its billed worker-time slots (``worker``) and its premium external API calls
+        (``premium``). A charge the gateway recorded (W2a / W4: worker + premium always) keeps its recorded amount —
+        a later card change never re-prices it; an AI response recorded before W2a is priced with the card in force.
+        Only confirmed usage is on the meter (I9). Call it once the meter is CLOSED, so the total is final. Raises
+        ``MeteringError`` while a retired pricing setting is present and ``RateCardError`` on a malformed card (the
+        caller defers: never a guessed charge — both are ``ValueError``s, so catch them first), and ``ValueError`` on
+        a broken meter (quarantine)."""
         from vigil_core import model_metering as mm
         from vigil_core.model_grant import meter_id
         from vigil_core.rate_card import rate_card
@@ -702,7 +704,7 @@ class LaunchGate:
             raise mm.MeteringError(mm.obsolete_setting_refusal(name))
         card = rate_card()
         used = 0
-        for rec in GrantMeter(config.MODEL_METER_DIR).usage_records(meter_id(str(slug), str(nonce))):
+        for rec in GrantMeter(config.MODEL_METER_DIR).charge_records(meter_id(str(slug), str(nonce))):
             used += int(rec["charge_mc"]) if "charge_mc" in rec else int(card.charge(rec["usage"])[0])
         return used
 

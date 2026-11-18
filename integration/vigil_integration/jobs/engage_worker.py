@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -342,6 +343,108 @@ def _model_grant_scope(bundle: Any, model: str, effort: str) -> "Iterator[None]"
                 os.environ[k] = prev[k]
 
 
+#: W4 — the model gateway's worker-time heartbeat path (mirrors ``sigil.model_gateway.WORKER_HEARTBEAT_PATH``;
+#: hard-coded here because the keyless worker must not import the sovereign plane — FATAL-2).
+_WORKER_HEARTBEAT_PATH = "/v1/vigil/worker/heartbeat"
+#: W4 — how often (seconds) a metered run pings the gateway while it runs. The SOVEREIGN gateway measures the
+#: interval and bills the worker time; the worker only pings (it never self-reports a number). Smaller than the
+#: gateway's worker slot (default 60 s) so every interval stays well inside the slot it reserved.
+_WORKER_HEARTBEAT_INTERVAL_ENV = "VIGIL_WORKER_HEARTBEAT_INTERVAL_S"
+_DEFAULT_WORKER_HEARTBEAT_INTERVAL_S = 30.0
+#: Terminal HTTP codes a heartbeat gets: a bad / expired / closed / credit-exhausted grant (401 / 403) or a gateway
+#: that does not serve the endpoint (404 / 405). On any of these the worker stops pinging; a credit pause then flows
+#: through the model path (W3). Everything else (200, a transient 0, a busy 429 / 529) keeps the heartbeat going.
+_HEARTBEAT_STOP_CODES = frozenset({401, 403, 404, 405})
+
+
+def _worker_heartbeat_interval_s() -> float:
+    """``VIGIL_WORKER_HEARTBEAT_INTERVAL_S`` (seconds, >= 1), default 30. A bad / sub-second value falls back to the
+    default (a heartbeat is best-effort; it never fails a run over a misconfigured interval)."""
+    raw = (os.environ.get(_WORKER_HEARTBEAT_INTERVAL_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_WORKER_HEARTBEAT_INTERVAL_S
+    try:
+        v = float(raw)
+    except ValueError:
+        return _DEFAULT_WORKER_HEARTBEAT_INTERVAL_S
+    return v if v >= 1.0 else _DEFAULT_WORKER_HEARTBEAT_INTERVAL_S
+
+
+def _post_heartbeat(gateway_url: str, token: str, *, timeout: float = 10.0) -> int:
+    """POST an EMPTY worker-time heartbeat to the loopback model gateway, authenticated by the run's grant token.
+    Returns the HTTP status (200 on success; the gateway's own 4xx/5xx code; 0 on a transient connection error, which
+    the caller treats as non-terminal). The worker sends no number — the sovereign gateway measures the time between
+    pings. stdlib only (FATAL-2: the keyless worker never imports the sovereign plane); proxies are bypassed so the
+    loopback gateway is reached directly, never through a relay that would see the bearer grant."""
+    import urllib.error
+    import urllib.request
+    url = gateway_url.rstrip("/") + _WORKER_HEARTBEAT_PATH
+    req = urllib.request.Request(url, data=b"", method="POST",
+                                 headers={"x-api-key": token, "content-type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+    except Exception:  # noqa: BLE001 — a transient failure is never fatal to the run; the next beat retries
+        return 0
+
+
+@contextlib.contextmanager
+def _worker_heartbeat_scope(bundle: Any, *, post: "Optional[Callable[[str, str], int]]" = None,
+                            interval_s: "Optional[float]" = None) -> "Iterator[None]":
+    """W4 — while a METERED run executes, ping the model gateway's worker-time endpoint so the SOVEREIGN side meters
+    the run's worker time. ``bundle is None`` (a FLAT run) ⇒ a NO-OP (byte-identical: no thread, no network). It
+    sends one ping at START (opens the first slot; bills nothing), one every ``interval_s`` while the run executes,
+    and one FINAL ping on exit (commits the last slot's elapsed). The keyless worker sends NO number — it only pings;
+    the gateway measures the interval and bounds each to the slot it reserved, so the worker can neither inflate the
+    time nor be charged for time it did not run. Best-effort: a transient error never breaks the run; a TERMINAL
+    refusal (:data:`_HEARTBEAT_STOP_CODES` — a bad / closed / exhausted grant, or a gateway without the endpoint)
+    stops the pings (a credit pause then flows through the model path, W3). The periodic ping runs on a daemon
+    thread so it never delays the run, and ``JobRunner.run_one`` serialises jobs, so one run's heartbeat never
+    overlaps another's. ``post`` / ``interval_s`` are injectable for tests."""
+    if bundle is None:
+        yield
+        return
+    token = str(getattr(bundle, "token", "") or "")
+    gateway = str(getattr(bundle, "gateway_url", "") or "")
+    if not token or not gateway:
+        yield                                  # a malformed bundle: never block the run on a missing heartbeat target
+        return
+    send = post if post is not None else _post_heartbeat
+    interval = _worker_heartbeat_interval_s() if interval_s is None else float(interval_s)
+    stop = threading.Event()
+    dead = threading.Event()                   # set once the gateway refused a ping terminally
+
+    def _ping() -> bool:
+        """One ping; True iff the gateway refused it TERMINALLY. Never raises (a transient error is not terminal)."""
+        try:
+            return int(send(gateway, token)) in _HEARTBEAT_STOP_CODES
+        except Exception:  # noqa: BLE001 — a heartbeat is best-effort: it never breaks the run
+            return False
+
+    if _ping():                                # the first ping opens the slot (bills nothing)
+        yield                                  # already terminal (e.g. the grant is exhausted): the model path pauses
+        return
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            if _ping():
+                dead.set()                     # that refusing ping already committed the open slot: stop pinging
+                return
+
+    beater = threading.Thread(target=_loop, name="vigil-worker-heartbeat", daemon=True)
+    beater.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        beater.join(timeout=2.0)               # no periodic ping may race the final one
+        if not dead.is_set():
+            _ping()                            # a final ping commits the last slot's elapsed time before the settle
+
+
 #: The low-impact self-serve engage profile. Customer authorities are minted ``allow_destructive=False``
 #: (``add_customer_target``), so the engine's destructive-confirm gate already refuses destructive tools; the
 #: run therefore stays read-only/non-destructive without a special flag. Left empty = run_engagement's
@@ -456,6 +559,8 @@ def make_engage_worker(
     completion_spool_dir: Any = None,
     signers: "Optional[list]" = None,
     emit_completion: bool = True,
+    heartbeat_post: "Optional[Callable[[str, str], int]]" = None,
+    heartbeat_interval_s: "Optional[float]" = None,
 ) -> "Callable[[SecurityJob], Any]":
     """Build the customer-launch worker: ``(SecurityJob) -> result``. Invoked ONLY by ``JobRunner.run_one``,
     i.e. only after ``build_customer_launch_gate`` allowed the job. It loads the VERIFIED customer authority
@@ -585,7 +690,9 @@ def make_engage_worker(
         try:
             with _model_grant_scope(grant_bundle, grant_model, grant_effort):  # M1c-2b: metered env (no-op when flat)
                 with _model_routing_scope(routing_override):      # EC-7: scope CRUCIBLE_MODEL_ROUTING to the tier (no-op when off)
-                    result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
+                    # W4 — meter the run's worker time on the sovereign side while it executes (no-op when flat).
+                    with _worker_heartbeat_scope(grant_bundle, post=heartbeat_post, interval_s=heartbeat_interval_s):
+                        result = runner(slug=job.slug, seed_url=seed_url, resume=resume, **kwargs)
         except Exception as _run_exc:  # noqa: BLE001 — a run failure re-raises (JobRunner -> failed + release_delivery -> re-drive)
             # M1c-2b — a METERED run whose prepaid credits are exhausted (the model gateway's terminal credit stop)
             # is a reversible CREDIT PAUSE, not a failure: HOLD the lease for a W3 top-up + resume. Classify it

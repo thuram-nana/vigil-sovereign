@@ -120,6 +120,9 @@ _log = logging.getLogger(__name__)
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 BUDGET_PATH = "/v1/vigil/budget"
+#: W4 — a metered run's keyless worker POSTs an empty, grant-authenticated ping here while it is running. The
+#: SOVEREIGN gateway (never the keyless worker) measures the time between pings and bills it (``GrantMeter.worker_heartbeat``).
+WORKER_HEARTBEAT_PATH = "/v1/vigil/worker/heartbeat"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _PASS_RESPONSE_HEADERS = ("request-id", "retry-after", "x-should-retry")
 _MIN_OUTPUT_TOKENS = 1024        # below this a request cannot do useful work: the run's budget is reached
@@ -254,6 +257,10 @@ class _LaunchState:
     poisoned: bool = False                                   # the file failed after a call: refuse the launch
     opens: "dict[str, int]" = field(default_factory=dict)   # request id -> reserved (unmatched ``open`` lines)
     opens_mc: "dict[str, int]" = field(default_factory=dict)  # request id -> its worst-case customer charge (mc)
+    # W4 — open worker-time slots: wid -> (ts the slot was reserved, reserved seconds, reserved mc). A heartbeat
+    # commits a slot's real elapsed time (bounded by its reserved seconds) and opens the next; an uncommitted slot
+    # lapses at close (VIGIL's cost, never billed). Its reserved_mc counts in ``pending_mc`` (the shared allowance).
+    worker_opens: "dict[str, tuple[float, int, int]]" = field(default_factory=dict)
     charged_mc: int = 0                                     # customer charge of the confirmed responses (mc)
     pending_mc: int = 0                                     # worst-case customer charge of the requests in flight
     unpriced_usage: mm.Usage = field(default_factory=mm.Usage)  # usage lines with no recorded charge
@@ -547,9 +554,18 @@ class GrantMeter:
                 st.opens_mc.pop(rid, None)               # unconfirmed: VIGIL's cost, never the customer's (I9)
                 st.orphaned[rid] = int(line["reserved"])
                 st.unconfirmed_nano += int(line["reserved"])
+            elif kind == "worker_open":                  # W4: a reserved worker-time slot (not yet billed)
+                st.worker_opens[str(line["wid"])] = (float(line["ts"]), int(line["reserved_s"]),
+                                                      int(line["reserved_mc"]))
+            elif kind == "worker":                       # W4: a committed worker-time slot (its real elapsed, billed)
+                st.worker_opens.pop(str(line["wid"]), None)
+                st.charged_mc += int(line["charge_mc"])
+            elif kind == "premium":                      # W4: one premium external API call, priced from the card
+                st.charged_mc += int(line["charge_mc"])
             elif kind == "close":
                 st.closed = True
-        st.pending_mc = sum(st.opens_mc.values())
+        # the pending customer charge is the in-flight AI requests plus the open (un-committed) worker slots
+        st.pending_mc = sum(st.opens_mc.values()) + sum(wo[2] for wo in st.worker_opens.values())
         return st
 
     def _orphan(self, fd: int, st: _LaunchState, rids: "list[str]", *, now: float) -> None:
@@ -588,11 +604,13 @@ class GrantMeter:
                                          now=time.time())
                         st.opens.clear()
                         st.opens_mc.clear()
+                        st.worker_opens.clear()         # a worker slot a prior process opened will never be committed
                         st.pending_mc = 0
                 else:
                     st = self._replay(mid)
                     st.opens.clear()                    # this process tracks only the requests it admits itself
                     st.opens_mc.clear()
+                    st.worker_opens.clear()
                     st.pending_mc = 0
                 self._states[mid] = st
             return st
@@ -850,6 +868,111 @@ class GrantMeter:
         self._settle(grant, rid, line, cost=cost_nano, held=held_nano, usage=usage, now=now,
                      charge_reservation=charge_reservation)
 
+    # -- W4: worker time + premium external APIs (the same hash-chained meter, priced from the rate card) -----
+    def worker_heartbeat(self, grant: ModelGrant, *, slot_s: int, allowance_mc: Optional[int],
+                         now: float) -> "dict[str, Any]":
+        """W4 — a metered run's worker-time heartbeat, measured on THIS (sovereign) side from the gateway clock.
+
+        Commits the seconds since the previous heartbeat (bounded by the slot it reserved) as a ``worker`` charge
+        line — ``clamp(now - ts_opened, 0, reserved_s)`` priced by :meth:`RateCard.worker_line`, the rate recorded so
+        a later card change never re-prices it — then reserves the next ``slot_s``-second slot if the launch's
+        prepaid ``allowance_mc`` covers it beside its confirmed and in-flight charges. The FIRST heartbeat only
+        reserves (bills nothing); a run that stops heartbeating leaves its last slot uncommitted — that unconfirmed
+        slot is VIGIL's cost (I9), never billed. The keyless worker sends no number: it only pings, and the gateway
+        measures the interval, so a run can neither inflate the time (it is clamped to the reserved slot and measured
+        here) nor is it ever charged for time it did not run. Returns
+        ``{"ok", "billed_seconds", "opened", "exhausted"}`` (ok False with ``reason`` ``closed`` / ``meter``)."""
+        if self.rate_card is None:
+            return {"ok": False, "reason": "meter"}     # worker time needs the card to price: never meter blind
+        card = self.rate_card
+        mid = grant.meter_id
+        st = self._state(mid)
+        with st.cond:
+            if st.closed or self._closed_elsewhere(mid):
+                st.closed = True
+                return {"ok": False, "reason": "closed"}
+            if st.poisoned:
+                return {"ok": False, "reason": "meter"}
+            billed_s = 0
+            opened = False
+            try:
+                with self._locked(mid) as fd:
+                    if self._stopped:
+                        return {"ok": False, "reason": "meter"}
+                    if self._closed_elsewhere(mid):     # re-checked under the file lock the settle step holds
+                        st.closed = True
+                        return {"ok": False, "reason": "closed"}
+                    # commit every open slot (normally one): bill its real elapsed, bounded by what it reserved
+                    for wid in list(st.worker_opens):
+                        ts0, reserved_s, reserved_mc = st.worker_opens[wid]
+                        secs = max(0, min(int(now - ts0), reserved_s))
+                        line = card.worker_line(secs)
+                        self._write(fd, {"kind": "worker", "ts": now, "wid": wid, "billed_s": secs,
+                                         "charge_mc": line.amount_mc, "rate_mc": line.rate.mc,
+                                         "rate_per": line.rate.per, "org_id": grant.org_id, "grant_id": grant.grant_id})
+                        del st.worker_opens[wid]
+                        st.charged_mc += line.amount_mc
+                        st.pending_mc = max(0, st.pending_mc - reserved_mc)
+                        billed_s += secs
+                    # reserve the next slot, if the prepaid allowance covers it beside confirmed + in-flight charges
+                    reserved_s = int(slot_s)
+                    reserved_mc = int(card.worker_line(reserved_s).amount_mc)
+                    if allowance_mc is None or st.charged_mc + st.pending_mc + reserved_mc <= allowance_mc:
+                        wid = secrets.token_hex(8)
+                        self._write(fd, {"kind": "worker_open", "ts": now, "wid": wid, "reserved_s": reserved_s,
+                                         "reserved_mc": reserved_mc, "org_id": grant.org_id,
+                                         "grant_id": grant.grant_id, "boot": self.boot})
+                        st.worker_opens[wid] = (now, reserved_s, reserved_mc)
+                        st.pending_mc += reserved_mc
+                        opened = True
+            except (OSError, ValueError):
+                # a write failed part-way: state matches exactly what landed (updates follow each successful write)
+                _log.exception("model gateway: a worker-time heartbeat could not be recorded")
+                return {"ok": False, "reason": "meter"}
+            st.cond.notify_all()
+            return {"ok": True, "billed_seconds": billed_s, "opened": opened, "exhausted": not opened}
+
+    def commit_premium(self, grant: ModelGrant, api: str, calls: int, *, allowance_mc: Optional[int],
+                       now: float) -> "dict[str, Any]":
+        """W4 — meter ``calls`` calls to the premium external API / tool ``api``, priced from the PUBLISHED rate card
+        (:meth:`RateCard.premium_line`; an unpriced ``api`` raises :class:`RateCardError` BEFORE anything is written
+        — a billable call is never metered free, and the SOVEREIGN prices it, never a wire number). Reserve-before-
+        forward: the charge must fit the launch's ``allowance_mc`` beside its confirmed and in-flight charges, else it
+        is refused (``allowance``) and nothing is written. Writes one ``premium`` line with the charge and the rate
+        that applied. The hook a sovereign premium-API proxy (the model-gateway pattern: it holds the key, forwards
+        the call and counts its OWN forwarded calls) calls; ``calls`` is the proxy's exact count, so the reservation
+        is the charge. Returns ``{"ok", "charge_mc", "api"}`` (ok False with ``reason`` ``closed`` / ``meter`` /
+        ``allowance``)."""
+        if self.rate_card is None:
+            return {"ok": False, "reason": "meter"}
+        line = self.rate_card.premium_line(api, calls)   # raises RateCardError on an unpriced api / a bad count
+        mid = grant.meter_id
+        st = self._state(mid)
+        with st.cond:
+            if st.closed or self._closed_elsewhere(mid):
+                st.closed = True
+                return {"ok": False, "reason": "closed"}
+            if st.poisoned:
+                return {"ok": False, "reason": "meter"}
+            if allowance_mc is not None and st.charged_mc + st.pending_mc + line.amount_mc > allowance_mc:
+                return {"ok": False, "reason": "allowance"}
+            try:
+                with self._locked(mid) as fd:
+                    if self._stopped:
+                        return {"ok": False, "reason": "meter"}
+                    if self._closed_elsewhere(mid):
+                        st.closed = True
+                        return {"ok": False, "reason": "closed"}
+                    self._write(fd, {"kind": "premium", "ts": now, "api": line.unit, "label": line.label,
+                                     "calls": int(calls), "charge_mc": line.amount_mc, "rate_mc": line.rate.mc,
+                                     "rate_per": line.rate.per, "org_id": grant.org_id, "grant_id": grant.grant_id})
+            except (OSError, ValueError):
+                _log.exception("model gateway: a premium API charge could not be recorded")
+                return {"ok": False, "reason": "meter"}
+            st.charged_mc += line.amount_mc
+            st.cond.notify_all()
+            return {"ok": True, "charge_mc": line.amount_mc, "api": line.unit}
+
     def owed(self) -> int:
         """How many records a failed write still owes, across every launch."""
         with self._guard:
@@ -928,17 +1051,27 @@ class GrantMeter:
         with st.cond:
             return st.pending_nano
 
-    def usage_records(self, mid: str) -> "list[dict[str, Any]]":
-        """Every metered response of a launch, oldest first, read from disk with its hash chain checked (raises
-        ``ValueError`` if broken or malformed): ``{"ts", "model", "request_id", "usage"}`` with ``usage`` a
-        :class:`~vigil_core.model_metering.Usage`, plus — on a line the gateway priced (W2a) — ``charge_mc``, the
-        ``rates`` that applied (``unit -> [mc, per]``) and ``charged_reservation``. Read-only; the customer's
-        per-charge statement is built from it."""
+    def charge_records(self, mid: str) -> "list[dict[str, Any]]":
+        """W4 — every CHARGE-bearing line of a launch, oldest first, read from disk with its hash chain checked
+        (raises ``ValueError`` if broken or malformed). Each record carries a ``kind``:
+
+          * ``ai`` — one metered model response: ``{"ts", "model", "request_id", "usage"}`` (``usage`` a
+            :class:`~vigil_core.model_metering.Usage`), plus — on a line the gateway priced (W2a) — ``charge_mc``, the
+            ``rates`` that applied (``unit -> [mc, per]``) and ``charged_reservation``;
+          * ``worker`` — one committed worker-time slot: ``{"ts", "seconds", "charge_mc", "rate_mc", "rate_per"}``;
+          * ``premium`` — one premium external API call: ``{"ts", "api", "label", "calls", "charge_mc", "rate_mc",
+            "rate_per"}``.
+
+        Read-only; the customer's per-charge statement and the exact metered settle (``LaunchGate.metered_use_mc``)
+        are built from it. A worker / premium line always carries ``charge_mc`` (the sovereign recorded it from the
+        card in force); an ``ai`` line recorded before W2a carries none and is priced by the caller at read time."""
         out: "list[dict[str, Any]]" = []
         try:
             for line, _h in self._lines(mid):
-                if line["kind"] == "usage":
-                    rec: "dict[str, Any]" = {"ts": float(line["ts"]), "model": str(line.get("model", "")),
+                kind = line["kind"]
+                if kind == "usage":
+                    rec: "dict[str, Any]" = {"kind": "ai", "ts": float(line["ts"]),
+                                             "model": str(line.get("model", "")),
                                              "request_id": str(line.get("request_id", "")),
                                              "usage": mm.Usage(**line["usage"])}
                     if "charge_mc" in line:                      # W2a: the charge and the rates that applied
@@ -946,9 +1079,25 @@ class GrantMeter:
                         rec["rates"] = {str(u): [int(r[0]), int(r[1])] for u, r in dict(line.get("rates", {})).items()}
                         rec["charged_reservation"] = bool(line.get("charged_reservation", False))
                     out.append(rec)
+                elif kind == "worker":
+                    out.append({"kind": "worker", "ts": float(line["ts"]), "seconds": int(line["billed_s"]),
+                                "charge_mc": int(line["charge_mc"]), "rate_mc": int(line["rate_mc"]),
+                                "rate_per": int(line["rate_per"])})
+                elif kind == "premium":
+                    out.append({"kind": "premium", "ts": float(line["ts"]), "api": str(line.get("api", "")),
+                                "label": str(line.get("label", "")), "calls": int(line["calls"]),
+                                "charge_mc": int(line["charge_mc"]), "rate_mc": int(line["rate_mc"]),
+                                "rate_per": int(line["rate_per"])})
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"meter file {mid[:8]}… is corrupt (a malformed record: {type(exc).__name__})") from None
         return out
+
+    def usage_records(self, mid: str) -> "list[dict[str, Any]]":
+        """Every metered AI response of a launch, oldest first (the ``ai`` records of :meth:`charge_records`, without
+        the ``kind`` tag): ``{"ts", "model", "request_id", "usage"}`` plus — on a line the gateway priced (W2a) —
+        ``charge_mc``, the ``rates`` that applied and ``charged_reservation``. Read-only; kept for the AI cost view."""
+        return [{k: v for k, v in rec.items() if k != "kind"}
+                for rec in self.charge_records(mid) if rec["kind"] == "ai"]
 
     def verify(self, mid: str) -> MeterTotals:
         """Re-read the launch's file from disk, checking the hash chain (raises ``ValueError`` if broken)."""
@@ -1067,6 +1216,11 @@ class GatewayConfig:
     allowance: Any = None
     allowance_required: bool = False
     allowance_chunk_credits: int = 100          # the credits one extension holds at least (a holding size, not a price)
+    #: W4 — the worker-time slot (seconds) a run's heartbeat reserves at a time: each heartbeat commits at most this
+    #: many seconds of billed worker time (so a stalled worker, a clock jump or a late ping can never bill more than
+    #: the slots it reserved), and the next slot is reserved from the launch's prepaid allowance. A measurement bound,
+    #: not a price. The worker heartbeats more often than this (default every ~30 s) so each interval is well under it.
+    worker_slot_s: int = 60
     #: PRICING G1 (default OFF). ``g1`` turns on capacity sized from the provider's rate-limit headers, the per-tenant
     #: fair share, the provider-account pool with health + failover, and the loss alarm. With it off NONE of the below
     #: is built and the gateway is byte-identical to its pre-G1 self.
@@ -1166,6 +1320,8 @@ class ModelGateway:
         self._extend_guard = threading.Lock()
         if config.allowance_chunk_credits < 1:
             raise ValueError("the allowance chunk must be at least 1 credit")
+        if config.worker_slot_s < 1:
+            raise ValueError("the worker-time slot must be at least 1 second")
         self._stop = threading.Event()
         self._flusher = threading.Thread(target=self._flush_loop, name="model-gateway-flush", daemon=True)
         self._flusher.start()
@@ -1353,6 +1509,31 @@ class ModelGateway:
                 "remaining_nano_usd": max(0, cap - used), "fraction_used": (min(1.0, used / cap) if cap else 1.0),
                 "fraction_spent": (min(1.0, spent / cap) if cap else 1.0),
                 "requests": t.requests, "closed": self.meter.is_closed(grant.meter_id)}
+
+    def worker_heartbeat(self, grant: ModelGrant, *, now: float) -> dict:
+        """W4 — handle a metered run's worker-time heartbeat (``WORKER_HEARTBEAT_PATH``): ensure the prepaid
+        allowance can hold one worker slot (taking an extension from the wallet if needed, W2b), then commit the
+        time since the last heartbeat and reserve the next slot (``GrantMeter.worker_heartbeat``). A run whose wallet
+        cannot cover the next slot is paused (403, the W3 credit-stop), so worker time stops being billed; a closed
+        meter (the run settled) is a terminal 403; a meter that cannot be written is a retryable 529. Returns the
+        seconds just billed and the next slot, for the worker's log."""
+        slot_s = self.config.worker_slot_s
+        slot_mc = int(self.config.rate_card.worker_line(slot_s).amount_mc)
+        allowance: Optional[int] = None
+        if self.config.allowance is not None:
+            allowance = self.ensure_allowance(grant, slot_mc)   # may take an extension; raises a retryable refusal
+        elif self.config.allowance_required:
+            # metered billing is on but no allowance source is wired: never accrue worker time the wallet does not back
+            raise _Refusal(529, "overloaded_error", "VIGIL cannot check this run's credits right now", retry_after=5)
+        out = self.meter.worker_heartbeat(grant, slot_s=slot_s, allowance_mc=allowance, now=now)
+        if not out.get("ok"):
+            if out.get("reason") == "closed":
+                raise _Refusal(403, "permission_error", "this run's model grant is closed (the run was settled)")
+            raise _Refusal(529, "overloaded_error", "VIGIL cannot meter this run right now")
+        if out.get("exhausted"):
+            # the wallet cannot cover the next worker slot: the scan pauses (W3); worker time stops being billed
+            raise _Refusal(403, "permission_error", CREDITS_EXHAUSTED, stop=STOP_CREDITS_EXHAUSTED)
+        return {"ok": True, "billed_seconds": out["billed_seconds"], "next_slot_s": slot_s}
 
     # -- request shaping -------------------------------------------------------------------------------------
     def authenticate(self, headers: Mapping[str, str], *, allow_expired: bool = False) -> ModelGrant:
@@ -1820,6 +2001,14 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not self.server.request_started(self.connection):   # type: ignore[attr-defined]
                 raise _Refusal(529, "overloaded_error", "the VIGIL model gateway is stopping; retry")
+            if path == WORKER_HEARTBEAT_PATH:
+                # W4 — a worker-time heartbeat: authenticate the grant (NOT allow_expired, so worker time is bounded
+                # to the grant's lifetime = the lease window) and let the SOVEREIGN gateway measure + bill the time.
+                # It reads no body and holds no model slot (it is not a model request).
+                grant = self.gw.authenticate(self._headers_lower())
+                self._request_complete()
+                self._send(200, json.dumps(self.gw.worker_heartbeat(grant, now=self.gw.config.clock())).encode())
+                return
             if path not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
                 raise _Refusal(404, "not_found_error", "not found")
             headers = self._headers_lower()
@@ -2461,6 +2650,7 @@ def config_from_env(allowance: Any = None) -> GatewayConfig:
                          daily_limit_nano=_daily_limit_nano(),
                          allowance=allowance, allowance_required=config.metered_billing_enabled(),
                          allowance_chunk_credits=mm.allowance_chunk_credits(),
+                         worker_slot_s=_int_env("VIGIL_WORKER_HEARTBEAT_SLOT_S", 60),
                          g1=g1, accounts=accounts, loss_alarm_file=loss_file)
 
 

@@ -568,6 +568,7 @@ jobs:
               integration/tests/test_launch_drain.py \
               integration/tests/test_engage_runner.py \
               integration/tests/test_engage_worker_metered.py \
+              integration/tests/test_engage_worker_heartbeat.py \
               integration/tests/test_live_metered_wiring.py \
               integration/tests/test_engage_worker_pause_redrive.py \
               integration/tests/test_launch_pause_redrive_gate.py \
