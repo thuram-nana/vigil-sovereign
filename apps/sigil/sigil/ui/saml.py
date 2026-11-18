@@ -1,0 +1,411 @@
+"""Consumer PR-H (Area 7) — SAML 2.0 Web-SSO assertion verification (the identity proof; NEVER authority).
+
+Doctrine, identical to `ui.oidc`: a SAML assertion proves WHO the user is; it NEVER carries a role. The caller
+(`ui.scim` / the provisioner) maps the verified identity to an OWNER-SIGNED membership whose role comes from the
+owner-signed `governor.sso_config`, capped at the ceiling — the IdP authenticates, the owner still authorizes.
+
+WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion is refused):
+
+  1. XML HARDENING — a DOCTYPE/DTD is refused outright at the expat level (so NO internal/external entity can be
+     declared or expanded: XXE and billion-laughs are closed by construction), plus a byte-size cap.
+  2. EXACTLY ONE ASSERTION in the whole document, and NO two elements share an `ID` — the structural core of the
+     signature-wrapping (XSW) defence: an attacker cannot smuggle a second, forged assertion for the processor
+     to read while the signature covers a hidden original.
+  3. SIGNATURE BINDING — the cryptographic signature (verified by the pluggable `sig_verifier` backend) must
+     validly cover EITHER the one processed assertion itself OR the enveloping Response; because step 2 proved
+     there is exactly one assertion in the document, a valid signature over the assertion/Response provably
+     covers the element we read (no wrapping gap). A signature over any OTHER id does not satisfy the binding.
+  4. ISSUER == the org's configured `idp_entity_id`.
+  5. AUDIENCE restriction CONTAINS the org's `sp_entity_id` (org-scoping — org A's assertion fails org B).
+  6. RECIPIENT / DESTINATION == the org's `acs_url`.
+  7. TIME WINDOWS — Conditions NotBefore/NotOnOrAfter and SubjectConfirmationData NotOnOrAfter, within the
+     configured clock skew. A missing NotOnOrAfter is refused (it bounds the replay window).
+  8. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger; a second presentation refuses.
+
+THE SIGNATURE CRYPTO BACKEND (honest boundary — see module `honest_todo`). Byte-correct XML-DSig verification
+needs EXCLUSIVE XML canonicalisation (`xml-exc-c14n#`); Python's stdlib `ElementTree.canonicalize` implements
+only C14N 2.0, and no vetted XML-DSig library (`signxml` / `xmlsec`) is vendored in this environment. Rolling an
+exclusive-c14n by hand — with no trusted conformance vectors to test it against — is exactly the unprovable
+"fake-fixture" antipattern this codebase forbids, so this module does NOT do it. Instead the crypto is a
+PLUGGABLE backend `sig_verifier(xml_bytes, cert_pems) -> frozenset[str]` returning the element ids whose
+signature validly verifies under one of the owner-configured certs. The shipped default
+(`signxml_sig_verifier`) uses `signxml` when it is importable and otherwise FAILS CLOSED (returns the empty set
+⇒ every assertion refused). So with the flag off, or without a vetted backend, SAML login is inert/refusing —
+never falsely accepting. The structural / temporal / audience / replay / XSW-binding layer above is complete and
+fully tested (a test injects a verifier that attests which ids are "signed", which is how the XSW-binding and
+accept paths are exercised without depending on byte-correct c14n).
+
+FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix`. Stdlib + `sigil.config`/`sigil.reuse` only.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, NamedTuple, Optional
+
+from ..reuse import assert_no_offense
+
+assert_no_offense()
+
+# SAML / XML-DSig namespaces.
+_NS_ASSERT = "urn:oasis:names:tc:SAML:2.0:assertion"
+_NS_PROTO = "urn:oasis:names:tc:SAML:2.0:protocol"
+_NS_DS = "http://www.w3.org/2000/09/xmldsig#"
+
+_A = lambda local: f"{{{_NS_ASSERT}}}{local}"      # noqa: E731 — tiny tag builders, local to this module
+_P = lambda local: f"{{{_NS_PROTO}}}{local}"       # noqa: E731
+_D = lambda local: f"{{{_NS_DS}}}{local}"          # noqa: E731
+
+# A SAML Response is a few KiB; cap the input so a hostile IdP/relay cannot stream an unbounded body.
+_MAX_SAML_BYTES = 4 * 1024 * 1024
+
+# The signature-verifier backend contract: given the raw signed bytes and the owner-configured IdP certs (PEM),
+# return the set of element `ID`s whose enveloped signature validly verifies under one of those certs. An empty
+# set means "no valid signature" (fail-closed).
+SigVerifier = Callable[[bytes, tuple], "frozenset[str]"]
+
+
+class SamlError(Exception):
+    """A fail-closed SAML refusal. The route maps it to a 401; it never leaks assertion internals."""
+
+
+class SamlIdentity(NamedTuple):
+    """The verified identity an assertion asserts — IDENTITY ONLY (no role). `groups` are the IdP-asserted group
+    names the caller feeds to `scim.resolve_role` to SELECT among the owner-signed config map (never authority)."""
+    name_id: str
+    assertion_id: str
+    attributes: dict
+    groups: tuple
+    session_index: str = ""
+
+
+# ---------------------------------------------------------------------------------------------------
+# XML hardening — refuse a DTD outright (no entities can then exist), cap the size, parse.
+# ---------------------------------------------------------------------------------------------------
+
+class _DtdFound(Exception):
+    """Internal sentinel raised the instant expat sees a `<!DOCTYPE` — it fires at the DOCTYPE *start*, BEFORE
+    any entity declaration in the internal subset is read or expanded, so aborting here closes billion-laughs
+    and XXE at the source (no entity ever exists to expand or resolve)."""
+
+
+def _reject_dtd(xml_bytes: bytes) -> None:
+    """A raw-expat pre-pass that FAILS CLOSED if the document declares a DOCTYPE/DTD. The C-accelerated
+    `ElementTree.XMLParser` exposes no handler hook (its `.parser` is None), so DTD rejection is done here with
+    `xml.parsers.expat` directly — whose `StartDoctypeDeclHandler` raises `_DtdFound` at the DOCTYPE start,
+    aborting before any `<!ENTITY>` is read. External entity resolution is also refused. On a malformed document
+    we return quietly and let the real tree parse below raise the precise `SamlError`."""
+    from xml.parsers import expat
+    p = expat.ParserCreate()
+
+    def _on_doctype(*_a):
+        raise _DtdFound()
+
+    p.StartDoctypeDeclHandler = _on_doctype
+    p.ExternalEntityRefHandler = lambda *_a, **_k: 0   # 0 ⇒ refuse external entity resolution
+    try:
+        p.Parse(bytes(xml_bytes), True)
+    except _DtdFound:
+        raise SamlError("refusing a SAML document that declares a DOCTYPE/DTD (XXE / entity-expansion defence)")
+    except expat.ExpatError:
+        return                                         # malformed — the ET parse below raises the real error
+
+
+def _parse_hardened(xml_bytes: bytes) -> ET.Element:
+    """Parse `xml_bytes` into an ElementTree root, FAIL-CLOSED. A DOCTYPE/DTD is refused up front (`_reject_dtd`)
+    so NO internal or external entity can be declared — XXE and billion-laughs are closed by construction. With
+    no DTD, only the five predefined XML entities exist; any other `&foo;` is an undefined-entity ParseError
+    (⇒ refusal). A byte-size cap bounds the input."""
+    if not isinstance(xml_bytes, (bytes, bytearray)):
+        raise SamlError("SAML input must be bytes")
+    if len(xml_bytes) > _MAX_SAML_BYTES:
+        raise SamlError("SAML document exceeds the size cap")
+    if len(xml_bytes) == 0:
+        raise SamlError("empty SAML document")
+    _reject_dtd(xml_bytes)
+    try:
+        root = ET.fromstring(bytes(xml_bytes))
+    except SamlError:
+        raise
+    except Exception as e:  # noqa: BLE001 — any malformed-XML / undefined-entity error → fail-closed refusal
+        raise SamlError("SAML document is not well-formed XML") from e
+    if root is None:
+        raise SamlError("SAML document has no root element")
+    return root
+
+
+def _collect_ids(root: ET.Element) -> dict:
+    """Every element carrying an `ID` attribute → {id: element}, FAIL-CLOSED on a DUPLICATE id (a classic XSW
+    primitive — two elements sharing an id let a signature reference resolve to the wrong one)."""
+    ids: dict = {}
+    for el in root.iter():
+        v = el.get("ID")
+        if v is None:
+            continue
+        if v in ids:
+            raise SamlError("duplicate ID in SAML document (signature-wrapping defence)")
+        ids[v] = el
+    return ids
+
+
+def _single_assertion(root: ET.Element) -> ET.Element:
+    """The ONE `<saml:Assertion>` in the document, FAIL-CLOSED on zero or more than one (the XSW structural
+    core: with exactly one assertion in the whole document the attacker cannot present a second forged one)."""
+    assertions = [el for el in root.iter(_A("Assertion"))]
+    if not assertions:
+        raise SamlError("no <saml:Assertion> in the SAML document")
+    if len(assertions) > 1:
+        raise SamlError(f"refusing {len(assertions)} assertions (exactly one is required; XSW defence)")
+    return assertions[0]
+
+
+# ---------------------------------------------------------------------------------------------------
+# SAML timestamp parsing (ISO-8601 UTC) — fail-closed.
+# ---------------------------------------------------------------------------------------------------
+
+def _parse_instant(value: Optional[str], what: str) -> float:
+    """Parse a SAML xsd:dateTime (e.g. `2024-01-01T00:00:00Z` / with fractional seconds) to an epoch float,
+    FAIL-CLOSED. A missing/unparseable/non-UTC-resolvable instant raises — the time guards must never silently
+    pass on a value they could not understand."""
+    s = str(value or "").strip()
+    if not s:
+        raise SamlError(f"SAML {what} is missing")
+    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as e:
+        raise SamlError(f"SAML {what} is not a valid instant") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Replay ledger — atomic single-use per assertion ID (mirrors ui.oidc.OidcStateStore's marker idiom).
+# ---------------------------------------------------------------------------------------------------
+
+class SamlReplayLedger:
+    """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, not_on_or_after)`
+    O_EXCL-creates a marker named `sha256(id)` (fixed hex, no traversal/newline injection); the exclusive create
+    is the serialization point, so of N concurrent presentations exactly ONE wins and the rest are refused
+    (replay). A per-spend sweep + a hard cap bound the directory; a marker older than the assertion's
+    NotOnOrAfter (+ grace) is reaped (by then the temporal guard refuses the assertion anyway). Stdlib only."""
+
+    _DEFAULT_MAX = 65536
+    _GRACE = 300.0
+
+    def __init__(self, path, *, max_outstanding: int = _DEFAULT_MAX) -> None:
+        self.dir = Path(path)
+        self.max_outstanding = int(max_outstanding)
+
+    def _marker(self, assertion_id: str) -> Path:
+        return self.dir / hashlib.sha256(assertion_id.encode("utf-8")).hexdigest()
+
+    def _sweep(self, now: float) -> int:
+        live = 0
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for entry in entries:
+            try:
+                rec = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+                expiry = float(rec["exp"])
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                self._unlink(entry.path)
+                continue
+            if now > expiry + self._GRACE:
+                self._unlink(entry.path)
+            else:
+                live += 1
+        return live
+
+    @staticmethod
+    def _unlink(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def try_spend(self, assertion_id: str, not_on_or_after: float, *, now: Optional[float] = None) -> bool:
+        """True iff this assertion ID is spent for the FIRST time (accept); False if already spent (replay →
+        refuse). Fail-closed on a blank id. A real I/O error at the exclusive-create raises (the caller refuses)."""
+        aid = str(assertion_id or "").strip()
+        if not aid:
+            return False
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        t = time.time() if now is None else float(now)
+        if self._sweep(t) >= self.max_outstanding:
+            raise SamlError("SAML replay ledger at capacity")
+        marker = self._marker(aid)
+        payload = json.dumps({"exp": float(not_on_or_after)}, ensure_ascii=False)
+        try:
+            fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False                                  # already spent → replay refused
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return True
+
+
+# ---------------------------------------------------------------------------------------------------
+# The signature-verifier backend (pluggable; default FAILS CLOSED without a vetted XML-DSig library).
+# ---------------------------------------------------------------------------------------------------
+
+def signxml_sig_verifier(xml_bytes: bytes, cert_pems: tuple) -> "frozenset[str]":
+    """The shipped default backend. Uses `signxml` (a vetted XML-DSig implementation) when it is importable,
+    returning the set of element ids whose enveloped signature validly verifies under one of `cert_pems`.
+    When `signxml` is NOT available (this environment), it FAILS CLOSED — returns the empty set, so every
+    assertion is refused — rather than guess at exclusive-c14n by hand. See the module honest-boundary note."""
+    try:
+        from signxml import XMLVerifier
+    except Exception:  # noqa: BLE001 — not vendored here ⇒ fail closed (no signature is ever "valid")
+        return frozenset()
+    verified_ids: set[str] = set()
+    for pem in cert_pems or ():  # pragma: no cover — exercised only where signxml is installed
+        try:
+            results = XMLVerifier().verify(bytes(xml_bytes), x509_cert=pem, expect_references=None)
+            for r in (results if isinstance(results, (list, tuple)) else [results]):
+                el = getattr(r, "signed_xml", None)
+                rid = el.get("ID") if el is not None else None
+                if rid:
+                    verified_ids.add(str(rid))
+        except Exception:  # noqa: BLE001 — a cert that does not verify this doc contributes nothing
+            continue
+    return frozenset(verified_ids)
+
+
+# ---------------------------------------------------------------------------------------------------
+# The verifier (the red-pen keystone).
+# ---------------------------------------------------------------------------------------------------
+
+def _text(el: Optional[ET.Element]) -> str:
+    return (el.text or "").strip() if el is not None else ""
+
+
+def _groups_attribute_names() -> frozenset:
+    """The SAML attribute Names we read group membership from (the common IdP conventions). Case-sensitive match
+    on the `Name` / `FriendlyName`."""
+    return frozenset({"groups", "memberOf", "http://schemas.xmlsoap.org/claims/Group",
+                      "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups", "Group", "Groups"})
+
+
+def _extract_attributes(assertion: ET.Element) -> "tuple[dict, tuple]":
+    """Project the AttributeStatement into {name: [values]} and pull the group names out of the group-bearing
+    attributes. Values are plain text (never executed); this is inert projection."""
+    attrs: dict = {}
+    groups: list = []
+    group_names = _groups_attribute_names()
+    for stmt in assertion.findall(_A("AttributeStatement")):
+        for attr in stmt.findall(_A("Attribute")):
+            name = attr.get("Name") or attr.get("FriendlyName") or ""
+            values = [_text(v) for v in attr.findall(_A("AttributeValue")) if _text(v)]
+            if name:
+                attrs[name] = values
+            if name in group_names:
+                groups.extend(values)
+    return attrs, tuple(groups)
+
+
+def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger: SamlReplayLedger,
+                         sig_verifier: Optional[SigVerifier] = None) -> SamlIdentity:
+    """Verify a SAML Response/Assertion against the OWNER-SIGNED `config` (a `governor.sso_config.SsoConfig`,
+    protocol=="saml"), returning the verified `SamlIdentity` or raising `SamlError`. Checks run in a
+    fail-closed order: harden+parse, structural XSW (single assertion, unique ids), SIGNATURE BINDING, issuer,
+    audience, recipient/destination, time windows, and single-use replay. `sig_verifier` defaults to
+    `signxml_sig_verifier` (fail-closed without a vetted backend); tests inject a stub that attests signed ids."""
+    if config is None or getattr(config, "protocol", None) != "saml":
+        raise SamlError("no active SAML config for this org")
+    certs = tuple(getattr(config, "idp_certs_pem", ()) or ())
+    if not certs:
+        raise SamlError("SAML config carries no IdP signing certificate (fail-closed)")
+    verifier = sig_verifier or signxml_sig_verifier
+    skew = int(getattr(config, "clock_skew_seconds", 60) or 0)
+
+    root = _parse_hardened(xml_bytes)
+    _collect_ids(root)                                                # fail-closed on duplicate ids (XSW defence)
+    assertion = _single_assertion(root)                               # fail-closed on != 1 assertion
+    assertion_id = assertion.get("ID") or ""
+    if not assertion_id:
+        raise SamlError("the assertion has no ID (cannot bind a signature or guard replay)")
+
+    # --- SIGNATURE BINDING (XSW): the signature must validly cover the one assertion OR the enveloping root.
+    # Because exactly one assertion exists in the whole document, a valid signature over the assertion or over
+    # the root Response provably covers the element we read — there is no wrapping gap to exploit.
+    signed_ids = verifier(bytes(xml_bytes), certs)
+    if not isinstance(signed_ids, (set, frozenset)):
+        raise SamlError("signature verifier returned a non-set")
+    root_id = root.get("ID") or ""
+    root_is_response = root.tag == _P("Response")
+    bound = (assertion_id in signed_ids) or (root_is_response and bool(root_id) and root_id in signed_ids)
+    if not bound:
+        raise SamlError("no valid signature binds the processed assertion (forged / unsigned / wrapped)")
+
+    # --- ISSUER (the assertion's, falling back to the Response's) == the configured IdP entity id.
+    issuer_el = assertion.find(_A("Issuer"))
+    if issuer_el is None and root_is_response:
+        issuer_el = root.find(_A("Issuer"))
+    if _text(issuer_el) != str(getattr(config, "idp_entity_id", "")):
+        raise SamlError("SAML Issuer does not match the configured IdP entity id")
+
+    # --- AUDIENCE restriction CONTAINS our SP entity id (org-scoping).
+    conditions = assertion.find(_A("Conditions"))
+    if conditions is None:
+        raise SamlError("assertion has no <Conditions> (cannot bound audience/time)")
+    audiences = {_text(a) for restr in conditions.findall(_A("AudienceRestriction"))
+                 for a in restr.findall(_A("Audience"))}
+    if str(getattr(config, "sp_entity_id", "")) not in audiences:
+        raise SamlError("assertion audience does not contain our SP entity id (wrong-tenant / replayed)")
+
+    # --- TIME WINDOWS: Conditions NotBefore/NotOnOrAfter within skew (NotOnOrAfter required — bounds replay).
+    cond_nooa = _parse_instant(conditions.get("NotOnOrAfter"), "Conditions/NotOnOrAfter")
+    if now >= cond_nooa + skew:
+        raise SamlError("assertion Conditions NotOnOrAfter has passed")
+    cond_nb = conditions.get("NotBefore")
+    if cond_nb is not None and now < _parse_instant(cond_nb, "Conditions/NotBefore") - skew:
+        raise SamlError("assertion is not yet valid (Conditions NotBefore)")
+
+    # --- SUBJECT CONFIRMATION: Recipient == our ACS url; NotOnOrAfter within skew.
+    subject = assertion.find(_A("Subject"))
+    if subject is None:
+        raise SamlError("assertion has no <Subject>")
+    scd = None
+    for sc in subject.findall(_A("SubjectConfirmation")):
+        d = sc.find(_A("SubjectConfirmationData"))
+        if d is not None:
+            scd = d
+            break
+    if scd is None:
+        raise SamlError("assertion has no <SubjectConfirmationData> (cannot bind recipient/time)")
+    if str(scd.get("Recipient") or "") != str(getattr(config, "acs_url", "")):
+        raise SamlError("SubjectConfirmationData Recipient does not match our ACS url")
+    scd_nooa = _parse_instant(scd.get("NotOnOrAfter"), "SubjectConfirmationData/NotOnOrAfter")
+    if now >= scd_nooa + skew:
+        raise SamlError("SubjectConfirmationData NotOnOrAfter has passed")
+    # Response Destination, when present, must also be our ACS url.
+    if root_is_response:
+        dest = root.get("Destination")
+        if dest is not None and str(dest) != str(getattr(config, "acs_url", "")):
+            raise SamlError("Response Destination does not match our ACS url")
+
+    # --- REPLAY: spend the assertion ID single-use, bounded by the earliest NotOnOrAfter.
+    window_end = min(cond_nooa, scd_nooa)
+    if not replay_ledger.try_spend(assertion_id, window_end, now=now):
+        raise SamlError("SAML assertion replay refused (ID already spent)")
+
+    # --- IDENTITY (never a role): the NameID, plus attributes and the IdP-asserted groups (for role SELECTION).
+    name_id = _text(subject.find(_A("NameID")))
+    if not name_id:
+        raise SamlError("assertion Subject has no NameID (no usable identity)")
+    attrs, groups = _extract_attributes(assertion)
+    authn = assertion.find(_A("AuthnStatement"))
+    session_index = (authn.get("SessionIndex") if authn is not None else "") or ""
+    return SamlIdentity(name_id=name_id, assertion_id=assertion_id, attributes=attrs, groups=groups,
+                        session_index=str(session_index))
