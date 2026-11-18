@@ -549,6 +549,18 @@ def make_engage_worker(
             kwargs["profile"] = run_tier.engage_profile_for(tier)  # surface|full — the roster NAME (manifest-recorded)
             kwargs.update(_engage_profile_kwargs(kwargs["profile"]))   # the enable_* passes that roster turns ON
             routing_override = run_tier.routing_enabled_for(tier)  # quick ⇒ cheaper tiers on; deep ⇒ capable models
+            # L1 (live Max) — overlay the depth's per-ENGAGEMENT controls (pricing design §6). Only the "max"
+            # depth carries them (engage_controls_for); quick/deep get the inert baseline, so NOTHING is added for
+            # them (byte-identical — the kwargs are passed only when non-default). A Max run is held to ONE rate
+            # limit + connection cap for the whole engagement (a single global throttle, not per-tool) and to
+            # governed tools only — the engine enforces both inside run_engagement / the gated executor.
+            controls = run_tier.engage_controls_for(tier)
+            if controls.governed_tools_only:
+                kwargs["governed_tools_only"] = True
+            if controls.min_request_interval_s > 0.0:
+                kwargs["per_engagement_rate_floor_s"] = controls.min_request_interval_s
+            if controls.connection_cap > 0:
+                kwargs["per_engagement_connection_cap"] = controls.connection_cap
         # M1c-2b — a METERED customer run reaches a model ONLY through the loopback model gateway, spending its
         # owner-signed grant. Read the grant published for THIS launch (written BEFORE the lease, so it is always
         # present for a metered launch's job — the keyless "this run is metered" signal): a usable grant ⇒ metered,

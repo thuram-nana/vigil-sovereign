@@ -395,6 +395,15 @@ class HttpExecutor:
     # existing callers/tests are unaffected.
     egress_allowlist: EgressAllowlist | None = None
 
+    # L1 (live Max) — the per-ENGAGEMENT throttle + connection cap this ONE executor holds (pricing design §6).
+    # Because an engagement builds exactly ONE executor and every gated request rides it, these bound the WHOLE
+    # run (a single global throttle + cap, NEVER one per tool / per agent — a Max run can never hammer a live
+    # target, however many agents call `gated_fetch`). Both default INERT (0.0 / 0 ⇒ no engagement-wide floor,
+    # the default connection pool) so a non-Max executor is byte-identical. `per_engagement_rate_floor_s` only
+    # ever TIGHTENS the posture rate (folded via max() in `_sleep_for_rate_limit`), never loosens it.
+    per_engagement_rate_floor_s: float = 0.0
+    per_engagement_connection_cap: int = 0
+
     # Internal mutable state.
     _requests_made: int = 0
     _last_request_at: float = 0.0
@@ -421,6 +430,10 @@ class HttpExecutor:
     _http_client: httpx.Client | None = None
     _resolved_posture: Posture = "TEST"
     _operator_min_interval: float = 0.0
+    # L1 — the clamped per-engagement rate floor (seconds) folded into every request's rate limit, set from
+    # `per_engagement_rate_floor_s` in __post_init__ (clamped [0, _MAX_MIN_INTERVAL_S], fail-safe like the
+    # operator floor).
+    _per_engagement_rate_floor: float = 0.0
 
     def __post_init__(self) -> None:
         # Resolve posture once at construction.
@@ -434,6 +447,14 @@ class HttpExecutor:
         if self.operator_identifier is None:
             self.operator_identifier = (os.environ.get(_OPERATOR_ID_ENV) or "").strip() or None
         self._operator_min_interval = _env_min_request_interval()
+        # L1 — clamp the per-engagement rate floor the SAME way as the operator floor (fail-safe: a junk /
+        # negative value folds to 0.0 = no engagement floor, a huge one is capped at 1h/request). It is a
+        # per-engagement throttle (the Max depth's single global rate limit), distinct from the operator env
+        # floor; both fold into `_rate_floor()` via max(), so neither can loosen the posture rate.
+        try:
+            self._per_engagement_rate_floor = min(_MAX_MIN_INTERVAL_S, max(0.0, float(self.per_engagement_rate_floor_s)))
+        except (TypeError, ValueError):
+            self._per_engagement_rate_floor = 0.0
         # The off-switch is always present: auto-wire a kill-switch bound
         # to this engagement when the caller did not supply one. This is
         # backward compatible — an absent `.halt` file means not tripped,
@@ -927,6 +948,11 @@ class HttpExecutor:
                 timeout=self.timeout_seconds,
                 follow_redirects=False,  # capture redirect chain manually
             )
+            # L1 — the per-engagement connection cap (one cap for the whole engagement; None ⇒ httpx default pool
+            # ⇒ byte-identical). Applied once when the shared client is built.
+            _limits = self._client_limits()
+            if _limits is not None:
+                kwargs["limits"] = _limits
             if self.egress_allowlist is not None:
                 # Route every request through the sovereign egress guard.
                 # In non-strict sovereign mode the NAME allowlist passes
@@ -1208,6 +1234,31 @@ class HttpExecutor:
         # captured HTTP archive onto tmpfs (purged on exit); default is unchanged.
         return paths.evidence_dir(self.engagement_slug, action_id)
 
+    def _rate_floor(self) -> float:
+        """The minimum inter-request interval this engagement's ONE gated executor holds — the single global
+        throttle across the whole run (per ENGAGEMENT, NEVER per tool / per agent). It is the MAX of three
+        floors, each of which can only TIGHTEN the rate (none can loosen it below the charter posture, so a
+        Max run can never hammer a live target):
+
+          * the charter POSTURE floor (``_RATE_PROFILES[self._resolved_posture]``);
+          * the OPERATOR env floor (``VIGIL_MIN_REQUEST_INTERVAL_S`` → ``_operator_min_interval``);
+          * the PER-ENGAGEMENT floor (``per_engagement_rate_floor_s`` → ``_per_engagement_rate_floor`` — the L1
+            live-Max rate; ``0.0`` ⇒ inert, so a non-Max executor's floor is exactly the posture+operator max).
+
+        Pure read of the resolved fields; ``_sleep_for_rate_limit`` calls it under the lock."""
+        posture_floor, _jitter = _RATE_PROFILES[self._resolved_posture]
+        return max(posture_floor, self._operator_min_interval, self._per_engagement_rate_floor)
+
+    def _client_limits(self) -> "httpx.Limits | None":
+        """The per-engagement CONNECTION cap this one executor imposes on the httpx pool (L1 live-Max: one
+        connection cap for the whole engagement, however many agents run — pricing design §6). ``0`` ⇒ ``None``
+        ⇒ httpx's default pool (byte-identical to before). A positive cap bounds BOTH the total and the
+        keep-alive connections to it, so a Max run opens at most that many sockets to the target at once."""
+        cap = self.per_engagement_connection_cap
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+            return None
+        return httpx.Limits(max_connections=cap, max_keepalive_connections=cap)
+
     def _sleep_for_rate_limit(self) -> None:
         """Hold the posture's minimum inter-request interval.
 
@@ -1221,10 +1272,10 @@ class HttpExecutor:
         the COMPLETION timestamp `_mark_request_done` writes, so the next request is still
         spaced from the previous one's completion exactly as before."""
         with self._lock:
-            floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
-            # An operator-set minimum interval can only TIGHTEN (raise) the floor — never lower it below what the
-            # charter posture mandates — so the control can slow a cautious first live run but never speed one up.
-            floor = max(floor, self._operator_min_interval)
+            _posture_floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
+            # The single per-engagement rate floor (posture + operator env floor + the L1 per-engagement/Max
+            # floor): each can only TIGHTEN, never loosen below the charter posture (see `_rate_floor`).
+            floor = self._rate_floor()
             if self._last_request_at <= 0.0:
                 base_wait = 0.0
             else:

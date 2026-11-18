@@ -179,3 +179,40 @@ def test_lease_names_depth_marks_a_metered_lease():
     assert rt.lease_names_depth(_Doc(10)) is False        # flat: no named depth
     assert rt.lease_names_depth(_Doc(10, "bogus")) is False   # not a real depth ⇒ names none (fail-safe)
     assert rt.lease_names_depth(object()) is False
+
+
+# ---- L1 (live Max) — the per-ENGAGEMENT controls a depth is held to (pricing design §6) ------------------------
+# Mutation-verify targets (each neuter reds a NAMED test below):
+#   * engage_controls_for gives "max" the baseline                    -> test_max_depth_is_one_rate_limit_one_connection_cap_and_governed_tools_only
+#   * the Max rate / cap / governed flag drift from the §6 decision   -> test_max_depth_is_one_rate_limit_one_connection_cap_and_governed_tools_only
+#   * engage_controls_for gives a non-"max" depth the Max controls    -> test_quick_deep_and_unknown_depths_carry_no_engagement_controls
+#   * EngageControls loses frozen=True (a caller could mutate the shared Max controls) -> test_the_shared_engage_controls_cannot_be_mutated
+
+def test_max_depth_is_one_rate_limit_one_connection_cap_and_governed_tools_only():
+    # §6: a Max run is held to ONE rate limit (10 requests/second ⇒ a 0.1 s minimum interval) and ONE connection cap
+    # (8) for the WHOLE engagement, and to governed tools only — however many agents it runs.
+    c = rt.engage_controls_for("max")
+    assert c.governed_tools_only is True
+    assert c.min_request_interval_s == pytest.approx(0.1)
+    assert 1.0 / c.min_request_interval_s == pytest.approx(10.0)      # 10 requests per second for the engagement
+    assert c.connection_cap == 8
+
+
+@pytest.mark.parametrize("depth", ["quick", "deep", "", "MAX", "Max", " max", "ultra", None, 3])
+def test_quick_deep_and_unknown_depths_carry_no_engagement_controls(depth):
+    # Only the explicit "max" depth tightens: quick / deep run ONE agent and keep the charter posture's own rate, and a
+    # malformed value can never silently ADD the Max controls (nor be read as Max) — the inert baseline, byte-identical.
+    c = rt.engage_controls_for(depth)
+    assert (c.governed_tools_only, c.min_request_interval_s, c.connection_cap) == (False, 0.0, 0)
+
+
+def test_the_shared_engage_controls_cannot_be_mutated():
+    # The Max controls are ONE module-level value every run reads; a caller that could rebind a field would loosen
+    # every later Max run in the process. Frozen ⇒ any write raises.
+    import dataclasses
+    c = rt.engage_controls_for("max")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        c.governed_tools_only = False                       # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        c.min_request_interval_s = 0.0                      # type: ignore[misc]
+    assert rt.engage_controls_for("max").governed_tools_only is True

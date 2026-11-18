@@ -195,8 +195,9 @@ class LaunchProduct:
 
     W2b-3: with metered billing on, a product selects its DEPTH (`run_tier`) and nothing else — the launch holds the
     allowance chunk from the wallet and names the depth in its owner-signed lease; `units` is not used
-    (`provision.launch_reserve`). There is no Max product yet: Max on live systems needs the L1 controls first (one
-    rate limit per engagement, governed tools only — pricing design §6)."""
+    (`provision.launch_reserve`). L1: the **Max** DEPTH product (`_MAX_LAUNCH_PRODUCTS`) is offered only when the
+    owner sets `VIGIL_MAX_DEPTH`, because Max on a LIVE system needs the L1 controls first — one rate limit per
+    engagement, governed tools only (pricing design §6), which the engine enforces for any `max`-depth run."""
     product_id: str
     display_name: str
     run_tier: str
@@ -249,12 +250,69 @@ def _validate_launch_product_band(products: tuple[LaunchProduct, ...]) -> None:
                              f"or VIGIL_QUICK_MAX_UNITS)")
 
 
+# ==================================================================================================
+# L1 — the Max DEPTH launch product (default-OFF behind VIGIL_MAX_DEPTH; byte-identical when off).
+#
+# Max is an assessment DEPTH (run_tier.DEPTHS), NOT a units-band tier (run_tier.RUN_TIERS never derives "max"):
+# its tier is RE-DERIVED from the launch's OWNER-SIGNED lease depth (W2b-3), so this adds no new signed field and
+# no snapshot bump. Max on a LIVE system runs under the L1 controls — one rate limit per engagement, governed
+# tools only (pricing design §6) — which the ENGINE enforces for any "max"-depth run. This catalog half only
+# decides whether a customer may SELECT Max: offered iff the owner set VIGIL_MAX_DEPTH (and the tiered-products
+# launch surface is on). The Max product lives in its OWN tuple with its OWN structural validator so the
+# existing _LAUNCH_PRODUCTS and its Quick/Deep validators stay byte-identical.
+# ==================================================================================================
+_MAX_LAUNCH_PRODUCTS: tuple[LaunchProduct, ...] = (
+    # `units` is a POSITIVE PLACEHOLDER only: a Max launch is metered and names its depth in the signed lease, so
+    # its units are the allowance chunk, never a depth signal (W2b-3 — "units is not used"). Kept valid (int >= 1).
+    LaunchProduct("vigil_launch_max", "Max scan", "max", units=20),
+)
+
+
+def _validate_launch_product_max_structure(products: tuple[LaunchProduct, ...]) -> None:
+    """ENV-INDEPENDENT structural validation for the Max DEPTH launch products — runs at import UNCONDITIONALLY
+    and reads NO env var, so it is byte-identical whether or not VIGIL_MAX_DEPTH is set: a malformed Max product
+    raises at import whether or not it is offered. A Max product names the "max" assessment DEPTH, which the
+    units band NEVER derives, so — UNLIKE Quick/Deep — its tier is not band-checked: it is re-derived from the
+    owner-signed lease DEPTH (``run_tier.depth_of``). This validates that the declared ``run_tier`` is a real
+    DEPTH that sits OUTSIDE the units band (so it can only be selected explicitly, never escalated from a units
+    amount), re-derives to itself, and runs the full roster — the depth analogue of the Quick/Deep band check."""
+    seen: set[str] = set()
+    for p in products:
+        if not p.product_id or p.product_id in seen:
+            raise ValueError(f"max launch product_id must be non-empty and unique: {p.product_id!r}")
+        seen.add(p.product_id)
+        depth_only = tuple(d for d in run_tier.DEPTHS if d not in run_tier.RUN_TIERS)
+        if p.run_tier not in depth_only:
+            raise ValueError(f"max launch product {p.product_id!r}: run_tier must be a DEPTH outside the units "
+                             f"band (one of {depth_only}), got {p.run_tier!r}")
+        if run_tier.depth_of(p.run_tier, None) != p.run_tier:
+            raise ValueError(f"max launch product {p.product_id!r}: depth {p.run_tier!r} must re-derive to "
+                             f"itself from the signed lease depth (run_tier.depth_of)")
+        if run_tier.engage_profile_for(p.run_tier) != run_tier.engage_profile_for("deep"):
+            raise ValueError(f"max launch product {p.product_id!r}: depth {p.run_tier!r} must run the full "
+                             f"roster (the same engagement profile as 'deep')")
+        if isinstance(p.units, bool) or not isinstance(p.units, int) or p.units < 1:
+            raise ValueError(f"max launch product {p.product_id!r}: units must be an int >= 1, got {p.units!r}")
+
+
+def _validate_launch_product_ids_unique(*groups: tuple[LaunchProduct, ...]) -> None:
+    """ENV-INDEPENDENT: launch product ids are GLOBALLY unique across every product tuple (Quick/Deep and Max). A
+    product id is the key ``provision.launch_reserve`` resolves to exactly ONE product, so a collision across the
+    tuples must fail the deploy loudly at import, never silently shadow one product (and its depth) with another."""
+    ids = [p.product_id for g in groups for p in g]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise ValueError(f"launch product ids must be globally unique across Quick/Deep and Max: {dupes}")
+
+
 # Structural validation ALWAYS (env-independent ⇒ byte-identical). The band check runs at import ONLY when
 # EC-7 is ON — gated on the SHARED run_tier flag reader (NOT sigil.config, which catalog cannot import at
 # module scope), so a started-with-EC-7-on deploy still fails FAST on a bad band, while an EC-7-off import
 # never reads VIGIL_QUICK_MAX_UNITS. launch_products() re-checks the band so OFFERED products are always
 # band-coherent even if the flag is flipped on after import.
 _validate_launch_product_structure(_LAUNCH_PRODUCTS)
+_validate_launch_product_max_structure(_MAX_LAUNCH_PRODUCTS)   # L1: Max products, env-independent ⇒ byte-identical
+_validate_launch_product_ids_unique(_LAUNCH_PRODUCTS, _MAX_LAUNCH_PRODUCTS)   # L1: one id ⇒ one product, always
 if run_tier.tiered_products_enabled():
     _validate_launch_product_band(_LAUNCH_PRODUCTS)
 
@@ -321,11 +379,19 @@ def launch_products() -> tuple[LaunchProduct, ...]:
     entitlements() are unchanged). When offered, the band consistency is re-checked so an OFFERED product is
     always coherent with the live band (fail-closed-loud on a misconfiguration). NOTE: these products are
     DEFINED and LISTED here; wiring a customer's product choice into the credit RESERVATION (so a Deep launch
-    reserves its units) is a follow-on — until then a launch reserves the default units (base 'quick' tier)."""
+    reserves its units) is a follow-on — until then a launch reserves the default units (base 'quick' tier).
+
+    L1: the **Max** DEPTH product is appended ONLY when the owner ALSO set VIGIL_MAX_DEPTH
+    (config.max_depth_enabled()). With it off the offered set is byte-identical to EC-7 (Quick/Deep only), so a
+    customer cannot select Max until the owner enables it (and the engine enforces the Max live controls — one
+    rate limit per engagement, governed tools only — for any max-depth run). Max requires the tiered-products
+    surface too: if that is off, NO product is offered (the early return above), Max included."""
     from .. import config
     if not config.tiered_products_enabled():
         return ()
     _validate_launch_product_band(_LAUNCH_PRODUCTS)   # offered ⇒ always band-coherent (catches a post-import flag flip)
+    if config.max_depth_enabled():
+        return _LAUNCH_PRODUCTS + _MAX_LAUNCH_PRODUCTS
     return _LAUNCH_PRODUCTS
 
 
