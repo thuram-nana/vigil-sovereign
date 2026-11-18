@@ -71,9 +71,10 @@
       steps: [
         { id: "overview", title: "The Overview", where: "Overview", route: "#/",
           clicks: ["Select Overview in the top bar.",
-                   "It shows the account you are signed in as and your workspace.",
-                   "As you use VIGIL, it brings your credits, hosts, assessments and monitoring together in one place."],
-          why: "Every screen shows your workspace only. The server decides what each person may see." },
+                   "It opens on the account you are signed in as and your workspace.",
+                   "Summary cards bring your credits, hosts, assessments and monitoring together, each with a button that opens its full screen.",
+                   "A card for something your role cannot see says so plainly, and never shows an error."],
+          why: "Every screen shows your workspace only. The server decides what each person may see, so each card shows just what you are allowed to." },
         { id: "team", title: "Bring in your team", where: "Team", route: "#/team",
           clicks: ["Select Team in the top bar. Under Add member, enter your teammate's work email and choose a role: Admin, Analyst or Viewer.",
                    "Select Add member. Your teammate needs a VIGIL account first: if there is none for that email, VIGIL says so and adds no one. They can create one with Create an account on the sign-in screen.",

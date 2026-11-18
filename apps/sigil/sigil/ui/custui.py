@@ -193,6 +193,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     launch_ui = _config.customer_launch_ui_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
+    # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
+    # non-secret on/off value written into the page, and it counts in the build id.
+    overview = _config.customer_overview_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -204,7 +207,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PASSKEY__": "1" if passkey else "0",
                                      "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
-                                     "__VIGIL_TEAM__": "1" if team else "0"})
+                                     "__VIGIL_TEAM__": "1" if team else "0",
+                                     "__VIGIL_OVERVIEW__": "1" if overview else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
