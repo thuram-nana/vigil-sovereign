@@ -533,7 +533,8 @@ class Provisioner:
     email token in the response when no real sender is configured — it must stay False in production."""
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
-                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None, signup_email_limiter=None,
+                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None, cloud_fetcher=None,
+                 signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
                  pending_totp=None, mfa_limiter=None,
                  checkout_limiter=None, pending_checkouts=None,
@@ -578,6 +579,12 @@ class Provisioner:
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
         self.target_fetcher = target_fetcher
+        # Consumer PR-C — the READ-ONLY CLOUD-identity fetcher for the connect screen's cloud leg: it assumes the
+        # customer's published read-only role with the issued external_id and reads back the caller identity
+        # (``assume(provider, account_id, role_ref, external_id, now) -> {assumed_with_external_id, account}``).
+        # None ⇒ self-serve cloud connect is OFF (fail-closed: ``cloud_connect_verify`` refuses), the default
+        # sovereign egress posture; the live assume-role reader is an owner-gated, later slice (honest TODO).
+        self.cloud_fetcher = cloud_fetcher
         # C6 — the GitHub INSTALLATION verifier for the Code screen's post-install callback:
         # ``(installation_id=, code=) -> True`` only when the person who came back provably has access to that
         # installation (GitHub user authorization → GET /user/installations). None ⇒ the callback records NOTHING
@@ -3398,6 +3405,144 @@ class Provisioner:
         from ..governor import asset_ownership as _own
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
+
+    # -- Consumer PR-C: the unified CONNECT surface (site + repo + cloud) — one screen, behind VIGIL_CUSTOMER_CONNECT ----
+    # CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER AUTHORIZES OFFENSE. Every action here is behind the master
+    # flag ``VIGIL_CUSTOMER_CONNECT`` (off ⇒ 404-equivalent refusal, byte-identical to a build without PR-C) PLUS the
+    # per-action customer admit. The reads use ``view_assessments`` (the same read axis as Assets/Assessments); the
+    # cloud WRITE paths use ``run_engagement`` (the TESTING-authority axis, NOT billing — registering an asset is not a
+    # billing-admin act), mirroring ``target_challenge``/``target_verify``. The org is the SESSION principal (never a
+    # body field). No live-offense gate (``customer_prod_execution_enabled``) is touched, no ``EngagementAuthority`` is
+    # minted, and a cloud grant is read-only — running a posture scan against it is a separately-gated engagement.
+    def _connect_enabled_or_deny(self, action: str, requester: str, org_id: str, *, target: str = "") -> None:
+        """Flag gate (default OFF): the master ``VIGIL_CUSTOMER_CONNECT`` is checked FIRST. Off ⇒ a clean refusal,
+        audited, exactly as an unknown route — nothing downstream runs. Caller then does its own admit."""
+        from .. import config
+        if not config.customer_connect_enabled():
+            self._audit(action, requester=requester, org_id=org_id, target=target, outcome="connect_off")
+            raise ProvisionDenied("the unified connect surface is not enabled on this deployment")
+
+    def customer_connect_overview(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                  now: "Optional[float]" = None) -> dict:
+        """The one-screen connect read for the SESSION org: its connected sites, repos and cloud accounts, each
+        tenant-scoped (``connect.connect_overview``). Behind the flag; ``view_assessments`` on the session org (no
+        global leg, live re-check), so org A can never read org B's connections. A read: no lock, no mint, no key."""
+        from . import connect as _connect
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            self._connect_enabled_or_deny("customer_connect_overview", requester, requester_org_id)
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _connect.connect_overview(s, o, now=t))
+
+    def customer_ownership_poll(self, requester: str, requester_org_id: str, host: str, *, ip: str = "",
+                                now: "Optional[float]" = None) -> dict:
+        """Poll ONE host's ownership state so the connect screen can RESUME a half-finished proof, auto-select a
+        method and know when to auto-re-check (``connect.customer_ownership_poll``). Behind the flag;
+        ``view_assessments`` on the session org (tenant-scoped, server-derived — a value for another tenant is
+        never surfaced). A read: no lock, no mint, no owner key; never raises on a malformed host."""
+        from . import connect as _connect
+        t = self._now() if now is None else float(now)
+        with self._lock:
+            self._connect_enabled_or_deny("customer_ownership_poll", requester, requester_org_id, target=str(host or ""))
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _connect.customer_ownership_poll(s, o, host, now=t))
+
+    def cloud_connect_challenge(self, requester: str, requester_org_id: str, provider: str, account_id: str, *,
+                                ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Issue an owner-signed READ-ONLY cloud-connect CHALLENGE for (org, provider, account) and return the
+        placement the customer configures (create a read-only role in THAT account trusting VIGIL under exactly
+        the issued external_id). Behind the flag; ``run_engagement`` (the testing axis, NOT billing — a pure
+        billing admin cannot register assets), mirroring ``target_challenge``. The requester + org are the
+        SERVER-authenticated session principal (never body fields). A challenge grants NOTHING — it is only the
+        external-id the later verdict checks VIGIL assumed the role with. CONNECTING AUTHORIZES NO OFFENSE."""
+        from ..governor.cloud_connect import CloudConnectRegistry
+        with self._lock:
+            self._connect_enabled_or_deny("cloud_connect_challenge", requester, requester_org_id,
+                                          target=f"{provider}:{account_id}")
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("cloud_connect_challenge", requester=requester, org_id=requester_org_id,
+                            target=f"{provider}:{account_id}", outcome="denied")
+                raise ProvisionDenied("requester may not register assets for this org")
+            try:
+                ch = CloudConnectRegistry(self.store).issue_challenge(
+                    requester_org_id, provider, account_id, issued_at=self._next_issued())
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            self._audit("cloud_connect_challenge", requester=requester, org_id=requester_org_id,
+                        target=f"{ch.provider}:{ch.account_id}", outcome="issued")
+        return {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id}
+
+    def cloud_connect_verify(self, requester: str, requester_org_id: str, provider: str, account_id: str,
+                             role_ref: str, *, ip: str = "", mfa_at: float = 0.0,
+                             now: "Optional[float]" = None) -> dict:
+        """Assume the customer's published read-only role with the issued external_id, and ONLY on a verdict pass
+        record the owner-signed READ-ONLY cloud GRANT (``CloudConnectRegistry.verify_and_connect``). Behind the
+        flag; ``run_engagement`` checked BEFORE the fetch and AGAIN inside the mint lock (TOCTOU). Fail-closed when
+        no cloud fetcher is configured (self-serve cloud connect OFF by default — the live assume-role reader is an
+        owner-gated later slice). The FETCH is OUTSIDE the lock (network I/O); the verdict + record are atomic
+        under it. The owner key signs the grant — the requester holds no key. RECORDING A GRANT AUTHORIZES NO
+        OFFENSE: it is a read-only connection record; running a cloud-posture scan is a separately-gated engagement."""
+        t = self._now() if now is None else float(now)
+        with self._lock:                                            # authorize BEFORE spending a network fetch
+            self._connect_enabled_or_deny("cloud_connect_verify", requester, requester_org_id,
+                                          target=f"{provider}:{account_id}")
+            if self.cloud_fetcher is None:
+                raise ProvisionError("self-serve cloud connect is not enabled on this deployment")
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
+                            target=f"{provider}:{account_id}", outcome="denied")
+                raise ProvisionDenied("requester may not register assets for this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            from ..governor.cloud_connect import CloudConnectRegistry
+            ch = CloudConnectRegistry(self.store, owner_key=None).challenge(requester_org_id, provider, account_id)
+            if ch is None:
+                raise ProvisionDenied(f"no outstanding cloud-connect challenge for {provider}:{account_id} — "
+                                      "start the connection first")
+        try:
+            observed = self.cloud_fetcher.assume(provider=ch.provider, account_id=ch.account_id,
+                                                 role_ref=role_ref, external_id=ch.external_id, now=t)
+        except Exception:  # noqa: BLE001 — a fetcher error fails closed WITHOUT echoing internals to the customer
+            self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
+                        target=f"{provider}:{account_id}", outcome="assume_failed")
+            raise ProvisionDenied("could not assume the read-only role with the issued external id") from None
+        from ..governor.cloud_connect import CloudConnectRegistry
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                raise ProvisionDenied("requester may not register assets for this org")  # TOCTOU
+            try:
+                grant = CloudConnectRegistry(self.store).verify_and_connect(
+                    requester_org_id, provider, account_id, role_ref=role_ref, observed=observed, now=t)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
+                        target=f"{grant.provider}:{grant.account_id}", outcome="connected", critical=True)
+        return {"provider": grant.provider, "account_id": grant.account_id, "role_ref": grant.role_ref,
+                "access": grant.access, "verified_at": grant.verified_at, "expires_at": grant.expires_at}
+
+    def cloud_disconnect(self, requester: str, requester_org_id: str, provider: str, account_id: str, *,
+                         ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Disconnect a cloud account — the SAFE direction (honored even unsigned, so it can never fail open).
+        Behind the flag; ``run_engagement`` only, NO step-up (it only removes a record, like ``monitor_revoke``).
+        Idempotent. The signing key is only touched to latch the governed revoke."""
+        from ..governor.cloud_connect import CloudConnectRegistry
+        with self._lock:
+            self._connect_enabled_or_deny("cloud_disconnect", requester, requester_org_id,
+                                          target=f"{provider}:{account_id}")
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("cloud_disconnect", requester=requester, org_id=requester_org_id,
+                            target=f"{provider}:{account_id}", outcome="denied")
+                raise ProvisionDenied("requester may not manage assets for this org")
+            reg = CloudConnectRegistry(self.store)
+            was = reg.grant(requester_org_id, provider, account_id) is not None   # an active grant before we latch
+            if was:
+                reg.disconnect(requester_org_id, provider, account_id)
+            self._audit("cloud_disconnect", requester=requester, org_id=requester_org_id,
+                        target=f"{provider}:{account_id}", outcome="disconnected" if was else "noop", critical=True)
+        return {"provider": str(provider or ""), "account_id": str(account_id or ""), "disconnected": was}
 
     def customer_notifications(self, requester: str, requester_org_id: str, *, ip: str = "",
                                now: "Optional[float]" = None) -> dict:

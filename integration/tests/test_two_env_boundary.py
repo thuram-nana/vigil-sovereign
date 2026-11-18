@@ -81,6 +81,12 @@ assert "framework" not in __import__("sys").modules, "redpen_system* must not im
 assert "strix" not in __import__("sys").modules, "redpen_system* must not import strix at module scope"
 import sigil.ui.redpen_scheduler              # R4: the sovereign System-review producer (owner key) stays offense-free
 assert "framework" not in __import__("sys").modules, "redpen_scheduler must not import framework at module scope"
+import sigil.governor.cloud_connect           # PR-C: the READ-ONLY cloud-grant registry (owner key) — SOVEREIGN
+assert "framework" not in __import__("sys").modules, "cloud_connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "cloud_connect must not import strix at module scope"
+import sigil.ui.connect                        # PR-C: the unified connect read projection (sites + repos + cloud)
+assert "framework" not in __import__("sys").modules, "ui.connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "ui.connect must not import strix at module scope"
 import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
 _m = __import__("sys").modules
 assert "framework" not in _m, "warden_gate must not import framework at module scope"

@@ -446,6 +446,25 @@ def customer_retest_reproof_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_connect_enabled() -> bool:
+    """True iff the unified customer CONNECT surface is ON (`VIGIL_CUSTOMER_CONNECT` affirmative; consumer PR-C).
+    OFF by default (mirrors `redpen_enabled`): with it off EVERY connect action is absent (404 exactly as an
+    unknown route) — the one-screen connect overview, the single-asset ownership poll, and the read-only cloud-grant
+    connect / verify / disconnect all refuse, nothing is minted and no cloud grant is recorded — so the server is
+    byte-identical to a build without PR-C.
+
+    This flag gates only the one-screen connect site/repo/cloud SURFACE; it never changes how an asset is TESTED.
+    CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER BY ITSELF AUTHORIZES LIVE OFFENSE: a live customer run
+    still rides the UNCHANGED `vigil_core.posture.customer_prod_execution_enabled()` (VIGIL_CUSTOMER_PROD_EXECUTION)
+    owner gate PLUS a current host-ownership proof PLUS the owner-signed EngagementAuthority, and a cloud grant is
+    READ-ONLY (running cloud posture against it is a separate, separately-gated engagement — not unlocked here).
+
+    Even when ON, cloud verify still fails CLOSED unless the operator has provisioned the cloud-identity fetcher
+    (the live assume-role / caller-identity reader), exactly as self-serve host ownership needs the owner-opted-in
+    `ownership_fetcher`. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account
