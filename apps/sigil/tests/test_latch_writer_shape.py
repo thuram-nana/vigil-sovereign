@@ -225,6 +225,7 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/report_unlock.py", "governor/subscription.py", "governor/trial_claim.py", "governor/wallet.py",
     "governor/billing_reversal.py",   # W5: owner-signed reversal/arrears ledger (its own literal signal governor.billing_reversal)
     "governor/connected_repos.py",    # Red-Pen R2: owner-signed connected-repo registry (its own literal signal)
+    "governor/shard_assignment.py",   # Front C S2a: owner-signed shard-assignment registry (its own literal signal, no latch)
     "governor/redpen_spend.py",       # Red-Pen R2: owner-signed per-(repo,month) spend record (its own literal signal)
     "governor/auto_topup.py",         # A1: owner-signed per-org auto-top-up settings + saved method + charge ledger
     "governor/redpen_schedule.py",    # Red-Pen R4: owner-signed System-review schedule + per-period enqueue markers

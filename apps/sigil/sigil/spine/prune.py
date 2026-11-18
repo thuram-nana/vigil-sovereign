@@ -213,6 +213,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand Red-Pen schedule(s) {stranded_rps}: their only owner-signed active "
                           f"record sits below K and is not re-asserted live (dropping the schedule or resetting the "
                           f"per-(org,repo) anti-replay high-water); lower K or re-sign above K")
+    # (c, Front C S2a) the SAME referential floor for governor.shard_assignment: a tenant whose only authoritative
+    # owner-signed ACTIVE assignment sits below K and is not re-asserted live would be silently UNASSIGNED (the
+    # routing edge then refuses it) or, by resetting the per-tenant high-water, re-open replay-resurrection of a
+    # migrated-off placement. Fail-closed, like the floors above; empty in the happy path (no assignments, or every
+    # active record >= K). The shard-assignment fold is a genesis scan with no seed in this slice.
+    stranded_sa = stranded_active_shard_assignments(store, archived, K)
+    if stranded_sa:
+        raise PruneUnsafe(f"K={K} would strand shard assignment(s) for tenant(s) {stranded_sa}: their only "
+                          f"owner-signed active assignment sits below K and is not re-asserted live (unassigning the "
+                          f"tenant or resetting the per-tenant anti-replay high-water); lower K or re-sign above K")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -688,6 +698,59 @@ def stranded_active_redpen_schedules(store, archived: list[Segment], K: int) -> 
     live_hw = _redpen_schedule_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
     neg = float("-inf")
     return sorted(f"{k[1]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
+
+
+def _shard_assignment_active_hw(records, resolver) -> "dict[str, float]":
+    """``{tenant_id: max VERIFIED-active issued_at}`` over ``records`` (Front C S2a). Only owner-signed active
+    shard-assignment records (verified under the owner pubkey valid at their seq) count; an unassign / forged /
+    unsigned record contributes nothing. Pure read, never raises out of the scan."""
+    from ..governor.shard_assignment import SIGNAL as SA_SIGNAL, _owner_root, _parse_signed
+    from ..governor.authn import as_issued_at
+    from vigil_core import verify_shard_assignment_record
+    hw: "dict[str, float]" = {}
+    for r in sorted(records, key=lambda r: r.seq):
+        p = getattr(r, "payload", None)
+        if not isinstance(p, dict) or p.get("signal") != SA_SIGNAL:
+            continue
+        rec = p.get("record")
+        if not isinstance(rec, dict):
+            continue                                  # an unassign (top-level state) carries no active hw
+        signed = _parse_signed(rec)
+        root = _owner_root(resolver.at(r.seq)) if signed is not None else None
+        if signed is None or root is None or not verify_shard_assignment_record(signed, root)[0]:
+            continue
+        tid = signed.document.tenant_id
+        at = as_issued_at(signed.document.issued_at)
+        if at > hw.get(tid, float("-inf")):
+            hw[tid] = at
+    return hw
+
+
+def stranded_active_shard_assignments(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Front C S2a) — the tenants (`governor/shard_assignment.py`) a hard prune to K would STRAND: those whose
+    only authoritative owner-signed ACTIVE assignment sits in the pruned prefix [0..K) and is NOT superseded by a
+    live (>= K) active assignment with an equal-or-higher ``issued_at``. This is the fail-closed durability floor for
+    the shard-assignment registry, which (in this slice) folds a signature-verifying genesis scan with NO snapshot
+    seed — so a prune that dropped a tenant's deciding active record would either silently UNASSIGN the tenant (the
+    routing edge would then refuse it) or, by resetting the per-tenant anti-replay high-water, re-open
+    REPLAY-RESURRECTION of a captured assignment onto a shard the tenant was migrated off. Both are caught by the
+    one condition ``max(below-K active issued_at) > max(live active issued_at)`` (a tenant re-asserted live at or
+    above the below-K high-water is safe). EMPTY in the happy path (no assignments, or every active record >= K).
+    Returns tenant ids. VERIFIED-active only (a forged record never blocks a prune). Read-only.
+
+    Carrying shard-assignment rows into the snapshot seed (as AE-0 did for monitoring) is a clean follow-on; until
+    then an owner lowers K below the oldest unsuperseded assignment, or re-signs it above K, to prune."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    below_hw = _shard_assignment_active_hw(below, resolver)
+    live_hw = _shard_assignment_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
+    neg = float("-inf")
+    return sorted(t for t, at in below_hw.items() if at > live_hw.get(t, neg))
 
 
 def stranded_active_customer_credentials(store, archived: list[Segment], K: int) -> list[str]:
