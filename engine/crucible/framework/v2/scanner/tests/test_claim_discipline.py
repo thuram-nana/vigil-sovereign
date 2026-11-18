@@ -790,16 +790,25 @@ def test_the_firewall_is_not_a_universal_graph_gate() -> None:
 # these ladder tests drive it and add the offense-leg check that a declared oracle_version is a REAL,
 # versionable OracleKind — the check tool_manifest cannot make without importing framework.
 
-# The Strix candidate families this slice declares LEAD-only. Pinned so a future edit that quietly promotes
-# one to FACT-capable (before the re-drive it requires exists) fails here.
+# The Strix candidate families STILL LEAD-only. Pinned so a future edit that quietly promotes one to
+# FACT-capable (before the VIGIL-owned re-drive it requires exists) fails here. The producer branches whose
+# VIGIL-owned re-drive now EXISTS have climbed the ladder and moved to ``_STRIX_PROMOTED`` below —
+# deliberately, with the re-drive + a same-shape benign-twin control (not quietly).
 _STRIX_LEAD_ONLY = {
-    "strix.dom_execution",
     "strix.auth_outcome",
     "strix.source_to_sink",
-    "strix.service_reachability",
-    "strix.tls_negotiation",
     "strix.cloud_credential_confirmation",
     "strix.misconfiguration_artifact",
+}
+
+# The Strix producer families PROMOTED to FACT-capable: a Strix lead is re-driven through VIGIL's OWN gated
+# capture and the deterministic oracle fires over VIGIL's OWN bytes — the producer report is never the proof
+# (``admit`` gates the FACT on that fire; ``certify_admitted`` re-fires it; a same-shape benign twin mints
+# nothing). Each maps to the REAL OracleKind whose decision procedure a verifier re-runs.
+_STRIX_PROMOTED = {
+    "strix.service_reachability": "service_reachability",
+    "strix.tls_negotiation": "tls_weakness",
+    "strix.dom_execution": "dom_execution",
 }
 
 
@@ -851,12 +860,14 @@ def test_every_fact_capable_branch_names_a_real_versionable_oracle() -> None:
 
 
 def test_the_strix_candidate_families_are_registered_lead_only() -> None:
-    """Operator decision 2, made structural: each Strix candidate family is present, LEAD-only (neither
-    FACT- nor CLEAN-capable), still TARGETS FACT-capability, and names the missing oracle/control in
-    blocking_work — so a Strix report can never mint a FACT until VIGIL wires its own re-drive."""
+    """Operator decision 2, made structural: each STILL-LEAD-only Strix candidate family is present, LEAD-only
+    (neither FACT- nor CLEAN-capable), still TARGETS FACT-capability, and names the missing oracle/control in
+    blocking_work — so a Strix report can never mint a FACT until VIGIL wires its own re-drive. The families
+    whose VIGIL-owned re-drive now EXISTS are in ``_STRIX_PROMOTED`` and checked by the next test."""
     by = {b["id"]: b for b in _load(_BRANCHES)["branches"]}
     missing = _STRIX_LEAD_ONLY - set(by)
     assert not missing, f"Strix candidate families absent from the ladder: {sorted(missing)}"
+    assert not (_STRIX_LEAD_ONLY & set(_STRIX_PROMOTED)), "a family cannot be both LEAD-only and promoted"
     for bid in sorted(_STRIX_LEAD_ONLY):
         b = by[bid]
         assert b["fact_capable"] is False, f"{bid}: a Strix producer report must be LEAD-only, not FACT-capable"
@@ -867,6 +878,39 @@ def test_the_strix_candidate_families_are_registered_lead_only() -> None:
         assert len(work) > 40 and ("oracle" in work.lower() or "control" in work.lower() or "capture" in work.lower()), (
             f"{bid}: blocking_work must name the missing oracle/control that closes the FACT gap")
         assert b.get("control_requirements"), f"{bid}: must name the controls it depends on / is missing"
+
+
+def test_the_promoted_strix_families_mint_only_over_a_vigil_owned_oracle_redrive() -> None:
+    """The ladder CLIMB made structural (the dual of the LEAD-only pin): each PROMOTED Strix producer family
+    is now FACT-capable AND names the REAL OracleKind whose decision procedure a verifier re-runs — so the
+    FACT it carries is VIGIL's OWN re-driven capture, never the producer's say-so. Its limitation must no
+    longer read 'LEAD-only' (that substring would make test_lead_only_branches_cannot_mint_or_clear forbid the
+    flip), and must spell out the SAME-SHAPE benign twin that keeps it a LEAD (the discipline the behavioural
+    re-drive tests — test_strix_transport_redrive / test_strix_dom_redrive — actually exercise)."""
+    import sys
+    engine = str(_ROOT / "engine" / "crucible")
+    if engine not in sys.path:
+        sys.path.insert(0, engine)
+    from framework.v2.verify.models import OracleKind
+
+    kinds = {k.value for k in OracleKind}
+    by = {b["id"]: b for b in _load(_BRANCHES)["branches"]}
+    missing = set(_STRIX_PROMOTED) - set(by)
+    assert not missing, f"promoted Strix families absent from the ladder: {sorted(missing)}"
+    for bid, want_ov in sorted(_STRIX_PROMOTED.items()):
+        b = by[bid]
+        assert b["fact_capable"] is True, f"{bid}: a promoted Strix producer family must be FACT-capable"
+        assert b["clean_capable"] is False, f"{bid}: a positive-only re-drive never asserts absence"
+        assert b.get("oracle_version") == want_ov, f"{bid}: must name OracleKind {want_ov!r}"
+        assert want_ov in kinds, f"{bid}: oracle_version {want_ov!r} is not a real OracleKind value"
+        assert "lead-only" not in b["limitation"].lower(), (
+            f"{bid}: a FACT-capable branch's limitation must not read 'LEAD-only'")
+        # the SAME-SHAPE benign twin that keeps the branch a LEAD must be named (the soundness the re-drive
+        # tests exercise): a closed port / a modern negotiation / a reflected-but-inert payload.
+        lim = b["limitation"].lower()
+        assert "benign twin" in lim or "mints nothing" in lim or "stays a lead" in lim, (
+            f"{bid}: the limitation must state the same-shape benign case that keeps it a LEAD")
+        assert b.get("control_requirements"), f"{bid}: must name the controls it depends on"
 
 
 def test_the_s8_column_validator_is_load_bearing() -> None:

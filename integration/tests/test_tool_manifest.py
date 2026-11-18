@@ -187,16 +187,26 @@ def test_branch_validator_rejects_the_new_column_overclaims():
 
 def test_the_strix_candidate_families_are_lead_only_in_the_committed_registry():
     """A Strix producer report is a LEAD, never a FACT, until VIGIL re-drives it (operator decision 2). The
-    seven candidate families ship fact_capable=false with a non-empty oracle_version forbidden."""
-    strix = {"strix.dom_execution", "strix.auth_outcome", "strix.source_to_sink",
-             "strix.service_reachability", "strix.tls_negotiation",
-             "strix.cloud_credential_confirmation", "strix.misconfiguration_artifact"}
+    families whose VIGIL-owned re-drive does NOT yet exist ship fact_capable=false (oracle_version forbidden);
+    the families whose re-drive EXISTS have climbed the ladder to fact_capable=true (and MUST then name a real
+    oracle_version — the dual column rule). Both arms pass the S8-column validator."""
+    still_lead = {"strix.auth_outcome", "strix.source_to_sink",
+                  "strix.cloud_credential_confirmation", "strix.misconfiguration_artifact"}
+    promoted = {"strix.service_reachability": "service_reachability",
+                "strix.tls_negotiation": "tls_weakness",
+                "strix.dom_execution": "dom_execution"}
     by = {b["id"]: b for b in load_branch_registry(_BRANCHES)}
-    assert strix <= set(by), f"missing Strix families: {sorted(strix - set(by))}"
-    for bid in sorted(strix):
+    assert (still_lead | set(promoted)) <= set(by), (
+        f"missing Strix families: {sorted((still_lead | set(promoted)) - set(by))}")
+    for bid in sorted(still_lead):
         b = by[bid]
         assert b["fact_capable"] is False, f"{bid}: must be LEAD-only"
         assert b.get("oracle_version", "") == "", f"{bid}: LEAD-only branch must name no oracle_version"
+        assert validate_branch_row(b) == [], f"{bid}: fails the S8-column validator"
+    for bid, ov in sorted(promoted.items()):
+        b = by[bid]
+        assert b["fact_capable"] is True, f"{bid}: a promoted Strix producer family is FACT-capable"
+        assert b.get("oracle_version", "") == ov, f"{bid}: a FACT-capable branch names oracle_version {ov!r}"
         assert validate_branch_row(b) == [], f"{bid}: fails the S8-column validator"
 
 

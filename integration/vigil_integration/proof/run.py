@@ -1147,14 +1147,17 @@ def _timing_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
 
 
 def _dom_redrive_mint(report: dict, fn_name: str, where: str, *, run_dir: "str | os.PathLike",
-                      signers: "list[tuple[str, str]]", engagement_slug: str) -> "Any | None":
+                      signers: "list[tuple[str, str]]", engagement_slug: str,
+                      producer_branch: "str | None" = None) -> "Any | None":
     """Shared adapter for the two W3 browser-backed DOM arms (dom_xss / prototype_pollution): extract
     {endpoint, param} from the report and drive the named ``live.dom_redrive`` runner — which launches
     VIGIL's OWN egress-gated headless-Chromium/CDP harness over the Strix-proposed URL/param, registers the
     ``__crucible_xss`` / ``__crucible_pp`` binding, feeds the dom_execution / prototype_pollution oracle, and
     mints via admit()+certify_admitted(provenance="live_redrive"). A missing endpoint / gate refusal /
     browserless env / oracle non-fire ⇒ LEAD (a browserless env is an INCONCLUSIVE LEAD, never CLEAN).
-    FATAL-2: the framework-touching import is function-local. Never raises."""
+    ``producer_branch`` (dom_xss only) ALSO records the SAME VIGIL-owned verdict under the FACT-capable
+    ``strix.dom_execution`` producer branch. FATAL-2: the framework-touching import is function-local. Never
+    raises."""
     url = str((report or {}).get("endpoint") or "").strip()
     if not url:
         return None
@@ -1163,7 +1166,11 @@ def _dom_redrive_mint(report: dict, fn_name: str, where: str, *, run_dir: "str |
     try:
         from ..live import dom_redrive as _dr  # noqa: PLC0415 — pulls framework at CALL time (offense)
         fn = getattr(_dr, fn_name)
-        res = fn(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers, param=param)
+        kwargs = {"slug": engagement_slug, "engagement_slug": engagement_slug, "signers": signers,
+                  "param": param}
+        if producer_branch is not None:
+            kwargs["producer_branch"] = producer_branch
+        res = fn(url, **kwargs)
     except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
         _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
         return None
@@ -1174,9 +1181,12 @@ def _dom_xss_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
                      signers: "list[tuple[str, str]]", engagement_slug: str,
                      control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
     """Rail adapter for DOM-XSS: mint ONLY when the dom_execution oracle observes VIGIL's canary EXECUTE in a
-    real headless DOM (a ``__crucible_xss`` binding call) — never on a reflected-but-inert payload."""
+    real headless DOM (a ``__crucible_xss`` binding call) — never on a reflected-but-inert payload. As the
+    Strix rail, it ALSO records that same VIGIL-owned verdict under the FACT-capable ``strix.dom_execution``
+    producer branch (the branch's declared blocking_work)."""
     return _dom_redrive_mint(report, "dom_xss_redrive", "proof.run._dom_xss_redrive",
-                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug,
+                             producer_branch="strix.dom_execution")
 
 
 def _prototype_pollution_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
@@ -1217,9 +1227,12 @@ def _transport_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
     """Rail adapter for the transport classes (S2): hand the Strix-reported host:port (and NOTHING else) to
     ``live.transport_redrive``, which re-authorises it through the charter/scope gate and then performs
     VIGIL's OWN bounded ``capture_handshake`` / ``capture_tls_handshake``. The FACT is admitted to the
-    VIGIL-owned FACT-capable branch; the ``strix.service_reachability`` / ``strix.tls_negotiation`` producer
-    branches remain LEAD-only. A ``udp`` (non-tcp) row is refused before any socket, an out-of-scope host is
-    refused before any traffic, and a closed port / strong TLS mints nothing. Never raises."""
+    VIGIL-owned FACT-capable twin AND — because this is the Strix rail (``strix_producer=True``) — to the
+    now-FACT-capable ``strix.service_reachability`` / ``strix.tls_negotiation`` PRODUCER branch over the SAME
+    VIGIL-owned capture (the branches' declared blocking_work). The producer branch is NEVER the proof:
+    ``admit`` gates a FACT on the oracle firing over VIGIL's OWN capture and ``certify_admitted`` re-fires it,
+    so a ``udp`` (non-tcp) row is refused before any socket, an out-of-scope host is refused before any
+    traffic, and a closed port / strong TLS mints nothing on either branch. Never raises."""
     endpoint = str((report or {}).get("endpoint") or (report or {}).get("target") or "").strip()
     host = str((report or {}).get("host") or (report or {}).get("hostname") or "").strip()
     if not endpoint and not host:
@@ -1229,7 +1242,8 @@ def _transport_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
         from ..live.transport_redrive import transport_redrive  # noqa: PLC0415 — pulls framework at CALL time
         res = transport_redrive(endpoint, claimed_class=cls, slug=engagement_slug,
                                 engagement_slug=engagement_slug, signers=signers,
-                                host=host, port=(report or {}).get("port"), protocol=protocol)
+                                host=host, port=(report or {}).get("port"), protocol=protocol,
+                                strix_producer=True)
     except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
         _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._transport_redrive", exc)
         return None

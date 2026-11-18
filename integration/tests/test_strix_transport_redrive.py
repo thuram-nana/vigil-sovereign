@@ -19,10 +19,11 @@ because VIGIL re-fires its OWN gated probe; the report supplies the host:port (a
     ``service_reachability.tcp_handshake`` / ``tls_weakness.tls_handshake`` /
     ``weak_crypto.cert_signature_algorithm``.
 
-INVARIANT PINNED HERE: the PRODUCER branches ``strix.service_reachability`` / ``strix.tls_negotiation`` stay
-``fact_capable: false``. VIGIL mints on its OWN branches over its OWN capture — never on a Strix say-so. A
-non-tcp (udp) row and an out-of-scope host are both refused with NO SOCKET ATTEMPTED (asserted by counting
-connector calls, not by inspecting a reason string).
+INVARIANT PINNED HERE: the PRODUCER branches ``strix.service_reachability`` / ``strix.tls_negotiation`` are now
+FACT-capable, BUT the FACT is VIGIL's OWN re-driven capture, never a Strix say-so — ``admit`` gates it on the
+deterministic oracle firing over VIGIL's OWN bytes and ``certify_admitted`` re-fires it, so the SAME-SHAPE
+benign twin (a closed port / a modern negotiation) mints nothing. A non-tcp (udp) row and an out-of-scope host
+are both refused with NO SOCKET ATTEMPTED (asserted by counting connector calls, not by a reason string).
 """
 
 from __future__ import annotations
@@ -124,21 +125,25 @@ def test_the_two_new_arms_are_on_the_rail_and_the_sink_screens_them_in():
     assert sink._transport_redrivable({"bug_class": "xss"}) is False
 
 
-def test_the_strix_producer_branches_stay_lead_only():
-    """S2 mints on the VIGIL-OWNED branches over VIGIL's OWN capture. The Strix producer branches describe a
-    report VIGIL did not re-drive and must NEVER become FACT-capable — flipping them would let a producer's
-    narrative mint. The GUARD must also hold for request_smuggling.differential_desync: #863 soundly demoted
-    it to fact_capable:false (a single-connection differential is ONE parser, not two), so the smuggling arm
-    stays a LEAD and must never be re-armed to a FACT."""
-    for producer in ("strix.service_reachability", "strix.tls_negotiation"):
+def test_the_strix_producer_branches_mint_only_over_vigils_own_capture():
+    """The Strix transport producer branches are now FACT-capable, but the FACT is VIGIL's OWN re-driven
+    capture, NEVER the producer's narrative: ``admit`` gates it on the oracle firing over VIGIL's OWN bytes
+    and ``certify_admitted`` re-fires it, so a benign twin (a closed port / a modern negotiation, exercised by
+    the positive/negative tests below) mints nothing. Each names the REAL OracleKind a verifier re-runs. The
+    GUARD still holds for request_smuggling.differential_desync: #863 soundly demoted it to fact_capable:false
+    (a single-connection differential is ONE parser, not two), so the smuggling arm stays a LEAD forever."""
+    for producer, ov in (("strix.service_reachability", "service_reachability"),
+                         ("strix.tls_negotiation", "tls_weakness")):
         b = _branch(producer)
-        assert b["fact_capable"] is False, f"{producer} must stay LEAD-only"
-        assert b["clean_capable"] is False, f"{producer} must never clear on the producer's say-so"
+        assert b["fact_capable"] is True, f"{producer}: FACT-capable over VIGIL's own re-drive"
+        assert b["clean_capable"] is False, f"{producer}: a positive-only re-drive never asserts absence"
+        assert b.get("oracle_version") == ov, f"{producer}: must name OracleKind {ov!r}"
+        assert "lead-only" not in b["limitation"].lower(), f"{producer}: FACT-capable, not LEAD-only"
     # request_smuggling.differential_desync is LEAD-only and STAYS retired (#863) — never re-armed here.
     smug = _branch("request_smuggling.differential_desync")
     assert smug["fact_capable"] is False, "request_smuggling.differential_desync must stay LEAD-only (#863)"
     assert smug["clean_capable"] is False, "request_smuggling.differential_desync may never assert absence"
-    # ... while the VIGIL-owned TRANSPORT twins this slice routes INTO are the FACT-capable ones.
+    # ... while the VIGIL-owned TRANSPORT twins this slice ALSO routes into stay FACT-capable.
     for owned in ("service_reachability.tcp_handshake", "tls_weakness.tls_handshake",
                   "weak_crypto.cert_signature_algorithm"):
         assert _branch(owned)["fact_capable"] is True
@@ -207,8 +212,10 @@ def _count_tls_connects(monkeypatch: pytest.MonkeyPatch) -> list:
 
 
 def test_an_open_port_mints_a_reachability_fact_that_reverifies_offline(monkeypatch, tmp_path):
-    """A Strix "this port is open" report drives VIGIL's OWN gated TCP handshake; the signed FACT is minted
-    on the VIGIL-owned ``service_reachability.tcp_handshake`` branch and re-verifies OFFLINE."""
+    """A Strix "this port is open" report drives VIGIL's OWN gated TCP handshake; the signed FACT is minted on
+    the VIGIL-owned ``service_reachability.tcp_handshake`` branch AND — because this is the Strix rail — the
+    SAME VIGIL-owned verdict is recorded under the now-FACT-capable ``strix.service_reachability`` producer
+    branch (its declared blocking_work). Both re-verify OFFLINE over VIGIL's OWN retained capture."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     signers, tr = _signers_and_trust()
@@ -217,12 +224,13 @@ def test_an_open_port_mints_a_reachability_fact_that_reverifies_offline(monkeypa
                                        "host": "127.0.0.1", "port": port, "protocol": "tcp"})
     assert mr is not None and mr.is_fact, f"expected a reachability FACT; got {mr}"
     res = mr.result
-    assert res.n_facts == 1, res.admissions
-    fact = res.facts[0]
-    assert fact.signed is not None
-    assert [a[0] for a in res.admissions] == ["service_reachability.tcp_handshake"]
-    assert res.admissions[0][1] == "FACT"
-    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+    # the VIGIL-owned twin AND the Strix producer branch both fired over the SAME VIGIL-owned handshake.
+    fact_branches = {a[0] for a in res.admissions if a[1] == "FACT"}
+    assert fact_branches == {"service_reachability.tcp_handshake", "strix.service_reachability"}, res.admissions
+    assert res.n_facts == 2, res.admissions
+    for fact in res.facts:
+        assert fact.signed is not None
+        _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
 
 
 def _assert_reverifies_and_rejects_tamper(fact, ctx, tr, tmp_path):
@@ -270,6 +278,11 @@ def _corrupt_context(oc: dict) -> None:
 
 
 def test_a_closed_port_mints_nothing(monkeypatch, tmp_path):
+    """SAME-SHAPE BENIGN TWIN for the promoted strix.service_reachability branch: an identically-shaped Strix
+    reachability report whose host/port is NOT actually reachable. VIGIL re-drives its OWN handshake, the
+    connect is refused, the SERVICE_REACHABILITY oracle does NOT fire — so NEITHER the VIGIL-owned twin NOR
+    the producer branch mints. The producer branch stays a non-FACT (its channel_established precondition is
+    unmet), proving the FACT rests on VIGIL's OWN capture, never on the Strix say-so."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     signers, _tr = _signers_and_trust()
@@ -278,6 +291,9 @@ def test_a_closed_port_mints_nothing(monkeypatch, tmp_path):
     assert mr is None or not mr.is_fact, "a closed port must never mint a reachability FACT"
     assert mr is not None and mr.result.n_facts == 0
     assert not mr.result.refused, "a genuinely refused connect is an OBSERVATION, not a gate refusal"
+    # the now-FACT-capable producer branch was ADMITTED (the rail reached it) but did NOT mint a FACT.
+    producer = [v for b, v, _r in mr.result.admissions if b == "strix.service_reachability"]
+    assert "FACT" not in producer, f"the benign twin minted a producer FACT: {mr.result.admissions}"
 
 
 def test_a_non_tcp_row_mints_nothing_and_attempts_no_socket(monkeypatch, tmp_path):
@@ -463,15 +479,18 @@ def test_a_deprecated_tls_protocol_mints_a_tls_weakness_fact(monkeypatch, tmp_pa
                                        "endpoint": f"https://127.0.0.1:{port}/"})
     assert mr is not None and mr.is_fact, f"expected a TLS_WEAKNESS FACT; got {mr}"
     res = mr.result
-    assert res.n_facts == 1, res.admissions
-    fact = res.facts[0]
-    assert "tls_weakness.tls_handshake" in {a[0] for a in res.admissions if a[1] == "FACT"}
+    # the weak protocol fires on the VIGIL-owned twin AND — the Strix rail — the now-FACT-capable
+    # strix.tls_negotiation producer branch, over the SAME VIGIL-owned negotiation (OracleKind.TLS_WEAKNESS).
+    assert {a[0] for a in res.admissions if a[1] == "FACT"} == {"tls_weakness.tls_handshake",
+                                                                "strix.tls_negotiation"}, res.admissions
+    assert res.n_facts == 2, res.admissions
     # the SAME single handshake was also judged for a broken-hash / undersized-key certificate, and that
-    # branch did NOT fire over this strong 2048-bit SHA-256 leaf.
-    assert {a[0] for a in res.admissions} == {"tls_weakness.tls_handshake",
+    # branch did NOT fire over this strong 2048-bit SHA-256 leaf (no strix producer branch for the leaf key).
+    assert {a[0] for a in res.admissions} == {"tls_weakness.tls_handshake", "strix.tls_negotiation",
                                               "weak_crypto.cert_signature_algorithm"}
     assert [a[1] for a in res.admissions if a[0] == "weak_crypto.cert_signature_algorithm"] == ["INCONCLUSIVE"]
-    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+    for fact in res.facts:
+        _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
 
 
 def test_an_undersized_certificate_key_mints_a_weak_crypto_fact(monkeypatch, tmp_path):
@@ -517,9 +536,11 @@ def test_the_two_weak_tls_positives_have_openssl_independent_coverage(monkeypatc
                                        "endpoint": f"https://127.0.0.1:{port}/"})
     assert mr is not None and mr.is_fact, mr
     res = mr.result
-    assert {a[0] for a in res.admissions if a[1] == "FACT"} == {"tls_weakness.tls_handshake"}, res.admissions
-    fact = res.facts[0]
-    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+    # the weak protocol fires on the VIGIL-owned twin AND the Strix producer branch (same VIGIL negotiation).
+    assert {a[0] for a in res.admissions if a[1] == "FACT"} == {"tls_weakness.tls_handshake",
+                                                                "strix.tls_negotiation"}, res.admissions
+    for fact in res.facts:
+        _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
 
 
 def test_the_weak_crypto_positive_has_openssl_independent_coverage(monkeypatch, tmp_path):
@@ -545,8 +566,10 @@ def test_the_weak_crypto_positive_has_openssl_independent_coverage(monkeypatch, 
 
 
 def test_a_strong_tls_endpoint_mints_nothing(monkeypatch, tmp_path):
-    """The benign twin: a modern protocol with a full-size SHA-256 leaf. Neither TLS branch may fire, and
-    the weak-crypto branch (clean_capable: false) may not report CLEAN either."""
+    """The SAME-SHAPE BENIGN TWIN for the promoted strix.tls_negotiation branch: an identically-shaped Strix
+    weak-TLS report against a modern protocol with a full-size SHA-256 leaf. VIGIL negotiates it ITSELF, the
+    TLS_WEAKNESS oracle does NOT fire, so neither the VIGIL-owned twin NOR the producer branch mints; the
+    weak-crypto branch (clean_capable: false) may not report CLEAN either."""
     from vigil_integration.live.verdict import Verdict
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
@@ -558,6 +581,8 @@ def test_a_strong_tls_endpoint_mints_nothing(monkeypatch, tmp_path):
     assert mr is not None and not mr.is_fact and mr.result.n_facts == 0, mr.result.admissions
     verdicts = {a[0]: a[1] for a in mr.result.admissions}
     assert verdicts.get("weak_crypto.cert_signature_algorithm") == Verdict.INCONCLUSIVE.value
+    # the now-FACT-capable producer branch was reached but did NOT mint over a modern negotiation.
+    assert verdicts.get("strix.tls_negotiation") != Verdict.FACT.value, mr.result.admissions
     # PINNED to the MEASURED verdict, not to a disjunction. ``tls_weakness.tls_handshake`` is registered
     # clean_capable, but the oracle's no-weakness return is built WITHOUT conclusive=True, so probe_verdict
     # can never say "clean" and admit() can only reach INCONCLUSIVE (see that branch's blocking_work). The

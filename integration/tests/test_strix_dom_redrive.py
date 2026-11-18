@@ -225,11 +225,17 @@ def test_dom_xss_mints_a_signed_fact_that_reverifies_offline(monkeypatch, tmp_pa
                "endpoint": "http://127.0.0.1:9/echo?q=seed"})
     _assert_fact_reverifies(mr, tr, tmp_path)
     assert mr.result.bug_class == "dom_xss"
+    # the canary EXECUTED, so the FACT is minted on the VIGIL-owned twin AND — the Strix rail — the
+    # now-FACT-capable ``strix.dom_execution`` producer branch, over the SAME VIGIL-owned CDP capture.
+    fact_branches = {a[0] for a in mr.result.admissions if a[1] == "FACT"}
+    assert fact_branches == {"dom_xss.dom_execution", "strix.dom_execution"}, mr.result.admissions
 
 
 def test_dom_xss_reflected_but_inert_is_refused(monkeypatch, tmp_path):
-    """FP: a safe page — the payload is reflected but never EXECUTES, so no __crucible_xss binding call → the
-    dom_execution oracle does not fire → LEAD (never a FACT)."""
+    """SAME-SHAPE BENIGN TWIN for the promoted strix.dom_execution branch: an identically-shaped Strix DOM-XSS
+    report against a safe page — the payload is reflected but never EXECUTES, so no __crucible_xss binding
+    call → the dom_execution oracle does not fire → NEITHER the VIGIL-owned twin NOR the producer branch mints
+    (LEAD, never a FACT; the Strix narrative is never the proof)."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=False))
@@ -240,6 +246,9 @@ def test_dom_xss_reflected_but_inert_is_refused(monkeypatch, tmp_path):
     assert mr is None or not mr.is_fact, "a reflected-but-inert payload must NOT mint a DOM-XSS FACT"
     # and it is INCONCLUSIVE, never CLEAN (this branch cannot assert absence).
     assert mr.result.family_verdict("dom_xss") != "CLEAN"
+    # the now-FACT-capable producer branch was reached but minted NO FACT over the inert payload.
+    assert "FACT" not in [v for b, v, _r in mr.result.admissions if b == "strix.dom_execution"], (
+        f"the inert benign twin minted a producer FACT: {mr.result.admissions}")
 
 
 def test_dom_xss_browserless_is_a_lead_never_clean(monkeypatch, tmp_path):

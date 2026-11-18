@@ -928,22 +928,23 @@
       "id": "strix.dom_execution",
       "check": "_finding_from_report",
       "evidence": "A Strix agent's report that injected JavaScript executed in a page DOM (DOM-XSS). Producer-supplied narrative; VIGIL has not re-driven it.",
-      "fact_capable": false,
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only: a Strix DOM-XSS observation over bytes VIGIL did not produce. VIGIL cannot mint a FACT until it independently re-drives the injection through its OWN gated headless-browser capture and the deterministic dom_execution oracle observes VIGIL's canary actually executing in a real DOM (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). A non-firing is uninformative; this branch may neither confirm nor clear.",
+      "limitation": "VIGIL re-drives a Strix DOM-XSS report through its OWN egress-gated headless-Chromium/CDP harness (live/dom_redrive.py:dom_xss_redrive) and mints a FACT ONLY when the deterministic DOM_EXECUTION oracle observes VIGIL's unique per-probe __crucible_xss canary ACTUALLY EXECUTE in a real DOM — the Strix narrative is the 'where to look', never the proof. admit() gates the FACT on that fire and certify_admitted re-fires it offline, so a reflected-but-inert / encoded payload (the same-shape benign twin) registers no binding call and mints nothing: the branch stays a LEAD. A browserless runner is INCONCLUSIVE, never CLEAN. Not clean-capable: proving the ABSENCE of a DOM sink is coverage-bounded, not this single re-drive's claim.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of a DOM-XSS sink is a coverage-based capability over every rendered path (a runtime-assembled sink never appears literally), not this single-observation re-drive's target, so clean-capability is deliberately not pursued on this branch.",
-      "blocking_work": "The VIGIL-OWNED headless-browser re-drive control now EXISTS (integration/vigil_integration/live/dom_redrive.py:dom_xss_redrive, reached from the proof-sink dispatch rail): a Strix DOM-XSS report is re-driven through VIGIL's OWN egress-gated CDP capture and, on a genuine execution the deterministic dom_execution oracle (verify/oracles.py:dom_execution_oracle, OracleKind.DOM_EXECUTION) observes, minted on the FACT-capable dom_xss.dom_execution branch. THIS branch stays the raw producer-report LEAD for a report VIGIL cannot re-drive to execution — no reachable endpoint, a reflected-but-inert payload, or a browserless runner keeps it a LEAD, never a FACT.",
+      "blocking_work": "REALIZED (promotion to FACT): the Strix DOM-XSS report is re-driven through VIGIL's OWN gated CDP capture on the Strix proof-sink rail (proof/run.py:_dom_xss_redrive -> live/dom_redrive.py:dom_xss_redrive with producer_branch='strix.dom_execution'), and that SAME VIGIL-owned DOM_EXECUTION-oracle verdict is recorded under this branch. A reflected-but-inert payload or a browserless runner stays a LEAD. No new OracleKind (DOM_EXECUTION is reused; the FACT-capable dom_xss.dom_execution twin is unchanged).",
       "evidence_surface": "composite",
       "implementation_refs": [
-        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "integration/vigil_integration/proof/run.py:_dom_xss_redrive",
+        "integration/vigil_integration/live/dom_redrive.py:dom_xss_redrive",
         "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
       ],
-      "oracle_version": "",
+      "oracle_version": "dom_execution",
       "control_requirements": [
         "headless_dom_render_capture",
         "vigil_owned_canary_injection",
@@ -1007,24 +1008,24 @@
       "id": "strix.service_reachability",
       "check": "_finding_from_report",
       "evidence": "A Strix agent's report that a network service was reachable/open. Producer-supplied; the FACT-capable twin is service_reachability.tcp_handshake, which VIGIL must independently reproduce.",
-      "fact_capable": false,
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only: a Strix reachability claim is not VIGIL's own handshake. A FACT is minted only when VIGIL independently completes its OWN TCP handshake against the reported host/port on the already-FACT-capable service_reachability.tcp_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is WIRED as of slice S2 (integration/vigil_integration/live/transport_redrive.py, reached from the proof-sink re-drive rail), so a Strix reachability report now drives VIGIL's own handshake and the FACT lands on that VIGIL-owned twin; this producer branch itself may still neither confirm nor clear on the producer's say-so.",
+      "limitation": "VIGIL re-drives a Strix-proposed host/port through its OWN charter-gated TCP handshake (verify/reachability.py:capture_handshake) and mints a FACT ONLY when the deterministic SERVICE_REACHABILITY oracle fires over VIGIL's OWN retained capture — the Strix report supplies the host:port ('where to look'), never the proof. admit() gates the FACT on that fire and certify_admitted re-fires it offline, so a closed port (the same-shape benign twin) fails the channel_established precondition and mints nothing: the branch stays a LEAD. Not clean-capable (a closed port is INCONCLUSIVE here; the VIGIL-owned service_reachability.tcp_handshake twin carries the channel-confirmed negative). Bounded to reachability at capture time.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Clean-capability (a closed-port negative) already belongs to the VIGIL-owned service_reachability.tcp_handshake branch; this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
-      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated handshake capture (verify/reachability.py:capture_handshake, OracleKind.SERVICE_REACHABILITY) on the existing FACT-capable service_reachability.tcp_handshake branch, under the gate chain that path actually enforces — there is NO WARDEN in it: agents.scope_gate.validate_action (protected-domain floor / signed charter / scope / posture), then verify.reachability._authorize (kill-switch / single-host / ACTIVE_RECON entitlement / charter scope), then the never-liftable egress floor with a connect-pin (live/egress_floor.py:pin_egress over vigil_gateway.denylist.is_egress_denied for every resolved address). The first two are pure string matching, so the floor is what makes a metadata/link-local destination unreachable even when a charter lists it. The oracle, the gated capture AND (slice S2) the LEAD-to-re-drive binding now all exist: integration/vigil_integration/live/transport_redrive.py re-authorises the reported host:port through that chain and runs VIGIL's own capture_handshake against the pinned address, and the deterministic oracle's verdict is admitted to service_reachability.tcp_handshake. What remains for THIS producer id is only the admission bookkeeping that would record that same VIGIL-owned capture+oracle verdict under this branch as well; until then the producer report itself stays a LEAD.",
+      "blocking_work": "REALIZED (promotion to FACT): the Strix reachability report is re-driven through VIGIL's OWN gated capture_handshake on the Strix proof-sink rail (proof/run.py:_transport_redrive -> live/transport_redrive.py:transport_redrive with strix_producer=True), and that SAME VIGIL-owned SERVICE_REACHABILITY-oracle verdict is recorded under this branch via live/transport_redrive.py:_STRIX_PRODUCER_FOR. admit() maps the fired oracle to a FACT only because this branch is now fact_capable; a non-firing capture (closed port) stays a LEAD. No new oracle and no new capture — the VIGIL-owned service_reachability.tcp_handshake twin is unchanged.",
       "evidence_surface": "transport",
       "implementation_refs": [
-        "integration/vigil_integration/proof/run.py:_finding_from_report",
         "integration/vigil_integration/proof/run.py:_transport_redrive",
         "integration/vigil_integration/live/transport_redrive.py:transport_redrive",
+        "integration/vigil_integration/live/transport_redrive.py:_STRIX_PRODUCER_FOR",
         "engine/crucible/framework/v2/verify/reachability.py:capture_handshake"
       ],
-      "oracle_version": "",
+      "oracle_version": "service_reachability",
       "control_requirements": [
         "vigil_owned_tcp_handshake_redrive",
         "warden_scope_gate"
@@ -1034,24 +1035,24 @@
       "id": "strix.tls_negotiation",
       "check": "_finding_from_report",
       "evidence": "A Strix agent's report of a weak TLS protocol/cipher negotiation. Producer-supplied; the FACT-capable twin is tls_weakness.tls_handshake, which VIGIL must independently reproduce.",
-      "fact_capable": false,
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only: a Strix TLS finding is not VIGIL's own handshake. A FACT is minted only when VIGIL independently negotiates its OWN TLS handshake against the reported host on the already-FACT-capable tls_weakness.tls_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is WIRED as of slice S2 (integration/vigil_integration/live/transport_redrive.py, reached from the proof-sink re-drive rail), so a Strix TLS report now drives VIGIL's own negotiation and the FACT lands on that VIGIL-owned twin; this producer branch itself may still neither confirm nor clear on the producer's say-so.",
+      "limitation": "VIGIL re-drives a Strix-proposed host through its OWN charter-gated TLS negotiation (verify/tls.py:capture_tls_handshake) and mints a FACT ONLY when the deterministic TLS_WEAKNESS oracle fires over VIGIL's OWN retained negotiation (a deprecated protocol / weak cipher) — the Strix report is the 'where to look', never the proof. admit() gates the FACT on that fire and certify_admitted re-fires it offline, so a modern negotiation (the same-shape benign twin) does not fire and mints nothing: the branch stays a LEAD. Scoped to the negotiated protocol/cipher (OracleKind.TLS_WEAKNESS); a broken-hash/undersized leaf key is a distinct claim that keeps minting only on the VIGIL-owned weak_crypto.cert_signature_algorithm twin.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Clean-capability belongs to the VIGIL-owned tls_weakness.tls_handshake branch (bounded to what a modern client negotiates); this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
-      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated TLS handshake capture (verify/tls.py:capture_tls_handshake, OracleKind.TLS_WEAKNESS) on the existing FACT-capable tls_weakness.tls_handshake branch, under the gate chain that path actually enforces — there is NO WARDEN in it: agents.scope_gate.validate_action (protected-domain floor / signed charter / scope / posture), then verify.reachability._authorize (kill-switch / single-host / ACTIVE_RECON entitlement / charter scope), then the never-liftable egress floor with a connect-pin (live/egress_floor.py:pin_egress over vigil_gateway.denylist.is_egress_denied for every resolved address). The first two are pure string matching, so the floor is what makes a metadata/link-local destination unreachable even when a charter lists it. The oracle, the gated capture AND (slice S2) the LEAD-to-re-drive binding now all exist: integration/vigil_integration/live/transport_redrive.py re-authorises the reported host:port through that chain and runs VIGIL's own capture_tls_handshake against the pinned address, whose single negotiation is judged for both a weak protocol/cipher (tls_weakness.tls_handshake) and a broken-hash/undersized leaf key (weak_crypto.cert_signature_algorithm). What remains for THIS producer id is only the admission bookkeeping that would record that same VIGIL-owned capture+oracle verdict under this branch as well; until then the producer report itself stays a LEAD.",
+      "blocking_work": "REALIZED (promotion to FACT): the Strix TLS report is re-driven through VIGIL's OWN gated capture_tls_handshake on the Strix proof-sink rail (proof/run.py:_transport_redrive -> transport_redrive with strix_producer=True), and that SAME VIGIL-owned TLS_WEAKNESS-oracle verdict is recorded under this branch for the weak_tls class via live/transport_redrive.py:_STRIX_PRODUCER_FOR. The leaf-key weakness keeps minting on weak_crypto.cert_signature_algorithm. A modern negotiation stays a LEAD. No new oracle and no new capture.",
       "evidence_surface": "tls_handshake",
       "implementation_refs": [
-        "integration/vigil_integration/proof/run.py:_finding_from_report",
         "integration/vigil_integration/proof/run.py:_transport_redrive",
         "integration/vigil_integration/live/transport_redrive.py:transport_redrive",
+        "integration/vigil_integration/live/transport_redrive.py:_STRIX_PRODUCER_FOR",
         "engine/crucible/framework/v2/verify/tls.py:capture_tls_handshake"
       ],
-      "oracle_version": "",
+      "oracle_version": "tls_weakness",
       "control_requirements": [
         "vigil_owned_tls_handshake_redrive",
         "warden_scope_gate"
