@@ -204,6 +204,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
                                      _IOS_TAGS_SLOT: _IOS_TAGS if ios else "",
+                                     # the Code (Red-Pen) screen: VIGIL_REDPEN_ENABLED, the same master flag that
+                                     # serves its routes, so the screen and its API are never out of step
+                                     "__VIGIL_CODE__": "1" if _config.redpen_enabled() else "0",
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
                                      "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
@@ -291,6 +294,20 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
           "/api/customer/assessments/findings": "assessment_findings",
           "/api/customer/assets": "assets_overview",
           "/api/customer/notifications": "notifications"}
+
+# C6 — the Code (Red-Pen) screen's POST actions (served only while VIGIL_REDPEN_ENABLED is on): the provisioner action
+# each relays to, and the ONLY body fields it carries (the org, the requester and the step-up stamp come from the
+# session). Its read, GET api/customer/code, carries no finding data (each repository's findings are read through the
+# previewed assessments/findings route), so like every flag-gated read it is routed separately, outside `_READS`.
+_CODE_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
+    "code/connect": ("redpen_connect", ()),
+    "code/settings": ("redpen_set_settings", ("repo", "block_threshold", "monthly_limit_credits")),
+    "code/disconnect": ("redpen_disconnect", ("repo",)),
+    "code/review": ("redpen_review", ("repo",)),
+    "code/schedule": ("redpen_schedule", ("repo", "cadence")),
+    "code/fix": ("redpen_fix_this", ("repo", "finding_ref")),
+    "code/retest": ("redpen_retest", ("repo", "finding_ref")),
+}
 
 class CustomerServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
@@ -614,6 +631,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("redpen_code_overview")
+        if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
+            return self._code_connected()
         # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
         # Both are served ONLY when customer_oidc_enabled() — otherwise the routes are absent (404), so the
         # edge is byte-identical to a build without customer OIDC (mirrors the operator route-gating).
@@ -1008,6 +1029,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._retest(body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
             return self._monitoring(action, body)
+        if action in _CODE_ACTIONS and _redpen_on():                 # C6 Code screen (flag OFF -> unknown-action 404)
+            return self._code(action, body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1177,6 +1200,56 @@ class CustomerHandler(BaseHTTPRequestHandler):
         else:
             c, r = self._provision("monitor_revoke", requester, payload)
         return self._json(r, c)
+
+    def _code(self, action: str, body: dict):
+        """C6 — the Code (Red-Pen) screen's actions. REQUESTER + ORG + step-up stamp from the SERVER-side session, never
+        the body (a body org_id is ignored): a customer manages code review only for THEIR bound org. Only the customer's
+        choices travel — the repository and what the action needs (what blocks a merge and/or the monthly limit, a
+        schedule cadence, a finding reference), copied by name from `_CODE_ACTIONS` so nothing else can ride along. The
+        sovereign provisioner admits manage_code, steps up where sensitive and checks the owner-signed connected-repo
+        record. Back come the install URL and opaque records — never an estimate, a cost or a model name, never the
+        GitHub App key (O-5)."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        target, fields = _CODE_ACTIONS[action]
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
+        for k in fields:
+            if k in body:
+                payload[k] = body[k]
+        c, r = self._provision(target, str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _code_connected(self):
+        """GET /api/customer/code/connected — GitHub sends the browser here once the VIGIL app is installed (its Setup
+        URL). HOST-gated only, like the OIDC callback: a top-level redirect from github.com carries a foreign Referer and
+        no Origin. It carries NO customer session (the cookie is SameSite=Strict), so the org is never read from this
+        request: the provisioner takes it from the owner-signed ``state`` that Connect GitHub minted for the signed-in
+        member, and records the installation only once it is verified as theirs. The edge relays the query once (an
+        oversized or repeated parameter is sent as empty, so it fails closed) and ends with a 302 into the Code screen
+        carrying only the outcome — never why, never a JSON page in the person's browser."""
+        if self.headers.get("Host", "") not in self.server.allowed_hosts:
+            return self._deny(403, "denied (host)")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def one(name: str, cap: int) -> str:
+            v = q.get(name, [])
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        c, r = self._provision("redpen_connect_record", "", {
+            "state": one("state", 4096), "installation_id": one("installation_id", 32),
+            "setup_action": one("setup_action", 32), "code": one("code", 512), "ip": self._ip()})
+        ok = c == 200 and isinstance(r, dict)
+        outcome = "1" if ok and r.get("recorded") else ("pending" if ok and r.get("pending") else "0")
+        self.send_response(302)
+        self.send_header("Location", f"/#/code?connected={outcome}")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")         # the state never leaks via Referer
+        self.send_header("X-Vigil-Build", self.server.app.build)
+        self.end_headers()
 
     def _onboarding(self, body: "dict | None"):
         """The onboarding tour's state for the SESSION's account: read it (GET, ``body`` None) or record that the tour
@@ -1350,6 +1423,11 @@ def _launch_ui_on() -> bool:
 def _retest_on() -> bool:
     from .. import config as _config
     return _config.customer_retest_ui_enabled()
+
+
+def _redpen_on() -> bool:
+    from .. import config as _config
+    return _config.redpen_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

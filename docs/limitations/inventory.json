@@ -788,6 +788,12 @@
       "kind": "debt",
       "limit_id": "LIMIT-restore-hard-pruned-spine",
       "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
+    },
+    {
+      "file": "apps/sigil/sigil/ui/provision.py",
+      "snippet": "Not wired by the factory yet",
+      "kind": "non-debt",
+      "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
     }
   ]
 }

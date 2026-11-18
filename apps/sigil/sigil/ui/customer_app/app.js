@@ -66,6 +66,13 @@
  * that screen is on) and unread notifications — each read from the SAME session-scoped read its full screen uses and
  * each opening that screen; a card whose read a role may not make says so plainly. Off, the home screen is the Account
  * card exactly as before and none of those reads is made.
+ *
+ * CODE. When the edge has Red-Pen on (data-code="1", VIGIL_REDPEN_ENABLED — the same switch that serves the
+ * api/customer/code routes), the top bar has a Code screen (#/code): Connect GitHub, the connected repositories, each
+ * one's Red-Pen policy (what blocks a merge, a monthly spending limit), Red-Pen System and its findings with Fix this and
+ * Retest, and Disconnect (confirmed in the page) — each offered only where the server says this deployment runs it. The
+ * server decides who may manage code review; this page sends only a repository the server listed and the choice. Off,
+ * there is no tab, #/code is the home screen exactly as any unknown route, and no call is made.
  */
 (function () {
   "use strict";
@@ -152,7 +159,7 @@
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) { return route !== "#/monitoring" || MONITORING_ON; }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2145,6 +2152,313 @@
     return shell(h("div", {}, [h("h2", { text: "Team" }), note, holder]), "#/team");
   }
 
+  // ---- Code (Red-Pen, VIGIL_REDPEN_ENABLED): connected GitHub repositories, their policy, Red-Pen System ------------
+  // Shown only while the edge writes data-code="1" — VIGIL_REDPEN_ENABLED, the switch that also serves the
+  // api/customer/code routes, so the screen and its API are never out of step. Off: no Code tab, #/code is the home
+  // screen exactly as an unknown route, and nothing is fetched. The SERVER decides everything. GET api/customer/code
+  // answers only someone who may manage code review (the founder, or an Operator VIGIL has added; anyone else sees the
+  // honest card below) with the session workspace's connected repositories, each one's policy and `available`: the
+  // actions this deployment really runs. Only those are offered, so no button can only say "not yet". Each change is one
+  // request for the session's workspace, never an org this page names, carrying only the repository and the choice:
+  // code/connect (GitHub's install page, opened only when it is github.com's own https page), code/settings,
+  // code/disconnect (asked first, in the page), code/review and code/schedule (Red-Pen System), code/fix and code/retest
+  // (on a finding). A repository's findings are the previewed api/customer/assessments/findings rows of its review slug.
+  // A sensitive change goes through the account-security step-up when this build has it. Nothing here shows a price, an
+  // estimate or a model name: VIGIL never estimates what a review costs, and the monthly limit is the workspace's cap.
+  var CODE_ON = pageFlag("code");
+  var CODE_THRESHOLDS = [["none", "Nothing"], ["critical_high", "Critical and High"], ["medium_up", "Medium and up"]];
+  var CODE_CADENCES = [["weekly", "Weekly"], ["monthly", "Monthly"], ["off", "No schedule"]];
+  // GitHub's return to the app (the edge's ?connected= outcome): a fixed sentence from this table, never the raw value.
+  var CODE_CONNECTED = {
+    "1": "GitHub is connected. The repositories you picked are listed below.",
+    pending: "GitHub is waiting for an owner of your GitHub organization to approve the VIGIL app. Once they have, "
+      + "select Connect GitHub again.",
+    "0": "GitHub was not connected, and nothing was recorded. Select Connect GitHub to try again; if it keeps "
+      + "happening, contact VIGIL.",
+  };
+  // Red-Pen System and the finding actions: the request each sends and what its answer means, in fixed words.
+  var CODE_RUN = {
+    review: { path: "/code/review", failed: "Red-Pen System did not start",
+      done: "Red-Pen System is reviewing the whole repository. Its findings appear here when it finishes.",
+      coming: "Reviewing a whole repository is not available on this deployment yet. Nothing was started." },
+    schedule: { path: "/code/schedule", failed: "The review schedule was not saved",
+      done: "The review schedule for this repository is saved.",
+      coming: "Scheduled reviews are not available on this deployment yet. No schedule was set." },
+    fix: { path: "/code/fix", failed: "The fix did not start",
+      done: "VIGIL is preparing a fix. Once it passes its checks, a pull request opens on GitHub for you to review.",
+      coming: "Fix this is not available on this deployment yet. Nothing was changed in your repository." },
+    retest: { path: "/code/retest", failed: "The retest did not start",
+      done: "Retest started. The finding counts as fixed once its reproduction stops failing.",
+      coming: "Retest is not available on this deployment yet. Nothing was started." },
+  };
+  var codeUi = { seq: 0, boxes: Object.create(null) };
+
+  function viewCode() {
+    codeUi.boxes = Object.create(null);
+    var holder = h("div#code-body", {}, loadingHolder("Loading…"));
+    var notice = codeConnectedNotice();
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/code"); }
+      catch (e) {
+        if (here() !== "#/code") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) {
+          return VUI.mount(holder, h("div.card.cust-soon", { text: "Only the founder of this workspace, or an Operator "
+            + "VIGIL has added, can connect GitHub and manage code review. Ask one of them to connect your repositories." }));
+        }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Code"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/code") return;                   // the person navigated away before the load resolved
+      VUI.mount(holder, codeBody(d || {}));
+      codeLoadFindings(d || {});
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Code" }),
+      h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect and reports "
+        + "only the problems it reproduced. Only this workspace sees them." }),
+      notice, holder]), "#/code");
+  }
+  // Back from GitHub (#/code?connected=…): one fixed sentence for what happened, then the hash loses its query so a
+  // reload does not say it again.
+  function codeConnectedNotice() {
+    var q = new URLSearchParams(((location.hash || "").split("?")[1]) || "");
+    var said = own(CODE_CONNECTED, String(q.get("connected") || ""));
+    if (!said) return null;
+    try { history.replaceState(null, "", location.pathname + location.search + "#/code"); } catch (e) { /* keep it */ }
+    return h("div.cust-launch-note", { role: "status" }, h("p", { text: said }));
+  }
+
+  function codeBody(d) {
+    var av = d.available || {};
+    var repos = (Array.isArray(d.repos) ? d.repos : []).filter(function (r) { return r && r.repo; });
+    var top = av.connect
+      ? h("div.card", {}, [h("h3", { text: "GitHub" }),
+          h("p.cust-muted", { text: "Connect GitHub, then pick on GitHub the repositories VIGIL may review. VIGIL works "
+            + "only on the repositories you picked." }),
+          h("div.cust-mon-actions", {}, codeButton("Connect GitHub", codeConnect, "primary"))])
+      : h("div.card.cust-soon", { text: "Connecting GitHub is not available on this deployment yet. Contact VIGIL to "
+          + "connect your repositories." });
+    var list = repos.length
+      ? h("div.cust-grid", {}, repos.map(function (r) { return codeRepoCard(r, av); }))
+      : h("div.card.cust-soon", { text: av.connect
+          ? "No repository is connected yet. Select Connect GitHub to pick the repositories VIGIL may review."
+          : "No repository is connected yet." });
+    return h("div", {}, [top, h("h3", { text: "Repositories" }), list]);
+  }
+  function codeButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+
+  // One repository: its Red-Pen policy, Red-Pen System, its findings and Disconnect.
+  function codeRepoCard(r, av) {
+    var box = h("div.cust-code-findings", {}, loadingHolder("Loading findings…"));
+    if (r.slug) codeUi.boxes[String(r.slug)] = box;
+    var foot = h("div.cust-mon-actions", {});
+    VUI.mount(foot, codeDisconnectButton(r, foot));
+    return h("div.card", {}, [
+      h("div.cust-asset-head", {}, [h("span.host", { text: String(r.repo) }),
+        h("span.cust-badge.cust-badge-on", { text: "Connected" })]),
+      codeSettings(r), codeSystem(r, av), h("div.cust-code-section", {}, [h("h4", { text: "Findings" }), box]), foot]);
+  }
+  function codeSettings(r) {
+    var n = ++codeUi.seq;
+    var sel = h("select#code-thr-" + n, {}, CODE_THRESHOLDS.map(function (t) {
+      return h("option", { value: t[0], text: t[1] });
+    }));
+    sel.value = String(r.block_threshold || "");
+    var limit = parseInt(r.monthly_limit_credits, 10) || 0;
+    var lim = h("input#code-limit-" + n + ".cust-code-limit", { type: "text", inputmode: "numeric", autocomplete: "off",
+      value: String(limit) });
+    var row = h("div.cust-mon-actions", {});
+    VUI.mount(row, codeButton("Save", function (b) { codeSave(r, sel, lim, b, row); }));
+    var out = [h("h4", { text: "Red-Pen" }), h("label", { for: "code-thr-" + n, text: "What blocks a merge" }), sel,
+      h("label", { for: "code-limit-" + n, text: "Monthly spending limit in credits (0 for no limit)" }), lim];
+    if (limit > 0 && r.used_this_month != null) {
+      var used = parseInt(r.used_this_month, 10) || 0;
+      out.push(kv("Used this month", used + " of " + limit + " credits"));
+      if (used >= limit) {
+        out.push(h("p.cust-muted", { text: "This repository reached its monthly limit: new reviews wait until next month, "
+          + "or until you raise the limit." }));
+      }
+    }
+    out.push(row);
+    return h("div.cust-code-section", {}, out);
+  }
+  async function codeSave(r, sel, lim, btn, row) {
+    clearErr();
+    var raw = String(lim.value == null ? "" : lim.value).trim();
+    if (!/^[0-9]{1,9}$/.test(raw)) {
+      return err("Enter the monthly spending limit as a whole number of credits, or 0 for no limit. Nothing was changed.");
+    }
+    btn.disabled = true;
+    try {
+      await codePost("/code/settings", { repo: r.repo, block_threshold: String(sel.value || ""),
+        monthly_limit_credits: parseInt(raw, 10) }, row);
+      VUI.toast("Red-Pen settings saved for " + r.repo + ".");
+      if (here() === "#/code") render();
+    } catch (e) { btn.disabled = false; await codeFailed(e, "The Red-Pen settings were not saved"); }
+  }
+  function codeSystem(r, av) {
+    var out = [h("h4", { text: "Red-Pen System" })];
+    if (!av.review && !av.schedule) {
+      out.push(h("p.cust-muted", { text: "Reviewing the whole repository, now or on a schedule, is not available on this "
+        + "deployment yet." }));
+      return h("div.cust-code-section", {}, out);
+    }
+    out.push(h("p.cust-muted", { text: "Review the whole repository now, or on a weekly or monthly schedule. No price is "
+      + "shown: VIGIL never estimates what a review costs." }));
+    var row = h("div.cust-mon-actions", {}), bs = [];
+    if (av.review) {
+      bs.push(codeButton("Review now", function (b) { codeRun("review", { repo: r.repo }, b, row); }, "primary"));
+    }
+    if (av.schedule) {
+      CODE_CADENCES.forEach(function (c) {
+        bs.push(codeButton(c[1], function (b) { codeRun("schedule", { repo: r.repo, cadence: c[0] }, b, row); }));
+      });
+    }
+    VUI.mount(row, bs);
+    out.push(row);
+    return h("div.cust-code-section", {}, out);
+  }
+  async function codeRun(kind, body, btn, where) {
+    var run = CODE_RUN[kind];
+    clearErr();
+    btn.disabled = true;
+    try {
+      var r = await codePost(run.path, body, where);
+      btn.disabled = false;
+      VUI.toast(r && r.coming ? run.coming : run.done);
+    } catch (e) { btn.disabled = false; await codeFailed(e, run.failed); }
+  }
+
+  // Each repository's findings: the session workspace's previewed assessment findings (read once per screen), the rows of
+  // that repository's review slug, with Fix this and Retest on a finding shown in full where this deployment runs them.
+  function codeLoadFindings(d) {
+    var repos = (Array.isArray(d.repos) ? d.repos : []).filter(function (r) { return r && r.repo && r.slug; });
+    if (!repos.length) return;
+    var av = d.available || {};
+    (async function () {
+      var f = null;
+      try { f = await VUI.getJSON(API + "/assessments/findings"); } catch (e) { f = null; }
+      if (here() !== "#/code") return;
+      repos.forEach(function (r) {
+        var box = codeUi.boxes[String(r.slug)];
+        if (!box) return;
+        if (!f) { VUI.mount(box, h("p.cust-muted", { text: "Findings could not be loaded just now." })); return; }
+        VUI.mount(box, codeFindings(r, (Array.isArray(f.findings) ? f.findings : []).filter(function (x) {
+          return x && x.engagement_slug === r.slug;
+        }), av));
+      });
+    })();
+  }
+  function codeFindings(r, list, av) {
+    if (!list.length) {
+      return h("p.cust-muted", { text: "No findings for this repository. Red-Pen lists here each problem it reproduced." });
+    }
+    var cards = list.map(function (f) {
+      var row = h("div.cust-mon-actions", {}), bs = [];
+      if (!f.locked && f.finding_ref) {
+        if (av.fix) {
+          bs.push(codeButton("Fix this", function (b) {
+            codeRun("fix", { repo: r.repo, finding_ref: f.finding_ref }, b, row);
+          }, "primary"));
+        }
+        if (av.retest) {
+          bs.push(codeButton("Retest", function (b) {
+            codeRun("retest", { repo: r.repo, finding_ref: f.finding_ref }, b, row);
+          }));
+        }
+      }
+      VUI.mount(row, bs);
+      return h("div.cust-code-finding", {}, [h("strong", { text: String(f.title || f.bug_class || "Finding") }),
+        kv("Severity", f.severity), kv("Where", f.surface), f.summary ? h("p", { text: String(f.summary) }) : null,
+        bs.length ? row : null]);
+    });
+    var missing = !av.fix && !av.retest ? "Fix this and Retest are" : (!av.fix ? "Fix this is"
+      : (!av.retest ? "Retest is" : ""));
+    return h("div", {}, cards.concat([missing ? h("p.cust-muted", { text: missing
+      + " not available on this deployment yet." }) : null]));
+  }
+
+  // Disconnect is asked here first, in place of its button; nothing is sent until it is confirmed.
+  function codeDisconnectButton(r, foot) {
+    return codeButton("Disconnect", function () { codeConfirmDisconnect(r, foot); }, "danger");
+  }
+  function codeConfirmDisconnect(r, foot) {
+    VUI.mount(foot, h("div.cust-mon-confirm", { role: "group", "aria-label": "Disconnect " + r.repo }, [
+      h("p", { text: "Stop reviewing " + r.repo + "? Red-Pen starts no new review of it, and findings already reported "
+        + "stay in VIGIL. To also remove VIGIL's access to its code, remove it from the VIGIL app on GitHub." }),
+      h("div.cust-mon-actions", {}, [
+        codeButton("Yes, disconnect", function (b) { codeDisconnect(r, b, foot); }, "danger"),
+        codeButton("Keep it connected", function () { VUI.mount(foot, codeDisconnectButton(r, foot)); }),
+      ]),
+    ]));
+  }
+  async function codeDisconnect(r, btn, foot) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await codePost("/code/disconnect", { repo: r.repo }, foot);
+      VUI.toast(r.repo + " is disconnected. Red-Pen starts no new review of it.");
+      if (here() === "#/code") render();
+    } catch (e) { btn.disabled = false; await codeFailed(e, r.repo + " was not disconnected"); }
+  }
+
+  // Connect GitHub: the server's install link, opened only when it is GitHub's own https install page (an absolute
+  // github.com link under /apps/, no credentials, no port) — never any other address it might name.
+  function isGitHubInstallUrl(u) {
+    try {
+      var p = new URL(String(u));
+      return p.protocol === "https:" && p.hostname === "github.com" && !p.port && !p.username && !p.password
+        && p.pathname.indexOf("/apps/") === 0;
+    } catch (e) { return false; }
+  }
+  async function codeConnect(btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      var r = await codePost("/code/connect", {}, btn.parentNode);
+      if (!r || !isGitHubInstallUrl(r.install_url)) {
+        btn.disabled = false;
+        return err("The GitHub link VIGIL received was not GitHub's own secure page, so it was not opened. Nothing was "
+          + "connected.");
+      }
+      location.assign(r.install_url);                     // leave for GitHub; it sends the person back to Code
+    } catch (e) { btn.disabled = false; await codeFailed(e, "GitHub was not connected"); }
+  }
+
+  // One Code change, sent once. When this build has the account-security step-up (withStepUp), a request the server
+  // answers with "a fresh second factor is needed" opens the inline check and is sent ONCE more; otherwise it is sent as
+  // it is (typeof is safe on a name a build does not have).
+  function codePost(path, body, where) {
+    function send() { return VUI.postJSON(API + path, body); }
+    return typeof withStepUp === "function" ? withStepUp(send, where) : send();
+  }
+  // Why a change did not go through: fixed words, then the server's own reason. A refusal comes before anything is
+  // written, so it says nothing was changed; when no answer came back, whether it happened is not known, so the screen
+  // is read again instead.
+  async function codeFailed(e, lead) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (e && e.stepUpCancelled) return;                    // the person closed the check: nothing was sent again
+    if (status === 401 && d.step_up_required) {
+      return err("For your security, this change needs a fresh second-factor check. Verify with your authenticator, "
+        + "then try again. Nothing was changed.");
+    }
+    if (status === 401) { await refreshWho(); nav("#/login"); return; }
+    if (!status || (status >= 500 && !(status === 503 && d.error === "updating"))) {
+      err(lead + ": VIGIL could not confirm it. This screen now shows your repositories as they are.");
+      if (here() === "#/code") render();
+      return;
+    }
+    if (status === 503) { return err(lead + ": VIGIL is updating. Try again in a moment. Nothing was changed."); }
+    var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
+      .replace(/\.$/, "");                                // as the server said it (it may start with a repository name)
+    err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -2349,6 +2663,7 @@
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -2422,6 +2737,8 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // Red-Pen off: #/code is the home screen, exactly as any unknown route is
+    "#/code": function () { return authed() ? (CODE_ON ? viewCode() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is

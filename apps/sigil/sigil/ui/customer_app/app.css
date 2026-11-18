@@ -200,6 +200,14 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-stmt-line .k { padding-left: 14px; }
 .cust-stmt-bal { text-align: right; font-size: 0.82em; opacity: 0.7; padding-top: 2px;
   font-variant-numeric: tabular-nums; }
+/* C6 — the Code (Red-Pen) screen: one card per connected repository — its Red-Pen policy, Red-Pen System, findings */
+.cust-code-section { display: grid; gap: 6px; margin-top: 14px; }
+.cust-code-section h4, .cust-code-section p { margin: 0; }
+.cust-code-section label { font-size: 0.85rem; opacity: 0.8; }
+.cust-code-limit { max-width: 16ch; }
+.cust-code-findings { display: grid; gap: 8px; }
+.cust-code-finding { display: grid; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); }
+.cust-code-finding p { margin: 0; }
 
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {

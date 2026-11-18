@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import math
 import secrets
 import time
@@ -470,7 +471,7 @@ class Provisioner:
                  pending_totp=None, mfa_limiter=None,
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
-                 trial_ip_limiter=None, email_codes=None, email_code_limiter=None,
+                 trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -510,6 +511,12 @@ class Provisioner:
         # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
         # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
         self.target_fetcher = target_fetcher
+        # C6 — the GitHub INSTALLATION verifier for the Code screen's post-install callback:
+        # ``(installation_id=, code=) -> True`` only when the person who came back provably has access to that
+        # installation (GitHub user authorization → GET /user/installations). None ⇒ the callback records NOTHING
+        # (fail-closed: the redirect's installation id is browser-controlled). Not wired by the factory yet — it needs
+        # the App's OAuth client secret + github.com egress (a later, owner-gated slice).
+        self.installation_verifier = installation_verifier
         # A SEPARATE, high-ceiling limiter enforcing a GLOBAL signup cap (per window) on top of per-email
         # uniqueness + the per-ip/email rate-limit — a ceiling on trial-credit farming (Finding: trial
         # abuse). None ⇒ no global cap (tests inject a low-cap one; the factory wires a daily cap).
@@ -2828,6 +2835,328 @@ class Provisioner:
         with self._lock:
             self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
         return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
+    # -- C6: the customer Code (Red-Pen) screen — connected GitHub repositories (own-a-repo != own-a-host) ----------
+    # Every action is behind the master flag VIGIL_REDPEN_ENABLED (off ⇒ the dispatch never reaches here: 404) AND
+    # `manage_code` (decision O-4: the founder and the owner-granted operator; NEVER org_admin — billing-authz !=
+    # testing-authz). The ORG is the SESSION's (the edge stamps it; never a body field) — except on the GitHub
+    # post-install callback, which carries no session (the customer cookie is SameSite=Strict and the redirect comes
+    # from github.com) and recovers the org from the owner-signed `state` the authenticated Connect GitHub minted. What
+    # crosses back is the install URL, the connected repositories and their policy — NEVER an estimate, a cost or a
+    # model name, and never the GitHub App key (decision O-5).
+    def _redpen_admit(self, action: str, requester: str, org_id: str, *, target: str = "") -> None:
+        """Flag gate (default OFF, defence in depth under the dispatch's 404) then ``admit_customer(manage_code)`` on the
+        SESSION org — refused + audited otherwise. Caller holds the lock."""
+        from .. import config
+        if not config.redpen_enabled():
+            raise ProvisionDenied("code review is not enabled on this deployment")
+        if not self.orgs.admit_customer(username=requester, org_id=org_id, permission="manage_code"):
+            self._audit(action, requester=requester, org_id=org_id, target=target, outcome="denied")
+            raise ProvisionDenied("requester may not manage code review for this org")
+
+    @staticmethod
+    def _redpen_repo(repo) -> str:
+        """The canonical ``github.com/<owner>/<repo>`` reference (fail-closed ``ProvisionError`` on anything else)."""
+        from vigil_core import check_connected_repo
+        try:
+            return check_connected_repo(repo)
+        except ValueError as e:
+            raise ProvisionError(str(e)) from None
+
+    # The Red-Pen EXECUTION actions this deployment can really run. EMPTY here: their workers land with R4 (review,
+    # schedule) and R5 (fix, retest), and each adds its name when it replaces its inert `coming` answer below, so the
+    # Code screen offers exactly the actions that work (never a button that can only say "not yet").
+    _REDPEN_EXECUTION_LIVE: "frozenset[str]" = frozenset()
+
+    def redpen_code_overview(self, requester: str, requester_org_id: str, *, ip: str = "",
+                             now: "Optional[float]" = None) -> dict:
+        """The Code screen's read for the SESSION org: its connected repositories and each one's policy — the
+        merge-blocking ``block_threshold``, the monthly spending limit (credits; 0 = none) and, for a repository with a
+        limit, the credits its reviews were actually CHARGED this calendar month (never an estimate) — plus each one's
+        review ``slug`` (the screen reads that repository's findings from the previewed
+        ``api/customer/assessments/findings``; this read carries NO finding data) and ``available``: which actions this
+        deployment offers (Connect GitHub once the owner registered the App here; review / schedule / fix / retest once
+        their workers are live). ``manage_code`` only (anyone else is refused: the screen shows an honest card). A
+        read: the signing key is never unsealed."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        from ..governor.redpen_spend import RedPenSpendLedger
+        from .target_authorization import _customer_slug
+        with self._lock:
+            self._redpen_admit("redpen_code_overview", requester, requester_org_id)
+            spend = RedPenSpendLedger(self.store, owner_key=None)
+            repos = []
+            for doc in ConnectedRepoRegistry(self.store, owner_key=None).repos_of_org(requester_org_id):
+                row = {"repo": doc.repo, "slug": _customer_slug(requester_org_id, doc.repo),
+                       "block_threshold": doc.block_threshold.value,
+                       "monthly_limit_credits": int(doc.monthly_limit_credits)}
+                if doc.monthly_limit_credits > 0:        # only a capped repository has a month to account for
+                    row["used_this_month"] = spend.charged(requester_org_id, doc.repo, now=t)
+                repos.append(row)
+        available = {"connect": bool(config.github_app_slug())}
+        available.update({a: a in self._REDPEN_EXECUTION_LIVE for a in ("review", "schedule", "fix", "retest")})
+        return {"org_id": requester_org_id, "repos": repos, "available": available}
+
+    # The Connect GitHub `state`: an OWNER-signed {kind, org_id, exp, nonce}, base64url-JSON, that round-trips the session
+    # org through GitHub's install flow. Only the owner key mints one, so no one can aim a callback at another tenant.
+    _REDPEN_STATE_KIND = "redpen_connect"
+    _REDPEN_STATE_CORE = ("kind", "org_id", "exp", "nonce")
+    _REDPEN_STATE_TTL = 15 * 60                     # one install round trip; a stale link is refused, never honoured
+    _REDPEN_STATE_MAX = 2048                        # a state longer than any we mint is refused before decoding
+
+    def _redpen_connect_state(self, org_id: str, *, now: float) -> str:
+        from ..governor.authn import signed_payload
+        from ..governor.identity import owner_keypair
+        core = {"kind": self._REDPEN_STATE_KIND, "org_id": org_id, "exp": float(now) + self._REDPEN_STATE_TTL,
+                "nonce": secrets.token_urlsafe(12)}
+        raw = json.dumps(signed_payload(core, owner_keypair()), separators=(",", ":"), sort_keys=True)
+        return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+    def _redpen_state_org(self, state: str, *, now: float) -> "Optional[str]":
+        """The org an owner-signed, unexpired Connect GitHub ``state`` names, or None (fail-closed on anything else:
+        malformed, forged, re-signed under another key, of another kind, or expired)."""
+        from ..governor.authn import verify_signed
+        from ..governor.identity import owner_pubkey
+        s = str(state or "")
+        if not s or len(s) > self._REDPEN_STATE_MAX:
+            return None
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
+        except (ValueError, TypeError):                  # binascii.Error / UnicodeDecodeError / JSONDecodeError
+            return None
+        if not isinstance(payload, dict) or payload.get("kind") != self._REDPEN_STATE_KIND:
+            return None
+        if not verify_signed(payload, self._REDPEN_STATE_CORE, owner_pubkey()):
+            return None
+        exp, oid = payload.get("exp"), payload.get("org_id")
+        if not isinstance(exp, (int, float)) or isinstance(exp, bool) or not math.isfinite(exp) or exp < now:
+            return None
+        return oid if isinstance(oid, str) and oid else None
+
+    def redpen_connect(self, requester: str, requester_org_id: str, *, ip: str = "", mfa_at=0.0,
+                       now: "Optional[float]" = None) -> dict:
+        """Connect GitHub: the GitHub App INSTALL URL the customer is sent to (``manage_code`` + step-up). It carries an
+        owner-signed, short-lived ``state`` binding the SESSION org, which the post-install callback needs (that
+        redirect is cross-site, so it carries no session). Refused cleanly while the owner has not registered the App
+        here (no slug) — never a dead link. Only the install URL crosses — never the App key (O-5)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        with self._lock:
+            self._redpen_admit("redpen_connect", requester, requester_org_id)
+            self._require_stepup(mfa_at, now=t)      # AFTER admit (no-op unless enforcement is on)
+        slug = config.github_app_slug()
+        if not slug:
+            raise ProvisionDenied("connecting GitHub is not set up on this deployment yet")
+        state = self._redpen_connect_state(requester_org_id, now=t)
+        self._audit("redpen_connect", requester=requester, org_id=requester_org_id, outcome="install_url")
+        return {"org_id": requester_org_id,
+                "install_url": f"https://github.com/apps/{slug}/installations/new?state={state}"}
+
+    def redpen_connect_record(self, *, state: str = "", installation_id="", setup_action: str = "", code: str = "",
+                              ip: str = "", now: "Optional[float]" = None) -> dict:
+        """The GitHub post-install callback's sovereign half. Resolves the owner-signed ``state`` to the org that began
+        the connect (never a body-supplied org), then — ONLY once the installation is VERIFIED as one the person who
+        came back can access — records it via R2's github_app: a short-lived installation token (sovereign-side; the
+        App key never leaves), the repositories the installation was granted, and an owner-signed connected-repo record
+        for each (``ConnectedRepoRegistry.connect``).
+
+        WHY the verification: the ``installation_id`` on this redirect is browser-controlled, and the App can mint a
+        token for ANY installation of it — recording an unverified id would let a member of one workspace attach another
+        tenant's installation (and its private repositories) to theirs. GitHub's own guidance is to confirm it with the
+        installing user's authorization (``code`` → user token → ``GET /user/installations``), which needs the App's
+        OAuth client secret and github.com egress — neither exists here yet. So ``self.installation_verifier`` (injected,
+        like ``target_fetcher``) is None by default and this records NOTHING: fail-closed, ``verification_required``.
+
+        setup_action ``install``/``update`` records; ``request`` (an organization owner must approve the App on GitHub)
+        answers ``pending``; anything else is ignored. Returns ``{org_id, recorded, connected, …}`` — no secret, no
+        token, no estimate."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        if not config.redpen_enabled():
+            raise ProvisionDenied("code review is not enabled on this deployment")
+        oid = self._redpen_state_org(state, now=t)
+        if oid is None:
+            self._audit("redpen_connect_record", outcome="bad_state")
+            raise ProvisionDenied("this GitHub connection link is invalid or has expired")
+        action = str(setup_action or "")
+        if action == "request":
+            self._audit("redpen_connect_record", org_id=oid, outcome="pending_approval")
+            return {"org_id": oid, "recorded": False, "pending": True, "connected": []}
+        if action not in ("install", "update"):
+            self._audit("redpen_connect_record", org_id=oid, outcome="ignored")
+            return {"org_id": oid, "recorded": False, "connected": []}
+        iid_raw = str(installation_id or "")
+        if not iid_raw.isdigit() or len(iid_raw) > 12 or int(iid_raw) < 1:
+            raise ProvisionDenied("GitHub did not return a valid installation")
+        iid = int(iid_raw)
+        verifier = self.installation_verifier
+        if verifier is None or verifier(installation_id=iid, code=str(code or "")) is not True:
+            self._audit("redpen_connect_record", org_id=oid, target=str(iid), outcome="unverified")
+            return {"org_id": oid, "recorded": False, "verification_required": True, "connected": []}
+        return self._redpen_record_installation(oid, iid)
+
+    def _redpen_record_installation(self, org_id: str, installation_id: int) -> dict:
+        """Record a VERIFIED installation: list what it was granted (R2 ``github_app``, sovereign-side token) and
+        owner-sign a connected-repo record per repository. A GitHub refusal — or no App registered yet — records nothing
+        and answers cleanly (never a 500). A repository already connected keeps its policy (re-signed fresh)."""
+        from ..governor import github_app
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        try:
+            token = github_app.mint_installation_token(installation_id)["token"]
+            listed = github_app.list_installation_repositories(token)
+        except github_app.GitHubAppError as e:
+            self._audit("redpen_connect_record", org_id=org_id, target=str(installation_id), outcome="github_refused",
+                        reason=str(e)[:120])
+            return {"org_id": org_id, "recorded": False, "connected": []}
+        connected: "list[str]" = []
+        with self._lock:
+            reg = ConnectedRepoRegistry(self.store)
+            for r in (listed.get("repositories") or []) if isinstance(listed, dict) else []:
+                full = r.get("full_name") if isinstance(r, dict) else None
+                if not isinstance(full, str):
+                    continue
+                try:
+                    ref = self._redpen_repo(f"github.com/{full}")
+                    cur = reg.active(org_id, ref)
+                    reg.connect(org_id, installation_id, ref, issued_at=self._next_issued(),
+                                **({"block_threshold": cur.block_threshold,
+                                    "monthly_limit_credits": cur.monthly_limit_credits} if cur is not None else {}))
+                except (ProvisionError, ValueError):
+                    continue                              # a malformed name from GitHub is skipped, never a crash
+                connected.append(ref)
+            if connected:
+                self._audit("redpen_connect_record", org_id=org_id, target=str(installation_id),
+                            outcome=f"connected_{len(connected)}", critical=True)
+        return {"org_id": org_id, "recorded": bool(connected), "connected": connected}
+
+    def redpen_set_settings(self, requester: str, requester_org_id: str, repo: str, *, block_threshold="",
+                            monthly_limit_credits=None, ip: str = "", mfa_at=0.0,
+                            now: "Optional[float]" = None) -> dict:
+        """A connected repository's policy: what blocks a merge (``none`` | ``critical_high`` | ``medium_up``) and/or
+        its monthly spending limit in credits (0 = no limit). ``manage_code`` + step-up: both live inside the
+        owner-signed record, so a fresh owner signature is minted here (R2 ``set_settings``) — the tenant cannot relax
+        a policy any other way. Refused for a repository that is not connected. Never a cost or an estimate."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import BlockThreshold
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        with self._lock:
+            self._redpen_admit("redpen_set_settings", requester, requester_org_id, target=str(repo or ""))
+            self._require_stepup(mfa_at, now=t)
+            ref = self._redpen_repo(repo)
+            threshold = None
+            if str(block_threshold or ""):
+                try:
+                    threshold = BlockThreshold(str(block_threshold))
+                except ValueError:
+                    raise ProvisionError("block_threshold must be none, critical_high or medium_up") from None
+            limit = None
+            if monthly_limit_credits is not None:
+                if isinstance(monthly_limit_credits, bool) or not isinstance(monthly_limit_credits, (int, str)):
+                    raise ProvisionError("monthly_limit_credits must be a whole number of credits (0 = no limit)")
+                try:
+                    limit = int(monthly_limit_credits)
+                except ValueError:
+                    raise ProvisionError("monthly_limit_credits must be a whole number of credits (0 = no limit)") \
+                        from None
+                if limit < 0:
+                    raise ProvisionError("monthly_limit_credits must be 0 (no limit) or more")
+            if threshold is None and limit is None:
+                raise ProvisionError("nothing to change: choose what blocks a merge or set a monthly limit")
+            try:
+                doc = ConnectedRepoRegistry(self.store).set_settings(
+                    requester_org_id, ref, issued_at=self._next_issued(), block_threshold=threshold,
+                    monthly_limit_credits=limit)
+            except ValueError as e:                       # not connected (or a bad value R2 refuses)
+                raise ProvisionDenied(str(e)) from None
+            self._audit("redpen_set_settings", requester=requester, org_id=requester_org_id, target=ref,
+                        outcome="updated", critical=True)
+        return {"org_id": requester_org_id, "repo": doc.repo, "block_threshold": doc.block_threshold.value,
+                "monthly_limit_credits": int(doc.monthly_limit_credits)}
+
+    def redpen_disconnect(self, requester: str, requester_org_id: str, repo: str, *, ip: str = "",
+                          now: "Optional[float]" = None) -> dict:
+        """Disconnect a repository — the SAFE direction (R2: honoured unsigned, so it can never fail open). ``manage_code``
+        only, NO step-up (it only removes authority, like ``monitor_revoke``). Its reviews stop at once:
+        ``reserve_redpen_review`` refuses a repository with no active record. Idempotent. The signing key is never
+        unsealed."""
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        with self._lock:
+            self._redpen_admit("redpen_disconnect", requester, requester_org_id, target=str(repo or ""))
+            ref = self._redpen_repo(repo)
+            reg = ConnectedRepoRegistry(self.store, owner_key=None)
+            was = reg.active(requester_org_id, ref) is not None
+            if was:
+                reg.disconnect(requester_org_id, ref)
+            self._audit("redpen_disconnect", requester=requester, org_id=requester_org_id, target=ref,
+                        outcome="disconnected" if was else "noop", critical=True)
+        return {"org_id": requester_org_id, "repo": ref, "disconnected": was}
+
+    # The Red-Pen EXECUTION actions (review now, the review schedule, Fix this, Retest) are driven by the Red-Pen worker
+    # slices (R3 PR-review worker, R4 Red-Pen System demand + schedule, R5 Fix + Retest), which are not merged with this
+    # screen. FATAL-2: the sovereign plane never imports the offense worker — on merge, each replaces ONLY the inert
+    # `coming` answer below with its sovereign enqueue (the reservation it needs is `LaunchGate.reserve_redpen_review`,
+    # at the worker's pickup). Every guard in front of it is real and stays: the flag, manage_code, the step-up, and an
+    # ACTIVE owner-signed connected-repo record for the session org.
+    _REDPEN_CADENCES = ("off", "weekly", "monthly")
+
+    def _redpen_execution(self, action: str, requester: str, org_id: str, repo, *, mfa_at, now: float,
+                          step_up: bool = True) -> str:
+        """The guards every Red-Pen execution action shares; returns the canonical repo. Caller adds nothing else."""
+        from ..governor.connected_repos import ConnectedRepoRegistry
+        with self._lock:
+            self._redpen_admit(action, requester, org_id, target=str(repo or ""))
+            if step_up:
+                self._require_stepup(mfa_at, now=now)
+            ref = self._redpen_repo(repo)
+            if ConnectedRepoRegistry(self.store, owner_key=None).active(org_id, ref) is None:
+                self._audit(action, requester=requester, org_id=org_id, target=ref, outcome="not_connected")
+                raise ProvisionDenied(f"{ref} is not connected for this workspace: connect it first")
+        return ref
+
+    def redpen_review(self, requester: str, requester_org_id: str, repo: str, *, ip: str = "", mfa_at=0.0,
+                      now: "Optional[float]" = None) -> dict:
+        """Red-Pen System — review a whole connected repository now (R4 demand path; the review is reserved + metered
+        by ``reserve_redpen_review`` when the worker picks it up — never estimated)."""
+        t = self._now() if now is None else float(now)
+        ref = self._redpen_execution("redpen_review", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+        return {"org_id": requester_org_id, "repo": ref, "coming": True}
+
+    def redpen_schedule(self, requester: str, requester_org_id: str, repo: str, *, cadence: str = "", ip: str = "",
+                        mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Red-Pen System — review a connected repository on a schedule (``weekly`` | ``monthly``) or stop it
+        (``off``) (R4 schedule)."""
+        t = self._now() if now is None else float(now)
+        c = str(cadence or "")
+        if c not in self._REDPEN_CADENCES:
+            raise ProvisionError("cadence must be off, weekly or monthly")
+        ref = self._redpen_execution("redpen_schedule", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+        return {"org_id": requester_org_id, "repo": ref, "cadence": c, "coming": True}
+
+    @staticmethod
+    def _redpen_finding_ref(finding_ref) -> str:
+        ref = str(finding_ref or "")
+        if not ref or len(ref) > 200 or any(ch.isspace() for ch in ref):
+            raise ProvisionError("a finding reference is required")
+        return ref
+
+    def redpen_fix_this(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
+                        mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Fix this — VIGIL writes a patch for one reproduced finding, checks it, and opens a pull request for the
+        customer to review (R5 ``redpen_fix_this``). VIGIL never merges anything itself."""
+        t = self._now() if now is None else float(now)
+        fref = self._redpen_finding_ref(finding_ref)
+        ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+        return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+
+    def redpen_retest(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
+                      mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Retest — re-run one finding's reproduction to confirm a fix (R5 ``redpen_retest``). It runs a review, so it
+        steps up like one."""
+        t = self._now() if now is None else float(now)
+        fref = self._redpen_finding_ref(finding_ref)
+        ref = self._redpen_execution("redpen_retest", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+        return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
 
     # -- customer-plane READS (the Slice-I backend): admit_customer-gated, session-org-scoped ---------
     def _customer_read(self, requester: str, org_id: str, permission: str, projector) -> dict:

@@ -475,6 +475,10 @@ def test_the_guide_covers_every_screen_of_the_app():
     wheres = {st["where"] for st in steps.values()}
     assert {"Account security", "Code", "Monitoring", "GitHub"} <= wheres
     assert {key[1] for key, st in steps.items() if st.get("route") == "#/monitoring"} == {"monitor", "events", "manage"}
+    # the Code screen (#/code): every Red-Pen step that happens on it is routed there; disconnecting starts on GitHub
+    assert {key[1] for key, st in steps.items() if st.get("route") == "#/code"} == {"connect", "pr", "settings", "system",
+                                                                                  "fix"}
+    assert steps[("redpen", "disconnect")]["route"] is None and steps[("redpen", "disconnect")]["where"] == "GitHub"
     # the questions tab answers the cost question without a number
     faq = {f["q"]: f["a"] for f in out["faq"]}
     assert "does not estimate" in faq["How much will an assessment cost?"]
