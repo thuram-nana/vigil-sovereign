@@ -90,6 +90,9 @@ assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import t
 import sigil.model_gateway                    # PRICING M1: the sovereign model gateway (holds the provider key)
 assert "framework" not in _m, "model_gateway must not import framework at module scope"
 assert "strix" not in _m, "model_gateway must not import strix at module scope"
+import sigil.ui.assistant                      # PR-J: the customer security assistant (sovereign; grounded + metered)
+assert "framework" not in _m, "ui.assistant must not import framework at module scope"
+assert "strix" not in _m, "ui.assistant must not import strix at module scope"
 import vigil_integration.live.approval_broker  # A2: the offense-side per-action approval queue/broker
 assert "framework" not in _m, "approval_broker must not import framework at module scope"
 assert "strix" not in _m, "approval_broker must not import strix at module scope"
