@@ -4067,6 +4067,103 @@ def _cmd_webhook_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_redpen_webhook_drain(args: argparse.Namespace) -> int:
+    """`vigil redpen-webhook-drain` — drain the Red-Pen inbound-webhook spool (the ``<VIGIL_GH_WEBHOOK_SPOOL>/redpen``
+    subtree the proxy's GitHub App route ``/webhooks/github-app`` writes; that route is mounted only when
+    ``VIGIL_REDPEN_ENABLED`` is on) into the Red-Pen SecurityJob queue. A reviewable PR
+    delivery (opened/synchronize/reopened) is normalized to a ``profile="redpen"`` SecurityJob and ENQUEUED; an
+    installation connect/disconnect sync signal is acknowledged (not enqueued — a connect is owner-signed
+    sovereign-side). Enqueue-only; the `vigil redpen-review` runner executes. Fail-closed; idempotent by delivery_id.
+    The sibling of `vigil webhook-drain`, kept on its OWN spool + queue so the two review paths never collide. With
+    ``VIGIL_REDPEN_ENABLED`` off it refuses (exit 2) and touches neither the spool nor the queue."""
+    import json
+
+    from . import redpen_webhook_drain
+    from .redpen import redpen_enabled
+
+    if not redpen_enabled():
+        print("vigil redpen-webhook-drain: Red-Pen is off (VIGIL_REDPEN_ENABLED) — nothing drained", file=sys.stderr)
+        return 2
+    drain = redpen_webhook_drain.RedpenWebhookDrain(spool_dir=args.spool, queue_root=args.queue_root)
+    if args.watch:
+        print(f"  draining Red-Pen deliveries from {args.spool}/incoming → SecurityJob queue "
+              f"({args.queue_root}); Ctrl-C to stop")
+        try:
+            drain.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(drain.drain(), indent=2))
+    return 0
+
+
+def _cmd_redpen_review(args: argparse.Namespace) -> int:
+    """`vigil redpen-review` — DRAIN the Red-Pen SecurityJob queue through the authorized runner (R3, the sibling of
+    `vigil pr-bot`): each queued PR job passes the hard authorization gate, then (only if allowed) the Red-Pen
+    reproduction engine reviews its changed files DIFF-SCOPED, and each REPRODUCED FACT is posted as a gated,
+    severity-marked review comment (🔴 Critical/High blocking · 🟠 Medium · 🟡 Low) with its reproduce command +
+    evidence ref + a Fix-this marker. LEADs are NEVER posted (decision O-1). An inert review-outcome envelope (FACT
+    severities only) is emitted for the SOVEREIGN "VIGIL Red-Pen" check writer (decision O-5).
+
+    This slice wires the OFFENSE half. The metered RESERVE + SETTLE are SOVEREIGN (the owner-signed connected-repo
+    record is the authorization of record, O-3; the per-repo monthly limit refuses at the ceiling, O-2) and reach
+    this plane only once the sovereign reserve publisher + ``VIGIL_METERED_BILLING`` are on (decision O-6 — the live
+    charge waits). Until then the reserve seam here is FAIL-CLOSED (every job is refused and emits a neutral check),
+    so no unauthorized / uncharged review ever runs. Needs a GitHub token (clone + read + comment). With
+    ``VIGIL_REDPEN_ENABLED`` off it refuses (exit 2) BEFORE touching the queue, so queued reviews simply wait."""
+    import json
+
+    from .redpen import redpen_enabled
+
+    if not redpen_enabled():
+        print("vigil redpen-review: Red-Pen is off (VIGIL_REDPEN_ENABLED) — nothing drained", file=sys.stderr)
+        return 2
+
+    from .jobs.redpen_review import make_inert_spooler, make_redpen_review_runner
+    from .live.github_write import GitHubCommentConfig, broker_comment_approver, signed_comment_audit_sink
+    from .live.governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
+    from .live.pr_checkout import make_pr_bot_changed_files, make_pr_bot_checkout
+
+    token = (getattr(args, "github_token", "") or os.environ.get("GITHUB_TOKEN", "")).strip()
+    if not token:
+        print("vigil redpen-review: a GitHub token is required (--github-token or $GITHUB_TOKEN)", file=sys.stderr)
+        return 2
+    base_dir = args.base_dir
+    queue_root = _resolve_queue_root(getattr(args, "queue_root", ""), base_dir)
+    from framework.v2.authority.store import load_authority_root
+    trust_root = load_authority_root()
+    gov = load_or_create_governance_keypair(path=str(Path(base_dir) / DEFAULT_GOVERNANCE_KEY_FILE))
+    audit = signed_comment_audit_sink(str(Path(base_dir) / "redpen-review-audit.jsonl"),
+                                      key_id="offense-governance", private_key_b64=gov.private_key_b64)
+    # The governance authoriser the reproduction engine signs each FACT certificate with (NOT the owner key — that
+    # is sovereign; this is the engagement's offense-governance key, like the signed-audit sink's).
+    signers = [("offense-governance", gov.private_key_b64)]
+
+    def _reserve_unwired(_job):
+        # FAIL-CLOSED: the sovereign reserve (connected-repo authorization + monthly-limit + wallet charge) is not
+        # reachable from the keyless offense plane in this slice — a metered review needs the sovereign reserve
+        # publisher + VIGIL_METERED_BILLING (decision O-6). Refusing here means no uncharged / unauthorized review
+        # ever runs; the worker records the refusal and hands off a neutral (non-blocking) check. The reason is
+        # CUSTOMER-SAFE: it reaches the GitHub check summary and the dashboard record.
+        return {"ok": False, "error": "Red-Pen reviews are not available for this repository yet"}
+
+    runner = make_redpen_review_runner(
+        queue_root=queue_root, trust_root=trust_root, reserve=_reserve_unwired,
+        checkout=make_pr_bot_checkout(github_token=token, base_dir=base_dir),
+        changed_files=make_pr_bot_changed_files(token),
+        comment_config=GitHubCommentConfig(github_token=token, comment_enabled=bool(args.comment)),
+        approve=broker_comment_approver(base_dir), audit=audit, signers=signers, settle=None,
+        # the inert hand-offs across the plane boundary: the check outcome (→ governor.redpen_check's drain) and
+        # the dashboard record (→ the customer app's review ingestion)
+        emit_outcome=make_inert_spooler(str(Path(base_dir) / "redpen-outcomes")),
+        record_review=make_inert_spooler(str(Path(base_dir) / "redpen-reviews")))
+    outcomes = runner.drain(max_jobs=args.max_jobs)
+    print(json.dumps([{"state": o.state, "repo": getattr(o.job, "repo", None),
+                       "denial_code": o.denial_code, "reason": (o.reason or "")[:200]} for o in outcomes],
+                     indent=2))
+    return 1 if any(o.state == "failed" for o in outcomes) else 0
+
+
 def _cmd_launch_drain(args: argparse.Namespace) -> int:
     """`vigil launch-drain` — poll the customer credit-launch-lease seam and ENQUEUE one SecurityJob per
     currently-valid published owner-signed lease (K4-5c, the sibling of `webhook-drain`). Each lease passes
@@ -6130,6 +6227,37 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--finding-ref", default="",
                     help="the oracle-verified finding's spine ref (--print-fix-authorization)")
     pb.set_defaults(func=_cmd_pr_bot)
+
+    prwd = sub.add_parser("redpen-webhook-drain",
+                          help="drain the Red-Pen inbound-webhook spool (<VIGIL_GH_WEBHOOK_SPOOL>/redpen) into the "
+                               "Red-Pen SecurityJob queue: a reviewable PR delivery → a profile='redpen' SecurityJob "
+                               "(enqueue-only; `redpen-review` executes); an installation sync is acknowledged. "
+                               "Fail-closed; idempotent by delivery_id. Behind VIGIL_REDPEN_ENABLED.")
+    prwd.add_argument("--spool", required=True,
+                      help="the Red-Pen webhook spool dir drained (= <uiproxy VIGIL_GH_WEBHOOK_SPOOL>/redpen)")
+    prwd.add_argument("--queue-root", required=True,
+                      help="the Red-Pen SecurityJob queue root (its OWN queue — never shared with pr-bot/reconcile)")
+    prwd.add_argument("--watch", action="store_true", help="keep draining as new deliveries arrive; Ctrl-C to stop")
+    prwd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    prwd.set_defaults(func=_cmd_redpen_webhook_drain)
+
+    prr = sub.add_parser("redpen-review",
+                         help="DRAIN the Red-Pen SecurityJob queue through the authorized runner: review each queued "
+                              "PR's changed files and (with --comment) post gated severity-marked comments for "
+                              "REPRODUCED FACTs (LEADs are never posted). The gate is the sole executor; emits an "
+                              "inert outcome for the sovereign check writer. Behind VIGIL_REDPEN_ENABLED; needs a "
+                              "GitHub token. (Metered reserve/settle are sovereign — O-6; reserve is fail-closed here.)")
+    prr.add_argument("--queue-root", default="",
+                     help="the Red-Pen SecurityJob queue root (its OWN queue; default <base-dir>/jobs)")
+    prr.add_argument("--base-dir", default=seam,
+                     help="engagement base dir (authority root, governance key, approvals, outcome spool)")
+    prr.add_argument("--github-token", default="",
+                     help="GitHub token for clone + read + comment (else $GITHUB_TOKEN). Off-spine (child env only).")
+    prr.add_argument("--comment", action="store_true",
+                     help="ENABLE posting review comments (OFF by default; still grant + owner-approval + "
+                          "signed-audit gated per post)")
+    prr.add_argument("--max-jobs", type=int, default=0, help="drain at most N jobs (0 = until empty or a busy slug)")
+    prr.set_defaults(func=_cmd_redpen_review)
 
     pt = sub.add_parser(
         "terminal",

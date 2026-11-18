@@ -68,6 +68,12 @@ import vigil_integration.redpen.engine        # R1: the orchestrator (framework 
 import vigil_integration.redpen.reproduce     # R1: the sandbox twice-fire runner (stdlib + sandbox_exec only)
 import vigil_integration.redpen.certify       # R1: the reproduction→FACT bridge — framework LAZY
 assert "framework" not in __import__("sys").modules, "redpen.* must not import framework at module scope"
+import vigil_integration.jobs.redpen_review   # R3: the PR-review worker (keyless; every sovereign op INJECTED)
+import vigil_integration.redpen_webhook_drain  # R3: the Red-Pen webhook spool → queue drain (queue LAZY)
+assert "framework" not in __import__("sys").modules, "R3 worker/drain must not import framework at module scope"
+import sigil.governor.redpen_check            # R3: the SOVEREIGN "VIGIL Red-Pen" check writer (O-5)
+assert "framework" not in __import__("sys").modules, "redpen_check must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "redpen_check must not import strix at module scope"
 import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
 _m = __import__("sys").modules
 assert "framework" not in _m, "warden_gate must not import framework at module scope"
