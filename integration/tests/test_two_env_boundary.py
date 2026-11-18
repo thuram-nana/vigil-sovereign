@@ -201,6 +201,12 @@ assert "framework" not in _m, "live.github_client must not import framework at m
 import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
 assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
 assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
+import vigil_core.standards_mirror             # APEX PR-A: the inert engine-table mirror the consumer renders from
+assert "framework" not in _m, "standards_mirror must not import framework at module scope"
+assert "strix" not in _m, "standards_mirror must not import strix at module scope"
+import sigil.ui.finding_presentation          # APEX PR-A: the sovereign posture/presentation head (renders via the mirror)
+assert "framework" not in _m, "finding_presentation must not import framework at module scope"
+assert "strix" not in _m, "finding_presentation must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

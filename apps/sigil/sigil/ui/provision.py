@@ -3363,6 +3363,18 @@ class Provisioner:
             _assess.overlay_retests(self.store, out["findings"], now=t)
         return out
 
+    def customer_assessment_posture(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """APEX PR-A — the session org's security POSTURE (0-100 score + worst-first triage + per-finding
+        plain-language impact / standards chips / remediation), derived ONLY from its OWN proven findings.
+        Tenant-scoped identically to :func:`customer_assessment_findings` (the IDOR class — the posture reads
+        only the org's own tenant-scoped findings, so another tenant's finding is structurally never counted or
+        shown). Gated at the cockpit dispatch by ``presentation_enabled()`` (404 when off); requester + org are
+        the hop-bound session principal, never a body field."""
+        import time as _t
+        from . import finding_presentation as _fp
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _fp.assessment_posture(s, o, now=_t.time()))
+
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:
         """C1a — the SESSION org's assessment launches for the customer app (``ui/customer_launches.launches``): those
