@@ -2097,6 +2097,44 @@ def _stripe_checkout_creator():
     return se.make_checkout_creator()
 
 
+def _monitoring_renewal_hook(store):
+    """Build the sovereign MONITORING-RENEWAL-CONTINUITY hook the billing drain hands `BillingSigner` as
+    `on_monitoring_change`. On a VERIFIED monitoring renewal (a `monitoring_price_ids()` ACTIVE event the
+    signer already minted + invoiced on `governor.monitoring_subscription`), it RE-PUSHES the catalog's host
+    slots + respond for the NEW period through the provisioner (`monitor_plan_changed` — owner key, grants
+    re-minted, artifacts republished to `config.monitoring_publish_dir()`), so AEGIS coverage CONTINUES across
+    periods instead of lapsing at each period end (after the 72h grace).
+
+    Resolves the three blockers the AEGIS-sale slice left open:
+      (a) INERT when VIGIL_CUSTOMER_MONITORING_ENABLED is off in THIS drain's own env — it returns without a
+          push and WITHOUT the `ProvisionDenied` that `monitor_plan_changed` itself raises when the flag is off
+          (that raise, fired after the mint+invoice on every re-drive, would wedge the envelope permanently).
+          Flag off ⇒ byte-identical: no provisioner is built (no limiter-dir side effects), nothing is pushed.
+      (b) IDEMPOTENT + re-drive-safe: `monitor_plan_changed`/`plan_enforcement` renew only grants minted in a
+          PRIOR period (`g.not_before < sub.period_start`); a re-mint sets `not_before == period_start`, so a
+          replay of the same renewal event finds no prior-period grant and re-pushes nothing — no double-grant,
+          no wedge. (Per-grant publish faults are retired-and-continued inside `monitor_plan_changed`, so the
+          only raise path was the now-guarded flag check.)
+      (c) the PROVISIONER + the gateway publish dir are injected HERE, at the drain's construction, not imported
+          inside the signer's mint path. The provisioner is built LAZILY on the first on-flag renewal (cached
+          for the drain's life — its monotonic issued_at high-water persists across renewals) so a drain that
+          never sees a monitoring renewal, or runs with the flag off, constructs nothing.
+    """
+    from . import config
+    prov = None
+
+    def _hook(org_id, now) -> None:
+        nonlocal prov
+        if not config.customer_monitoring_enabled():
+            return                                       # INERT: byte-identical off; never raises (blocker a)
+        if prov is None:
+            from .ui.provision import build_provisioner  # injected here, never inside the mint path (blocker c)
+            prov = build_provisioner(store)              # lazy: built once, cached for the drain's life
+        prov.monitor_plan_changed(org_id, now=now)       # re-push catalog slots+respond; idempotent (blocker b)
+
+    return _hook
+
+
 def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bool = False,
                     alarm_topups: bool = False):
     """The ONE billing signer both drain lanes use: the owner catalog (mintable view), the expected amounts, the
@@ -2123,6 +2161,11 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
                          # AEGIS: a paid monitoring price mints its OWN line, never the credit plan (flag-free,
                          # like mintable_entitlements(): a sold AEGIS plan's renewals keep minting).
                          monitoring_subscriptions=MonitoringSubscriptionRegistry(store),
+                         # AEGIS renewal continuity: on a verified renewal, re-push the catalog's host slots +
+                         # respond for the new period (monitor_plan_changed) so coverage does not lapse. INERT
+                         # (no raise, no push, no provisioner built) when the monitoring flag is off in THIS
+                         # drain's env ⇒ byte-identical; idempotent + re-drive-safe (see _monitoring_renewal_hook).
+                         on_monitoring_change=_monitoring_renewal_hook(store),
                          # Pricing S4: wired UNCONDITIONALLY (the drain runs under its own env file), so the
                          # unlock is recorded whatever the preview flag says; the records stay inert until read.
                          report_unlocks=ReportUnlockRegistry(store),
