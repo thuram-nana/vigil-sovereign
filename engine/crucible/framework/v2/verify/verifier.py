@@ -255,6 +255,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "ssti": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    # APEX PR-2 — blind SSTI (the OUT-OF-BAND variant of SSTI, whose template evaluation leaves no readable
+    # response byte and is proven ONLY by an out-of-band interaction the evaluated construct triggers). Routes
+    # to the EXISTING OracleKind.OOB_CALLBACK (NO new OracleKind — _ALL_ORACLES stays 15), exactly as `oob_sqli`
+    # is kept DISTINCT from the in-corpus `sqli`: here `blind_ssti` is kept distinct from the in-corpus `ssti`
+    # (whose EVALUATION row proves the REFLECTED variant) so the blind row is NOT hijacked by the evaluation
+    # family and, being absent from every benchmark corpus, is INERT on the gate (`make gate` byte-identical).
+    # This row is PERMANENT (never flag-gated), so an offline re-verify of a minted blind_ssti FACT routes the
+    # oracle identically regardless of VIGIL_APEX_OOB — only LIVE production of the attempt is flag-gated (see
+    # live.runtime_redrive.oob_redrive_classes). VIGIL mints its OWN callback token and the oracle adjudicates.
+    "blind_ssti": (OracleKind.OOB_CALLBACK,),
     "el_injection": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT),
     # Wave-4.1 Server-Side Includes (SSI, CWE-97). REUSES the frozen EVALUATION kind exactly like SSTI (adds
     # NO new OracleKind, so _ALL_ORACLES stays EXACTLY 15 and `make gate` is byte-identical). EVALUATION is

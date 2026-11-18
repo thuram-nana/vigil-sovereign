@@ -329,6 +329,61 @@ def test_governed_oracle_seam_mints_an_oob_fact_end_to_end(hermetic_root, monkey
     assert ref, "a governed OOB interaction with the feeder provisioned must mint a signed FACT (a finding ref)"
 
 
+# ===================================================================================================
+# APEX PR-2 — the DEFAULT-WIRE of the ONE new OOB class (blind SSTI) through the SAME governed feeder.
+# The same seam, the same trusted bundle, only the class differs — ON mints, OFF stays a LEAD.
+# ===================================================================================================
+
+def test_governed_oracle_seam_mints_a_blind_ssti_fact_end_to_end(hermetic_root, monkeypatch):
+    # APEX ON: a governed engage with OOB provisioned mints a signed blind_ssti FACT through the EXISTING
+    # feeder seam — no new wiring, the class rides the same trusted bundle (the default-wire capability).
+    monkeypatch.setenv("VIGIL_APEX_OOB", "1")
+    _grant_active_recon(monkeypatch)
+    _write_charter("gov-ssti")
+    kp = _collector_keypair()
+    prov = provision_authority(slug="gov-ssti", scope=["127.0.0.1"], oob_collector_pubkey=kp.public_key_b64)
+    cfg = EngineConfig(slug="gov-ssti", oob_enable=True, oob_collector_keypair=kp)
+    oracle = _build_oracle(prov, oob_material_provider=lambda: _governed_oob_material(prov, cfg))
+    srv = _serve_benchmark()
+    port = srv.server_address[1]
+    try:
+        spec = {"kind": "oob", "url": f"http://127.0.0.1:{port}/oobtest/fetch", "bug_class": "blind_ssti"}
+        ref = oracle("", _analysis("blind_ssti"), redrive=spec)   # router-shaped spec — NO material on it
+    finally:
+        srv.shutdown()
+    assert ref, "APEX-on, a governed blind_ssti OOB interaction with the feeder provisioned must mint a FACT"
+
+
+def test_governed_oracle_seam_blind_ssti_stays_a_lead_with_the_apex_flag_off(hermetic_root, monkeypatch):
+    # DEFAULT-OFF control: the SAME call with VIGIL_APEX_OOB unset ⇒ blind_ssti is not an OOB re-drive class ⇒
+    # the consumer seam refuses it (even with the feeder fully provisioned) ⇒ the claim stays a LEAD,
+    # byte-identical to a build without APEX OOB. The already-merged classes are unaffected by this flag.
+    monkeypatch.delenv("VIGIL_APEX_OOB", raising=False)
+    _grant_active_recon(monkeypatch)
+    _write_charter("gov-ssti-off")
+    kp = _collector_keypair()
+    prov = provision_authority(slug="gov-ssti-off", scope=["127.0.0.1"], oob_collector_pubkey=kp.public_key_b64)
+    cfg = EngineConfig(slug="gov-ssti-off", oob_enable=True, oob_collector_keypair=kp)
+    oracle = _build_oracle(prov, oob_material_provider=lambda: _governed_oob_material(prov, cfg))
+    srv = _serve_benchmark()
+    port = srv.server_address[1]
+    try:
+        spec = {"kind": "oob", "url": f"http://127.0.0.1:{port}/oobtest/fetch", "bug_class": "blind_ssti"}
+        ref = oracle("", _analysis("blind_ssti"), redrive=spec)
+    finally:
+        srv.shutdown()
+    assert ref is None, "APEX-off ⇒ blind_ssti is not an OOB class ⇒ the claim stays a LEAD (fail-closed)"
+    # the standing SSRF path is UNAFFECTED by the APEX flag — it still mints under the same (off) environment.
+    srv2 = _serve_benchmark()
+    port2 = srv2.server_address[1]
+    try:
+        ssrf_spec = {"kind": "oob", "url": f"http://127.0.0.1:{port2}/oobtest/fetch", "bug_class": "ssrf"}
+        ssrf_ref = oracle("", _analysis("ssrf"), redrive=ssrf_spec)
+    finally:
+        srv2.shutdown()
+    assert ssrf_ref, "the already-merged SSRF OOB path must mint regardless of the APEX flag"
+
+
 def test_governed_oracle_seam_stays_a_lead_without_the_feeder(hermetic_root, monkeypatch):
     # DEFAULT-OFF control: the SAME oracle call, but no feeder wired ⇒ no material ⇒ the claim stays a LEAD.
     _grant_active_recon(monkeypatch)

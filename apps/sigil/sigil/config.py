@@ -1412,3 +1412,18 @@ def doctor() -> list[tuple[str, bool, str]]:
     checks.append(_check_qdrant())
     checks.append(_check_keyring())
     return checks
+
+
+def apex_oob_enabled() -> bool:
+    """True iff APEX PR-2 OOB-First confirmation is ON (`VIGIL_APEX_OOB` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off the one genuinely-new OOB class — blind SSTI — is absent from the
+    effective out-of-band re-drive set, so the autonomous router/feeder/arm never route a `blind_ssti`
+    candidate to the out-of-band confirmation seam and such a claim stays a LEAD, byte-identical to a build
+    without APEX OOB. The already-merged out-of-band classes (ssrf / xxe / blind_xxe / rce / command_injection
+    / deserialization / oob_sqli) are UNAFFECTED by this flag — they ship on the standing VF-2b collector path.
+    Read at call time. The offense/integration plane reads the SAME `VIGIL_APEX_OOB` env var directly
+    (``runtime_redrive.apex_oob_enabled`) — it may not import this sovereign module (FATAL-2); this function is
+    the sovereign-side convenience + the canonical place the flag is documented. Even ON, a blind-SSTI OOB
+    FACT still requires the full collector provisioning (an owner-pinned collector pubkey + the deployment
+    collector private key + a verified owner-signed authority), exactly like every other out-of-band class."""
+    return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE

