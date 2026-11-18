@@ -452,9 +452,11 @@ def _no_money_or_estimate(blob) -> None:
 # ============================================================================ the merge probes (pending slices) ======
 
 def _merged_w3() -> bool:
-    """W3 extends ``credit_lease_pause`` with a pause REASON (§11.6: add-only, old markers still read)."""
+    """W3 extends ``credit_lease_pause`` with the sovereign credit-pause record + its reason (§11.6: new accessors —
+    ``record_credit_pause`` / ``credit_pause_reason`` / ``credit_paused_launches`` — add-only; the plain halt marker
+    ``record_lease_pause`` is unchanged)."""
     from vigil_integration.live import credit_lease_pause as clp
-    return "reason" in inspect.signature(clp.record_lease_pause).parameters
+    return hasattr(clp, "credit_pause_reason")
 
 
 def _merged_w4() -> bool:
@@ -633,9 +635,10 @@ def test_stage_5b_the_credit_stop_records_an_insufficient_credits_pause(provider
                     "`credit_lease_pause.record_lease_pause(base, slug, nonce, reason='insufficient_credits')` is "
                     "called from the gateway's refused extension (ModelGateway.ensure_allowance -> W3 hook) + a "
                     "customer notification; this stage then asserts the marker and its reason.")
-    # --- W3 merged (written to the §11.6 spec before W3 had code: confirm the reason's field at integration) ---
+    # --- W3 merged: the halt marker parks it AND the sovereign credit-pause record carries the reason (W3's real
+    # accessor is `credit_pause_reason`, reconciled from the spec's assumed `pause_path` read at integration) ---
     assert clp.is_lease_paused(base, r["slug"], r["nonce"])
-    assert "insufficient_credits" in clp.pause_path(base, r["slug"]).read_text(encoding="utf-8")
+    assert clp.credit_pause_reason(base, r["slug"], r["nonce"]) == "insufficient_credits"
 
 
 # ============================================================================ STAGE 6 — top up, resume ==============
