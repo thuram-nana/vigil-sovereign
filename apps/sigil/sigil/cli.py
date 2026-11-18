@@ -3484,6 +3484,106 @@ def _owner_pub_for_doctor() -> "str | None":
         return None
 
 
+def _require_redpen_schedule_home() -> None:
+    """`sigil redpen-schedule` reserves review credits (owner-signed wallet holds) and owner-signs schedule records
+    onto the spine under SIGIL_HOME — the money-mint discipline of `billing-drain`: SIGIL_HOME must be set, ABSOLUTE
+    and already expanded, in THIS process's own environment; when the cockpit's env file names a SIGIL_HOME it must
+    be that same directory; and the home must hold the owner identity. A scheduler on the wrong home would reserve
+    against a spine the cockpit never reads (or reserve nothing) while exiting 0 — so exit 2 instead: the unit goes
+    FAILED and the dead-man alarms."""
+    import os
+    from pathlib import Path
+    from .governor.identity import owner_pubkey
+    home = os.environ.get("SIGIL_HOME", "").strip()
+    if not home:
+        print("redpen-schedule: SIGIL_HOME is not set in this process's environment — refusing (fail-closed: the "
+              "scheduler reserves review credits on the spine under SIGIL_HOME, and an implicit ~/.sigil may not be "
+              "the cockpit's home). Set SIGIL_HOME to the cockpit's SIGIL_HOME in ~/.config/vigil/redpen-schedule.env "
+              "(an install that never moved it: SIGIL_HOME=/home/<user>/.sigil).", file=sys.stderr)
+        sys.exit(2)
+    if "%" in home or not Path(home).is_absolute():
+        print(f"redpen-schedule: SIGIL_HOME must be an ABSOLUTE, already-expanded path (got {home!r}; systemd does "
+              f"NOT expand %h inside an EnvironmentFile value) — refusing.", file=sys.stderr)
+        sys.exit(2)
+    cockpit = _cockpit_env_sigil_home()
+    if cockpit is not None and os.path.realpath(cockpit[1]) != os.path.realpath(home):
+        print(f"redpen-schedule: this process's SIGIL_HOME ({home}) is not the cockpit's — {cockpit[0]} sets "
+              f"SIGIL_HOME={cockpit[1]} — refusing (fail-closed: reviews would be reserved on a spine the cockpit "
+              f"never reads). Make SIGIL_HOME in ~/.config/vigil/redpen-schedule.env the cockpit's.", file=sys.stderr)
+        sys.exit(2)
+    if not owner_pubkey():
+        print(f"redpen-schedule: SIGIL_HOME ({home}) holds no owner identity, so it is not the cockpit's home — "
+              f"refusing (fail-closed: nothing could be reserved or signed there).", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_redpen_schedule(a) -> None:
+    """`sigil redpen-schedule` — the Red-Pen SYSTEM-review scheduler (R4, SOVEREIGN; the opt-in
+    ``vigil-redpen-schedule`` timer runs ``tick``). ``tick`` enqueues every DUE weekly/monthly whole-repository review
+    once per calendar period: it reserves the review through the W2 path (refused at the per-repo monthly spending
+    limit, an empty wallet or a disconnected repository) and drops an owner-signed ticket that the integration drain
+    (``vigil redpen-schedule``) turns into a queued job — it NEVER runs a job. ``set`` / ``clear`` / ``status`` manage
+    the owner-signed per-repo schedule; ``enqueue`` reserves ONE on-demand review. Default-OFF
+    (``VIGIL_REDPEN_ENABLED``) and fail-closed: with Red-Pen off it refuses (exit 2) and reads or writes nothing."""
+    import time
+    from .config import redpen_enabled
+    cmd = getattr(a, "redpen_schedule_cmd", None) or "tick"
+    if not redpen_enabled():
+        print("redpen-schedule: Red-Pen is off (VIGIL_REDPEN_ENABLED) — refusing (nothing scheduled, nothing "
+              "reserved)", file=sys.stderr)
+        sys.exit(2)
+    _require_redpen_schedule_home()
+    from .governor.redpen_schedule import RedPenScheduleRegistry, period_key
+    from .ui.redpen_scheduler import RedPenScheduler
+    store = SpineStore()
+    now = float(a.now) if getattr(a, "now", None) is not None else time.time()
+    seam: "str | None" = None
+    if cmd in ("tick", "enqueue"):
+        # A money verb that writes ONE seam tree (the System-review tickets): it must be the tree the cockpit and the
+        # settle drain use, else a review is reserved (credits held) but its ticket lands where the integration drain
+        # never reads — refused (exit 2) before anything is reserved, exactly like `ops-sweep reservations`.
+        seam = _writer_seam_base(f"redpen-schedule {cmd}", money=True)
+    if cmd == "tick":
+        print(json.dumps(RedPenScheduler(store, base_dir=seam).tick(now), indent=2, sort_keys=True))
+        return
+    if cmd == "status":
+        reg = RedPenScheduleRegistry(store, owner_key=None)
+        rows = []
+        for oid, repo_ref, cad in reg.active_records():
+            if a.org and oid != a.org:
+                continue
+            last, cur = reg.last_enqueued_period(oid, repo_ref), period_key(cad, now)
+            rows.append({"org_id": oid, "repo": repo_ref, "cadence": cad, "current_period": cur,
+                         "last_enqueued_period": last, "due": cur != last})
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return
+    org, repo = str(a.org or "").strip(), str(a.repo or "").strip()
+    if not org or not repo:
+        print(f"redpen-schedule {cmd}: an <org> and a <repo> (github.com/org/repo) are required", file=sys.stderr)
+        sys.exit(2)
+    if cmd == "enqueue":
+        res = RedPenScheduler(store, base_dir=seam).enqueue_system_review(org, repo, now=now)
+        print(json.dumps(res, indent=2, sort_keys=True))
+        if not res.get("ok"):
+            sys.exit(2)
+        return
+    reg = RedPenScheduleRegistry(store)
+    try:
+        if cmd == "set":
+            if not a.cadence:
+                print("redpen-schedule set: --cadence weekly|monthly is required", file=sys.stderr)
+                sys.exit(2)
+            core = reg.set_schedule(org, repo, cadence=a.cadence, issued_at=now)
+            print(f"redpen-schedule: {core['cadence']} System review scheduled for {core['repo']} "
+                  f"(org {core['org_id']})")
+        else:
+            reg.clear_schedule(org, repo)
+            print(f"redpen-schedule: System-review schedule cleared for {repo} (org {org})")
+    except ValueError as e:
+        print(f"redpen-schedule {cmd}: {e} — refusing", file=sys.stderr)
+        sys.exit(2)
+
+
 def sigil_doctor_report() -> dict:
     """Build the SIGIL doctor report dict — the SAME data `sigil doctor --json` emits. Shared by the CLI
     (`cmd_doctor`) and the `/api/doctor` UI read (in-process, same venv). Driven by the shared
@@ -4435,6 +4535,21 @@ def main(argv=None) -> None:
                      help="per-(org,host) report-secret dir (default: $VIGIL_MONITORING_SECRETS_DIR)")
     pmd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pmd.set_defaults(fn=cmd_monitoring_drain)
+    prs = sub.add_parser("redpen-schedule",
+                         help="Red-Pen System-review scheduler (default-OFF: VIGIL_REDPEN_ENABLED): tick = reserve + "
+                              "ticket each DUE weekly/monthly whole-repository review once per period (never runs a "
+                              "job); set|clear|status = the owner-signed per-repo schedule; enqueue = one on-demand "
+                              "review")
+    prs.add_argument("redpen_schedule_cmd", choices=["tick", "set", "clear", "status", "enqueue"], nargs="?",
+                     default="tick")
+    prs.add_argument("org", nargs="?", default=None,
+                     help="(set/clear/enqueue) the tenant org_id; (status) an optional org filter")
+    prs.add_argument("repo", nargs="?", default=None,
+                     help="(set/clear/enqueue) the connected repository, github.com/<owner>/<repo>")
+    prs.add_argument("--cadence", choices=["weekly", "monthly"], default=None,
+                     help="(set) how often the whole repository is reviewed")
+    prs.add_argument("--now", type=float, default=None, help="POSIX time override (default: now)")
+    prs.set_defaults(fn=cmd_redpen_schedule)
     porg = sub.add_parser("org", help="owner operations on a customer org (pricing)")
     porg_sub = porg.add_subparsers(dest="org_cmd", required=True)
     for _verb, _help in (("unlock-reports", "owner-sign a full-report unlock for an org"),

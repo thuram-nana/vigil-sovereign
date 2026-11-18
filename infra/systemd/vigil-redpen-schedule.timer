@@ -1,0 +1,17 @@
+# Hourly trigger for the VIGIL Red-Pen System-review scheduler (R4). OPT-IN — ships disabled like every timer.
+#   systemctl --user enable --now vigil-redpen-schedule.timer
+# Schedules are weekly or monthly, so an hourly pass enqueues each due review within an hour of its period starting;
+# a pass with nothing due reserves nothing and writes nothing.
+
+[Unit]
+Description=Hourly trigger for the VIGIL Red-Pen System-review scheduler
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=3600
+# (No Persistent= — it only affects OnCalendar= timers; this monotonic timer re-arms 3600s after each pass.)
+Unit=vigil-redpen-schedule.service
+
+[Install]
+WantedBy=timers.target

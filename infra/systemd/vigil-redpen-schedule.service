@@ -1,0 +1,67 @@
+# VIGIL Red-Pen System-review SCHEDULER — systemd USER service (oneshot, fired hourly by its timer). OPT-IN.
+# =====================================================================
+# Red-Pen R4: a customer may have a WHOLE-REPOSITORY (System) review of a connected repository run on a weekly or
+# monthly schedule — an owner-signed schedule record (`sigil redpen-schedule set`). This unit runs ONE scheduler pass:
+# for every schedule whose current calendar period has not been enqueued yet, it reserves the review through the W2
+# path (refused at the per-repo monthly spending limit, an empty wallet or a disconnected repository) and drops an
+# owner-signed ticket on the redpen-system seam — at most once per period (an owner-signed high-water). It NEVER runs a
+# review: the integration drain (`vigil redpen-schedule --watch`, on the offense/integration plane) turns each ticket
+# into a queued SecurityJob, and only the authorized runner executes it, behind the job gate that re-verifies the
+# ticket's owner-signed lease.
+#
+# The pass is DEFAULT-OFF and fail-closed (`sigil redpen-schedule tick`): it refuses unless VIGIL_REDPEN_ENABLED is
+# set; it never falls back to ~/.sigil (SIGIL_HOME is REQUIRED in the env file below, must be the cockpit's and must
+# hold the owner identity); and it refuses to write a ticket to a seam the cockpit and the settle drain do not use.
+# Every refusal exits non-zero, so this unit goes FAILED and the dead-man alarms. While the owner's kill switch or the
+# customer_launch latch is engaged, a due review is DEFERRED (its period stays due), never dropped.
+#
+# NETWORK: deliberately NOT PrivateNetwork — the owner signing key may be KMS-wrapped (VIGIL_KEK_BACKEND=kms), and
+# unsealing it reaches AWS KMS. A pass makes no other network call: it reads and writes the local spine and seam only.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-redpen-schedule.service
+#     journalctl --user -u vigil-redpen-schedule -e
+#
+# INSTALL (paired with its timer):
+#   cp infra/systemd/vigil-redpen-schedule.{service,timer} ~/.config/systemd/user/
+#   install -m 600 infra/systemd/vigil-redpen-schedule.env.example ~/.config/vigil/redpen-schedule.env  # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-redpen-schedule.timer
+
+[Unit]
+Description=VIGIL Red-Pen System-review scheduler (one pass: due weekly/monthly reviews → reserve → owner-signed ticket)
+Documentation=file:%h/vigil/docs/runbooks/AWS-DEPLOY.md
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+# The ONE seam base every unit on the launch path shares (the cockpit publishes, the settle drain settles): tickets
+# land where the integration drain reads them. An override belongs in the env file below AND in the cockpit's and
+# the drains' — the pass refuses a seam the cockpit and the settle drain do not use.
+Environment=VIGIL_BASE_DIR=%h/.sigil/credit-lease
+EnvironmentFile=-%h/.config/vigil/redpen-schedule.env
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil redpen-schedule tick
+# A pass folds the spine for each due schedule (O(spine) each). This bound only frees a WEDGED pass, which the
+# dead-man has already alarmed on; the next pass re-tries the same period (an un-advanced high-water is idempotent).
+TimeoutStartSec=1800
+
+# --- heartbeat + staleness alarm (W8-1 pattern) ------------------------------
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+# The EnvironmentFile is unit-wide, so the heartbeat hook (a different venv, another codebase) would inherit every
+# value in it. An ALLOW-list, not a strip-list: the hook runs with an EMPTY environment plus the three values it reads
+# (systemd turns "$$" into "$"; SERVICE_RESULT exists only in this hook's own environment, so the shell forwards it).
+ExecStopPost=/bin/sh -c 'exec /usr/bin/env -i HOME="$$HOME" SERVICE_RESULT="$$SERVICE_RESULT" VIGIL_ALERT_STATE_DIR="$$VIGIL_ALERT_STATE_DIR" "$$0" unit-heartbeat "$$1"' %h/vigil/.venv-offense/bin/vigil %n
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# IMPORTANT: if SIGIL_HOME or VIGIL_BASE_DIR is outside ~/.sigil, ADD it to ReadWritePaths above.

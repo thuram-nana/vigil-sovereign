@@ -34,6 +34,10 @@ SEAM_UNITS: "tuple[tuple[str, str], ...]" = (
     ("vigil-backup-push.service", "infra/systemd"),
     ("vigil-backup-drill.service", "infra/systemd"),
     ("vigil-command.service", "infra/systemd"),
+    # Red-Pen R4: reserves System reviews and writes their owner-signed tickets under the seam base. Not a WRITER /
+    # MONEY migration unit below (it is new — no former CWD-relative tree to migrate); its pass refuses a seam the
+    # cockpit and the settle drain do not use (`sigil redpen-schedule` → `_writer_seam_base(money=True)`).
+    ("vigil-redpen-schedule.service", "infra/systemd"),
 )
 _LEGACY_ALIAS = "VIGIL_SETTLE_BASE_DIR"
 #: The seam-migration guard a unit sets for its process (the shipped cockpit and settle-drain units set it to 1).

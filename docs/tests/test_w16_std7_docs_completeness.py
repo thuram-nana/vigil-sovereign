@@ -290,6 +290,7 @@ FORBIDDEN: list[tuple[Path, str]] = [
     (README, "(~33 kinds)"),
     (README, "(~38 kinds)"),  # now ALSO a stale UNDERCLAIM: code has 49 OracleKinds and the README states 49.
     (README, "0/7 systemd timers enabled"),
+    (README, "0/15 systemd timers enabled"),  # stale since Red-Pen R4 shipped a 16th timer (the anchor is 0/16)
 ]
 
 ANCHORS: list[tuple[Path, str]] = [
@@ -298,7 +299,7 @@ ANCHORS: list[tuple[Path, str]] = [
     (AS_BUILT_LIVE, "(`test_engine_live.py`, `PYTHONPATH=integration:engine/crucible:gateway`)"),
     (AS_BUILT_LIVE, "one of the UI's screens"),
     (README, "49 oracle kinds"),  # advanced 33→38→49: pins the now-correct count ("(~38 kinds)" is now forbidden above).
-    (README, "0/15 systemd timers enabled"),
+    (README, "0/16 systemd timers enabled"),  # 15→16: Red-Pen R4 shipped the opt-in vigil-redpen-schedule.timer
 ]
 
 
@@ -332,13 +333,14 @@ def drift_code_fact_violations() -> list[str]:
     n = _oraclekind_member_count()
     if n < 49:
         errs.append(f"OracleKind has {n} members (<49) — the README's '49 oracle kinds' would overstate")
-    # #6 — infra/systemd really ships 15 .timer units (M4.5 added vigil-twin.timer alongside the original 9;
+    # #6 — infra/systemd really ships 16 .timer units (M4.5 added vigil-twin.timer alongside the original 9;
     # slice 2a added vigil-finding-drain.timer + vigil-settle-drain.timer for the supervised SaaS drains;
     # DEP-3 (#73) added the opt-in vigil-upgrade-drill.timer; Front B added the opt-in vigil-billing-drain.timer;
-    # Stripe parity added the opt-in vigil-billing-drain-stripe.timer).
+    # Stripe parity added the opt-in vigil-billing-drain-stripe.timer; Red-Pen R4 added the opt-in
+    # vigil-redpen-schedule.timer).
     timers = sorted(p.name for p in TIMERS_DIR.glob("*.timer"))
-    if len(timers) != 15:
-        errs.append(f"expected 15 systemd .timer units, found {len(timers)}: {timers}")
+    if len(timers) != 16:
+        errs.append(f"expected 16 systemd .timer units, found {len(timers)}: {timers}")
     # #2/#3 — the two test files really have MORE than the stale counts (they were underclaims).
     if _count_test_defs(TEST_ENGINE) <= 17:
         errs.append("test_engine.py no longer has >17 test defs — the underclaim correction is stale")
