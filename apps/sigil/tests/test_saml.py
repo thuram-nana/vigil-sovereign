@@ -14,9 +14,15 @@ Load-bearing invariants (a false-green here is a full auth bypass):
 The crypto itself is treated as a verified dependency: tests inject a `sig_verifier` stub that attests WHICH
 element ids are validly signed, so the structural/XSW/temporal/audience/replay logic is exercised without
 depending on byte-correct exclusive-c14n (which the environment cannot provide; see the module honest boundary).
+
+GUARD ISOLATION: a refusal test proves its guard only if NO OTHER guard refuses the same document — otherwise it
+stays green with its own guard deleted. So every load-bearing guard has an isolating test: an otherwise-valid
+document that only that guard refuses (asserted by the guard's own message), next to a same-shape control that
+verifies once the one hostile feature is removed. Each was proven by mutating its guard (the test reds).
 """
 from __future__ import annotations
 
+import dataclasses
 import sys
 import tempfile
 
@@ -39,18 +45,24 @@ CFG = SsoConfig(org_id="acme", protocol="saml", issued_at=1.0, state="active",
 def _assertion(aid="a1", aud="https://sp.vigil/acme", rcpt="https://app.vigil/acs/acme",
                nooa="2001-09-14T00:00:00Z", nb="2001-09-13T00:00:00Z", issuer="https://idp.example",
                nameid="user@acme", groups=("admins",), with_subject=True, with_conditions=True,
-               with_scd=True, with_nameid=True):
+               with_scd=True, with_nameid=True, cond_nooa=None, scd_nooa=None):
+    # `cond_nooa` / `scd_nooa` override ONE NotOnOrAfter bound (None = `nooa`; "" = omit the attribute), so a test
+    # can make exactly one of the two time guards the only one that refuses.
+    cond_nooa = nooa if cond_nooa is None else cond_nooa
+    scd_nooa = nooa if scd_nooa is None else scd_nooa
     grp = "".join(f'<saml:AttributeValue>{g}</saml:AttributeValue>' for g in groups)
     subj = ""
     if with_subject:
         nid = f'<saml:NameID>{nameid}</saml:NameID>' if with_nameid else ''
-        scd = (f'<saml:SubjectConfirmation><saml:SubjectConfirmationData Recipient="{rcpt}" '
-               f'NotOnOrAfter="{nooa}"/></saml:SubjectConfirmation>') if with_scd else ''
+        scd_attr = f' NotOnOrAfter="{scd_nooa}"' if scd_nooa else ''
+        scd = (f'<saml:SubjectConfirmation><saml:SubjectConfirmationData Recipient="{rcpt}"'
+               f'{scd_attr}/></saml:SubjectConfirmation>') if with_scd else ''
         subj = f'<saml:Subject>{nid}{scd}</saml:Subject>'
     cond = ""
     if with_conditions:
         nbattr = f' NotBefore="{nb}"' if nb else ''
-        cond = (f'<saml:Conditions{nbattr} NotOnOrAfter="{nooa}"><saml:AudienceRestriction>'
+        cond_attr = f' NotOnOrAfter="{cond_nooa}"' if cond_nooa else ''
+        cond = (f'<saml:Conditions{nbattr}{cond_attr}><saml:AudienceRestriction>'
                 f'<saml:Audience>{aud}</saml:Audience></saml:AudienceRestriction></saml:Conditions>')
     return (f'<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{aid}">'
             f'<saml:Issuer>{issuer}</saml:Issuer>{subj}{cond}'
@@ -117,6 +129,86 @@ def test_assertion_without_id_refused():
         _verify(_response(assertions=a), signed=("a1",))
 
 
+# The duplicate-ID guard in its REAL XSW shape. `test_duplicate_id_refused` uses TWO assertions, so with
+# `_collect_ids` deleted `_single_assertion` still refuses it. Here the document holds EXACTLY ONE <saml:Assertion>
+# plus a second element reusing an id the verifier attests: the signature reference resolves to the hidden, validly
+# signed original while the processor reads the forged twin — only `_collect_ids` sees the collision.
+_DUP_HOLDERS = {
+    # the IdP-signed original Response wrapped away in <Extensions>; the forged root Response reuses its ID
+    "wrapped-signed-response": ('<samlp:Response ID="{}"/>', "r1"),
+    # a decoy element reusing the processed assertion's own ID
+    "decoy-sharing-the-assertion-id": ('<ds:Object xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="{}"/>', "a1"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_DUP_HOLDERS))
+def test_duplicate_id_beside_exactly_one_assertion_is_refused_by_collect_ids(shape):
+    holder, dup = _DUP_HOLDERS[shape]
+
+    def doc(holder_id: str) -> bytes:
+        return _response(assertions=f'<samlp:Extensions>{holder.format(holder_id)}</samlp:Extensions>'
+                                    + _assertion(nameid="evil@acme"))
+    with pytest.raises(SamlError, match="duplicate ID"):
+        _verify(doc(dup), signed=(dup,))
+    # isolation control: rename ONLY the duplicate and the same document verifies (one assertion, a binding
+    # signature) — so nothing but `_collect_ids` refuses the shape above.
+    assert _verify(doc(dup + "-unique"), signed=(dup,)).name_id == "evil@acme"
+
+
+def test_a_response_without_any_assertion_is_refused_by_the_single_assertion_guard():
+    # without this guard the bare index would raise IndexError — not a SamlError, so it would escape the
+    # SamlError -> SsoLoginError mapping the provisioner's refusal accounting (failure count + audit) relies on.
+    with pytest.raises(SamlError, match="no <saml:Assertion>"):
+        _verify(_response(assertions=""))
+
+
+class _SpendsAnything:
+    """A replay-ledger stand-in that would spend ANY id (even a blank one): with it, only verify's own guard
+    can refuse an id-less assertion (the real ledger's blank-id refusal is pinned separately below)."""
+
+    def try_spend(self, *_a, **_k):
+        return True
+
+
+def test_an_assertion_without_id_is_refused_by_its_own_guard():
+    # test_assertion_without_id_refused is refused by the signature binding (no id is attested); here the enveloping
+    # Response IS signed and the ledger spends anything, so only the no-ID guard stands.
+    with_id = _assertion()
+    no_id = _response(assertions=with_id.replace(' ID="a1"', "", 1))
+    with pytest.raises(SamlError, match="has no ID"):
+        _verify(no_id, signed=("r1",), ledger=_SpendsAnything())
+    # isolation control: the same assertion WITH its id verifies under the same signature and ledger
+    assert _verify(_response(assertions=with_id), signed=("r1",), ledger=_SpendsAnything()).name_id == "user@acme"
+
+
+@pytest.mark.parametrize("attested", ["attacker-a1-wrapper", ["a1"]], ids=["str", "list"])
+def test_a_verifier_answer_that_is_not_a_set_is_refused(attested):
+    # a str answer would turn `assertion_id in signed_ids` into a SUBSTRING test ('a1' in 'attacker-a1-wrapper')
+    with pytest.raises(SamlError, match="non-set"):
+        saml.verify_saml_response(_response(), config=CFG, now=NOW, replay_ledger=_led(),
+                                  sig_verifier=lambda b, c: attested)
+
+
+def _rooted(tag: str) -> bytes:
+    return (f'<samlp:{tag} xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="w1">'
+            f'{_assertion()}</samlp:{tag}>').encode()
+
+
+def test_a_signature_over_a_root_that_is_not_a_response_does_not_bind():
+    with pytest.raises(SamlError, match="no valid signature binds"):
+        _verify(_rooted("ArtifactResponse"), signed=("w1",))
+    # isolation control: the identical body under a <samlp:Response> root binds through that root's signature
+    assert _verify(_rooted("Response"), signed=("w1",)).name_id == "user@acme"
+
+
+def test_an_attested_empty_id_never_binds_an_id_less_response():
+    no_root_id = _response().replace(b' ID="r1"', b"", 1)
+    with pytest.raises(SamlError, match="no valid signature binds"):
+        _verify(no_root_id, signed=("",))
+    # isolation control: the same id-less Response verifies once the assertion's own id is attested
+    assert _verify(no_root_id, signed=("a1",)).name_id == "user@acme"
+
+
 # --- XML hardening ----------------------------------------------------------------------------------
 
 def test_doctype_refused():
@@ -145,6 +237,35 @@ def test_oversize_and_empty_refused():
         saml._parse_hardened(b"x" * (saml._MAX_SAML_BYTES + 1))
     with pytest.raises(SamlError):
         saml._parse_hardened(b"")
+
+
+@pytest.mark.parametrize("doctype,nameid", [
+    ('<!DOCTYPE samlp:Response [<!ENTITY who "user@acme">]>', "&who;"),   # an internal entity supplies the identity
+    ("<!DOCTYPE samlp:Response>", "user@acme"),                           # a bare DOCTYPE, no entity at all
+], ids=["internal-entity", "bare-doctype"])
+def test_a_doctype_on_an_otherwise_valid_response_is_refused_by_the_dtd_guard(doctype, nameid):
+    # the DTD tests above carry no assertion (and the XXE one an undefined external entity), so without
+    # `_reject_dtd` they are still refused — by `_single_assertion` / the parser. This Response is otherwise valid.
+    xml = _response(nameid=nameid).replace(b'<?xml version="1.0"?>', b'<?xml version="1.0"?>' + doctype.encode(), 1)
+    with pytest.raises(SamlError, match="DOCTYPE"):
+        _verify(xml)
+    # isolation control: the same Response without the DTD verifies
+    assert _verify(_response()).name_id == "user@acme"
+
+
+def _padded(total: int) -> bytes:
+    """A valid Response grown to exactly `total` bytes by an inert XML comment."""
+    base = _response()
+    pad = total - len(base) - len(b"<!---->")
+    return base.replace(b"</samlp:Response>", b"<!--" + b"x" * pad + b"--></samlp:Response>", 1)
+
+
+def test_an_oversize_but_otherwise_valid_response_is_refused_by_the_size_cap():
+    # test_oversize_and_empty_refused's oversize input is not XML at all (the parser refuses it anyway)
+    with pytest.raises(SamlError, match="size cap"):
+        _verify(_padded(saml._MAX_SAML_BYTES + 1))
+    # isolation control: one byte less — exactly at the cap — the same Response verifies
+    assert _verify(_padded(saml._MAX_SAML_BYTES)).name_id == "user@acme"
 
 
 def test_malformed_xml_refused():
@@ -198,6 +319,32 @@ def test_missing_not_on_or_after_refused():
         _verify(_response(assertions=a))
 
 
+LATER = "2001-09-20T00:00:00Z"                              # well after EXPIRED
+
+
+@pytest.mark.parametrize("still_valid,guard", [
+    ("scd_nooa", "Conditions NotOnOrAfter has passed"),
+    ("cond_nooa", "SubjectConfirmationData NotOnOrAfter has passed"),
+], ids=["conditions-expired", "subject-confirmation-expired"])
+def test_each_not_on_or_after_bound_refuses_on_its_own(still_valid, guard):
+    # test_expired_refused expires BOTH bounds, so either guard masks the other's removal; here only one has passed
+    with pytest.raises(SamlError, match=guard):
+        _verify(_response(**{still_valid: LATER}), now=EXPIRED)
+    # isolation control: with both bounds LATER the same assertion verifies at the same instant
+    assert _verify(_response(cond_nooa=LATER, scd_nooa=LATER), now=EXPIRED).name_id == "user@acme"
+
+
+@pytest.mark.parametrize("missing,guard", [
+    ("cond_nooa", "Conditions/NotOnOrAfter is missing"),
+    ("scd_nooa", "SubjectConfirmationData/NotOnOrAfter is missing"),
+], ids=["conditions", "subject-confirmation"])
+def test_each_not_on_or_after_is_required_on_its_own(missing, guard):
+    # test_missing_not_on_or_after_refused omits BOTH; here exactly one is absent (the control below has both)
+    with pytest.raises(SamlError, match=guard):
+        _verify(_response(**{missing: ""}))
+    assert _verify(_response()).name_id == "user@acme"
+
+
 def test_clock_skew_tolerated():
     # just-expired within skew (60s): NOW == nooa + 30 should still pass.
     import datetime
@@ -220,6 +367,23 @@ def test_distinct_assertion_ids_both_accepted():
     led = _led()
     assert _verify(_response(aid="a1"), signed=("a1",), ledger=led).name_id == "user@acme"
     assert _verify(_response(aid="a2"), signed=("a2",), ledger=led).name_id == "user@acme"
+
+
+def test_the_replay_ledger_never_spends_a_blank_id(tmp_path):
+    led = saml.SamlReplayLedger(tmp_path / "replay")
+    for blank in ("", "   ", None):
+        assert led.try_spend(blank, 1e12, now=NOW) is False
+    assert not (tmp_path / "replay").exists() or not any((tmp_path / "replay").iterdir())   # nothing was spent
+    assert led.try_spend("a1", 1e12, now=NOW) is True and led.try_spend("a1", 1e12, now=NOW) is False   # control
+
+
+def test_the_replay_ledger_is_bounded(tmp_path):
+    led = saml.SamlReplayLedger(tmp_path / "replay", max_outstanding=2)
+    assert led.try_spend("a1", NOW + 60, now=NOW) and led.try_spend("a2", NOW + 60, now=NOW)
+    with pytest.raises(SamlError, match="capacity"):
+        led.try_spend("a3", NOW + 60, now=NOW)
+    # once the spent ids are past NotOnOrAfter (+ grace) they are reaped, and there is room again
+    assert led.try_spend("a3", NOW + 60, now=NOW + 60 + led._GRACE + 1)
 
 
 # --- missing structure ------------------------------------------------------------------------------
@@ -263,6 +427,18 @@ def test_config_without_cert_refused():
                        sp_entity_id="https://sp.vigil/acme", acs_url="https://app.vigil/acs/acme")
     with pytest.raises(SamlError):
         _verify(_response(), cfg=nocert)
+
+
+def test_a_non_saml_config_is_refused_even_when_it_carries_saml_material():
+    # test_protocol_mismatch_refused's OIDC config carries no IdP cert, so the cert guard masks this one
+    with pytest.raises(SamlError, match="no active SAML config"):
+        _verify(_response(), cfg=dataclasses.replace(CFG, protocol="oidc"))
+
+
+def test_a_config_without_a_cert_is_refused_even_by_a_verifier_that_attests():
+    # test_config_without_cert_refused's config also lacks the IdP entity id, so the issuer guard masks this one
+    with pytest.raises(SamlError, match="no IdP signing certificate"):
+        _verify(_response(), cfg=dataclasses.replace(CFG, idp_certs_pem=()))
 
 
 # --- FATAL-2 ----------------------------------------------------------------------------------------
