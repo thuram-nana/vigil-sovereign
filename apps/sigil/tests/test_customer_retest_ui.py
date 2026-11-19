@@ -668,6 +668,11 @@ function ser(e) {
 
 _RETEST_START = '  var RETEST_ON = pageFlag("retest");'
 _RETEST_END = "  // ---- end of retest (C1b)"
+# PR-L (Area 11): findingsBlock also calls blindVulnBadge, so the SPA harness slices in the blind-vuln region
+# (its own var BLIND_VULN_ON = pageFlag("blindVuln") + helpers) exactly as it does the retest region. With the
+# flag off (the harness sets no data-blind-vuln) blindVulnBadge returns null, so the card stays byte-identical.
+_BLIND_START = '  var BLIND_VULN_ON = pageFlag("blindVuln");'
+_BLIND_END = "  // ---- Attack-path storytelling (PR-L, Area 11)"
 
 _PRELUDE = r"""
 document.body.dataset.retest = %(flag)s;
@@ -675,6 +680,7 @@ var API = "api/customer";                 // app.js's own constant, above the ex
 // every page-flag constant app.js declares, stubbed off; the extracted retest block then sets its OWN RETEST_ON
 // from the page flag (a var re-declaration), exactly as app.js does
 var GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, LAUNCH_ON = false, RETEST_ON = false;
+var BLIND_VULN_ON = false, ATTACK_PATH_ON = false;   // PR-L flags, stubbed off; the sliced blind block resets its own
 function pageFlag(name) { var ds = (document.body && document.body.dataset) || {}; return ds[name] === "1"; }
 const calls = [];
 const navs = []; function nav(r) { navs.push(r); }
@@ -697,6 +703,7 @@ def _harness(flag="1", *, server="{}"):
     env = _PRELUDE % {"flag": json.dumps(flag), "server": server}
     return (_dom() + f"\nrequire({json.dumps(str(UI_JS))});\nconst out = {{}};\n" + env + "\n"
             + _fn(src, "kv") + "\n" + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
+            + _slice(src, _BLIND_START, _BLIND_END)       # PR-L: findingsBlock also calls blindVulnBadge
             + _ser())
 
 
@@ -891,7 +898,8 @@ console.log(JSON.stringify(cases.map(function (c) { return ser(findingsBlock(c.h
     head = (_dom() + f"\nrequire({json.dumps(str(UI_JS))});\n" + _PRELUDE % {"flag": json.dumps("0"), "server": "{}"}
             + _ser() + _fn(src, "kv") + "\n")
     prog_base = head + _BASE_FINDINGSBLOCK + inputs
-    prog_cur = head + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END) + inputs
+    prog_cur = (head + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
+                + _slice(src, _BLIND_START, _BLIND_END) + inputs)   # PR-L: blindVulnBadge is null when off
     rb = subprocess.run([_need_node(), "-e", prog_base], capture_output=True, text=True, timeout=60)
     rc = subprocess.run([_need_node(), "-e", prog_cur], capture_output=True, text=True, timeout=60)
     assert rb.returncode == 0, rb.stderr
