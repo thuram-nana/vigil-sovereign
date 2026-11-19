@@ -311,6 +311,21 @@ def customer_notify_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_NOTIFY") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def apex_autonomous_enabled() -> bool:
+    """True iff the APEX autonomous DRIVER is ON (`VIGIL_APEX_AUTONOMOUS` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it OFF an engagement runs the exact current fixed pipeline — crawl →
+    audit → confirm → chain → ground — and the autonomous OODA loop stays a post-scan advisory appendix
+    behind `--autonomous`; nothing in the primary path changes and `make gate` is byte-identical. With it
+    ON, `framework.v2.engage.run_engagement` keeps the one gated scan executor OPEN past the scan and drives
+    the select→act→observe→reorient loop IN-ENGAGEMENT over it (one shared request budget), so a recon-
+    discovered surface is promoted → crawled → probed → oracle-confirmed WITHOUT a human pointing at it —
+    the loop proposes, the gate authorizes, the oracle confirms (no new mint site). Read at call time.
+    FATAL-2 safe: a pure env read; this sovereign accessor loads no offense module, and the offense engine
+    reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
+    closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
+    return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 # A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL
 # (`https://github.com/apps/<slug>/installations/new`) accepts — the numeric App id cannot build it. The owner sets
 # it when they register the real App (go-live, HANDOFF §6); unset ⇒ the Code screen's Connect GitHub refuses with a

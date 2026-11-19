@@ -2259,28 +2259,32 @@
     },
     {
       "id": "nosqli.datastore_error",
-      "check": "injection_redrive (LEAD-only — conditional emission, not a proven query break)",
-      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) plus a benign CONTROL twin, and the deterministic error_signature oracle observes whether a mongodb datastore/parser-error signature was emitted CONDITIONALLY on the payload (present on the probe, absent from the benign control). That is a LEAD, not a FACT: the oracle is a STRING MATCH and the control twin only rules out UNCONDITIONAL emission.",
-      "fact_capable": false,
+      "check": "injection_redrive (parser-state-toggle causation oracle — a proven query break)",
+      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned THREE-leg probe against the finding's {endpoint, param} — a benign CONTROL, an UNBALANCED metacharacter BREAK, and a RE-BALANCED BALANCED payload carrying the SAME metacharacter set (the RUNNER crafts all three; the Strix/LLM payload is never trusted) — and the deterministic parser_state_toggle_oracle re-derives OFFLINE, over the three retained responses plus the three retained payloads, that the mongodb parser errored on the BREAK leg ALONE (a genuine QUERY BREAK) while the re-balanced and the benign-control legs did not. A source keying on metacharacter PRESENCE errors on both break and balanced and so cannot produce the toggle; a static banner fires on all three; the matched signature must be a genuine parser-break MESSAGE (never a bare package/class name) and a block/rejection response is refused. The FACT is decided by the wire bytes, re-executable offline over the frozen capture.",
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only. The error_signature oracle re-verifies only CONDITIONAL EMISSION of a mongodb error-shaped string — necessary but NOT sufficient for a query break. The benign control twin suppresses only signatures emitted UNCONDITIONALLY; a signature emitted CONDITIONALLY on the metacharacter by a NON-datastore source passes it — a WAF/security-filter block page that names the engine, an input-validator rejection, or an unrelated 500 whose stack trace merely names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) all mint a false FACT this way (reproduced at rate 1.0; a metacharacter routinely triggers some 500, so the stack-trace case is a high-frequency real-world false positive). NOT CLEAN-capable either: a non-firing is uninformative (injection can hide on a boolean/OOB channel this response cannot see).",
+      "limitation": "A POSITIVE-only parser-state-toggle channel: a fire proves the mongodb query parser broke on VIGIL's UNBALANCED payload and NOT on the re-balanced twin (same metacharacter set) nor the benign control — attributable to a genuine QUERY BREAK, re-derived offline over the frozen three-leg capture. It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction (injection can hide on a boolean/out-of-band channel this response-triple cannot see), so absence can NEVER establish the target is not injectable — NOT CLEAN-capable. Irreducible residual: a source that returns a non-block status AND emits a genuine mongodb parser-break message ONLY for the unbalanced payload is indistinguishable from a real break by construction; and the same-metacharacter-SET guard closes the metacharacter-PRESENCE filter the toggle targets, not a hypothetical exact-COUNT filter.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (NoSQL injection (nosqli) absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
       "evidence_surface": "service_response",
       "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:parser_state_toggle_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
         "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
       ],
-      "oracle_version": "",
-      "blocking_work": "Make the mongodb error attributable to a genuine QUERY BREAK, re-executable OFFLINE (the error_signature oracle proves only conditional emission). The sound FACT path is a break-vs-repair PARSER-STATE-TOGGLE decision procedure — a new causation oracle that re-fires at verify time over THREE bound responses: a genuine mongodb parser error on the UNBALANCED breaking payload, NO error on a BALANCED/repaired payload carrying the SAME metacharacters, and NO error on the benign control. A WAF/validator/unrelated-500 keying on metacharacter PRESENCE fires on both breaking and balanced, so it cannot pass the toggle. Plus: DROP the bare package/class-name signatures (they name a subsystem, not a query break) and REFUSE block/rejection responses (403/406/400 with block wording). This needs a new OracleKind, deliberately out of this slice's scope (reuse-only). Irreducible residual once built: a source that returns a non-block status AND perfectly echoes a real mongodb query-parser error only for the unbalanced payload.",
+      "oracle_version": "error_signature",
       "control_requirements": [
-        "parser_state_toggle_causation_oracle",
+        "warden_scope_gate",
+        "vigil_owned_live_redrive",
+        "three_leg_break_balanced_control_capture",
+        "same_metacharacter_set_balanced_twin",
+        "genuine_parser_break_message_not_bare_package_name",
         "block_response_refusal",
-        "genuine_parser_error_message_not_bare_package_name",
+        "parser_state_toggle_causation_oracle",
         "offline_reexecutable_causation_decision"
       ]
     },
@@ -2313,28 +2317,32 @@
     },
     {
       "id": "ldap_injection.datastore_error",
-      "check": "injection_redrive (LEAD-only — conditional emission, not a proven query break)",
-      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) plus a benign CONTROL twin, and the deterministic error_signature oracle observes whether a ldap datastore/parser-error signature was emitted CONDITIONALLY on the payload (present on the probe, absent from the benign control). That is a LEAD, not a FACT: the oracle is a STRING MATCH and the control twin only rules out UNCONDITIONAL emission.",
-      "fact_capable": false,
+      "check": "injection_redrive (parser-state-toggle causation oracle — a proven query break)",
+      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned THREE-leg probe against the finding's {endpoint, param} — a benign CONTROL, an UNBALANCED LDAP filter BREAK, and a RE-BALANCED BALANCED payload carrying the SAME metacharacter set (the RUNNER crafts all three; the Strix/LLM payload is never trusted) — and the deterministic parser_state_toggle_oracle re-derives OFFLINE, over the three retained responses plus the three retained payloads, that the ldap filter/DN parser errored on the BREAK leg ALONE (a genuine QUERY BREAK) while the re-balanced and the benign-control legs did not. A source keying on metacharacter PRESENCE errors on both break and balanced and so cannot produce the toggle; a static banner fires on all three; the matched signature must be a genuine filter/DN parse-error MESSAGE (never a bare package/class name) and a block/rejection response is refused. The FACT is decided by the wire bytes, re-executable offline over the frozen capture.",
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only. The error_signature oracle re-verifies only CONDITIONAL EMISSION of a ldap error-shaped string — necessary but NOT sufficient for a query break. The benign control twin suppresses only signatures emitted UNCONDITIONALLY; a signature emitted CONDITIONALLY on the metacharacter by a NON-datastore source passes it — a WAF/security-filter block page that names the engine, an input-validator rejection, or an unrelated 500 whose stack trace merely names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) all mint a false FACT this way (reproduced at rate 1.0; a metacharacter routinely triggers some 500, so the stack-trace case is a high-frequency real-world false positive). NOT CLEAN-capable either: a non-firing is uninformative (injection can hide on a boolean/OOB channel this response cannot see).",
+      "limitation": "A POSITIVE-only parser-state-toggle channel: a fire proves the ldap filter/DN parser broke on VIGIL's UNBALANCED payload and NOT on the re-balanced twin (same metacharacter set) nor the benign control — attributable to a genuine QUERY BREAK, re-derived offline over the frozen three-leg capture. It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction (injection can hide on a boolean/out-of-band channel this response-triple cannot see), so absence can NEVER establish the target is not injectable — NOT CLEAN-capable. Irreducible residual: a source that returns a non-block status AND emits a genuine ldap parse-error message ONLY for the unbalanced payload is indistinguishable from a real break by construction; and the same-metacharacter-SET guard closes the metacharacter-PRESENCE filter the toggle targets, not a hypothetical exact-COUNT filter.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (LDAP injection absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
       "evidence_surface": "service_response",
       "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:parser_state_toggle_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
         "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
       ],
-      "oracle_version": "",
-      "blocking_work": "Make the ldap error attributable to a genuine QUERY BREAK, re-executable OFFLINE (the error_signature oracle proves only conditional emission). The sound FACT path is a break-vs-repair PARSER-STATE-TOGGLE decision procedure — a new causation oracle that re-fires at verify time over THREE bound responses: a genuine ldap parser error on the UNBALANCED breaking payload, NO error on a BALANCED/repaired payload carrying the SAME metacharacters, and NO error on the benign control. A WAF/validator/unrelated-500 keying on metacharacter PRESENCE fires on both breaking and balanced, so it cannot pass the toggle. Plus: DROP the bare package/class-name signatures (they name a subsystem, not a query break) and REFUSE block/rejection responses (403/406/400 with block wording). This needs a new OracleKind, deliberately out of this slice's scope (reuse-only). Irreducible residual once built: a source that returns a non-block status AND perfectly echoes a real ldap query-parser error only for the unbalanced payload.",
+      "oracle_version": "error_signature",
       "control_requirements": [
-        "parser_state_toggle_causation_oracle",
+        "warden_scope_gate",
+        "vigil_owned_live_redrive",
+        "three_leg_break_balanced_control_capture",
+        "same_metacharacter_set_balanced_twin",
+        "genuine_parser_break_message_not_bare_package_name",
         "block_response_refusal",
-        "genuine_parser_error_message_not_bare_package_name",
+        "parser_state_toggle_causation_oracle",
         "offline_reexecutable_causation_decision"
       ]
     },
@@ -2367,28 +2375,32 @@
     },
     {
       "id": "xpath_injection.datastore_error",
-      "check": "injection_redrive (LEAD-only — conditional emission, not a proven query break)",
-      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) plus a benign CONTROL twin, and the deterministic error_signature oracle observes whether a xpath datastore/parser-error signature was emitted CONDITIONALLY on the payload (present on the probe, absent from the benign control). That is a LEAD, not a FACT: the oracle is a STRING MATCH and the control twin only rules out UNCONDITIONAL emission.",
-      "fact_capable": false,
+      "check": "injection_redrive (parser-state-toggle causation oracle — a proven query break)",
+      "evidence": "VIGIL's runner sends its OWN gated, DNS-pinned THREE-leg probe against the finding's {endpoint, param} — a benign CONTROL, an UNBALANCED XPath predicate/string BREAK, and a RE-BALANCED BALANCED payload carrying the SAME metacharacter set (the RUNNER crafts all three; the Strix/LLM payload is never trusted) — and the deterministic parser_state_toggle_oracle re-derives OFFLINE, over the three retained responses plus the three retained payloads, that the xpath expression parser errored on the BREAK leg ALONE (a genuine QUERY BREAK) while the re-balanced and the benign-control legs did not. A source keying on metacharacter PRESENCE errors on both break and balanced and so cannot produce the toggle; a static banner fires on all three; the matched signature must be a genuine XPath parse-error MESSAGE (never a bare package/class name) and a block/rejection response is refused. The FACT is decided by the wire bytes, re-executable offline over the frozen capture.",
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only. The error_signature oracle re-verifies only CONDITIONAL EMISSION of a xpath error-shaped string — necessary but NOT sufficient for a query break. The benign control twin suppresses only signatures emitted UNCONDITIONALLY; a signature emitted CONDITIONALLY on the metacharacter by a NON-datastore source passes it — a WAF/security-filter block page that names the engine, an input-validator rejection, or an unrelated 500 whose stack trace merely names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) all mint a false FACT this way (reproduced at rate 1.0; a metacharacter routinely triggers some 500, so the stack-trace case is a high-frequency real-world false positive). NOT CLEAN-capable either: a non-firing is uninformative (injection can hide on a boolean/OOB channel this response cannot see).",
+      "limitation": "A POSITIVE-only parser-state-toggle channel: a fire proves the xpath expression parser broke on VIGIL's UNBALANCED payload and NOT on the re-balanced twin (same metacharacter set) nor the benign control — attributable to a genuine QUERY BREAK, re-derived offline over the frozen three-leg capture. It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction (injection can hide on a boolean/out-of-band channel this response-triple cannot see), so absence can NEVER establish the target is not injectable — NOT CLEAN-capable. Irreducible residual: a source that returns a non-block status AND emits a genuine xpath parse-error message ONLY for the unbalanced payload is indistinguishable from a real break by construction; and the same-metacharacter-SET guard closes the metacharacter-PRESENCE filter the toggle targets, not a hypothetical exact-COUNT filter.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (XPath injection absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
       "evidence_surface": "service_response",
       "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:parser_state_toggle_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
         "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
       ],
-      "oracle_version": "",
-      "blocking_work": "Make the xpath error attributable to a genuine QUERY BREAK, re-executable OFFLINE (the error_signature oracle proves only conditional emission). The sound FACT path is a break-vs-repair PARSER-STATE-TOGGLE decision procedure — a new causation oracle that re-fires at verify time over THREE bound responses: a genuine xpath parser error on the UNBALANCED breaking payload, NO error on a BALANCED/repaired payload carrying the SAME metacharacters, and NO error on the benign control. A WAF/validator/unrelated-500 keying on metacharacter PRESENCE fires on both breaking and balanced, so it cannot pass the toggle. Plus: DROP the bare package/class-name signatures (they name a subsystem, not a query break) and REFUSE block/rejection responses (403/406/400 with block wording). This needs a new OracleKind, deliberately out of this slice's scope (reuse-only). Irreducible residual once built: a source that returns a non-block status AND perfectly echoes a real xpath query-parser error only for the unbalanced payload.",
+      "oracle_version": "error_signature",
       "control_requirements": [
-        "parser_state_toggle_causation_oracle",
+        "warden_scope_gate",
+        "vigil_owned_live_redrive",
+        "three_leg_break_balanced_control_capture",
+        "same_metacharacter_set_balanced_twin",
+        "genuine_parser_break_message_not_bare_package_name",
         "block_response_refusal",
-        "genuine_parser_error_message_not_bare_package_name",
+        "parser_state_toggle_causation_oracle",
         "offline_reexecutable_causation_decision"
       ]
     },
