@@ -379,6 +379,52 @@ def customer_assistant_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_assistant_wallet_enabled() -> bool:
+    """True iff every customer security-assistant turn is ACCOUNTED to the asking org (PR-J2,
+    `VIGIL_CUSTOMER_ASSISTANT_WALLET` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the assistant
+    is exactly PR-J's — refused while metered billing is on, otherwise metered against its grant's cap — the model
+    gateway's allowance source never answers for an assistant grant, the customer statement carries no assistant line
+    and the reservation sweep has no assistant leg: byte-identical to a build without it. ON (with
+    `VIGIL_CUSTOMER_ASSISTANT`), in EVERY billing mode a turn is admitted only within the org's rate limit and daily
+    turn budget (`assistant_turns_per_hour` / `assistant_turns_per_day`; over either ⇒ rate limited) and only after an
+    owner-signed audit record of it (who asked, for which org, under which grant — `governor.assistant_turns`) is on the
+    spine. With `VIGIL_METERED_BILLING` on it is also BILLED to the org's own credits: before its one model request the
+    turn HOLDS that request's worst case (an owner-signed reserve keyed by the turn's grant nonce — refused, with nothing
+    held, when the exact balance or the credit line cannot cover it), the gateway admits the request only within that
+    hold, and the turn then settles EXACTLY (its confirmed metered charge kept to the milli-credit, the rest returned)
+    with a "Security assistant" line on the statement (`ui.assistant_wallet`). With metered billing off nothing is
+    drawn (flat billing: VIGIL bears the model cost, bounded per org per day by the turn budget times the grant's cap).
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT_WALLET") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def assistant_turns_per_hour() -> int:
+    """PR-J2 — the most security-assistant turns ONE org may have answered in any rolling hour
+    (`VIGIL_ASSISTANT_TURNS_PER_HOUR`, default 20), counted from the owner-signed turn ledger
+    (`governor.assistant_turns`); a turn past it is refused as rate limited. Consulted only while
+    `customer_assistant_wallet_enabled()`. A junk/out-of-range value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_HOUR") or "").strip()
+    try:
+        n = int(raw) if raw else 20
+    except ValueError:
+        return 20
+    return n if 1 <= n <= 10_000 else 20
+
+
+def assistant_turns_per_day() -> int:
+    """PR-J2 — the daily turn BUDGET of ONE org's security assistant: the most turns it may have answered in any
+    rolling day (`VIGIL_ASSISTANT_TURNS_PER_DAY`, default 100), from the same ledger as `assistant_turns_per_hour`. With
+    each turn's model spend capped by its grant (`assistant_cap_nano_usd`), a flat-billed org can cost VIGIL at most
+    this many times that cap a day. Consulted only while `customer_assistant_wallet_enabled()`. A junk/out-of-range
+    value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_DAY") or "").strip()
+    try:
+        n = int(raw) if raw else 100
+    except ValueError:
+        return 100
+    return n if 1 <= n <= 100_000 else 100
+
+
 def customer_notify_enabled() -> bool:
     """True iff the customer Notifications & integrations surfaces are ON (`VIGIL_CUSTOMER_NOTIFY` affirmative).
     OFF by default (mirrors `redpen_enabled`): with it off EVERY notify route / channel registration / outbound

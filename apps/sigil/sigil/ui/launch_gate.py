@@ -1055,12 +1055,14 @@ class LaunchGate:
                             finish_only: bool = False,
                             lease_split: "Optional[tuple[int, Optional[float]]]" = None,
                             allowance_check: Optional[Callable[[], Optional[str]]] = None,
-                            exact_mc: Optional[int] = None) -> dict:
+                            exact_mc: Optional[int] = None, seam: bool = True) -> dict:
         """Settle the reservation of lease ``(s, non)`` of org ``oid`` — ``reserved`` credits, ``consumed`` of them
         used (already clamped to ``[0, reserved]``): route postpaid / prepaid, build the settlement decision (the
         bucket split) and run the exactly-once ``_settle_once``. ``settle_launch`` calls it with the VERIFIED lease's
         fields; ``release_superseded_reservation`` (E7) with ``reserved`` taken from the owner-signed reserve
-        records.
+        records; ``ui.assistant_wallet`` (PR-J2) with an assistant turn's own reserve records and ``seam=False`` (a
+        turn has no lease on the cross-plane seam, so its settle reads and writes nothing there — see
+        ``_settle_once``).
 
         ``lease_split`` is where a prepaid decision's plan share comes from: the signed lease's
         ``(plan_reserved, plan_period_end)``; None — a signed lease that does not carry it, or E7, which has no
@@ -1107,7 +1109,7 @@ class LaunchGate:
             return self._settle_once(oid, s, non, reserved, consumed, now_ts,
                                      SettlementDecision.postpaid(reserved, consumed, basis), _move_postpaid,
                                      refuse_if, finish_only, allowance_check=allowance_check,
-                                     exact=_exact_postpaid if exact_mc is not None else None)
+                                     exact=_exact_postpaid if exact_mc is not None else None, seam=seam)
         # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
         # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
         # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
@@ -1196,7 +1198,8 @@ class LaunchGate:
         return self._track_hold(oid, s, non, self._settle_once(oid, s, non, reserved, consumed, now_ts, decision,
                                                                _move_prepaid, refuse_if, finish_only,
                                                                allowance_check=allowance_check,
-                                                               exact=_exact_prepaid if exact_mc is not None else None))
+                                                               exact=_exact_prepaid if exact_mc is not None else None,
+                                                               seam=seam))
 
     @staticmethod
     def _track_hold(oid: str, s: str, non: str, out: dict) -> dict:
@@ -1259,7 +1262,7 @@ class LaunchGate:
                      move: "Callable[[Any, set[str], bool], dict]",
                      refuse_if: Optional[Callable[[], Optional[str]]], finish_only: bool,
                      allowance_check: Optional[Callable[[], Optional[str]]] = None,
-                     exact: Optional[Callable[[int], Any]] = None) -> dict:
+                     exact: Optional[Callable[[int], Any]] = None, seam: bool = True) -> dict:
         """THE exactly-once settle transaction of lease ``(s, non)``, shared by the prepaid and postpaid paths.
         ``decision`` is what THIS caller would decide (a ``SettlementDecision``); ``move(d, landed, durable)`` moves
         the money of decision ``d`` — writing only the settle entries NOT already ``landed`` (and, when ``durable``,
@@ -1284,7 +1287,12 @@ class LaunchGate:
         EXACT (W2c-1): with ``exact``, a FRESH settle reads the org's remainder ``r`` once its meter is closed and the
         allowance re-checked — inside the critical section, so no other settle moves ``r`` in between — and settles on
         ``exact(r)`` instead of ``decision``; that v3 decision is ALWAYS recorded (the remainder moves only through
-        it), whatever the settle-record flag says. A not-fresh settle never reads ``r``."""
+        it), whatever the settle-record flag says. A not-fresh settle never reads ``r``.
+
+        ``seam=False`` (PR-J2, an assistant turn — always an EXACT settle, so its decision is always recorded): the
+        cross-plane seam is neither read nor written — no settlement marker, no tombstone, no grant removal. A turn
+        never had a lease or a grant file there; the SPINE's owner-signed decision record (written before any money
+        moves) is its whole settlement evidence, and closing its meter is what revokes its grant."""
         from contextlib import ExitStack
         from .. import config
         from ..governor.launch_settlement import record_launch_settled, scan_settlement, settle_lock
@@ -1313,7 +1321,7 @@ class LaunchGate:
                 return busy
             try:
                 ev = scan_settlement(self.store, pub, org_id=oid, slug=s, nonce=non, since=ev)   # + since then
-                on_seam = is_lease_settled(base, s, non)
+                on_seam = is_lease_settled(base, s, non) if seam else False
             except OSError:
                 return busy
             fresh = not (ev.settled or on_seam)
@@ -1324,7 +1332,8 @@ class LaunchGate:
                 why = _refusal(refuse_if)
                 if why:
                     return {"ok": False, "error": f"settle refused: {why}", "refused": why}
-                meter_refusal = self._close_model_meter(s, non, now_ts)
+                meter_refusal = (self._close_model_meter(s, non, now_ts) if seam
+                                 else self._close_model_meter(s, non, now_ts, seam=False))
                 if meter_refusal is not None:
                     return meter_refusal
                 # W2b: the meter is closed, so no allowance extension can land any more — the reservation this
@@ -1343,13 +1352,15 @@ class LaunchGate:
                         return {"ok": False, "error": f"internal: settlement decision invariant violated "
                                 f"(fail-closed): {type(e).__name__}"}
             else:
-                meter_refusal = self._close_model_meter(s, non, now_ts)
+                meter_refusal = (self._close_model_meter(s, non, now_ts) if seam
+                                 else self._close_model_meter(s, non, now_ts, seam=False))
                 if meter_refusal is not None:                # OD-8: settled already — never strand its refund on it
                     import logging
                     logging.getLogger(__name__).warning("a settled launch's model meter could not be closed: %s",
                                                         meter_refusal.get("error"))
             recorded = False
-            if fresh and (decision.exact or config.settle_spine_record_enabled()):
+            # without the seam (an assistant turn) the spine record is the ONLY settlement evidence: always written
+            if fresh and (decision.exact or not seam or config.settle_spine_record_enabled()):
                 try:
                     record_launch_settled(self.store, kp, org_id=oid, slug=s, nonce=non, decision=decision,
                                           issued_at=now_ts)
@@ -1360,7 +1371,7 @@ class LaunchGate:
                 except Exception as e:  # noqa: BLE001 — an invalid decision moves nothing
                     return {"ok": False, "error": f"internal: settlement decision invariant violated (fail-closed): "
                             f"{type(e).__name__}"}
-            if not on_seam:
+            if seam and not on_seam:
                 try:
                     record_lease_settlement(base, s, non)    # revoke BEFORE any money moves (or re-assert a lost one)
                 except Exception as e:  # noqa: BLE001 — a revocation failure refuses the settle (no money moved)
@@ -1398,7 +1409,8 @@ class LaunchGate:
             elif decided is not None:
                 self._write_cost_settle_if_missing(oid, s, non, decided.consumed, reserved, now_ts)
             try:
-                tombstone_credit_lease(base, s, non)         # nonce-matched: never clobber a newer re-lease
+                if seam:
+                    tombstone_credit_lease(base, s, non)     # nonce-matched: never clobber a newer re-lease
             except Exception:  # noqa: BLE001 — total by contract; the marker already revokes the lease
                 pass
         out = {"ok": True, "action": "launch_settled" if fresh else "launch_already_settled", "org_id": oid,
@@ -1720,13 +1732,14 @@ class LaunchGate:
         from ..model_gateway import GrantMeter
         return GrantMeter(config.MODEL_METER_DIR).was_metered(meter_id(str(slug), str(nonce)))
 
-    def _close_model_meter(self, slug: str, nonce: str, now_ts: float) -> Optional[dict]:
+    def _close_model_meter(self, slug: str, nonce: str, now_ts: float, *, seam: bool = True) -> Optional[dict]:
         """Close the launch's model meter and retire its grant before its lease settles (PRICING M1c). Applies to a
         launch published metered (:meth:`_launch_was_metered`), whatever the flag says now; a no-op otherwise, so a
         flat launch's settle is unchanged. Returns the refusal to settle with: ``retry`` when the live gateway still
         has a request of this run in flight or the meter cannot be written right now; a broken meter refuses
         without ``retry`` (fail closed). The grant is removed only once the meter is closed; removing it is
-        best-effort, as a grant whose meter is closed can spend nothing."""
+        best-effort, as a grant whose meter is closed can spend nothing. ``seam=False`` (an assistant turn, PR-J2):
+        no grant file was ever published on the seam, so none is removed — closing the meter is the revocation."""
         from .. import config
         from vigil_core.model_grant import meter_id
         from vigil_integration.live.model_grant_broker import remove_model_grant
@@ -1742,6 +1755,8 @@ class LaunchGate:
                     "error": f"the run's model meter cannot be written right now; retry the settle: {type(e).__name__}"}
         except ValueError as e:
             return {"ok": False, "error": f"could not close the run's model meter (fail-closed): {type(e).__name__}"}
+        if not seam:
+            return None
         try:
             remove_model_grant(self._seam_base(), str(slug), expect_nonce=str(nonce))
         except OSError:
@@ -2351,12 +2366,31 @@ class LaunchAllowance:
     The lease's units come from the OWNER-SIGNED lease on the seam, verified under the pinned owner key and bound to
     the grant's ``(org, slug, nonce)``; an unverifiable lease, a different launch on the seam, or an extension whose
     amount left the live spine window gives None (the gateway then refuses the request as retryable — never admits
-    it blind)."""
+    it blind).
+
+    PR-J2 — a customer security-assistant TURN's grant (an ``asst_`` slug) is answered by
+    ``ui.assistant_wallet.AssistantTurns`` instead, while ``config.customer_assistant_wallet_enabled()`` (read on
+    every call): its allowance is the turn's own owner-signed reserve on the spine (a turn has no lease), it is never
+    extended, and it has no pause to record. With the flag off every grant takes the launch path below, unchanged."""
 
     def __init__(self, gate: "LaunchGate"):
         self.gate = gate
 
+    def _assistant_turn(self, grant: Any) -> Any:
+        """The assistant-turn source when ``grant`` is an assistant turn's and the assistant wallet is on, else None
+        (the launch path, byte-identical)."""
+        from .. import config
+        if not config.customer_assistant_wallet_enabled():
+            return None
+        from .assistant_wallet import AssistantTurns, is_assistant_slug
+        if not is_assistant_slug(getattr(grant, "engagement_slug", None)):
+            return None
+        return AssistantTurns(self.gate)
+
     def allowance_mc(self, grant: Any) -> Optional[int]:
+        turn = self._assistant_turn(grant)
+        if turn is not None:
+            return turn.allowance_mc(grant)
         from vigil_core import AuthorizerKey, TrustRoot, verify_credit_launch_lease
         from vigil_integration.live.credit_lease_broker import read_credit_lease
         kp = self.gate.owner_key
@@ -2378,10 +2412,16 @@ class LaunchAllowance:
         return 1000 * (int(doc.units_reserved) + ext)
 
     def available_credits(self, grant: Any) -> int:
+        turn = self._assistant_turn(grant)
+        if turn is not None:
+            return turn.available_credits(grant)
         # W2c-1: the wallet's EXACT balance in whole credits (a sizing hint, read unlocked: the extension re-checks it)
         return int(self.gate.wallet.balance(grant.org_id).spendable)
 
     def extend(self, grant: Any, credits: int) -> dict:
+        turn = self._assistant_turn(grant)
+        if turn is not None:
+            return turn.extend(grant, credits)
         import time as _time
         return self.gate.extend_reservation(org_id=grant.org_id, slug=grant.engagement_slug, nonce=grant.nonce,
                                             credits=int(credits), now=_time.time())
@@ -2389,6 +2429,10 @@ class LaunchAllowance:
     def note_credit_pause(self, grant: Any, now: float) -> bool:
         """W3 — the gateway is about to refuse this run with the TERMINAL credit stop: record the sovereign credit
         pause first (:meth:`LaunchGate.record_credit_pause`). True only when it is durably recorded; False (or a
-        raise) makes the gateway refuse with a retryable stop instead."""
+        raise) makes the gateway refuse with a retryable stop instead. An assistant turn (PR-J2) has nothing to park:
+        True, so its request gets the terminal stop and the turn ends."""
+        turn = self._assistant_turn(grant)
+        if turn is not None:
+            return turn.note_credit_pause(grant, now)
         r = self.gate.record_credit_pause(slug=str(grant.engagement_slug), nonce=str(grant.nonce), now=float(now))
         return bool(r.get("ok"))

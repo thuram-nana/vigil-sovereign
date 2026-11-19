@@ -881,6 +881,8 @@
     if (u && u.bought_mc != null) rows.push(kv("Credits bought", mc2(u.bought_mc)));
     if (u && u.trial_mc) rows.push(kv("Trial credits", mc2(u.trial_mc)));
     rows.push(kv("Credits used", (u && u.credits != null) ? u.credits : "—"));
+    // PR-J2: of which the security assistant (its turns are "Security assistant" lines on the statement)
+    if (u && u.assistant) rows.push(kv("Security assistant", (u.assistant.credits != null) ? u.assistant.credits : "—"));
     return VUI.card("Usage", null, rows);
   }
   function runningScansCard(running) {

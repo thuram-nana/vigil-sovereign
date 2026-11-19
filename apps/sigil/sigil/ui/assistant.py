@@ -225,6 +225,42 @@ def answer(store: Any, org_id: str, question: str, *, model_call: ModelCall, now
                           truncated=response.get("stop_reason") == "max_tokens")
 
 
+def _gateway_messages_url(gateway_url: str) -> str:
+    """``<gateway_url>/v1/messages`` for a LOOPBACK model-gateway URL (``vigil_core.model_grant.gateway_url``), else
+    :class:`AssistantError` — so no dial here can ever be pointed at a real provider."""
+    from vigil_core.model_grant import gateway_url as _check_url
+
+    base = _check_url(gateway_url)
+    if base is None:
+        raise AssistantError("the assistant may only call the loopback model gateway")
+    return base.rstrip("/") + "/v1/messages"
+
+
+def _dial(url: str, raw: bytes, grant_token: str, *, opener: Any, timeout: float) -> "dict[str, Any]":
+    """POST the request bytes ``raw`` to the gateway at ``url`` with ``grant_token`` as the ``x-api-key`` and return
+    the parsed response. A non-200 (or a gateway STOP) or an unreachable gateway raises :class:`AssistantError` — the
+    turn fails closed, never silently."""
+    from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER
+
+    req = urllib.request.Request(
+        url, data=raw, method="POST",
+        headers={"content-type": "application/json", "x-api-key": grant_token,
+                 "anthropic-version": "2023-06-01"})
+    try:
+        if opener is not None:
+            with opener.open(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=timeout) as r:   # pragma: no cover - exercised via opener in tests
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        stop = (e.headers.get(STOP_HEADER) or "") if e.headers else ""
+        if stop == STOP_CREDITS_EXHAUSTED:
+            raise AssistantError("the assistant's model credit for this turn is exhausted") from None
+        raise AssistantError(f"the model gateway refused the assistant request ({e.code})") from None
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        raise AssistantError("the model gateway could not be reached") from e
+
+
 def gateway_model_call(*, gateway_url: str, grant_token: str, opener: Any = None,
                        timeout: float = 60.0) -> ModelCall:
     """A :data:`ModelCall` bound to the sovereign model gateway — the production metered egress.
@@ -236,34 +272,52 @@ def gateway_model_call(*, gateway_url: str, grant_token: str, opener: Any = None
     provider; a non-loopback URL raises :class:`AssistantError` before any request. ``opener`` lets a test inject a
     proxy-free urllib opener. A non-200 (or a gateway STOP) raises :class:`AssistantError` — the turn fails closed,
     never silently."""
-    from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER, gateway_url as _check_url
-
-    base = _check_url(gateway_url)
-    if base is None:
-        raise AssistantError("the assistant may only call the loopback model gateway")
+    url = _gateway_messages_url(gateway_url)
     if not isinstance(grant_token, str) or not grant_token:
         raise AssistantError("the assistant has no model grant for this turn")
-    url = base.rstrip("/") + "/v1/messages"
-    _opener = opener
 
     def _call(body: "dict[str, Any]") -> "dict[str, Any]":
+        return _dial(url, json.dumps(body).encode("utf-8"), grant_token, opener=opener, timeout=timeout)
+
+    return _call
+
+
+#: PR-J2 — ADMITS one model request of a turn accounted to the asking org: given the EXACT request bytes and the
+#: request's ``max_tokens``, it decides the turn (rate limit, audit record and — metered — the hold on the org's
+#: credits) and returns the turn's grant token plus the closer to run once the request is over (None: nothing to
+#: close), or raises — and then nothing is sent. See :func:`accounted_gateway_model_call`.
+OpenTurn = Callable[[bytes, int], "tuple[str, Optional[Callable[[], None]]]"]
+
+
+def accounted_gateway_model_call(*, gateway_url: str, open_turn: OpenTurn, min_output_tokens: int = 0,
+                                 opener: Any = None, timeout: float = 60.0) -> ModelCall:
+    """PR-J2 — the gateway dial of a turn ACCOUNTED to the asking org (``ui.assistant_wallet``): the same loopback-only
+    dial as :func:`gateway_model_call`, with the turn decided per request BEFORE anything is sent.
+
+    The request's ``max_tokens`` is raised to ``min_output_tokens`` when below it (the least output the gateway admits
+    against a prepaid hold), and the body is serialised ONCE. ``open_turn(raw, max_tokens)`` is called with those exact
+    bytes BEFORE anything is sent and returns ``(grant_token, close)`` — or raises, and then nothing is sent at all. The
+    SAME bytes are then POSTed (so a hold sized from them is exactly what the gateway checks the request against), and
+    ``close()`` runs once the request is over, whatever happened (a turn billed to the org's credits settles there).
+    Loopback-only (checked before any turn is opened); fails closed on any refusal."""
+    url = _gateway_messages_url(gateway_url)
+    if isinstance(min_output_tokens, bool) or not isinstance(min_output_tokens, int) or min_output_tokens < 0:
+        raise AssistantError("the assistant's least output bound must be a non-negative integer")
+
+    def _call(body: "dict[str, Any]") -> "dict[str, Any]":
+        mt = body.get("max_tokens") if isinstance(body, dict) else None
+        if isinstance(mt, bool) or not isinstance(mt, int) or mt < 1:
+            raise AssistantError("the assistant request has no output bound")
+        if mt < min_output_tokens:
+            body, mt = {**body, "max_tokens": min_output_tokens}, min_output_tokens
         raw = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=raw, method="POST",
-            headers={"content-type": "application/json", "x-api-key": grant_token,
-                     "anthropic-version": "2023-06-01"})
+        token, close = open_turn(raw, mt)
         try:
-            if _opener is not None:
-                with _opener.open(req, timeout=timeout) as r:
-                    return json.loads(r.read().decode("utf-8"))
-            with urllib.request.urlopen(req, timeout=timeout) as r:   # pragma: no cover - exercised via opener in tests
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            stop = (e.headers.get(STOP_HEADER) or "") if e.headers else ""
-            if stop == STOP_CREDITS_EXHAUSTED:
-                raise AssistantError("the assistant's model credit for this turn is exhausted") from None
-            raise AssistantError(f"the model gateway refused the assistant request ({e.code})") from None
-        except (urllib.error.URLError, TimeoutError, ValueError) as e:
-            raise AssistantError("the model gateway could not be reached") from e
+            if not isinstance(token, str) or not token:
+                raise AssistantError("the assistant has no model grant for this turn")
+            return _dial(url, raw, token, opener=opener, timeout=timeout)
+        finally:
+            if close is not None:
+                close()
 
     return _call
