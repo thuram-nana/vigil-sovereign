@@ -383,6 +383,23 @@ def test_public_urls():
         sso_edge.public_urls("https://app.example.com", "../o")
 
 
+def test_public_urls_refuses_a_fragment_or_a_hostless_base():
+    # every bad base above is refused by the scheme / path / query / plain-http clause; these two are refused ONLY
+    # by the fragment and the host clause respectively
+    for base in ("https://app.example.com#frag", "https://"):
+        with pytest.raises(ValueError):
+            sso_edge.public_urls(base, "o")
+
+
+def test_the_sso_binding_cookie_is_secure_under_the_production_posture(monkeypatch):
+    import vigil_core.posture as posture
+    monkeypatch.setattr(posture, "is_production_posture", lambda *a, **k: True)
+    prod = sso_edge.SsoEdgeMixin._sid_cookie_value(None, "sid-1")
+    assert prod.endswith("; Secure") and "; HttpOnly;" in prod and "SameSite=Lax" in prod
+    monkeypatch.setattr(posture, "is_production_posture", lambda *a, **k: False)
+    assert "Secure" not in sso_edge.SsoEdgeMixin._sid_cookie_value(None, "sid-1")   # a loopback dev edge (http)
+
+
 def test_tenant_re_lockstep():
     from sigil.governor import orgs
     assert sso_edge._TENANT_RE.pattern == orgs._TENANT_RE.pattern == sso_provision._TENANT_RE.pattern
@@ -432,6 +449,13 @@ def test_decode_saml_response_bounds():
     for bad in ("", "not base64!", "A" * (sso_provision.MAX_SAML_RESPONSE_B64 + 4)):
         with pytest.raises(ValueError):
             sso_provision._decode_saml_response(bad)
+
+
+def test_decode_saml_response_is_strict_base64():
+    # "not base64!" above also breaks base64 PADDING, so even a lenient decoder refuses it; "PHg+!" decodes to b"<x>"
+    # once the stray byte is silently dropped — only the strict (validate=True) decode refuses it
+    with pytest.raises(ValueError):
+        sso_provision._decode_saml_response("PHg+!")
 
 
 # =====================================================================================================================

@@ -616,6 +616,57 @@ def test_sso_login_start_gates(stack):
     assert tile.status == 302 and tile.location.startswith(IDP_SSO_URL)
 
 
+def test_every_sso_browser_leg_refuses_a_foreign_host_before_touching_state(stack):
+    """Anti-rebinding on the legs the gates test above does not reach: the ACS, the finish and the OIDC callback
+    answer a foreign Host 403 BEFORE any state is read or spent (the RelayState stays live), while the very same
+    requests with the edge's own Host get the ordinary refusal redirect."""
+    stack.saml_org(ORG_A)
+    r, _sid = stack.start(ORG_A)
+    _req, relay = _authn_request(r.location)
+    form = urllib.parse.urlencode({"SAMLResponse": "PHg+", "RelayState": relay}).encode()
+    legs = (("acs", "POST", "/api/customer/sso/saml/acs", form, {"Content-Type": "application/x-www-form-urlencoded"}),
+            ("finish", "GET", "/api/customer/sso/finish?ticket=t", None, {}),
+            ("oidc-callback", "GET", "/api/customer/sso/oidc/callback?code=c&state=s", None, {}))
+    for name, method, path, body, hdr in legs:
+        foreign = _call(stack.port, method, path, body=body, headers=hdr, host="evil.example")
+        assert foreign.status == 403 and not foreign.location, name
+    assert stack.audits("sso_login") == []                             # nothing reached the cockpit
+    for name, method, path, body, hdr in legs:                         # control: the edge's own Host
+        own = _call(stack.port, method, path, body=body, headers=hdr)
+        assert own.status in (302, 303) and own.location == "/#sso=err", name
+    assert [a["outcome"] for a in stack.audits("sso_login")] == ["denied"]   # the RelayState was still unspent
+
+
+def test_saml_acs_refuses_an_oversize_body_before_reading_it(stack):
+    """The ACS (like SCIM, whose 413 is pinned below) reads its body itself, outside the cookie plane's reader: its
+    own cap must refuse a declared body over the limit at once — nothing is read, consumed or relayed."""
+    from sigil.ui.sso_edge import _MAX_ACS_BODY
+    stack.saml_org(ORG_A)
+    big = _call(stack.port, "POST", "/api/customer/sso/saml/acs", body=b"x" * 8,
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(_MAX_ACS_BODY + 1)})
+    assert big.status == 303 and big.location == "/#sso=err"
+    assert stack.audits("sso_login") == []
+
+
+def test_refused_saml_sign_ins_lock_the_address_out_of_start_and_acs(stack, signed):
+    """The per-IP sign-in limiter: every refused verification is COUNTED, and once the address is locked both a new
+    sign-in start and the ACS refuse it — even a validly signed answer to a login begun before the lockout."""
+    u = stack.saml_org(ORG_A)
+    r, _sid = stack.start(ORG_A)
+    req, relay = _authn_request(r.location)
+    good = _sign(_saml_response(request_id=req.get("ID"), audience=u["saml_sp_entity_id"],
+                                recipient=u["saml_acs_url"], name_id="alice@acme.com"), IDP_KEY)
+    for _ in range(5):                                                 # the limiter's threshold within its window
+        rx, _ = stack.start(ORG_A)
+        reqx, relayx = _authn_request(rx.location)
+        unsigned = _saml_response(request_id=reqx.get("ID"), audience=u["saml_sp_entity_id"],
+                                  recipient=u["saml_acs_url"], name_id="mallory@acme.com").encode()
+        assert stack.post_acs(unsigned, relayx).location == "/#sso=err"
+    assert stack.start(ORG_A)[0].location == "/#sso=err"              # a locked address cannot start a sign-in …
+    assert stack.post_acs(good, relay).location == "/#sso=err"        # … nor finish one it began before the lock
+    assert stack.orgs().memberships(ORG_A) == []
+
+
 # =====================================================================================================================
 # Enterprise OIDC
 # =====================================================================================================================
@@ -655,6 +706,33 @@ def test_enterprise_oidc_refusals(stack):
     assert stack.get(f"/api/customer/sso/oidc/callback?error=access_denied&state={st2}",
                      cookie=f"{SSO_SID_COOKIE}={sid2}").location == "/#sso=err"
     assert stack.orgs().memberships(ORG_A) == [] and stack.orgs().memberships(ORG_B) == []
+
+
+def test_an_oidc_callback_carrying_an_idp_error_is_refused_even_with_a_valid_code(stack):
+    """The IdP-error answer above carries no code, so the missing-code check alone would refuse it; this callback
+    carries BOTH an `error` and a live code for a correctly bound login: the error guard refuses it, and the code is
+    never exchanged."""
+    stack.oidc_org(ORG_A, client_id="cid-acme")
+    r, sid = stack.start(ORG_A)
+    code, state = stack.idp.authorize(r.location, sub="00u-erin")
+    got = stack.get(f"/api/customer/sso/oidc/callback?error=access_denied&code={code}&state={state}",
+                    cookie=f"{SSO_SID_COOKIE}={sid}")
+    assert got.location == "/#sso=err" and got.cookie(CUSTOMER_COOKIE) is None
+    assert stack.idp.posts == [] and stack.orgs().memberships(ORG_A) == []
+
+
+def test_refused_oidc_sign_ins_lock_the_address_out_of_the_callback(stack):
+    """As SAML: refused id_tokens are COUNTED per address, and once it is locked the callback refuses even a valid
+    code for a login begun before the lockout (and a new start is refused too)."""
+    stack.oidc_org(ORG_A, client_id="cid-acme")
+    r, sid = stack.start(ORG_A)
+    code, state = stack.idp.authorize(r.location, sub="00u-alice")
+    for _ in range(5):                                                 # five refused tokens (another login's nonce)
+        assert _oidc_sign_in(stack, ORG_A, sub="00u-eve", nonce="someone-elses-nonce").location == "/#sso=err"
+    got = stack.get(f"/api/customer/sso/oidc/callback?code={code}&state={state}", cookie=f"{SSO_SID_COOKIE}={sid}")
+    assert got.location == "/#sso=err" and got.cookie(CUSTOMER_COOKIE) is None
+    assert stack.start(ORG_A)[0].location == "/#sso=err"
+    assert stack.orgs().memberships(ORG_A) == []
 
 
 # =====================================================================================================================
@@ -800,6 +878,40 @@ def test_scim_changes_wait_for_the_cross_process_membership_lock(stack):
         assert t.is_alive() and "r" not in out               # still waiting on the owner's critical section
     t.join(20)
     assert out["r"].status == 201 and stack.role(out["r"].json()["id"], ORG_A) == "viewer"
+
+
+@pytest.mark.parametrize("protocol", ["saml", "oidc"])
+def test_sso_sign_in_grants_wait_for_the_cross_process_membership_lock(stack, signed, protocol):
+    """As SCIM above: a just-in-time sign-in grant runs inside the same critical section as every membership change,
+    so it WAITS for an owner verb holding the membership flock — then lands, never interleaved."""
+    from sigil.ui.provision import _members_lock
+    if protocol == "saml":
+        u = stack.saml_org(ORG_A)
+        r, _sid = stack.start(ORG_A)
+        req, relay = _authn_request(r.location)
+        xml = _sign(_saml_response(request_id=req.get("ID"), audience=u["saml_sp_entity_id"],
+                                   recipient=u["saml_acs_url"], name_id="ann@acme.com"), IDP_KEY)
+
+        def sign_in() -> Resp:
+            return stack.post_acs(xml, relay)
+    else:
+        stack.oidc_org(ORG_A, client_id="cid-acme")
+        r, sid = stack.start(ORG_A)
+        code, state = stack.idp.authorize(r.location, sub="00u-ann")
+
+        def sign_in() -> Resp:
+            return stack.get(f"/api/customer/sso/oidc/callback?code={code}&state={state}",
+                             cookie=f"{SSO_SID_COOKIE}={sid}")
+    out: dict = {}
+    with _members_lock(stack.store()):
+        t = threading.Thread(target=lambda: out.update(r=sign_in()))
+        t.start()
+        t.join(1.5)
+        assert t.is_alive() and "r" not in out               # still waiting on the owner's critical section
+    t.join(20)
+    landed = out["r"].location
+    assert landed.startswith("/api/customer/sso/finish?ticket=") if protocol == "saml" else landed == "/"
+    assert len(stack.orgs().memberships(ORG_A)) == 1
 
 
 def test_scim_bearer_rotation_retires_the_old_token_at_once(stack):
