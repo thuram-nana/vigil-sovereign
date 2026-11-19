@@ -50,7 +50,15 @@ _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity",
                 # bearing cert is never surfaced). It is additive SIGNED data that rides the per-finding tenant-
                 # scoped projection, so a cross-tenant presentation can never leak, and is purely descriptive —
                 # never read for any verdict.
-                "presentation")
+                "presentation",
+                # APEX PR-L (Area 11) — the inert attack-path chain and the out-of-band (blind-vuln) callback
+                # attestation. Each is additive, purely-descriptive SIGNED data that rides this SAME tenant-scoped
+                # allowlist, but ONLY while its own default-OFF flag is on (``attack_path`` -> VIGIL_CUSTOMER_ATTACK_PATH,
+                # ``oob_attestation`` -> VIGIL_CUSTOMER_BLIND_VULN; see ``_finding_json``), so the flag-off read is
+                # byte-identical (a chain/attestation-bearing cert is never surfaced). ``attack_path`` restates
+                # oracles that already fired (no un-grounded edge); ``oob_attestation`` is the existing independent
+                # pinned-collector receipt. Neither is EVER read for a verdict and neither can promote a finding.
+                "attack_path", "oob_attestation")
 
 # NTF-3: the settle-drain's tenant-scoped assessment-outcome projection (``sigil.inbound.completion_spool``).
 _OUTCOME_KIND = "assessment_outcome"
@@ -86,19 +94,46 @@ def _presentation_on() -> bool:
     return config.presentation_enabled()
 
 
+def _attack_path_on() -> bool:
+    """True iff APEX PR-L (Area 11) attack-path storytelling is armed (``config.customer_attack_path_enabled``).
+    Read at projection time; process-static in practice (a deploy-time env flag), so the fold index + the scan
+    path agree. OFF -> the inert ``attack_path`` cert field is never surfaced (byte-identical)."""
+    from .. import config
+    return config.customer_attack_path_enabled()
+
+
+def _blind_vuln_on() -> bool:
+    """True iff APEX PR-L (Area 11) blind-vuln (out-of-band) confirmation is armed
+    (``config.customer_blind_vuln_enabled``). Read at projection time; process-static in practice. OFF -> the
+    inert ``oob_attestation`` cert field is never surfaced (byte-identical)."""
+    from .. import config
+    return config.customer_blind_vuln_enabled()
+
+
+# The gated nested cert blocks: each is surfaced ONLY while its flag is on, and is DEEP-COPIED on projection (it
+# is a nested dict/list read by reference from the spine record, and the scan path returns these rows directly
+# with no later copy, so a caller must never alias — or mutate — the record). All are additive, purely-descriptive
+# SIGNED data; none is ever read for a verdict. Maps the cert field -> the flag-read that gates it.
+_GATED_FIELDS = {
+    "presentation": _presentation_on,
+    "attack_path": _attack_path_on,
+    "oob_attestation": _blind_vuln_on,
+}
+
+
 def _finding_json(payload: dict, cert: dict) -> dict[str, Any]:
     out: dict[str, Any] = {"engagement_slug": cert.get("engagement_slug")}
     # finding_ref/oracle_context_digest live at the spine payload top level too (receiver mirrors them); prefer
-    # the cert value, fall back to the payload, so the projection is robust to either carrier.
-    present = _presentation_on()
+    # the cert value, fall back to the payload, so the projection is robust to either carrier. The gated nested
+    # blocks are each read ONCE here (not per-field inside the loop) so the flag read is cheap and consistent.
+    gated_on = {f: on() for f, on in _GATED_FIELDS.items()}
     for f in _CERT_FIELDS:
-        if f == "presentation" and not present:
-            continue                 # flag OFF -> presentation is never surfaced (the read stays byte-identical)
+        if f in gated_on and not gated_on[f]:
+            continue                 # flag OFF -> this nested block is never surfaced (the read stays byte-identical)
         v = cert.get(f, payload.get(f))
         if v is not None:
-            # deep-copy the presentation block: it is a nested dict read by reference from the spine record, and
-            # the scan path returns these rows directly (no later copy), so a caller must never alias the record.
-            out[f] = copy.deepcopy(v) if f == "presentation" else v
+            # deep-copy a gated nested block so a caller never aliases the spine record (see ``_GATED_FIELDS``).
+            out[f] = copy.deepcopy(v) if f in _GATED_FIELDS else v
     return out
 
 
