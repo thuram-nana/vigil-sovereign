@@ -253,11 +253,22 @@ def test_backfill_without_the_owner_key_places_nothing():
 
 # -- `sigil shard backfill` ---------------------------------------------------------------------------------------
 
-def _cli(monkeypatch, tmp_path, *, fair, multi, ids):
-    from sigil import cli
+def _cli(monkeypatch, tmp_path, *, fair, multi, ids, migrated=True):
+    """The spine the `sigil` CLI opens — ONE store, shared by the verb and its startup gate. `cli.main()` runs its
+    fail-closed startup gates BEFORE the verb, among them the store-operability (migration) gate, which opens
+    ``config.SPINE_PATH`` (bound at import and shared by the whole test process). Retarget it to the very spine the
+    verb writes, so the gate judges THIS store and never a legacy single-file spine another test in a full run left
+    at the shared default (that refuses the verb with exit 3 before its own gates, exit 2, are reached — the CI
+    failure). ``migrated``: the segment layout a provisioned home is in (the install flow migrates a fresh home
+    once), as in test_founder_role's `_cli_store`; False leaves an UN-migrated legacy spine holding the orgs."""
+    from sigil import cli, config
     from sigil.governor.identity import ensure_owner_keypair
     from sigil.governor.orgs import OrgRegistry
-    store = SpineStore(tmp_path / "spine" / "spine.jsonl")
+    path = tmp_path / "spine" / "spine.jsonl"
+    monkeypatch.setattr(config, "SPINE_PATH", path)                   # the startup gate's store → this test's
+    store = SpineStore(path)
+    if migrated:
+        store.migrate()
     monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)     # the verb's default store → this test's
     for name, on in (("VIGIL_CUSTOMER_FAIR_QUEUE", fair), ("VIGIL_MULTI_SHARD", multi)):
         if on:
@@ -280,7 +291,20 @@ def test_the_backfill_verb_refuses_unless_every_gate_is_on(monkeypatch, tmp_path
     cli, store = _cli(monkeypatch, tmp_path, fair=fair, multi=multi, ids=ids)
     with pytest.raises(SystemExit) as ex:
         cli.main(["shard", "backfill"])
-    assert ex.value.code == 2 and "refusing" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    gate = "shard placement is off" if not (fair and multi) else "no owner shard topology (VIGIL_SHARD_IDS)"
+    assert ex.value.code == 2 and "refusing" in err and gate in err, err   # the VERB's own gate refused, by name
+    assert ShardAssignmentRegistry(store, owner_key=None).placements() == []
+
+
+def test_the_backfill_verb_never_writes_an_unmigrated_spine(monkeypatch, tmp_path, capsys):
+    # `shard` is a spine WRITER, so it is NOT exempt from the CLI's migration gate: with every placement gate ON, an
+    # un-migrated legacy spine that holds data is refused at startup (exit 3, naming the fix) and nothing is placed.
+    cli, store = _cli(monkeypatch, tmp_path, fair=True, multi=True, ids="s1,s2", migrated=False)
+    with pytest.raises(SystemExit) as ex:
+        cli.main(["shard", "backfill"])
+    err = capsys.readouterr().err
+    assert ex.value.code == 3 and "refusing to run `shard`" in err and "sigil upgrade" in err, err
     assert ShardAssignmentRegistry(store, owner_key=None).placements() == []
 
 
