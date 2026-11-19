@@ -413,6 +413,11 @@
       minimize: "M9 4v3a2 2 0 01-2 2H4M15 4v3a2 2 0 002 2h3M9 20v-3a2 2 0 00-2-2H4M15 20v-3a2 2 0 012-2h3",
       "dock-right": "M4 5h16v14H4zM14 5v14",
       "dock-bottom": "M4 5h16v14H4zM4 14h16",
+      // session folders
+      folder: "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z",
+      "folder-plus": "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2zM12 10.5v5M9.5 13h5",
+      "chev-right": "M9 6l6 6-6 6",
+      "chev-down": "M6 9l6 6 6-6",
     };
     return h("span.glyph", { html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + (P[name] || P.dot) + '"/></svg>' });
   }
