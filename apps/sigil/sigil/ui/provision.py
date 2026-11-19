@@ -3421,7 +3421,7 @@ class Provisioner:
         if config.metered_billing_enabled():
             raise ProvisionDenied("the assistant is not yet available while metered billing is enabled")
         owner_key = getattr(self.orgs, "owner_key", None)
-        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):
+        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):  # gitleaks:allow — attr name, not a key
             raise ProvisionDenied("the assistant needs the owner key to mint its model grant")
         token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
         call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
