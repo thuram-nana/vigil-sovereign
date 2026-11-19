@@ -193,6 +193,11 @@ class EngagementResult:
     # discoveries into ``report.active_findings`` BEFORE the reasoning phases, so they are chained + grounded
     # like scan findings. It mints nothing itself — the oracle stays the sole authority.
     autonomy: object = None
+    # APEX PR-3 (opt-in ``VIGIL_APEX_IMPACT``, default None → byte-identical). The demonstrated-impact
+    # deliverable: the reasoned attack paths re-assessed for which hops RE-REPRODUCE now (an
+    # ``apex_impact.ImpactReport``). Pure oracle re-execution over the confirmed findings' retained
+    # oracle_context (never traffic on the default path, mints nothing); None whenever the flag is OFF.
+    impact_report: object = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -2033,6 +2038,21 @@ def run_engagement(
         result.attack_paths = auto.attack_paths
         result.path_portfolio = auto.path_portfolio
         result.chained_conclusions = auto.chained_conclusions
+        # APEX PR-3 Deliverable 1 — chaining-to-DEMONSTRATED-impact (opt-in ``VIGIL_APEX_IMPACT``, default OFF
+        # ⇒ this whole block is skipped and the chaining phase is byte-identical). Re-assess the reasoned paths:
+        # which hops RE-REPRODUCE now (oracle re-execution over each confirmed finding's OWN retained
+        # oracle_context — the firewall primitive), and the terminal impact class each path achieves. It mints
+        # NOTHING and sends NO new traffic here (no live_prover / no gate injected — the live-pursuit arm is
+        # taken only by an authorized owner/prod-execution caller that injects both), so the default engage path
+        # and ``make gate`` stay byte-identical. Best-effort: a failure leaves ``impact_report`` None.
+        from .apex_impact import apex_impact_enabled, pursue_impact   # lazy — keyless flag + pure pass
+        if apex_impact_enabled():
+            try:
+                result.impact_report = pursue_impact(
+                    report, world, auto.path_portfolio or auto.attack_paths,
+                    slug=slug, target_url=seed_url)
+            except Exception:
+                result.impact_report = None
     ledger.run_phase(P_CHAINING, _do_chaining, enabled=enable_chaining)
 
     # Veracity firewall over the live findings — re-execute each finding's own oracle
