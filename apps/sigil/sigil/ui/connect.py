@@ -34,9 +34,18 @@ from ..governor import asset_ownership as _own  # noqa: E402
 from ..governor.cloud_connect import CloudConnectRegistry  # noqa: E402
 from ..governor.connected_repos import ConnectedRepoRegistry  # noqa: E402
 
-# The Search-Console default method the connect screen pre-selects when the customer has not already proven the
-# host another way — a meta tag in the homepage <head> is the lowest-friction of the three.
+# The method the connect screen pre-selects for a host never proven before (a PRE-selection; the customer can pick
+# any of the three). A SUBDOMAIN (app.example.com, www.example.com) usually serves its own homepage, so the
+# lowest-friction proof is a meta tag in that page's <head>. A bare two-label domain (example.com) commonly answers
+# its root with a redirect to www — and the ownership fetch never follows a redirect, so a meta tag there would fail
+# — while its owner controls the DNS zone, so the DNS TXT record is the robust pick (Search Console's domain property).
 _DEFAULT_METHOD = _own.METHOD_META_TAG
+_APEX_METHOD = _own.METHOD_DNS_TXT
+
+
+def auto_method(host: str) -> str:
+    """The pre-selected proof method for a validated ``host`` (see the note above). Deterministic, never raises."""
+    return _APEX_METHOD if str(host or "").count(".") == 1 else _DEFAULT_METHOD
 
 # The reason text the poll returns beside the auto-re-check hint, per status. Stated plainly for the customer.
 _RECHECK_REASON = {
@@ -75,8 +84,8 @@ def customer_ownership_poll(store, org_id: str, host: str, *, now: float) -> dic
       * ``invalid``  — the host is not a verifiable DNS name (carries ``detail``); not due.
 
     ``selected_method`` auto-selects: the method that already proved the host when there is a proof (so re-proving
-    stays on the same method), else the Search-Console default (meta-tag). Present for every non-invalid status so
-    the UI's method picker is pre-filled even on ``none``."""
+    stays on the same method), else :func:`auto_method` (DNS TXT for a bare domain, the meta tag for a subdomain).
+    Present for every non-invalid status so the UI's method picker is pre-filled even on ``none``."""
     reg = _own.AssetOwnershipRegistry(store, owner_key=None)
     try:
         h = _own._check_host(host)
@@ -99,8 +108,8 @@ def customer_ownership_poll(store, org_id: str, host: str, *, now: float) -> dic
         out["method"] = proof.method
         out["verified_at"] = float(proof.verified_at)
         out["expires_at"] = float(proof.expires_at)
-    # AUTO-SELECT: stay on the proving method when there is one, else the Search-Console default (meta-tag).
-    out["selected_method"] = proof.method if proof is not None else _DEFAULT_METHOD
+    # AUTO-SELECT: stay on the proving method when there is one, else the host-shape pick (auto_method).
+    out["selected_method"] = proof.method if proof is not None else auto_method(h)
     # RESUME: when a challenge is outstanding surface every method's placement + the marker the customer publishes.
     if challenge is not None and challenge.token:
         out["methods"] = _methods_block(h, challenge.token)
@@ -123,21 +132,27 @@ def _repos_block(store, org_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def connect_overview(store, org_id: str, *, now: float) -> dict[str, Any]:
+def connect_overview(store, org_id: str, *, now: float, include_repos: bool = True,
+                     include_cloud: bool = True) -> dict[str, Any]:
     """The ONE-screen connect read for ONE org: its connected SITES, REPOS and CLOUD accounts, each tenant-scoped
     to ``org_id`` (the session principal, server-side) and projected through a stable allowlist. PURE read — no
     lock, no mint, no owner key. Composes the three substrates' own tenant-scoped reads:
 
       * ``sites``  — ``AssetOwnershipRegistry.assets_overview`` (verified / expired / pending per host, with the
-        current challenge's placement when one is outstanding);
-      * ``repos``  — this org's connected repositories (:func:`_repos_block`);
-      * ``cloud``  — ``CloudConnectRegistry.cloud_overview`` (connected / expired per read-only cloud account).
+        current challenge's placement when one is outstanding — what lets a half-finished proof RESUME);
+      * ``repos``  — this org's connected repositories (:func:`_repos_block`), only when ``include_repos`` (the
+        provisioner passes the requester's own ``manage_code`` admit + the Red-Pen flag, the Code screen's gate);
+      * ``cloud``  — ``CloudConnectRegistry.cloud_overview`` (connected / expired per read-only cloud account), only
+        when ``include_cloud`` (the cloud leg's flag) — absent otherwise, never an empty placeholder.
 
     Assumes the caller already authorized ``org_id`` for the read (the provisioner's ``_customer_read`` gate). The
     counts are the org's true totals; another tenant's assets are structurally absent from every leg. No estimate,
     no cost, no engine/model name ever appears — connecting records an asset, it never prices or tests one."""
     n = float(now)
-    sites = _own.AssetOwnershipRegistry(store, owner_key=None).assets_overview(org_id, now=n)
-    repos = _repos_block(store, org_id)
-    cloud = CloudConnectRegistry(store, owner_key=None).cloud_overview(org_id, now=n)
-    return {"org_id": org_id, "sites": sites, "repos": repos, "cloud": cloud}
+    out: dict[str, Any] = {"org_id": org_id,
+                           "sites": _own.AssetOwnershipRegistry(store, owner_key=None).assets_overview(org_id, now=n)}
+    if include_repos:
+        out["repos"] = _repos_block(store, org_id)
+    if include_cloud:
+        out["cloud"] = CloudConnectRegistry(store, owner_key=None).cloud_overview(org_id, now=n)
+    return out

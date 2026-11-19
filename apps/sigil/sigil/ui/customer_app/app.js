@@ -73,6 +73,12 @@
  * Retest, and Disconnect (confirmed in the page) — each offered only where the server says this deployment runs it. The
  * server decides who may manage code review; this page sends only a repository the server listed and the choice. Off,
  * there is no tab, #/code is the home screen exactly as any unknown route, and no call is made.
+ *
+ * CONNECT. When the edge has the Connect screen on (data-connect="1", VIGIL_CUSTOMER_CONNECT — the same switch that serves
+ * api/customer/connect), the top bar has Connect (#/connect): one place to prove a website (the method pre-selected, Copy
+ * buttons, automatic re-checking until it is verified, a half-finished proof resumed from the server), connect GitHub,
+ * and — with data-cloud-connect="1" too — connect an AWS account read-only. Off, there is no tab, #/connect is the home
+ * screen exactly as any unknown route, and no call or timer is made.
  */
 (function () {
   "use strict";
@@ -159,7 +165,10 @@
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON); }
+  function routeShown(route) {
+    return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON)
+      && (route !== "#/connect" || CONNECT_ON);
+  }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -1965,6 +1974,395 @@
     VUI.mount(holder, monEventsList(d && d.events));
   }
 
+  // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
+  // Shown only while the edge writes data-connect="1" — VIGIL_CUSTOMER_CONNECT, the switch that also serves
+  // api/customer/connect and api/customer/connect/*, so the screen and its API are never out of step. Off: no Connect
+  // tab, #/connect is the home screen exactly as an unknown route, and nothing is fetched or timed. The SERVER decides
+  // everything: GET api/customer/connect lists the session workspace's sites, its repositories (only to someone the Code
+  // screen itself admits) and its cloud accounts (only while data-cloud-connect="1"), plus `available` — what this
+  // deployment really runs — so a tile offers only a flow that can finish.
+  //   * WEBSITE — "Prove you own it": the server pre-selects the method (a DNS TXT record for a bare domain, a meta tag
+  //     for a subdomain; the person can switch), the screen shows exactly what to publish with Copy buttons, and once
+  //     the person confirms they are authorized to test the site, "Check now" starts AUTOMATIC re-checking: one POST
+  //     api/customer/connect/ownership {recheck: true} every 10 s (the server itself runs at most one check per site per
+  //     10 s, whoever asks), a live status line, and the card flips to Verified on its own. It stops on Verified, on any
+  //     refusal, when the screen is left, and after about five minutes (then "Check again"); it waits while the page is
+  //     hidden. A proof started earlier — on any device — is listed with "Continue": the challenge lives on the server,
+  //     so a reload resumes exactly where it stopped.
+  //   * CODE REPOSITORY — Connect GitHub (the Code screen's own install flow, codeConnect) and the connected repositories.
+  //   * CLOUD ACCOUNT (AWS) — the account id, then the exact trust policy to paste (VIGIL's principal + the external id),
+  //     AWS's read-only SecurityAudit policy, the role's ARN, Verify. VIGIL records a READ-ONLY connection only when the
+  //     role lands in that account AND refuses any other external id; nothing here runs a test.
+  // Nothing here shows a price, an estimate or a model name. A sensitive request goes through the step-up when this
+  // build has it (withStepUp).
+  var CONNECT_ON = pageFlag("connect");
+  var CLOUD_CONNECT_ON = CONNECT_ON && pageFlag("cloudConnect");
+  var CONNECT_POLL_MS = 10000;          // one automatic re-check every 10 s while a proof is pending (the server's cadence)
+  var CONNECT_POLL_MAX = 30;            // then pause (about five minutes): "Check again" resumes it
+  var CONNECT_METHODS = [["meta-tag", "HTML meta tag"], ["dns-txt", "DNS TXT record"], ["well-known", "File on your site"]];
+  var connectUi = { gen: 0, timer: null };
+
+  function viewConnect() {
+    stopConnectPoll();
+    var holder = h("div#connect-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/connect"); }
+      catch (e) {
+        if (here() !== "#/connect") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) {
+          return VUI.mount(holder, h("div.card.cust-soon", { text: "Connecting assets is for the people who test in "
+            + "this workspace: its founder, or an Operator VIGIL has added. Billing roles cannot connect or test assets." }));
+        }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Connect"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/connect") return;              // the person navigated away before the load resolved
+      VUI.mount(holder, connectBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Connect" }),
+      h("p.cust-muted", { text: "Connect what you own — a website, a code repository, a cloud account — in one place. "
+        + "Connecting proves you own it; it never runs a test by itself." }),
+      holder]), "#/connect");
+  }
+
+  function connectBody(d) {
+    var av = d.available || {};
+    var tiles = [connectSiteTile(d, av), connectRepoTile(d, av)];
+    if (CLOUD_CONNECT_ON) tiles.push(connectCloudTile(d, av));
+    return h("div", {}, [h("div.cust-grid.cust-connect-tiles", {}, tiles), h("div#connect-flow")]);
+  }
+  function connectFlowBox() { return VUI.$("#connect-flow"); }
+  function connectButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // One Connect request, sent once; with the step-up in this build, a "fresh second factor needed" answer opens the
+  // inline check and the request is sent ONCE more (as codePost does).
+  function connectPost(path, body, where) {
+    function send() { return VUI.postJSON(API + path, body); }
+    return typeof withStepUp === "function" ? withStepUp(send, where) : send();
+  }
+  // A value the person copies into their DNS / web page / AWS console: shown verbatim (a <code>, never re-worded) with
+  // a Copy button. A browser without the clipboard API says so; the text is still there to select.
+  function connectCode(value) { return h("code.cust-connect-code", { text: String(value == null ? "" : value) }); }
+  function connectCopy(value) {
+    var b = h("button.btn.cust-copy", { type: "button", text: "Copy" });
+    b.addEventListener("click", function () {
+      var v = String(value == null ? "" : value);
+      function done() { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500); }
+      function fail() { VUI.toast("Select the text and copy it."); }
+      try {
+        var cb = window.navigator && window.navigator.clipboard;
+        if (cb && typeof cb.writeText === "function") { cb.writeText(v).then(done, fail); return; }
+      } catch (e) { /* no clipboard: fall through */ }
+      fail();
+    });
+    return b;
+  }
+  function connectCopyRow(label, value) {
+    return h("div.cust-connect-copy", {}, [h("span.k", { text: label }), connectCode(value), connectCopy(value)]);
+  }
+  // Why a request did not go through: fixed words, then the server's own reason (as the Code screen does).
+  async function connectFailed(e, lead) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (e && e.stepUpCancelled) return;                    // the person closed the check: nothing was sent again
+    if (status === 401 && d.step_up_required) {
+      return err("For your security, this needs a fresh second-factor check. Verify with your authenticator, then try "
+        + "again.");
+    }
+    if (status === 401) { await refreshWho(); nav("#/login"); return; }
+    if (status === 429) { return err(lead + ": too many checks just now. Wait a few minutes, then try again."); }
+    if (status === 503 && d.error === "updating") { return err(lead + ": VIGIL is updating. Try again in a moment."); }
+    var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
+      .replace(/\.$/, "");
+    err(lead + (why ? ": " + why : "") + ".");
+  }
+
+  // ---- the Website tile + the proof panel (auto-selected method, copy, confirm, automatic re-check) ----
+  function connectSiteTile(d, av) {
+    var sites = (Array.isArray(d.sites) ? d.sites : []).filter(function (s) { return s && s.host; });
+    var body = [h("h3", { text: "Website" }),
+      h("p.cust-muted", { text: "Prove you control a site or domain: publish one short code, VIGIL checks it." })];
+    if (sites.length) {
+      body.push(h("div.cust-connect-list", {}, sites.map(function (s) {
+        var row = [h("span.host", { text: String(s.host) }), statusBadge(s.status)];
+        if (s.status !== "verified" && av.site_check) {
+          row.push(connectButton(s.status === "expired" ? "Prove again" : "Continue",
+            function () { connectSiteFlow(String(s.host)); }));
+        }
+        return h("div.cust-asset-head", {}, row);
+      })));
+    } else {
+      body.push(h("p.cust-muted", { text: "No website connected yet." }));
+    }
+    body.push(av.site_check
+      ? h("div.cust-mon-actions", {}, connectButton("Connect a website", function () { connectSiteFlow(""); }, "primary"))
+      : h("p.cust-muted", { text: "Proving a website is not available on this deployment yet. Contact VIGIL." }));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+  function connectSiteFlow(host) {
+    stopConnectPoll();
+    var box = connectFlowBox();
+    if (!box) return;
+    if (host) return connectShowProof(host, "");
+    var input = h("input#connect-host", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "app.example.com" });
+    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect a website" }),
+      h("label", { for: "connect-host", text: "Site or domain" }), input,
+      h("div.cust-mon-actions", {}, connectButton("Get my verification code",
+        function (b) { connectStartSite(b, input); }, "primary"))]));
+  }
+  async function connectStartSite(btn, input) {
+    clearErr();
+    var host = String(input.value || "").trim().toLowerCase();
+    if (!host) return err("Enter a site or domain, for example app.example.com.");
+    btn.disabled = true;
+    try { await connectPost("/target/challenge", { host: host }, btn.parentNode); }   // the EXISTING challenge request
+    catch (e) { btn.disabled = false; return connectFailed(e, "The verification code was not issued"); }
+    return connectShowProof(host, "");
+  }
+  async function connectShowProof(host, method) {
+    var box = connectFlowBox();
+    if (!box) return;
+    VUI.mount(box, loadingHolder("Loading…"));
+    var st;
+    try { st = await VUI.postJSON(API + "/connect/ownership", { host: host }); }   // a read: no re-check asked
+    catch (e) { VUI.mount(box, null); return connectFailed(e, "Could not load " + host); }
+    if (here() !== "#/connect" || box !== connectFlowBox()) return;
+    VUI.mount(box, connectProofCard(st || {}, method));
+  }
+  function connectProofCard(st, method) {
+    var host = String(st.host || "");
+    if (st.status === "verified") {
+      return h("div.card", {}, [h("div.cust-asset-head", {}, [h("span.host", { text: host }), statusBadge("verified")]),
+        h("p", { text: "Ownership is proven. You can authorize assessments of this site." })]);
+    }
+    if (st.status === "invalid") {
+      return h("div.card.cust-soon", { text: String(st.detail || "That is not an address VIGIL can verify.") });
+    }
+    var methods = st.methods || {};
+    if (!own(methods, "meta-tag")) {                      // no code issued (or it was replaced): get one first
+      return h("div.card", {}, [h("h3", { text: host }), h("p", { text: "Get a verification code to prove this site." }),
+        h("div.cust-mon-actions", {}, connectButton("Get my verification code", function (b) {
+          b.disabled = true;
+          connectPost("/target/challenge", { host: host }, b.parentNode).then(function () { connectShowProof(host, ""); },
+            function (e) { b.disabled = false; connectFailed(e, "The verification code was not issued"); });
+        }, "primary"))]);
+    }
+    var picked = own(methods, method) ? method : (own(methods, st.selected_method) ? st.selected_method : "meta-tag");
+    var tabs = h("div.cust-connect-methods", {}, CONNECT_METHODS.map(function (m) {
+      var on = m[0] === picked;
+      var b = h("button.btn" + (on ? ".primary" : ""), { type: "button", text: m[1], "aria-pressed": on ? "true" : "false" });
+      b.addEventListener("click", function () { stopConnectPoll(); VUI.mount(connectFlowBox(), connectProofCard(st, m[0])); });
+      return b;
+    }));
+    var place = own(methods, picked) || {};
+    var how;
+    if (picked === "dns-txt") {
+      how = [h("p", { text: "Add this TXT record in your DNS:" }), connectCopyRow("Name", place.dns_name),
+        connectCopyRow("Value", place.dns_value)];
+    } else if (picked === "well-known") {
+      how = [h("p", { text: "Publish a plain-text file at this address:" }), connectCopyRow("URL", place.well_known_url),
+        connectCopyRow("Contents", place.well_known_body)];
+    } else {
+      how = [h("p", { text: "Add this tag inside the <head> of https://" + host + "/ (the page itself, not a redirect):" }),
+        connectCopyRow("Tag", place.meta_tag)];
+    }
+    var box = h("input", { type: "checkbox", id: "connect-authz" });
+    var status = h("p.cust-connect-status", { role: "status" });
+    var again = connectButton("Check again", function () { again.hidden = true; startConnectPoll(host, picked, status, again); });
+    again.hidden = true;
+    var check = connectButton("Check now", function () {
+      clearErr();
+      if (!box.checked) { status.textContent = "Please confirm you are authorized to test this site first."; return; }
+      check.hidden = true;
+      startConnectPoll(host, picked, status, again);
+    }, "primary");
+    return h("div.card.cust-connect-proof", {}, [
+      h("div.cust-asset-head", {}, [h("span.host", { text: host }), statusBadge(st.status)]),
+      h("p.cust-muted", { text: "Publish ONE of these. We picked the one that is usually quickest for this address; "
+        + "choose another if it suits you better." }),
+      tabs, h("div.cust-connect-how", {}, how),
+      h("label.cust-connect-authz", {}, [box, h("span.cust-muted", { text: "I confirm I am authorized to test this asset. "
+        + "Controlling a domain is not the same as being allowed to test it — only check this if you have authorization." })]),
+      h("div.cust-mon-actions", {}, [check, again]), status]);
+  }
+
+  // The automatic re-check: one request per CONNECT_POLL_MS (or sooner when the server says when), each its own
+  // generation so leaving the screen, switching method or starting again ends the old chain at its next step.
+  function stopConnectPoll() {
+    connectUi.gen++;
+    if (connectUi.timer) { clearTimeout(connectUi.timer); connectUi.timer = null; }
+  }
+  function startConnectPoll(host, method, status, again) {
+    stopConnectPoll();
+    connectCheck({ gen: connectUi.gen, host: host, method: method, tries: 0, status: status, again: again });
+  }
+  function connectSchedule(run, ms) {
+    connectUi.timer = setTimeout(function () { connectUi.timer = null; connectCheck(run); }, ms);
+  }
+  async function connectCheck(run) {
+    if (run.gen !== connectUi.gen) return;
+    if (here() !== "#/connect") { stopConnectPoll(); return; }
+    if (document.hidden) { connectSchedule(run, CONNECT_POLL_MS); return; }   // wait while hidden (not counted)
+    run.tries++;
+    run.status.textContent = "Checking " + run.host + "…";
+    var r;
+    try {
+      r = await connectPost("/connect/ownership",
+        { host: run.host, method: run.method, recheck: true, authorized: true }, run.status.parentNode);
+    } catch (e) {
+      if (run.gen !== connectUi.gen) return;
+      stopConnectPoll();
+      run.status.textContent = "Automatic checking stopped.";
+      run.again.hidden = false;
+      return connectFailed(e, "Checking stopped");
+    }
+    if (run.gen !== connectUi.gen) return;
+    if (r && r.status === "verified") {
+      stopConnectPoll();
+      run.status.textContent = "Verified — " + run.host + " is connected.";
+      VUI.toast("Ownership verified for " + run.host);
+      if (here() === "#/connect") render();             // the Website tile now lists it as Verified
+      return;
+    }
+    var c = (r && r.checked) || {};
+    var why = (c.ran && c.ok === false && c.reason) ? String(c.reason).replace(/\.$/, "") : "";
+    if (run.tries >= CONNECT_POLL_MAX) {
+      stopConnectPoll();
+      run.status.textContent = "Not found yet" + (why ? " (" + why + ")" : "") + ". Automatic checking paused — "
+        + "publish it, then select Check again.";
+      run.again.hidden = false;
+      return;
+    }
+    var nx = Number(r && r.recheck && r.recheck.next_in);
+    var ms = (nx > 0 && nx <= 60) ? Math.max(1000, Math.round(nx * 1000)) : CONNECT_POLL_MS;
+    run.status.textContent = (why ? "Not found yet: " + why : "Waiting for your change to appear")
+      + ". Checking again in " + Math.round(ms / 1000) + " s.";
+    connectSchedule(run, ms);
+  }
+
+  // ---- the Code repository tile ----
+  function connectRepoTile(d, av) {
+    var body = [h("h3", { text: "Code repository" })];
+    if (!av.repos) {
+      body.push(h("p.cust-muted", { text: CODE_ON
+        ? "Only the founder of this workspace, or an Operator VIGIL has added, can connect repositories."
+        : "Connecting repositories is not available on this deployment yet." }));
+      return h("div.card.cust-connect-tile", {}, body);
+    }
+    var repos = (Array.isArray(d.repos) ? d.repos : []).filter(function (r) { return r && r.repo; });
+    body.push(h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect." }));
+    body.push(repos.length
+      ? h("div.cust-connect-list", {}, repos.map(function (r) {
+          return h("div.cust-asset-head", {}, [h("span.host", { text: String(r.repo) }),
+            h("span.cust-badge.cust-badge-on", { text: "Connected" })]);
+        }))
+      : h("p.cust-muted", { text: "No repository connected yet." }));
+    var acts = [];
+    if (av.repo_connect) acts.push(connectButton("Connect GitHub", function (b) { codeConnect(b); }, "primary"));
+    else body.push(h("p.cust-muted", { text: "Connecting GitHub is not available on this deployment yet. Contact VIGIL." }));
+    acts.push(connectButton("Open Code", function () { nav("#/code"); }));
+    body.push(h("div.cust-mon-actions", {}, acts));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+
+  // ---- the Cloud account tile (AWS) ----
+  function connectCloudTile(d, av) {
+    var accts = (Array.isArray(d.cloud) ? d.cloud : []).filter(function (c) { return c && c.account_id; });
+    var body = [h("h3", { text: "Cloud account" }),
+      h("p.cust-muted", { text: "Give VIGIL read-only access to an AWS account through a role you create. VIGIL never "
+        + "changes anything in your account." })];
+    if (accts.length) body.push(h("div.cust-connect-list", {}, accts.map(connectCloudRow)));
+    else body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
+    body.push(av.cloud_connect
+      ? h("div.cust-mon-actions", {}, connectButton("Connect an AWS account", connectCloudFlow, "primary"))
+      : h("p.cust-muted", { text: "Connecting a cloud account is not available on this deployment yet. Contact VIGIL." }));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+  function connectCloudRow(c) {
+    var live = c.status === "connected";
+    var foot = h("div.cust-mon-actions", {});
+    VUI.mount(foot, connectButton("Disconnect", function () { connectCloudConfirm(c, foot); }));
+    return h("div.cust-connect-acct", {}, [
+      h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
+        h("span.cust-badge.cust-badge-" + (live ? "verified" : "expired"),
+          { text: live ? "✓ Connected (read-only)" : "⚠ Expired — connect again" })]),
+      kv("Role", c.role_ref), kv(live ? "Valid until" : "Expired", fmtDate(c.expires_at)), foot]);
+  }
+  function connectCloudConfirm(c, foot) {
+    VUI.mount(foot, [h("span.cust-muted", { text: "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; "
+      + "delete the role in AWS to remove the access entirely." }),
+      connectButton("Disconnect", async function (b) {
+        b.disabled = true;
+        try {
+          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || "aws"),
+            account_id: String(c.account_id) }, foot);
+        } catch (e) { b.disabled = false; return connectFailed(e, "The account was not disconnected"); }
+        VUI.toast("AWS account " + c.account_id + " disconnected");
+        if (here() === "#/connect") render();
+      }, "danger"),
+      connectButton("Cancel", function () {
+        VUI.mount(foot, connectButton("Disconnect", function () { connectCloudConfirm(c, foot); }));
+      })]);
+  }
+  function connectCloudFlow() {
+    stopConnectPoll();
+    var box = connectFlowBox();
+    if (!box) return;
+    var acct = h("input#connect-aws-account", { type: "text", inputmode: "numeric", autocomplete: "off",
+      placeholder: "123456789012" });
+    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect an AWS account" }),
+      h("label", { for: "connect-aws-account", text: "AWS account ID (12 digits)" }), acct,
+      h("div.cust-mon-actions", {}, connectButton("Continue", function (b) { connectCloudStart(b, acct); }, "primary"))]));
+  }
+  async function connectCloudStart(btn, input) {
+    clearErr();
+    var account = String(input.value || "").replace(/[\s-]/g, "");
+    if (!/^[0-9]{12}$/.test(account)) return err("An AWS account ID is 12 digits.");
+    btn.disabled = true;
+    var r;
+    try { r = await connectPost("/connect/cloud/challenge", { provider: "aws", account_id: account }, btn.parentNode); }
+    catch (e) { btn.disabled = false; return connectFailed(e, "The connection was not started"); }
+    var box = connectFlowBox();
+    if (!box || here() !== "#/connect") return;
+    VUI.mount(box, connectCloudSteps(r || {}));
+  }
+  function connectCloudSteps(r) {
+    var hint = String(r.role_name_hint || "VigilSecurityAudit");
+    var role = h("input#connect-aws-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "arn:aws:iam::" + String(r.account_id || "") + ":role/" + hint });
+    return h("div.card.cust-connect-proof", {}, [
+      h("h3", { text: "Connect AWS account " + String(r.account_id || "") }),
+      h("ol.cust-connect-steps", {}, [
+        h("li", {}, [h("p", { text: "In that account's IAM, create a role (for example " + hint + ") with this trust "
+          + "policy. It lets only VIGIL assume the role, and only with your external ID:" }),
+          h("pre.cust-connect-policy", { text: String(r.trust_policy || "") }), connectCopy(r.trust_policy)]),
+        h("li", {}, [h("p", { text: "Attach AWS's read-only managed policy to the role:" }),
+          connectCopyRow("Policy", r.permissions_policy_arn)]),
+        h("li", {}, [h("label", { for: "connect-aws-role", text: "Paste the role's ARN, then verify:" }), role,
+          h("div.cust-mon-actions", {}, connectButton("Verify connection",
+            function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      ]),
+      h("p.cust-muted", { text: "VIGIL connects the account only if the role is in account " + String(r.account_id || "")
+        + " and refuses any other external ID. The connection is read-only and never runs a test by itself." })]);
+  }
+  async function connectCloudVerify(btn, r, input) {
+    clearErr();
+    var arn = String(input.value || "").trim();
+    if (!arn) return err("Paste the role's ARN.");
+    btn.disabled = true;
+    try {
+      await connectPost("/connect/cloud/verify", { provider: "aws", account_id: String(r.account_id || ""),
+        role_ref: arn }, btn.parentNode);
+    } catch (e) { btn.disabled = false; return connectFailed(e, "The account was not connected"); }
+    VUI.toast("AWS account " + r.account_id + " connected (read-only)");
+    if (here() === "#/connect") render();
+  }
+
   // ---- Team (VIGIL_CUSTOMER_TEAM_UI): the workspace's members — add, change a role, remove -------------------------
   // Shown only while the edge writes data-team="1"; off, #/team is the "being wired" card it always was and nothing is
   // fetched. The SERVER decides everything: GET api/customer/members lists the session's workspace only, and only to
@@ -2662,6 +3060,7 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
@@ -2739,6 +3138,8 @@
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
     "#/code": function () { return authed() ? (CODE_ON ? viewCode() : viewDashboard()) : viewLogin(); },
+    // Connect off: #/connect is the home screen, exactly as any unknown route is
+    "#/connect": function () { return authed() ? (CONNECT_ON ? viewConnect() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is

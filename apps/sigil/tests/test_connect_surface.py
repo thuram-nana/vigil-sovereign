@@ -67,19 +67,29 @@ def _challenge_host(store, org: str, host: str) -> None:
 def _grant_cloud(store, org: str, account: str, *, now: float, ttl: float = 1000.0) -> None:
     reg = CloudConnectRegistry(store)
     reg.issue_challenge(org, "aws", account, issued_at=_issue(), external_id="EXT-" + account)
-    reg.verify_and_connect(org, "aws", account, role_ref="arn:" + account,
-                           observed={"assumed_with_external_id": "EXT-" + account, "account": account},
-                           now=now, ttl_seconds=ttl)
+    reg.verify_and_connect(org, "aws", account, role_ref=f"arn:aws:iam::{account}:role/VigilSecurityAudit",
+                           observed={"assumed_with_external_id": "EXT-" + account, "account": account,
+                                     "control_external_id": "CTL", "control_denied": True},
+                           control_external_id="CTL", now=now, ttl_seconds=ttl)
 
 
 # ---- the single-host ownership POLL -------------------------------------------------------------------------
-def test_poll_none_when_nothing_started_auto_selects_the_default_method():
+def test_poll_none_when_nothing_started_auto_selects_by_host_shape():
     s = _store()
     out = connect.customer_ownership_poll(s, "acme", "apme.cm", now=100.0)
     assert out["status"] == "none"
-    assert out["selected_method"] == ao.METHOD_META_TAG         # Search-Console default pre-selected
+    assert out["selected_method"] == ao.METHOD_DNS_TXT          # a bare domain: its zone (its root often redirects)
     assert out["recheck"]["due"] is False
     assert "methods" not in out                                  # nothing to resume yet
+    sub = connect.customer_ownership_poll(s, "acme", "app.apme.cm", now=100.0)
+    assert sub["status"] == "none" and sub["selected_method"] == ao.METHOD_META_TAG   # a subdomain: its own page
+
+
+def test_auto_method_is_a_pure_host_shape_pick():
+    assert connect.auto_method("example.com") == ao.METHOD_DNS_TXT
+    assert connect.auto_method("www.example.com") == ao.METHOD_META_TAG
+    assert connect.auto_method("a.b.example.co.uk") == ao.METHOD_META_TAG
+    assert connect.auto_method("") == ao.METHOD_META_TAG                  # never raises, never an unknown method
 
 
 def test_poll_pending_resumes_the_half_finished_proof_and_flags_recheck():
@@ -92,7 +102,7 @@ def test_poll_pending_resumes_the_half_finished_proof_and_flags_recheck():
     assert set(out["methods"]) == {ao.METHOD_META_TAG, ao.METHOD_DNS_TXT, ao.METHOD_WELL_KNOWN}
     assert out["marker"].startswith("vigil-site-verification=")
     assert out["methods"][ao.METHOD_DNS_TXT]["dns_name"] == "_vigil-challenge.apme.cm"
-    assert out["selected_method"] == ao.METHOD_META_TAG
+    assert out["selected_method"] == ao.METHOD_DNS_TXT
 
 
 def test_poll_verified_has_no_recheck_and_names_the_proving_method():
@@ -162,6 +172,16 @@ def test_overview_is_tenant_scoped_org_b_sees_none_of_org_a():
     _grant_cloud(s, "acme", ACCT, now=100.0)
     out = connect.connect_overview(s, "evil", now=200.0)
     assert out == {"org_id": "evil", "sites": [], "repos": [], "cloud": []}
+
+
+def test_overview_legs_are_absent_not_empty_when_not_included():
+    # the repo leg follows the Code screen's own gate and the cloud leg its flag: when the caller excludes one it is
+    # ABSENT (no key), never an empty placeholder a screen could mistake for "nothing connected"
+    s = _store()
+    ConnectedRepoRegistry(s).connect("acme", 42, "github.com/acme/widgets", issued_at=_issue())
+    _grant_cloud(s, "acme", ACCT, now=100.0)
+    out = connect.connect_overview(s, "acme", now=200.0, include_repos=False, include_cloud=False)
+    assert set(out) == {"org_id", "sites"}
 
 
 def test_overview_cloud_leg_marks_expired_and_hides_the_secret():

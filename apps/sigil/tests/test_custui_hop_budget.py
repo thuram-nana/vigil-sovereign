@@ -30,6 +30,11 @@ def test_each_slow_action_outwaits_its_own_downstream_worst_case():
     assert t["billing_checkout"] > 2 * stripe_egress._DEFAULT_TIMEOUT_S               # the same, when Stripe serves it
     assert t["oidc_finish"] > 2 * (_default(oidc._http_post_form, "timeout") + _default(oidc._http_get_json, "timeout"))
     assert t["target_verify"] > ownership_fetch._DEFAULT_TOTAL_TIMEOUT_S              # an ABSOLUTE budget
+    # PR-C: the Connect re-check runs that same ownership fetch; cloud connect makes three STS calls, each bounded per
+    # blocking socket op (connect, then read)
+    from sigil.ui import cloud_fetch
+    assert t["connect_ownership_poll"] > ownership_fetch._DEFAULT_TOTAL_TIMEOUT_S
+    assert t["cloud_connect_verify"] > 3 * 2 * cloud_fetch._DEFAULT_TIMEOUT_S
     smtp = _default(email_channel.SmtpEmailSender.__init__, "timeout")
     for a in ("signup_request", "recover_request"):
         assert t[a] > 5 * smtp                                                     # connect/EHLO/STARTTLS/AUTH/DATA
@@ -79,6 +84,7 @@ def test_a_slow_checkout_is_not_reported_failed_but_a_wedged_local_action_still_
 
 
 @pytest.mark.parametrize("action", ["billing_checkout", "oidc_finish", "target_verify", "signup_request",
-                                    "recover_request", "signup_confirm", "recover_confirm"])
+                                    "recover_request", "signup_confirm", "recover_confirm",
+                                    "connect_ownership_poll", "cloud_connect_verify"])
 def test_every_slow_action_name_is_a_real_hop_action(action):
     assert f'"{action}"' in inspect.getsource(custui)

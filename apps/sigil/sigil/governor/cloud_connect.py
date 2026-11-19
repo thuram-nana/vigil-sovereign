@@ -2,32 +2,35 @@
 connected a cloud account they control (consumer PR-C; the unified connect surface's cloud leg).
 
 WHAT THIS IS: a per-org, owner-signed record that a customer has PROVEN CONTROL of a specific cloud account by
-creating, in THAT account's own IAM, a read-only role that trusts VIGIL under a VIGIL-issued, unguessable
-``external_id`` — the classic cross-account, confused-deputy-safe grant. Trusted sovereign code then ASSUMES
-that role with our external_id and reads back the caller identity; the account the role lands in IS the proof
-of control (only that account's IAM controller can create a role there and trust VIGIL to it).
+creating, in THAT account's own IAM, a read-only role that trusts VIGIL's connector principal under a VIGIL-issued,
+unguessable ``external_id`` — the classic cross-account, confused-deputy-safe grant. Trusted sovereign code
+(``ui.cloud_fetch``) then ASSUMES that role with our external_id and reads back the caller identity; the account the
+role lands in IS the proof of control (only that account's IAM controller can create a role there and trust VIGIL).
+
+THE SAME-SHAPE NEGATIVE CONTROL (why the verdict also needs a DENIAL): a successful assume with our external id
+proves nothing about whether the role's trust policy REQUIRES that id. A role that trusts VIGIL's principal with no
+``sts:ExternalId`` condition would also succeed — and then ANY VIGIL tenant could name that role and connect another
+customer's account through VIGIL (the confused-deputy hole the external id exists to close). So the fetcher also
+assumes the SAME role with a FRESH RANDOM external id, and the verdict holds only if that control was explicitly
+DENIED. A role that admits an arbitrary external id is refused, for every tenant, with a message naming the fix.
 
 WHY IT MATTERS (the doctrine, stated once, enforced): own-a-repo != own-a-host != CONNECT-A-CLOUD-ACCOUNT !=
 offense-test. Connecting a cloud account RECORDS an owner-verified asset; it is a DISTINCT, read-only capability.
 It NEVER, by itself, authorizes a live offense run — not against the cloud account, not against anything. The
 ``VIGIL_CUSTOMER_PROD_EXECUTION`` owner gate (``vigil_core.posture``) and the host-ownership + EngagementAuthority
-chain are UNCHANGED by anything here. Actually RUNNING a cloud-posture scan against a connected account (even a
-read-only one) is a SEPARATE, separately-gated engagement — this module deliberately does not unlock it (honest
-TODO: the read-only cloud-posture reader + its own gate land in a later slice).
+chain are UNCHANGED by anything here. ``assume_target`` is the one read a later READ-ONLY posture run consumes, and
+that run is a separate engagement that must itself pass ``build_offense_gate -> conjunctive_decide``.
 
-TRUST BOUNDARY (critical, mirrors ``asset_ownership``): the identity observation (what ``sts:AssumeRole`` +
-``sts:GetCallerIdentity`` returned) is produced by TRUSTED SOVEREIGN CODE that assumes the customer's published
-role — NEVER supplied by the customer. ``verify_and_connect`` runs the deterministic verdict ITSELF over that
-observation and records an owner-signed grant ONLY when the verdict passes; a grant is never recorded without the
-verdict firing. The fetch that produces the observation (the live STS/assume-role reader) is a provisioner/edge
-concern layered on top (injected like ``target_fetcher``); this module stays NETWORK-FREE and independently
-testable (the "prove over data the real account produced" doctrine, with the I/O injected).
+TRUST BOUNDARY (critical, mirrors ``asset_ownership``): the observation (what the two AssumeRole calls and the
+GetCallerIdentity call returned) is produced by TRUSTED SOVEREIGN CODE — NEVER supplied by the customer.
+``verify_and_connect`` runs the deterministic verdict ITSELF over that observation and records an owner-signed grant
+ONLY when the verdict passes; a grant is never recorded without the verdict firing. This module stays NETWORK-FREE
+and independently testable (the I/O is injected).
 
-CLAIM BOUNDARY (claim-discipline): the verdict proves ACCOUNT CONTROL (VIGIL could assume a role that lands in
-the claimed account, and only via our external_id). It does NOT prove the granted role is minimally scoped /
-genuinely read-only — that is a property of the customer's attached policy, which a deeper policy analysis would
-establish. The grant RECORDS the connection as read-only INTENT (VIGIL's later, separately-gated cloud-posture
-engagement uses only read verbs); it does not claim to have verified the policy's scope.
+CLAIM BOUNDARY (claim-discipline): the verdict proves ACCOUNT CONTROL and that the role ENFORCES our external id. It
+does NOT prove the granted role is minimally scoped / genuinely read-only — that is a property of the customer's
+attached permissions policy (the connect screen asks for AWS's managed ``SecurityAudit``). The grant RECORDS the
+connection as read-only INTENT; it does not claim to have verified the policy's scope.
 
 ASYMMETRIC AUTHENTICATION (mirrors ``asset_ownership`` / ``connected_repos``):
   * issue_challenge / record a verified grant = the DANGEROUS direction -> honored only if OWNER-SIGNED
@@ -39,11 +42,10 @@ ANTI-REPLAY: per-(org_id, provider, account_id) last-writer-wins high-water (the
 accounts/orgs/asset_ownership carry). A captured owner-signed active grant cannot resurrect a revoked grant (its
 ``issued_at`` <= high-water -> ignored). Every grant also carries an OWNER-SIGNED ``expires_at`` so a lapsed grant
 cannot be silently extended — re-connecting requires a fresh challenge + a fresh observation. OWNER-KEY SUCCESSION
-is honored exactly as ``asset_ownership._fold`` (each active grant authenticated under the owner pubkey valid AT
-ITS SEQ). HARD-PRUNE durability (a prune tripwire / snapshot seed, exactly as ``connected_repos`` / the
-``asset_ownership`` proof fold carry) is a clean follow-on; until then the fold is a full genesis scan (which a
-prune of OLD records cannot fool) and the owner-signed ``expires_at`` bounds the blast radius of any stranded
-record. (honest TODO: ``spine.prune`` tripwire for stranded active cloud grants.)
+is honored exactly as ``asset_ownership._fold``. HARD-PRUNE DURABILITY: the fold is a signature-verifying genesis
+scan of the live window (no snapshot seed), so — exactly as ``connected_repos`` — a fail-closed TRIPWIRE
+(``spine.prune.stranded_active_cloud_grants``) refuses a hard prune that would strand an active grant's only record
+(which would silently disconnect it, or reset its high-water and re-open replay-resurrection).
 
 FATAL-2: SOVEREIGN-side, ``assert_no_offense()`` at import; imports only the shared ``vigil_core`` (via
 ``reuse``) + the sovereign governor siblings (``authn`` / ``identity`` / ``key_history``). No ``framework`` /
@@ -52,9 +54,10 @@ FATAL-2: SOVEREIGN-side, ``assert_no_offense()`` at import; imports only the sha
 from __future__ import annotations
 
 import hmac
+import json
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..reuse import assert_no_offense
@@ -71,38 +74,43 @@ from .identity import owner_keypair, owner_pubkey  # noqa: E402
 CHALLENGE_SIGNAL = "governor.cloud_connect_challenge"
 GRANT_SIGNAL = "governor.cloud_connect_grant"
 
-# The cloud providers a customer may connect. The verdict is CONCRETE for AWS (external-id assume-role +
-# caller-identity account match). GCP (service-account impersonation) + Azure (managed-identity / app
-# registration) have the SAME proof SHAPE but a distinct observation; their verdict is NOT yet wired, so a
-# verify against them fails closed (honest TODO) — a challenge may still be issued so the UI can show the shape.
+# The cloud provider vocabulary. The proof is CONCRETE for AWS (external-id assume-role + caller-identity account
+# match + the same-shape negative control). GCP (service-account impersonation) and Azure (a multi-tenant app
+# registration) need a different observation; their verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict),
+# so BOTH a challenge and a verify refuse them — a customer is never walked into a flow that cannot finish.
 PROVIDER_AWS = "aws"
 PROVIDER_GCP = "gcp"
 PROVIDER_AZURE = "azure"
 _PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE})
-# The providers whose deterministic proof-of-control verdict is actually wired today. A verify against a provider
-# NOT here fails closed (``verify_and_connect`` refuses) rather than recording an unproven grant.
+# The providers whose deterministic proof-of-control verdict exists. Anything else fails closed at the first step.
 _VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS})
 
-# A cloud ACCOUNT id: a provider-agnostic single safe token (AWS 12-digit account id, GCP project id, Azure
-# subscription GUID all fit). alnum start, then [A-Za-z0-9._-], max 128. No path separators / traversal / spaces
-# so it is one safe spine key component and can never widen scope.
+# A cloud ACCOUNT id: a provider-agnostic single safe token (alnum start, then [A-Za-z0-9._-], max 128) — one safe
+# spine key component that can never widen scope. AWS additionally requires the exact 12-digit account id.
 _ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-# A role / grant REFERENCE the customer created (an AWS role ARN, a GCP SA email, an Azure resource id). It is a
-# public identifier, never a secret. Bounded + control-char-free; a provider-exact shape is the fetcher's concern.
+_AWS_ACCOUNT_RE = re.compile(r"[0-9]{12}")
+# A role / grant REFERENCE the customer created — a public identifier, never a secret. Bounded + control-char-free;
+# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected.
 _ROLE_REF_MAX = 512
+_AWS_ROLE_ARN_RE = re.compile(r"arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]{1,512}")
+
+# The AWS managed policy the connect screen asks the customer to attach: read-only access to security configuration
+# metadata (list/describe/get), the standard for cloud-posture tooling. Shown, never enforced by this module.
+AWS_READ_ONLY_POLICY_ARN = "arn:aws:iam::aws:policy/SecurityAudit"
 
 # A conservative default grant validity window. Cloud access changes hands (a role is deleted, an account is
 # closed), so a grant EXPIRES and must be re-connected. 90 days mirrors the ownership-proof cadence; the owner
 # signs the concrete ``expires_at``, so lengthening it is a deliberate owner act, never a config.
 _DEFAULT_GRANT_TTL_S: float = 90.0 * 24.0 * 3600.0
 
-# The owner-signed authenticated CORE of each record. ``issued_at`` MUST be inside it (else a captured grant
-# could be re-stamped fresh past the high-water without breaking the signature). For a challenge the external_id
-# is inside it so an owner-signed challenge cannot be re-tokened. For a grant org_id/provider/account_id/role_ref/
-# external_id hash/verified_at/expires_at are inside it so a grant for (orgA, aws, 1111) can never be re-aimed at
-# another org/account, nor have its role/window rewritten.
+# The owner-signed authenticated CORE of each record. ``issued_at`` MUST be inside it (else a captured grant could be
+# re-stamped fresh past the high-water without breaking the signature). For a challenge the external_id is inside it
+# so an owner-signed challenge cannot be re-tokened. For a grant org_id/provider/account_id/role_ref/external_id/
+# verified_at/expires_at are inside it so a grant for (orgA, aws, 1111) can never be re-aimed at another org/account,
+# nor have its role, its external id or its window rewritten. The grant carries the external id ITSELF (not a hash)
+# so it stays CONSUMABLE after a later challenge supersedes the one it was proven against (``assume_target``).
 _CHALLENGE_CORE = ("signal", "org_id", "provider", "account_id", "external_id", "state", "issued_at")
-_GRANT_CORE = ("signal", "org_id", "provider", "account_id", "role_ref", "external_id_sha256",
+_GRANT_CORE = ("signal", "org_id", "provider", "account_id", "role_ref", "external_id",
                "verified_at", "expires_at", "state", "issued_at")
 
 _SKIP = object()          # the shared fold step: the record touched no (org_id, provider, account_id)
@@ -120,20 +128,36 @@ def _check_provider(provider: str) -> str:
     return p
 
 
-def _check_account(account_id: str) -> str:
+def _check_verifiable(provider: str) -> str:
+    """A provider whose proof-of-control VIGIL can actually check — anything else refuses at the first step."""
+    p = _check_provider(provider)
+    if p not in _VERIFIABLE_PROVIDERS:
+        raise ValueError(f"connecting a {p!r} account is not available — only AWS accounts can be connected today")
+    return p
+
+
+def _check_account(account_id: str, provider: str = "") -> str:
     a = str(account_id or "").strip()
     if not _ACCOUNT_RE.fullmatch(a):
         raise ValueError("account_id must be an alphanumeric start then [A-Za-z0-9._-], max 128 chars, "
                          "no separators / traversal / spaces (an AWS account id / GCP project / Azure subscription)")
+    if provider == PROVIDER_AWS and not _AWS_ACCOUNT_RE.fullmatch(a):
+        raise ValueError("an AWS account id is exactly 12 digits")
     return a
 
 
-def _check_role_ref(role_ref: str) -> str:
+def _check_role_ref(role_ref: str, provider: str = "", account_id: str = "") -> str:
     r = str(role_ref or "").strip()
     if not r:
-        raise ValueError("a role reference is required (the read-only role/SA you created for VIGIL)")
+        raise ValueError("a role reference is required (the read-only role you created for VIGIL)")
     if len(r) > _ROLE_REF_MAX or any(ord(c) < 0x20 or ord(c) == 0x7f for c in r):
         raise ValueError("role reference must be a non-empty, control-char-free string under 512 chars")
+    if provider == PROVIDER_AWS:
+        m = _AWS_ROLE_ARN_RE.fullmatch(r)
+        if not m:
+            raise ValueError("give the role's full ARN, e.g. arn:aws:iam::123456789012:role/VigilSecurityAudit")
+        if account_id and m.group(1) != account_id:
+            raise ValueError("the role ARN names a different AWS account than the one you are connecting")
     return r
 
 
@@ -147,49 +171,80 @@ def _ct_eq(a: str, b: str) -> bool:
     return hmac.compare_digest(str(a or "").encode("utf-8"), str(b or "").encode("utf-8"))
 
 
-def cloud_grant_proves(provider: str, external_id: str, account_id: str, observed) -> bool:
-    """``True`` iff ``observed`` proves CONTROL of ``account_id`` under ``provider`` via the VIGIL ``external_id``.
-    FAIL-CLOSED on any unknown/unwired provider, empty external_id, or malformed observation (never raises).
+_NOT_MADE = "the connection check was not completed — start it again"
 
-    ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw (never customer-supplied). For AWS it is the dict the
-    assume-role + caller-identity read produced:
 
-        {"assumed_with_external_id": "<the external_id VIGIL assumed with>", "account": "<GetCallerIdentity acct>"}
+def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observed, *,
+                        control_external_id: str) -> Optional[str]:
+    """``None`` iff ``observed`` proves CONTROL of ``account_id`` under ``provider`` via the VIGIL ``external_id``
+    AND that the role ENFORCES that id; otherwise the customer-facing reason it does not. TOTAL and FAIL-CLOSED: an
+    unknown/unverifiable provider, an empty id, a control id equal to the real one, or a malformed observation all
+    refuse (never raises).
 
-    The verdict holds iff BOTH:
-      * ``assumed_with_external_id`` equals this challenge's ``external_id`` (constant-time) — VIGIL assumed the
-        role ONLY because the customer placed OUR external_id in its trust policy (confused-deputy-safe, and it
-        ties the observation to THIS challenge, so a replayed observation from a prior challenge is refused);
-      * ``account`` equals the claimed ``account_id`` — the assumed role LANDS IN the claimed account, which only
-        that account's IAM controller could have created and trusted to VIGIL. THIS is the control proof.
+    ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw (never customer-supplied). For AWS:
 
-    GCP / Azure are not yet wired (``_VERIFIABLE_PROVIDERS``) → a fail-closed ``False`` (honest TODO)."""
-    ext = str(external_id or "")
-    if not ext or provider not in _VERIFIABLE_PROVIDERS:
-        return False
-    if provider == PROVIDER_AWS:
-        if not isinstance(observed, dict):
-            return False
-        got_ext = observed.get("assumed_with_external_id")
-        got_acct = observed.get("account")
-        if not isinstance(got_ext, str) or not isinstance(got_acct, str):
-            return False
-        return _ct_eq(ext, got_ext) and _ct_eq(str(account_id or ""), got_acct)
-    return False   # unreachable while _VERIFIABLE_PROVIDERS == {aws}, but fail-closed by construction
+        {"assumed_with_external_id": <the id VIGIL assumed with>, "account": <GetCallerIdentity account>,
+         "control_external_id": <the random id of the control assume>, "control_denied": <True iff AccessDenied>}
+
+    The verdict holds iff ALL of:
+      * ``assumed_with_external_id`` equals this challenge's ``external_id`` (constant-time) — the observation
+        belongs to THIS challenge, so a replayed observation from a prior challenge is refused;
+      * ``account`` equals the claimed ``account_id`` — the role LANDS IN the claimed account. THE control proof;
+      * ``control_external_id`` equals the control id the provisioner generated for this check and differs from the
+        real id, and ``control_denied`` is exactly ``True`` — the same role REFUSED an arbitrary external id, so its
+        trust policy enforces ours (the confused-deputy guard; see the module docstring)."""
+    try:
+        ext, ctl = str(external_id or ""), str(control_external_id or "")
+        if provider not in _VERIFIABLE_PROVIDERS:
+            return "connecting this kind of cloud account is not available"
+        if not ext or not ctl or _ct_eq(ext, ctl) or not isinstance(observed, dict):
+            return _NOT_MADE
+        got_ext, got_acct = observed.get("assumed_with_external_id"), observed.get("account")
+        got_ctl, denied = observed.get("control_external_id"), observed.get("control_denied")
+        if not isinstance(got_ext, str) or not _ct_eq(ext, got_ext):
+            return _NOT_MADE
+        if not isinstance(got_ctl, str) or not _ct_eq(ctl, got_ctl):
+            return _NOT_MADE
+        if not isinstance(got_acct, str) or not _ct_eq(str(account_id or ""), got_acct):
+            return (f"control of {account_id} was not proven — the role VIGIL assumed is not in that account "
+                    f"(check the account id and the role ARN)")
+        if denied is not True:
+            return ("the role does not require VIGIL's external id: its trust policy must carry the "
+                    "sts:ExternalId condition shown on the connect screen (without it any VIGIL customer could name "
+                    "this role), so the account was not connected")
+        return None
+    except Exception:  # noqa: BLE001 — a verdict is total: anything unexpected refuses
+        return _NOT_MADE
+
+
+def cloud_grant_proves(provider: str, external_id: str, account_id: str, observed, *,
+                       control_external_id: str) -> bool:
+    """``True`` iff :func:`cloud_grant_refusal` finds nothing to refuse (the boolean form of the same verdict)."""
+    return cloud_grant_refusal(provider, external_id, account_id, observed,
+                               control_external_id=control_external_id) is None
 
 
 # ---------------------------------------------------------------------------------------------------
-# Placement instructions — a deterministic function of (external_id). The edge hands these to the customer
-# verbatim ("create a read-only role that trusts VIGIL with exactly this external id"), and the verdict checks
-# that VIGIL could assume it with exactly this external id.
+# Placement — a deterministic function of (VIGIL's connector principal, external_id). The edge hands this to the
+# customer verbatim ("create a read-only role whose trust policy is exactly this").
 # ---------------------------------------------------------------------------------------------------
+
+def aws_trust_policy(principal_arn: str, external_id: str) -> str:
+    """The exact IAM trust policy (JSON text) the customer's read-only role needs: it trusts ONLY VIGIL's connector
+    principal and ONLY under this challenge's ``sts:ExternalId``. Deterministic (stable key order) so the screen and a
+    test agree byte-for-byte."""
+    doc = {"Version": "2012-10-17",
+           "Statement": [{"Effect": "Allow", "Principal": {"AWS": str(principal_arn)}, "Action": "sts:AssumeRole",
+                          "Condition": {"StringEquals": {"sts:ExternalId": str(external_id)}}}]}
+    return json.dumps(doc, indent=2)
+
 
 @dataclass(frozen=True)
 class CloudConnectChallenge:
     org_id: str
     provider: str
     account_id: str
-    external_id: str     # the unguessable VIGIL external-id the customer must trust in the role's policy
+    external_id: str     # the unguessable VIGIL external-id the customer must require in the role's trust policy
     issued_at: float     # owner-set anti-replay high-water for this (org_id, provider, account_id) challenge
 
 
@@ -198,13 +253,32 @@ class CloudGrant:
     org_id: str
     provider: str
     account_id: str
-    role_ref: str                # the read-only role/SA reference the customer created (public id, never a secret)
-    external_id_sha256: str      # hash of the external_id that was verified (ties the grant to a real challenge)
-    verified_at: float
-    expires_at: float            # owner-signed expiry — re-connecting required after this
-    issued_at: float             # owner-set anti-replay high-water for this grant
-    state: str                   # "active" | "revoked"
+    role_ref: str                # the read-only role the customer created (a public id, never a secret)
+    external_id: str = field(repr=False)   # the id the role's trust policy requires (never rendered in a repr)
+    verified_at: float = 0.0
+    expires_at: float = 0.0      # owner-signed expiry — re-connecting required after this
+    issued_at: float = 0.0       # owner-set anti-replay high-water for this grant
+    state: str = "active"        # "active" | "revoked"
     access: str = "read-only"    # the RECORDED connection intent (see the module CLAIM BOUNDARY note)
+
+    @property
+    def external_id_sha256(self) -> str:
+        """A log-safe identifier of the external id this grant was proven under."""
+        from ..reuse import sha256_hex
+        return sha256_hex(self.external_id.encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class CloudAssumeTarget:
+    """What a later, separately-gated READ-ONLY posture run needs to reach a connected account: the role to assume
+    and the external id its trust policy requires. Holding one authorizes NOTHING — the run is an engagement that
+    must itself pass ``build_offense_gate -> conjunctive_decide``."""
+    org_id: str
+    provider: str
+    account_id: str
+    role_ref: str
+    external_id: str = field(repr=False)
+    expires_at: float = 0.0
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -213,7 +287,7 @@ class CloudGrant:
 
 def _grant_row(p: dict, at: float) -> dict:
     return {"provider": p.get("provider"), "account_id": p.get("account_id"), "role_ref": p.get("role_ref"),
-            "external_id_sha256": p.get("external_id_sha256"), "verified_at": p.get("verified_at"),
+            "external_id": p.get("external_id"), "verified_at": p.get("verified_at"),
             "expires_at": p.get("expires_at"), "issued_at": at}
 
 
@@ -266,15 +340,15 @@ class CloudConnectRegistry:
                         external_id: Optional[str] = None) -> CloudConnectChallenge:
         """Owner-sign a fresh connect CHALLENGE for (org_id, provider, account_id) — the DANGEROUS direction,
         honored only if it verifies AND is FRESH (``issued_at`` strictly exceeds the per-key challenge high-water).
-        Returns the challenge (external_id + the placement the edge hands the customer: create a read-only role in
-        THAT account trusting VIGIL under exactly this external_id). A new challenge supersedes the prior one
-        (LWW). ``external_id`` is injectable for tests; in production a fresh 256-bit URL-safe secret.
+        Refuses a provider VIGIL cannot verify (no dead-end flow). A new challenge supersedes the prior one (LWW).
+        ``external_id`` is injectable for tests; in production a fresh 256-bit URL-safe secret.
 
         A challenge grants NOTHING on its own — it is only the external-id the later verdict checks VIGIL assumed
         the role with."""
         if self.owner_key is None:
             raise ValueError("issuing a cloud-connect challenge requires the owner signing key")
-        oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
+        oid, prov = _check_org_id(org_id), _check_verifiable(provider)
+        acct = _check_account(account_id, prov)
         ext = str(external_id) if external_id is not None else secrets.token_urlsafe(32)
         if not ext or any(ord(c) < 0x20 or ord(c) == 0x7f for c in ext):
             raise ValueError("external_id must be a non-empty control-char-free string")
@@ -288,48 +362,45 @@ class CloudConnectRegistry:
                                      issued_at=float(issued_at))
 
     def verify_and_connect(self, org_id: str, provider: str, account_id: str, *, role_ref: str,
-                           observed, now: float, ttl_seconds: float = _DEFAULT_GRANT_TTL_S) -> CloudGrant:
+                           observed, control_external_id: str, now: float,
+                           ttl_seconds: float = _DEFAULT_GRANT_TTL_S) -> CloudGrant:
         """Run the deterministic verdict over a TRUSTED observation and, ONLY on success, owner-sign a READ-ONLY
-        cloud GRANT for (org_id, provider, account_id). Fail-closed — raises ``ValueError`` on an invalid
-        org/provider/account/role, an unwired provider, a missing/stale challenge, a non-positive ttl, or a
-        verdict that does not fire; a grant is NEVER recorded without the verdict passing.
+        cloud GRANT for (org_id, provider, account_id). Fail-closed — raises ``ValueError`` (its text is the
+        customer-facing reason) on an invalid org/provider/account/role, an unverifiable provider, a missing/stale
+        challenge, a non-positive ttl, or a verdict that does not fire; a grant is NEVER recorded otherwise.
 
-        ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw assuming the customer's role (never customer-
-        supplied). The verdict is checked against the CURRENT active challenge's external_id for the key; a verify
-        with no outstanding challenge, or against a superseded external_id, refuses. On success the grant carries
-        an owner-signed ``expires_at`` = ``now + ttl_seconds`` and the SHA-256 of the verified external_id.
+        ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw (never customer-supplied); ``control_external_id`` is
+        the random id the provisioner generated for this check's negative control. The verdict is checked against
+        the CURRENT active challenge's external_id for the key; a verify with no outstanding challenge, or against a
+        superseded external_id, refuses. On success the grant carries an owner-signed ``expires_at`` =
+        ``now + ttl_seconds`` and the verified external id (so a later gated run can assume the role).
 
-        RECORDING A GRANT AUTHORIZES NO OFFENSE: it is a read-only CONNECTION record. Running a cloud-posture scan
-        against it is a separate, separately-gated engagement (see the module docstring)."""
+        RECORDING A GRANT AUTHORIZES NO OFFENSE: it is a read-only CONNECTION record (see the module docstring)."""
         if self.owner_key is None:
             raise ValueError("recording a cloud grant requires the owner signing key")
-        oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
-        ref = _check_role_ref(role_ref)
-        if prov not in _VERIFIABLE_PROVIDERS:
-            raise ValueError(f"self-serve connect for {prov!r} is not wired yet (only {sorted(_VERIFIABLE_PROVIDERS)} "
-                             f"can be verified today); do not record an unproven grant")
+        oid, prov = _check_org_id(org_id), _check_verifiable(provider)
+        acct = _check_account(account_id, prov)
+        ref = _check_role_ref(role_ref, prov, acct)
         ttl = float(ttl_seconds)
         if not (ttl > 0.0):
             raise ValueError("ttl_seconds must be positive")
         ch = self.challenge(oid, prov, acct)
         if ch is None:
             raise ValueError(f"no outstanding cloud-connect challenge for {prov}:{acct} (org {oid}) — issue one first")
-        if not cloud_grant_proves(prov, ch.external_id, acct, observed):
-            raise ValueError(f"control of {prov}:{acct} was not proven — VIGIL could not assume the role with the "
-                             f"issued external id, or it did not land in the claimed account")
-        from ..reuse import sha256_hex
+        refusal = cloud_grant_refusal(prov, ch.external_id, acct, observed, control_external_id=control_external_id)
+        if refusal is not None:
+            raise ValueError(refusal)
         verified_at = float(now)
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": ref,
-                "external_id_sha256": sha256_hex(ch.external_id.encode("utf-8")),
-                "verified_at": verified_at, "expires_at": verified_at + ttl,
+                "external_id": ch.external_id, "verified_at": verified_at, "expires_at": verified_at + ttl,
                 "state": "active", "issued_at": verified_at}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"read-only cloud grant RECORDED for {prov}:{acct} by org {oid} (owner-signed)"}
         self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
-        return CloudGrant(org_id=oid, provider=prov, account_id=acct, role_ref=ref,
-                          external_id_sha256=core["external_id_sha256"], verified_at=verified_at,
-                          expires_at=verified_at + ttl, issued_at=verified_at, state="active")
+        return CloudGrant(org_id=oid, provider=prov, account_id=acct, role_ref=ref, external_id=ch.external_id,
+                          verified_at=verified_at, expires_at=verified_at + ttl, issued_at=verified_at,
+                          state="active")
 
     def disconnect(self, org_id: str, provider: str, account_id: str) -> int:
         """Disconnect a cloud grant — the SAFE direction (honored even unsigned, fixed ``issued_at`` 0.0).
@@ -337,8 +408,7 @@ class CloudConnectRegistry:
         or when the customer removes the role. A grant with no active record authorizes nothing anywhere."""
         oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": "",
-                "external_id_sha256": "", "verified_at": 0.0, "expires_at": 0.0, "state": "revoked",
-                "issued_at": 0.0}
+                "external_id": "", "verified_at": 0.0, "expires_at": 0.0, "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"cloud grant for {prov}:{acct} (org {oid}) DISCONNECTED (governed latch)"}
@@ -349,7 +419,7 @@ class CloudConnectRegistry:
         """Fold the spine into {(org_id, provider, account_id): record_dict} whose latest state is active,
         authenticating each ``active`` grant under the owner pubkey valid AT ITS SEQ and refusing any stale/
         replayed re-append via the per-key high-water. Revokes (safe direction) are honored regardless of
-        signature. A FULL genesis scan (no snapshot seed in this slice — see the module HARD-PRUNE note)."""
+        signature. A genesis scan of the live window (no snapshot seed — the prune tripwire is the invariant)."""
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: dict[tuple, str] = {}
         issued: dict[tuple, float] = {}
@@ -374,7 +444,7 @@ class CloudConnectRegistry:
 
     def grant(self, org_id: str, provider: str, account_id: str) -> Optional[CloudGrant]:
         """The current active grant record for the key, or None (fail-closed). Does NOT apply the expiry filter —
-        use ``has_current_grant`` for a time-aware gate."""
+        use ``has_current_grant`` / ``assume_target`` for a time-aware gate."""
         try:
             oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
         except ValueError:
@@ -388,7 +458,7 @@ class CloudConnectRegistry:
     def _grant_of_row(oid: str, prov: str, acct: str, row: dict) -> CloudGrant:
         return CloudGrant(
             org_id=oid, provider=prov, account_id=acct, role_ref=str(row.get("role_ref") or ""),
-            external_id_sha256=str(row.get("external_id_sha256") or ""),
+            external_id=str(row.get("external_id") or ""),
             verified_at=float(as_issued_at(row.get("verified_at"))),
             expires_at=float(as_issued_at(row.get("expires_at"))),
             issued_at=as_issued_at(row.get("issued_at")), state="active")
@@ -401,6 +471,21 @@ class CloudConnectRegistry:
         if g is None:
             return False
         return float(now) < g.expires_at
+
+    def assume_target(self, org_id: str, provider: str, account_id: str, *, now: float) -> Optional[CloudAssumeTarget]:
+        """The ONE read a later READ-ONLY posture run consumes: the role + external id of an ACTIVE, UNEXPIRED,
+        owner-signed grant of a VERIFIABLE provider for exactly (org_id, provider, account_id), else None.
+        DEFAULT-DENY on everything else (no grant, revoked, expired, another org's account, an empty role/id).
+        Returning a target authorizes NOTHING: the run is an engagement that must itself pass
+        ``build_offense_gate -> conjunctive_decide``; the engine-side consumer of this read is not built
+        (VIGIL-LIMIT:LIMIT-customer-cloud-posture-run)."""
+        g = self.grant(org_id, provider, account_id)
+        if g is None or g.provider not in _VERIFIABLE_PROVIDERS or not (float(now) < g.expires_at):
+            return None
+        if not g.role_ref or not g.external_id:
+            return None
+        return CloudAssumeTarget(org_id=g.org_id, provider=g.provider, account_id=g.account_id,
+                                 role_ref=g.role_ref, external_id=g.external_id, expires_at=g.expires_at)
 
     def grants_of_org(self, org_id: str, *, now: Optional[float] = None) -> "list[CloudGrant]":
         """Every cloud account ``org_id`` currently has connected, in (provider, account) order. CROSS-TENANT
@@ -428,8 +513,8 @@ class CloudConnectRegistry:
         tenant-scoped read behind the connect screen's cloud leg. DEFAULT-DENY to this org (the fold is keyed per
         (org, provider, account); another tenant's accounts are STRUCTURALLY absent, never a client-chosen filter).
         Each account is ``connected`` (active + unexpired) or ``expired`` (active grant past its owner-signed
-        expiry → re-connect). Read-only: no lock, no mint, no owner key. Never includes the external_id secret
-        (only its hash is stored); ``access`` is the recorded read-only intent."""
+        expiry → re-connect). Read-only: no lock, no mint, no owner key. A fixed allowlist of fields — the external
+        id is NEVER projected; ``access`` is the recorded read-only intent."""
         if not isinstance(org_id, str) or not org_id:
             return []
         try:
