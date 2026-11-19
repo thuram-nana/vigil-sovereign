@@ -3412,17 +3412,18 @@ class Provisioner:
         q = _assistant.valid_question(question)
         if q is None:
             raise ProvisionDenied("the question is empty or too long")
-        # HONEST TODO (money-doctrine): the assistant's model spend is not yet drawn from the customer WALLET. With
-        # metered billing ON the gateway requires a per-grant ALLOWANCE (``LaunchAllowance`` is keyed by a launch lease,
-        # not by an assistant grant), so an assistant grant would be refused by the gateway. Until the assistant meter is
-        # wired into the wallet + statement, fail closed here rather than mint a grant the gateway cannot admit. The
-        # gateway still METERS the turn against the grant cap when metered billing is off (the invariant holds); what is
-        # unbuilt is only the wallet DRAW + its statement line.
-        if config.metered_billing_enabled():
+        # MONEY-DOCTRINE (PR-J2): with VIGIL_CUSTOMER_ASSISTANT_WALLET on every turn is ACCOUNTED to the session org —
+        # a per-org rate limit + daily turn budget and an owner-signed audit record, and with metered billing on a hold
+        # on the org's credits, an exact settle and a statement line (``_assistant_ask_accounted``). With it off the
+        # turn is refused while metered billing is on (never answered unbilled), else metered against its grant's cap.
+        accounted = config.customer_assistant_wallet_enabled()
+        if config.metered_billing_enabled() and not accounted:
             raise ProvisionDenied("the assistant is not yet available while metered billing is enabled")
         owner_key = getattr(self.orgs, "owner_key", None)
-        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):
+        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):  # gitleaks:allow — attr name, not a key
             raise ProvisionDenied("the assistant needs the owner key to mint its model grant")
+        if accounted:
+            return self._assistant_ask_accounted(requester, requester_org_id, q, owner_key)
         token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
         call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
         reply = _assistant.answer(self.store, requester_org_id, q, model_call=call, now=_t.time(),
@@ -3430,18 +3431,78 @@ class Provisioner:
                                   limit=config.assistant_finding_limit())
         return reply.as_dict()
 
-    def _mint_assistant_grant(self, org_id: str, owner_key: Any, *, now: float) -> str:
+    def _assistant_ask_accounted(self, requester: str, org_id: str, q: str, owner_key: Any) -> dict:
+        """PR-J2 — ONE assistant turn ACCOUNTED to the session org (``VIGIL_CUSTOMER_ASSISTANT_WALLET`` on).
+        ``requester`` / ``org_id`` are the hop-bound session principal :meth:`customer_assistant_ask` has ALREADY
+        admitted (view_assessments) — never a body field — so every record written and every credit moved is that
+        org's. The answer is the SAME grounded ``assistant.answer`` call as the unaccounted turn (same corpus, same
+        prompt, same limits — ``test_assistant_wallet`` pins the parity); only its model dial differs: before the one
+        request is sent, ``assistant_wallet.turn_opener`` admits it as a turn under a fresh grant nonce —
+
+          * the org's rate limit and daily turn budget are decided from the owner-signed turn ledger and the turn's
+            AUDIT record (who asked, for which org, under which grant) is written — over a limit is a
+            ``ProvisionRateLimited`` (with its retry-after), and NO model request is made;
+          * with metered billing on, that request's worst case — sized from its exact bytes — is HELD from the org's
+            credits (not enough credits, a billing hold, a replayed nonce or a busy ledger is a ``ProvisionDenied``,
+            nothing held and nothing sent), the grant is minted for exactly that hold, and once the request is over the
+            turn settles EXACTLY (its meter closed, its confirmed metered charge kept to the milli-credit, the rest
+            returned; a "Security assistant" line on the statement). A settle that must wait leaves the hold for a
+            later settle — never a charge the meter cannot prove.
+
+        The reply is the advice projection — no cost, no model name."""
+        import time as _t
+        from .. import config
+        from ..model_gateway import MIN_USEFUL_OUTPUT_TOKENS
+        from . import assistant as _assistant
+        from .assistant_wallet import TURN_DIAL_TIMEOUT_S, TurnRateLimited, TurnRefused, turn_opener
+        from .launch_gate import LaunchGate
+        metered = config.metered_billing_enabled()
+        # spending the org's credits takes the permission that spends them on a launch (every role holding
+        # view_assessments holds it today; this keeps it so if a read-only role ever gains the assistant)
+        if metered and not self.orgs.admit_customer(username=requester, org_id=org_id, permission="run_engagement"):
+            raise ProvisionDenied("requester may not spend this org's credits on the assistant (run_engagement)")
+
+        def mint(*, slug: Optional[str], nonce: str, now: float, cap_nano_usd: int) -> str:
+            return self._mint_assistant_grant(org_id, owner_key, now=now, slug=slug, nonce=nonce,
+                                              cap_nano_usd=cap_nano_usd)
+
+        call = _assistant.accounted_gateway_model_call(
+            gateway_url=config.model_gateway_url(),
+            open_turn=turn_opener(LaunchGate(self.store), org_id=org_id, requester=requester, mint=mint,
+                                  metered=metered),
+            min_output_tokens=MIN_USEFUL_OUTPUT_TOKENS if metered else 0, timeout=TURN_DIAL_TIMEOUT_S)
+        try:
+            reply = _assistant.answer(self.store, org_id, q, model_call=call, now=_t.time(),
+                                      model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
+                                      limit=config.assistant_finding_limit())
+        except TurnRateLimited as e:
+            self._audit("assistant_ask", requester=requester, org_id=org_id, outcome="refused", reason="rate_limited")
+            raise ProvisionRateLimited(e.retry_after) from None
+        except TurnRefused as e:
+            self._audit("assistant_ask", requester=requester, org_id=org_id, outcome="refused", reason="not_admitted")
+            raise ProvisionDenied(str(e)) from None
+        return reply.as_dict()
+
+    def _mint_assistant_grant(self, org_id: str, owner_key: Any, *, now: float, slug: Optional[str] = None,
+                              nonce: Optional[str] = None, cap_nano_usd: Optional[int] = None) -> str:
         """Mint a short-lived owner-signed MODEL GRANT for ONE assistant turn: the turn's model
         (``config.assistant_model``), the cheapest effort, a small per-turn cap (a technical ceiling a leaked token can
         never spend past), a fresh nonce (a fresh meter per turn) and a 5-minute life. Its meter is the org's assistant
         meter (``assistant:<customer_slug>``), separate from any launch's. Sovereign-side only (it holds the owner
-        private key); the token is handed only to the gateway dial, never logged or returned to the customer."""
+        private key); the token is handed only to the gateway dial, never logged or returned to the customer.
+
+        PR-J2 — an ACCOUNTED turn passes the ``nonce`` (and cap) its audit record names, and a turn billed to the org's
+        credits also its HOLD's ``slug`` (``assistant_wallet.assistant_slug``), so the grant's meter is the meter of
+        that hold and the gateway admits its request only within it. Omitted: exactly as before."""
         from vigil_core.model_grant import ModelGrant, encode_token, new_grant_id
         from .. import config
         from .target_authorization import _customer_slug
-        slug = "assistant:" + _customer_slug(org_id, "__assistant__")
-        grant = ModelGrant(grant_id=new_grant_id(), org_id=org_id, engagement_slug=slug, nonce=new_grant_id(),
-                           model=config.assistant_model(), effort="high", cap_nano_usd=config.assistant_cap_nano_usd(),
+        if slug is None:
+            slug = "assistant:" + _customer_slug(org_id, "__assistant__")
+        grant = ModelGrant(grant_id=new_grant_id(), org_id=org_id, engagement_slug=slug,
+                           nonce=nonce if nonce is not None else new_grant_id(), model=config.assistant_model(),
+                           effort="high",
+                           cap_nano_usd=cap_nano_usd if cap_nano_usd is not None else config.assistant_cap_nano_usd(),
                            not_after=now + 300.0, issued_at=now)
         return encode_token(grant, owner_key.private_key_b64)
 
