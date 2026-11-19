@@ -539,8 +539,14 @@ class Provisioner:
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
+                 shard_assignments=None,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
+        # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up. None
+        # (the default, and every pre-PR-F construction) ⇒ shard-on-signup is a byte-identical no-op. Even when
+        # injected it stays inert unless `customer_fair_queue_enabled()` + `multi_shard_enabled()` + an owner
+        # `shard_ids()` topology are all set — a tenant NEVER chooses its shard (see `_place_on_signup`).
+        self.shard_assignments = shard_assignments
         self.customers = customers
         self.orgs = orgs
         self.wallet = wallet
@@ -643,6 +649,28 @@ class Provisioner:
         nxt = t if t > self._last_issued else math.nextafter(self._last_issued, math.inf)
         self._last_issued = nxt
         return nxt
+
+    def _place_on_signup(self, org_id: str) -> None:
+        """PR-F: owner-sign a SHARD PLACEMENT for a newly-created tenant, when the fair-queue + multi-shard flags
+        are on and the owner has named a shard topology. A byte-identical NO-OP otherwise: without an injected
+        registry (every pre-PR-F build), with either flag off, or with no owner `shard_ids()` nothing is read,
+        minted or appended. A tenant NEVER chooses its shard — the shard is server-chosen from owner topology +
+        current load and owner-signed (`shard_on_signup.assign_on_signup`). IDEMPOTENT (a tenant already placed is
+        a no-op), so it rides the idempotent-forward sign-up transaction: the caller runs it under the sign-up lock
+        before the commit marker, so a crash before the commit re-drives to exactly one placement. A placement
+        failure (e.g. a mis-named shard) fails the sign-up CLOSED (the token stays valid for a safe retry) rather
+        than leaving a routable-but-unplaced tenant — consistent with Finding A's 'ONE account/org/trial — or
+        nothing'."""
+        if self.shard_assignments is None:
+            return
+        from .. import config
+        if not (config.customer_fair_queue_enabled() and config.multi_shard_enabled()):
+            return
+        shard_ids = config.shard_ids()
+        if not shard_ids:
+            return
+        from ..governor.shard_on_signup import assign_on_signup
+        assign_on_signup(self.shard_assignments, org_id, shard_ids=shard_ids, issued_at=self._next_issued())
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
@@ -1031,6 +1059,7 @@ class Provisioner:
             role = _signup_role(self._founder_latch_open)
             self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
             trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
+            self._place_on_signup(org_id)                  # PR-F: owner-signed shard placement (no-op unless on)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
@@ -1198,6 +1227,7 @@ class Provisioner:
         role = _signup_role(self._founder_latch_open)
         self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
         self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
+        self._place_on_signup(org_id)                      # PR-F: owner-signed shard placement (no-op unless on)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
