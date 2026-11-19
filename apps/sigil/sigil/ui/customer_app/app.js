@@ -1285,6 +1285,7 @@
     if (!fs.length) { return h("div.card.cust-soon", { text: "No findings for " + host + "." }); }
     var cards = fs.map(function (f) {
       return VUI.card(f.title || f.finding_ref || "Finding", f.severity || null, h("div", {}, [
+        blindVulnBadge(f),                             // PR-L: "Confirmed out-of-band" (null, so dropped, when off/none)
         kv("Severity", f.severity), kv("Class", f.bug_class), kv("Surface", f.surface), kv("Confidence", f.confidence),
         f.summary ? h("p", { text: f.summary }) : null,
         f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
@@ -1293,6 +1294,185 @@
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
+  }
+
+  // ---- Blind-vuln (out-of-band) confirmation badge (PR-L, Area 11) ---------------------------------------------
+  // Shown only while the edge writes data-blind-vuln="1" (VIGIL_CUSTOMER_BLIND_VULN) AND the finding carries a
+  // signed out-of-band attestation (oob_attestation). VIGIL proved this vulnerability by an INDEPENDENT, signed
+  // out-of-band callback — a vuln with no visible response that most scanners miss. The badge only SURFACES the
+  // signed attestation already on a PROVEN finding (every finding the read returns is oracle-confirmed): it
+  // re-verifies nothing, promotes nothing, and is absent (null -> the kit drops it) when off or when no
+  // attestation is present — never rendered as "clean". Off: blindVulnBadge returns null and findingsBlock
+  // renders exactly the pre-PR-L card.
+  var BLIND_VULN_ON = pageFlag("blindVuln");
+  function isEmptyObj(o) { for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) return false; } return true; }
+  function shortId(s) {
+    s = (s == null) ? "" : String(s);
+    return (s.length > 22) ? (s.slice(0, 12) + "…" + s.slice(-6)) : s;
+  }
+  function oobMethodLabel(m) {
+    m = String(m || "").toLowerCase();
+    if (m === "dns") return "DNS callback";
+    if (m === "http" || m === "https") return "HTTP callback";
+    return m ? m : null;                              // an unknown method shows as-is (textContent — safe); empty -> dropped
+  }
+  function oobWhen(ts) {
+    var n = Number(ts);
+    if (!isFinite(n) || n <= 0) return null;
+    try { return new Date((n < 1e12 ? n * 1000 : n)).toISOString().replace("T", " ").replace(/\..*/, " UTC"); }
+    catch (e) { return null; }
+  }
+  function oobDetail(att) {
+    // Each line is kv() (textContent — never innerHTML), so a hostile value can never inject. Dropped when absent.
+    var rows = [kv("Confirmation", "Out-of-band signed callback"),
+                kv("Method", oobMethodLabel(att.method)),
+                kv("Independent collector", shortId(att.collector_key_id)),
+                kv("Correlation canary", shortId(att.canary || att.token)),
+                kv("Callback received", oobWhen(att.received_at)),
+                kv("Receipt digest", shortId(att.receipt_digest || att.signature))];
+    rows.push(h("p.cust-muted", { text: "An independent collector signed this callback; the receipt re-verifies "
+      + "offline against the pinned collector key — VIGIL cannot forge it." }));
+    return rows;
+  }
+  function blindVulnBadge(f) {
+    if (!BLIND_VULN_ON) return null;                 // flag OFF: ignored even if a read carried an attestation
+    var att = f && f.oob_attestation;
+    if (!att || typeof att !== "object" || isEmptyObj(att)) return null;   // no signed attestation -> no badge
+    var panel = h("div.cust-oob-detail", { hidden: true }, oobDetail(att));
+    var btn = h("button.cust-link-btn", { type: "button", "aria-expanded": "false", text: "How we proved it",
+      onClick: function () {
+        var open = panel.hidden;
+        panel.hidden = !open;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        btn.textContent = open ? "Hide proof" : "How we proved it";
+      } });
+    return h("div.cust-oob", {}, [
+      h("div.cust-oob-head", {}, [
+        h("span.cust-badge.cust-badge-oob", { text: "✓ Confirmed out-of-band" }),
+        h("span.cust-oob-sub", { text: "No visible response — proven by an independent, offline-verifiable callback. "
+          + "Most scanners miss this." }),
+      ]),
+      h("div.row", {}, [btn]),
+      panel,
+    ]);
+  }
+
+  // ---- Attack-path storytelling (PR-L, Area 11) ---------------------------------------------------------------
+  // Shown only while the edge writes data-attack-path="1" (VIGIL_CUSTOMER_ATTACK_PATH). A visual narrative of how
+  // the org's PROVEN findings chain into real impact (e.g. SSRF -> cloud metadata -> credentials -> data access).
+  // Built ENTIRELY from the inert, signed attack_path field already on a finding (every step restates an oracle
+  // that fired): it invents no chain and asserts no impact the cert did not. Each chain renders as an SVG ribbon
+  // (static markup, every dynamic value escaped — no inline handler) plus an accessible step list with real
+  // buttons. Empty -> an honest "no chains surfaced yet" (never "you are safe"). Off: #/attack-path is the home
+  // screen and no nav link is shown (byte-identical).
+  var ATTACK_PATH_ON = pageFlag("attackPath");
+  function svgEsc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;";
+    });
+  }
+  function clip(s, n) { s = String(s == null ? "" : s); return (s.length > n) ? (s.slice(0, n - 1) + "…") : s; }
+  function attackStep(s) {
+    if (!s || typeof s !== "object") return null;
+    var src = String(s.src || ""), dst = String(s.dst || ""), edge = String(s.edge || s.technique || "");
+    if (!dst && !src) return null;                   // a step with no endpoints carries nothing to draw
+    return { src: src, dst: dst, edge: edge, technique: String(s.technique || ""),
+             oracle: String(s.oracle || ""), finding_ref: String(s.finding_ref || "") };
+  }
+  function attackChainOf(f) {
+    // Normalise a finding's inert attack_path into a drawable chain, or null. Pure projection of signed DATA.
+    var ap = f && f.attack_path;
+    if (!ap || typeof ap !== "object") return null;
+    var raw = ap.steps;
+    if (!Array.isArray(raw) || !raw.length) return null;
+    var steps = raw.map(attackStep).filter(function (s) { return s; });
+    if (!steps.length) return null;
+    // Nodes = the first step's source, then each step's destination (the ordered reachability the proof walked).
+    var nodes = [];
+    if (steps[0].src) nodes.push({ label: steps[0].src, kind: "start", edge: "", prov: "" });
+    steps.forEach(function (s, i) {
+      nodes.push({ label: s.dst || ("step " + (i + 1)), kind: (i === steps.length - 1) ? "impact" : "node",
+                   edge: s.edge, prov: s.oracle || s.finding_ref });
+    });
+    var destination = String(ap.destination || (steps[steps.length - 1] || {}).dst || "");
+    if (destination && nodes.length) { nodes[nodes.length - 1].label = destination; }
+    return { title: f.title || f.finding_ref || "Finding", host: f.surface || "",
+             slug: f.engagement_slug || "", impact: String(ap.impact || ""), steps: steps, nodes: nodes };
+  }
+  function chainSvg(c) {
+    // A VERTICAL kill-chain ribbon: node boxes top-to-bottom joined by labelled arrows. Static markup built as a
+    // trusted string (the icon pattern); EVERY dynamic value passes through svgEsc, so a hostile finding title or
+    // step label can neither break the markup nor inject. Mobile-first: fixed narrow width, grows vertically.
+    var W = 300, PAD = 8, BOXH = 46, GAP = 46, BOXW = W - PAD * 2;
+    var n = c.nodes.length, H = PAD * 2 + n * BOXH + (n - 1) * GAP;
+    var parts = ['<svg class="cust-chain-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H
+      + '" role="img" aria-label="Attack chain to impact" xmlns="http://www.w3.org/2000/svg">'];
+    var defs = '<defs><marker id="apArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" '
+      + 'orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>';
+    parts.push(defs);
+    for (var i = 0; i < n; i++) {
+      var y = PAD + i * (BOXH + GAP), cx = W / 2, nd = c.nodes[i];
+      if (i > 0) {                                    // the arrow + edge label from the previous node into this one
+        var y0 = y - GAP, ymid = y0 + GAP / 2;
+        parts.push('<line x1="' + cx + '" y1="' + y0 + '" x2="' + cx + '" y2="' + (y - 2)
+          + '" stroke="currentColor" stroke-width="1.5" marker-end="url(#apArrow)" class="cust-chain-edge"/>');
+        if (nd.edge) {
+          parts.push('<text x="' + (cx + 8) + '" y="' + (ymid + 4) + '" class="cust-chain-edgelbl">'
+            + svgEsc(clip(nd.edge, 30)) + '</text>');
+        }
+      }
+      var cls = nd.kind === "impact" ? "cust-chain-box impact" : nd.kind === "start" ? "cust-chain-box start"
+        : "cust-chain-box";
+      parts.push('<rect x="' + PAD + '" y="' + y + '" width="' + BOXW + '" height="' + BOXH + '" rx="8" class="'
+        + cls + '"/>');
+      parts.push('<title>' + svgEsc(nd.label) + (nd.prov ? (" — proven: " + svgEsc(nd.prov)) : "") + '</title>');
+      var ty = y + (nd.kind === "impact" || nd.kind === "start" ? BOXH / 2 + 4 : BOXH / 2 + 4);
+      var pfx = nd.kind === "impact" ? "◎ " : "✓ ";
+      parts.push('<text x="' + cx + '" y="' + ty + '" text-anchor="middle" class="cust-chain-lbl">'
+        + svgEsc(pfx + clip(nd.label, 34)) + '</text>');
+    }
+    parts.push('</svg>');
+    return parts.join("");
+  }
+  function chainStepList(c) {
+    // The accessible, interactive twin of the SVG: each step is a real button (CSP-safe; no inline handler) that
+    // links to Assessments where its proven finding lives. Screen-reader friendly and never truncated beyond clip.
+    var items = c.steps.map(function (s, i) {
+      var label = (s.src ? (clip(s.src, 26) + " ") : "") + "→" + (s.edge ? (" [" + clip(s.edge, 26) + "] ") : " ")
+        + "→ " + clip(s.dst, 26);
+      var prov = s.oracle ? ("proven by " + s.oracle) : (s.finding_ref ? ("finding " + s.finding_ref) : "proven step");
+      return h("button.cust-chain-step", { type: "button", onClick: function () { nav("#/assessments"); } }, [
+        h("span.cust-chain-step-n", { text: String(i + 1) }),
+        h("span.cust-chain-step-main", {}, [h("span", { text: label }), h("span.cust-muted", { text: prov })]),
+      ]);
+    });
+    return h("div.cust-chain-steps", {}, items);
+  }
+  function chainCard(c) {
+    var impact = c.impact ? h("span.cust-chain-impact", { text: "Business impact: " + c.impact }) : null;
+    return VUI.card("How this chains to impact", null, h("div", {}, [
+      h("div.cust-kv", {}, [h("span.k", { text: "Finding" }), h("span", { text: c.title })]),
+      c.host ? kv("Entry surface", c.host) : null,
+      impact,
+      h("div.cust-chain-wrap", { html: chainSvg(c) }),
+      chainStepList(c),
+      h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+        onClick: function () { nav("#/assessments"); } })]),
+    ]));
+  }
+  function viewAttackPath() {
+    return dataView("#/attack-path", "Attack path", API + "/assessments/findings", function (d) {
+      var findings = (d && d.findings) || [];
+      var chains = findings.map(attackChainOf).filter(function (c) { return c; });
+      var intro = h("p.cust-muted", { text: "How your proven findings chain into real impact. Each node is a step "
+        + "VIGIL confirmed; the final node is the business impact a real attacker reaches." });
+      if (!chains.length) {
+        return h("div", {}, [intro, h("div.card.cust-soon", { text: "No attack chains have been surfaced for your "
+          + "authorized assessments yet. A chain appears here when VIGIL proves that findings combine into real "
+          + "impact — it is not a statement that no chain exists." })]);
+      }
+      return h("div", {}, [intro, h("div", {}, chains.map(chainCard))]);
+    });
   }
 
   // ---- Assessments: retest a finding (C1b) ----------------------------------------------------------------------
@@ -2676,6 +2856,7 @@
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(ATTACK_PATH_ON ? [navLink("Attack path", "#/attack-path")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
@@ -2750,6 +2931,8 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
+    "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
     "#/code": function () { return authed() ? (CODE_ON ? viewCode() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is

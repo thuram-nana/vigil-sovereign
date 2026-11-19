@@ -298,6 +298,28 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_fix_it_enabled() -> bool:
+    """True iff the customer one-click "Fix it for me" DISPATCH (consumer Area 10 / PR-K) is ON
+    (`VIGIL_CUSTOMER_FIX_IT` affirmative). OFF by default and NESTED under `VIGIL_REDPEN_ENABLED` (which gates the
+    whole Code screen): with it off the Code screen's Fix this action keeps returning the honest inert "coming"
+    answer — byte-identical to a build without the dispatch — and the overview advertises `fix` as unavailable;
+    nothing is reserved, metered or published to the `redpen-actions` seam.
+
+    With it ON (and `VIGIL_REDPEN_ENABLED` also on), an explicit customer "Fix this" on ONE reproduced finding
+    DISPATCHES to the already-built offense Fix worker (`vigil_integration.jobs.redpen_fix`) by publishing a
+    validated action marker to the dedicated `redpen-actions` seam — but ONLY after the full sovereign guard
+    chain that was already present: the `manage_code` admit (decision O-4), the E3c step-up (a fix opens a PR —
+    sensitive), and a `reserve_redpen_review` that re-verifies the active owner-signed connected-repo record +
+    the wallet floor + the per-repo monthly limit and METERS the model spend with no estimate. The dispatch
+    GRANTS NO BYPASS: the marker is an untrusted trigger and the offense plane re-checks every authority where it
+    WRITES (the owner-signed repo-exact `"pr"` grant + the signed-spine FACT), re-reviews the patch, and opens
+    only a gated, m-of-n-quorum PR from a fix branch — VIGIL never merges. It mints NO fact and implies NO
+    clearance: a clearance is the signed NEGATIVE remediation cert the independent verification path earns, never
+    a button's claim. Read at call time; a pure env read (FATAL-2 clean — this sovereign accessor loads no
+    offense module, and the offense plane reads the same master `VIGIL_REDPEN_ENABLED` through its own helper)."""
+    return (os.environ.get("VIGIL_CUSTOMER_FIX_IT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def presentation_enabled() -> bool:
     """True iff the APEX PR-A presentation spine is ON (`VIGIL_APEX_PRESENTATION` affirmative). OFF by default
     (mirrors `redpen_enabled`): with it off the customer Posture read (``/api/customer/assessments/posture`` →
@@ -313,6 +335,35 @@ def presentation_enabled() -> bool:
     The ``presentation`` block is ADDITIVE SIGNED DATA that never changes a FACT/oracle verdict, and posture +
     triage are derived SOVEREIGN-side ONLY from the org's own proven findings. Read at call time."""
     return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_attack_path_enabled() -> bool:
+    """True iff the customer Attack-path storytelling screen is ON (`VIGIL_CUSTOMER_ATTACK_PATH` affirmative). OFF
+    by default (Area 11 UI): with it off the ``#/attack-path`` SPA route is the home screen (exactly as an unknown
+    route), no nav link is shown, the page's ``__VIGIL_ATTACK_PATH__`` switch is "0", and the sovereign findings
+    projection NEVER surfaces the inert ``attack_path`` cert field — so the server is byte-identical to a build
+    without the feature.
+
+    PURE PRESENTATION: ``attack_path`` is additive, purely-descriptive signed DATA that rides the EXISTING
+    tenant-scoped finding projection (``assessments._finding_json``); it restates oracles that already fired for
+    the org's OWN proven findings, is NEVER read for any verdict, and can promote nothing. The screen only draws
+    a chain the signed data already established — it invents no finding and asserts no impact the cert did not.
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ATTACK_PATH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_blind_vuln_enabled() -> bool:
+    """True iff the customer blind-vulnerability (out-of-band) confirmation badge is ON (`VIGIL_CUSTOMER_BLIND_VULN`
+    affirmative). OFF by default (Area 11 UI): with it off the finding card renders byte-identically (no badge),
+    the page's ``__VIGIL_BLIND_VULN__`` switch is "0", and the sovereign findings projection NEVER surfaces the
+    inert ``oob_attestation`` cert field — so the server is byte-identical to a build without the feature.
+
+    PURE PRESENTATION: ``oob_attestation`` is the EXISTING signed, independent out-of-band callback receipt
+    (pinned-collector-key attested) carried on the finding cert as inert DATA. The badge only SURFACES that a
+    proven finding was confirmed out of band (a vuln with no visible response); it re-verifies nothing, promotes
+    nothing, and is shown ONLY when the signed attestation is present — absence is never rendered as "clean".
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_BLIND_VULN") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_assistant_enabled() -> bool:
