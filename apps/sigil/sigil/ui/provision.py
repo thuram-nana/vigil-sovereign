@@ -3075,7 +3075,10 @@ class Provisioner:
                     row["used_this_month"] = spend.charged(requester_org_id, doc.repo, now=t)
                 repos.append(row)
         available = {"connect": bool(config.github_app_slug())}
-        available.update({a: a in self._REDPEN_EXECUTION_LIVE for a in ("review", "schedule", "fix", "retest")})
+        live = set(self._REDPEN_EXECUTION_LIVE)
+        if config.customer_fix_it_enabled():      # PR-K: "Fix this" dispatches to the built R5 worker when on
+            live.add("fix")
+        available.update({a: a in live for a in ("review", "schedule", "fix", "retest")})
         return {"org_id": requester_org_id, "repos": repos, "available": available}
 
     # The Connect GitHub `state`: an OWNER-signed {kind, org_id, exp, nonce}, base64url-JSON, that round-trips the session
@@ -3323,11 +3326,49 @@ class Provisioner:
     def redpen_fix_this(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
                         mfa_at=0.0, now: "Optional[float]" = None) -> dict:
         """Fix this — VIGIL writes a patch for one reproduced finding, checks it, and opens a pull request for the
-        customer to review (R5 ``redpen_fix_this``). VIGIL never merges anything itself."""
+        customer to review (R5 ``redpen_fix_this``). VIGIL never merges anything itself.
+
+        Behind ``VIGIL_CUSTOMER_FIX_IT`` (PR-K; nested under ``VIGIL_REDPEN_ENABLED``): OFF (default) keeps the
+        honest inert ``coming`` answer, fully guarded, byte-identical to a build without the dispatch. ON
+        DISPATCHES the action to the already-built offense Fix worker — the full guard chain (manage_code admit +
+        E3c step-up + a ``reserve_redpen_review`` that re-verifies the connected-repo record, holds the wallet
+        reservation and meters the model spend) runs first, then a validated marker is published to the dedicated
+        ``redpen-actions`` seam. The offense plane re-checks every authority where it WRITES and opens only a
+        gated, m-of-n PR (VIGIL never merges). Nothing here mints a fact or asserts a clearance."""
+        from .. import config
         t = self._now() if now is None else float(now)
         fref = self._redpen_finding_ref(finding_ref)
-        ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
-        return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+        if not config.customer_fix_it_enabled():
+            # Dispatch not enabled on this deployment (default): keep the honest, fully-guarded "coming" answer so
+            # the console is byte-identical to a build without PR-K (no reservation, nothing published).
+            ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+            return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+        return self._redpen_dispatch_fix(requester, requester_org_id, repo, fref, mfa_at=mfa_at, now=t)
+
+    def _redpen_dispatch_fix(self, requester: str, org_id: str, repo: str, finding_ref: str, *, mfa_at,
+                             now: float) -> dict:
+        """PR-K dispatch tail (reached ONLY with ``VIGIL_CUSTOMER_FIX_IT`` on): hand one customer "Fix this" to
+        the built offense Fix worker. Reuses the merged sovereign dispatch (``redpen_provision.redpen_fix_this``),
+        which runs the SAME guard chain the inert path's guards did (flag + ``manage_code`` admit + E3c step-up)
+        and then reserves/meters via ``reserve_redpen_review`` (the connected-repo record is the authorization of
+        record) and publishes the fix marker on the dedicated ``redpen-actions`` seam. The step-up is the
+        provisioner's own E3c check, bound to ``now``.
+
+        The returned payload is CUSTOMER-SAFE: it names no model, price, estimate or credit count (the reservation
+        is metered sovereign-side; the customer-facing answer only says the fix was handed off). The dispatch
+        grants no bypass — the marker is an untrusted trigger and the offense plane re-checks the owner-signed
+        ``"pr"`` grant + the signed-spine FACT, re-reviews the patch, and opens only a gated m-of-n PR. A refused
+        conjunct raises (``ProvisionDenied`` / ``ProvisionStepUpRequired``) and nothing is reserved or published."""
+        from . import redpen_provision
+        from .launch_gate import LaunchGate
+        res = redpen_provision.redpen_fix_this(
+            requester=requester, org_id=org_id, repo=repo, finding_ref=finding_ref, orgs=self.orgs,
+            launch_gate=LaunchGate(self.store), now=now, mfa_at=mfa_at,
+            require_stepup=lambda m: self._require_stepup(m, now=now))
+        ref = str(res.get("repo") or "")
+        self._audit("redpen_fix_this", requester=requester, org_id=org_id, target=ref, outcome="dispatched",
+                    critical=True)
+        return {"org_id": org_id, "repo": ref, "finding_ref": finding_ref, "dispatched": True}
 
     def redpen_retest(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
                       mfa_at=0.0, now: "Optional[float]" = None) -> dict:
