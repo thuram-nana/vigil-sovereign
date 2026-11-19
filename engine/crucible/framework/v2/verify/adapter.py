@@ -552,6 +552,18 @@ class FindingContext(BaseModel):
     # requests are VIGIL's own on its own socket. No benchmark/scan/engage finding carries `smuggling_desync`,
     # so appending it leaves the gate byte-identical and reuses the frozen kind (oracle_version untouched).
     smuggling_desync: dict[str, Any] | None = None
+    # parser_state_toggle_oracle (nosqli/ldap_injection/xpath_injection datastore QUERY BREAK). The retained
+    # record the gated THREE-leg re-drive (live/runtime_redrive.py:injection_redrive) captured: {engine,
+    # break/balanced/control each {body,status}, break_payload/balanced_payload/control_payload}. The oracle
+    # (kind ERROR_SIGNATURE — REUSE, like smuggling_desync reuses DIFFERENTIAL_RESPONSE — reached via the fresh
+    # `parser_state_toggle` ctx key) re-derives OFFLINE that the datastore parser errored on the UNBALANCED
+    # break leg ALONE (a genuine query break) while the re-balanced leg (same metacharacter SET, re-derived
+    # from the retained payloads) and the benign control did not, that the matched signature is a genuine
+    # parser-break MESSAGE (never a bare package name), and that the break leg is not a block/rejection. No
+    # benchmark/scan/engage finding carries `parser_state_toggle`, so appending it leaves the gate byte-
+    # identical and reuses the frozen kind (oracle_version(ERROR_SIGNATURE) untouched — the SQL error_signature
+    # certificates bind it).
+    parser_state_toggle: dict[str, Any] | None = None
     # password_reset_invariant_oracle (Wave-4.3 — CWE-640/613/330, its OWN OracleKind.PASSWORD_RESET_INVARIANT).
     # The retained record scanner.reset captured through the gated send carries the RAW bytes the oracle re-runs
     # over. Discriminated by `mode`:
@@ -2733,6 +2745,8 @@ class FindingContext(BaseModel):
             ctx["mfa_bypass"] = self.mfa_bypass
         if self.smuggling_desync is not None:
             ctx["smuggling_desync"] = self.smuggling_desync
+        if self.parser_state_toggle is not None:
+            ctx["parser_state_toggle"] = self.parser_state_toggle
         if self.password_reset_invariant is not None:
             ctx["password_reset_invariant"] = self.password_reset_invariant
         if self.jwt_token is not None:

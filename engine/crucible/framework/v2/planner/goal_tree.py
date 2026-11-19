@@ -293,8 +293,16 @@ class GoalTree:
             if n.kind == "leaf" and n.status == "open":
                 yield n
 
-    def best_open_leaf(self) -> GoalNode | None:
-        scored = [(l.score(), l) for l in self.open_leaves()]
+    def best_open_leaf(
+        self, *, leaf_filter: "Callable[[GoalNode], bool] | None" = None,
+    ) -> GoalNode | None:
+        """Myopic greedy pick (``prior * value / cost``). ``leaf_filter`` (default None → byte-identical)
+        restricts consideration to the open leaves it accepts — a multi-agent SURFACE-DECOMPOSITION selector
+        passes one so a single domain's leaves are scored without re-implementing the scoring. When None the
+        iterator, the scored list and the (stable, insertion-order tie-break) sort are exactly as before."""
+        leaves = self.open_leaves() if leaf_filter is None else (
+            l for l in self.open_leaves() if leaf_filter(l))
+        scored = [(l.score(), l) for l in leaves]
         if not scored:
             return None
         scored.sort(key=lambda t: t[0], reverse=True)
@@ -310,6 +318,7 @@ class GoalTree:
         k: int = 3,
         weight_fn: "Callable[[Edge], float] | None" = None,
         edge_kinds: "Iterable | None" = None,
+        leaf_filter: "Callable[[GoalNode], bool] | None" = None,
     ) -> GoalNode | None:
         """World-model-aware leaf selection.
 
@@ -326,9 +335,13 @@ class GoalTree:
 
         Falls back to :meth:`best_open_leaf` verbatim when the world model is
         not supplied, so the default (world=None) path is byte-for-byte the
-        legacy behaviour. Deterministic: ties break on ascending leaf id."""
+        legacy behaviour. Deterministic: ties break on ascending leaf id.
+
+        ``leaf_filter`` (default None → byte-identical) scopes the selection to the open leaves it accepts
+        (a surface-decomposition domain), threaded through BOTH greedy fall-backs and the path-aware scored
+        loop so a domain-scoped pick still earns the full path-boost it would globally."""
         if world is None or not objective_kinds or source is None:
-            return self.best_open_leaf()
+            return self.best_open_leaf(leaf_filter=leaf_filter)
 
         boosts = _path_node_boosts(
             world,
@@ -341,11 +354,13 @@ class GoalTree:
         )
         if not boosts:
             # No crown-jewel reachable: nothing to bias toward — behave greedily.
-            return self.best_open_leaf()
+            return self.best_open_leaf(leaf_filter=leaf_filter)
 
         # (-effective_score, leaf_id) sorts to max score, then lowest id.
         scored: list[tuple[float, int, GoalNode]] = []
         for leaf in self.open_leaves():
+            if leaf_filter is not None and not leaf_filter(leaf):
+                continue
             base = leaf.score()
             nid = surface_to_node_id(world, leaf.surface)
             mult = boosts.get(nid, 1.0) if nid is not None else 1.0
