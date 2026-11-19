@@ -91,6 +91,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/assessments": ("Assessments", ("api/customer/assessments", "api/customer/launches")),
     "#/team": ("Team", ("api/customer/members",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/guide": ("Guide", ()),
 }
 _PREAUTH: dict[str, str] = {"#/login": "Sign in", "#/signup": "Create your account",
@@ -123,11 +124,13 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does).
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
-               "code": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0"}
+               "code": "1", "posture": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0"}
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
-# (the Buy section): Gate 5 buys credits, so the gate's configuration has it on.
+# (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. Fix first (PR-B) is served only with
+# its own switch AND its master switch, VIGIL_APEX_PRESENTATION.
 _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
-              "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI")
+              "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
+              "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION")
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -303,6 +306,46 @@ _FAKE_SERVER = {
                                 "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
     "api/customer/monitoring/events": {"org_id": "org_acme", "events": []},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
+    # PR-B Fix first: one verified host tested — two open findings worst first (the critical one with its signed
+    # plain-language parts and fix), one a retest proved fixed, the first six weeks not measured yet. The scores are the
+    # server's own arithmetic over these severities (100 x 100 // (100 + 45 + 22 [+ 9 while the medium was open])).
+    "api/customer/posture": {
+        "org_id": "org_acme", "measured": True, "posture_score": 59, "hosts_total": 1, "findings_total": 3,
+        "open_total": 2, "fixed_total": 1,
+        "severity_counts": {"critical": 1, "high": 1, "unrated": 0, "medium": 0, "low": 0, "info": 0},
+        "fix_first": [
+            {"finding_ref": "sqli-login", "engagement_slug": "cust_a", "bug_class": "sqli",
+             "surface": "https://a.example/login", "title": "SQL injection at /login", "severity": "critical",
+             "severity_basis": "certificate", "priority_score": 1.6667, "effort": "L", "tier": 1,
+             "tier_label": "Tier 1", "presentation_signed": True,
+             "standards_chips": [{"framework": "owasp", "label": "OWASP Top 10", "version": "OWASP Top 10:2021",
+                                  "ids": ["A03:2021"]},
+                                 {"framework": "cwe", "label": "CWE", "version": "CWE 4.x", "ids": ["CWE-89"]}],
+             "plain_impact": {"what": "The sign-in form builds a database query from what a visitor types.",
+                              "category_consequence": "Someone could read or change the data the database holds.",
+                              "established": "that the sign-in form's input changed the database query's result.",
+                              "description_on_file": True},
+             "remediation": "Pass `username` to the query as a bound parameter on `POST /login`.",
+             "oracle_context_digest": "d-sqli", "host": "a.example", "status": "open"},
+            {"finding_ref": "xss-search", "engagement_slug": "cust_a", "bug_class": "xss",
+             "surface": "https://a.example/search", "title": "Reflected XSS at /search", "severity": "high",
+             "severity_basis": "certificate", "priority_score": 2.0, "effort": "M", "tier": 1, "tier_label": "Tier 1",
+             "presentation_signed": False, "oracle_context_digest": "d-xss", "host": "a.example", "status": "open",
+             "standards_chips": [{"framework": "owasp", "label": "OWASP Top 10", "version": "OWASP Top 10:2021",
+                                  "ids": ["A03:2021"]}]}],
+        "fixed": [{"finding_ref": "redir-go", "engagement_slug": "cust_a", "bug_class": "open_redirect",
+                   "title": "Open redirect at /go", "severity": "medium", "host": "a.example", "status": "fixed",
+                   "status_at": 1798000000.0}],
+        "standards_summary": {"frameworks": [{"framework": "owasp", "label": "OWASP Top 10",
+                                              "version": "OWASP Top 10:2021", "findings": 2}]},
+        "trend": {"points": [{"at": 1792800000 + 604800 * k, "posture_score": None if k < 6 else (56 if k < 8 else 59),
+                              "open": 0 if k < 6 else (3 if k < 8 else 2), "fixed": 0 if k < 8 else 1}
+                             for k in range(12)],
+                  "step_seconds": 604800, "current": 59, "since": 1792800000 + 604800 * 6, "change": 3},
+        "basis": {"method": "100 × 100 // (100 + Σ severity penalties) over the org's OPEN oracle-confirmed findings",
+                  "weights": {"critical": 45, "high": 22, "unrated": 12, "medium": 9, "low": 3, "info": 1},
+                  "counts_fixes": True, "note": "an honest heuristic for prioritising, not a measured or certified rating"},
+        "generated_from": "proven_findings"},
 }
 
 
@@ -529,7 +572,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers"):
+        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "posture",
+                  "posture/trend"):
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

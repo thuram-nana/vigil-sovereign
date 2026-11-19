@@ -521,6 +521,26 @@ def customer_retest_reproof_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_posture_enabled() -> bool:
+    """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
+    Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of
+    what to fix first — each open finding's plain-language impact, its standards chips and its exact remediation — read
+    from the edge's ``api/customer/posture`` (the cockpit's ``customer_posture`` action) and
+    ``api/customer/posture/trend`` (``posture_trend``, which also feeds the Overview's Posture card).
+
+    Effective ONLY together with `presentation_enabled()` (VIGIL_APEX_PRESENTATION): that is the master switch over
+    the consumer posture surface and the signed presentation block this screen renders, so this flag on with it off
+    is OFF. OFF by default (mirrors `redpen_enabled`): both routes and both cockpit actions are absent (404, exactly
+    as an unknown route), the page's ``data-posture`` switch is "0", there is no Fix first tab, ``#/fix-first`` is
+    the home screen exactly as an unknown route, and the Overview has no Posture card and makes no posture read — so
+    the app is byte-identical to a build without it. Everything shown is a read-only projection of the org's OWN
+    oracle-confirmed findings (``ui/customer_posture.py``): it mints nothing, decides no verdict and makes no model
+    call. Read by the customer edge when it starts (it is written into the page) and by the edge and the cockpit on
+    every request for the routes — set the SAME value in customer.env and cockpit.env."""
+    return ((os.environ.get("VIGIL_CUSTOMER_POSTURE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+            and presentation_enabled())
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account

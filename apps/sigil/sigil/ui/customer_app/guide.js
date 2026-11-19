@@ -183,6 +183,13 @@
                    "Each finding shows its severity, its class, where it was found and how strong the proof is.",
                    "Use Verify offline to re-run the proof yourself, without VIGIL."],
           why: "VIGIL lists a finding only when a deterministic check confirmed it on evidence your host produced. Anything it could not prove is never shown as a finding." },
+        // PR-B: `when` names the page switch (data-posture) the Fix first screen is served under.
+        { id: "fixfirst", title: "Fix the worst first", where: "Fix first", route: "#/fix-first", when: "posture",
+          clicks: ["Select Fix first in the top bar. At the top is your security posture: a score out of 100 for the findings still open on your verified hosts, and how it changed over the last twelve weeks.",
+                   "Below it, every open finding is listed worst first. Each says what the weakness is, what VIGIL's check proved, the standards it touches and exactly how to fix it.",
+                   "Fix the first one on your side, then select Retest on it. When its proof no longer works, it moves to Fixed and your score goes up.",
+                   "Select How the score works to see how each finding counts, or Show the numbers to read the trend as a table."],
+          why: "The score is a way to decide what to fix first, not a certified rating. It counts only findings VIGIL proved on your own hosts." },
         { id: "retest", title: "Confirm a fix", where: "Assessments", route: "#/assessments",
           clicks: ["Fix the weakness on your side.",
                    "Open the finding and select Retest. VIGIL re-runs that finding's proof against your host.",

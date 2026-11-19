@@ -3483,6 +3483,42 @@ class Provisioner:
         from .finding_preview import preview_locked
         return preview_locked(self.store, org_id, wallet=self.wallet)
 
+    # ---- APEX consumer PR-B: the Fix-first screen's reads (``ui/customer_posture.py``) --------------------------------
+    def customer_posture(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """PR-B — the session org's Fix-first view: the 0-100 posture over its OPEN oracle-confirmed findings, the
+        worst-first list of what to fix (PR-A's triage entry per finding: plain-language impact + standards chips +
+        exact remediation, the signed parts only when signed), what a retest proved fixed, and the trend from the
+        same pass. ``admit_customer(view_assessments)`` on the hop-bound SESSION org (never a body field), then the
+        pure projection; retest verdicts count only while the retest UI is on (the same switch the Assessments
+        screen shows them under). A trial-preview org whose report is locked gets the preview here too: only the one
+        revealed finding in full, every other entry without its fix. Refuses unless ``customer_posture_enabled``
+        (the cockpit dispatch is already absent then)."""
+        import time as _t
+        from .. import config
+        from . import customer_posture as _cp
+        if not config.customer_posture_enabled():
+            raise ProvisionDenied("the posture view is not enabled")
+        t, verdicts = _t.time(), config.customer_retest_ui_enabled()
+
+        def project(s, o):
+            locked = self._preview_locked(o)
+            can_buy = locked and self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")
+            return _cp.customer_posture(s, o, now=t, retest_verdicts=verdicts, locked=locked, can_buy=can_buy)
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
+
+    def customer_posture_trend(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """PR-B — the session org's posture over the last twelve weeks (the Overview's Posture card; the Fix-first
+        screen reads the same series inside ``customer_posture``). Same gate, scope and switch as
+        :meth:`customer_posture`; an aggregate of severity only, so a locked trial org's preview is unaffected."""
+        import time as _t
+        from .. import config
+        from . import customer_posture as _cp
+        if not config.customer_posture_enabled():
+            raise ProvisionDenied("the posture view is not enabled")
+        t, verdicts = _t.time(), config.customer_retest_ui_enabled()
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _cp.posture_trend(s, o, now=t, retest_verdicts=verdicts))
+
     def customer_assets(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         """Per-host ownership status (verified / pending / expired) for the SESSION org's assets — the read
         behind the customer 'Domains' view (SS-4). Tenant-scoped by ``_customer_read``'s ``admit_customer``
