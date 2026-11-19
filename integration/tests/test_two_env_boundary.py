@@ -214,6 +214,13 @@ assert "strix" not in _m, "standards_mirror must not import strix at module scop
 import sigil.ui.finding_presentation          # APEX PR-A: the sovereign posture/presentation head (renders via the mirror)
 assert "framework" not in _m, "finding_presentation must not import framework at module scope"
 assert "strix" not in _m, "finding_presentation must not import strix at module scope"
+import vigil_integration.apex_flags  # APEX PR-3: the keyless master flag (stdlib only)
+import vigil_integration.remediation.apex_pcr  # APEX PR-3: the PCR close-the-loop — framework (cert/oracle/autopatch) LAZY
+assert "framework" not in _m, "remediation.apex_pcr must not import framework at module scope (cert/oracle/autopatch are lazy)"
+assert "strix" not in _m, "remediation.apex_pcr must not import strix at module scope"
+import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
+assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
+assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
 import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
 assert "framework" not in _m, "notify_channels must not import framework at module scope"
 assert "strix" not in _m, "notify_channels must not import strix at module scope"
