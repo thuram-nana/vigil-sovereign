@@ -41,8 +41,9 @@ and it is trusted only while it is provably a prefix of the current spine:
     history record it then folds (a concurrent rotation) is returned but not cached;
   * IDENTITY — one entry per (fold, resolved spine path), tagged with the caller's key: the trusted owner
     pubkey, the genesis pin and the loaded snapshot BY VALUE (a prune moves its boundary; its rows are the
-    seed). A different key rebuilds and replaces the entry, so memory stays bounded to one folded state per
-    fold and spine;
+    seed), plus any other input the fold's projection depends on (a flag the view is projected under —
+    `fold_read.cached_unsigned_read(identity=...)`). A different key rebuilds and replaces the entry, so memory
+    stays bounded to one folded state per fold and spine;
   * FAIL-SAFE — any error while validating or extending discards the entry and rebuilds from the spine; an
     error in the REBUILD propagates exactly as the caller's full fold would raise it.
 

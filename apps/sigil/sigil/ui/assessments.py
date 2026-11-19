@@ -47,7 +47,8 @@ _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity",
                 # APEX PR-A — the SIGNED presentation block (plain-language impact + standards chips + exact
                 # remediation). Projected through this SAME allowlist, but ONLY while VIGIL_APEX_PRESENTATION is
                 # on (see ``_finding_json``), so the flag-off findings read is byte-identical (a presentation-
-                # bearing cert is never surfaced). It is additive SIGNED data that rides the per-finding tenant-
+                # bearing cert is never surfaced) — on the fold-cache path too, whose index is keyed by the flag
+                # (see ``_indexed``). It is additive SIGNED data that rides the per-finding tenant-
                 # scoped projection, so a cross-tenant presentation can never leak, and is purely descriptive —
                 # never read for any verdict.
                 "presentation")
@@ -80,17 +81,23 @@ def _org_slug_set(store, org_id: str, *, now: float) -> set[str]:
 
 
 def _presentation_on() -> bool:
-    """True iff the APEX PR-A presentation spine is armed (``config.presentation_enabled``). Read at projection
-    time; process-static in practice (a deploy-time env flag), so the fold index + the scan path agree."""
+    """True iff the APEX PR-A presentation spine is armed (``config.presentation_enabled``). The scans read it at
+    projection time; a fold-cache read reads it ONCE per read and binds that value into the index's cache identity
+    (``_indexed``), so the fold index and the scan path agree for EVERY value of the flag — including a flag that
+    changes inside a running process, which no longer leaves the index answering with the old value's rows."""
     from .. import config
     return config.presentation_enabled()
 
 
-def _finding_json(payload: dict, cert: dict) -> dict[str, Any]:
+def _finding_json(payload: dict, cert: dict, *, present: Optional[bool] = None) -> dict[str, Any]:
+    """One finding through the ``_CERT_FIELDS`` allowlist. ``present`` is the presentation flag the projection is
+    made under: the fold index passes the value its view was built for (part of its cache identity); a scan passes
+    nothing and reads the flag now."""
     out: dict[str, Any] = {"engagement_slug": cert.get("engagement_slug")}
     # finding_ref/oracle_context_digest live at the spine payload top level too (receiver mirrors them); prefer
     # the cert value, fall back to the payload, so the projection is robust to either carrier.
-    present = _presentation_on()
+    if present is None:
+        present = _presentation_on()
     for f in _CERT_FIELDS:
         if f == "presentation" and not present:
             continue                 # flag OFF -> presentation is never surfaced (the read stays byte-identical)
@@ -107,14 +114,19 @@ class _AssessmentsView:
     per request: `findings[slug]` / `outcomes[slug]` = [(seq, projected json)] in spine order, built from EXACTLY
     the records the scans keep (same kind / dict / certificate checks; the projection is the same pure
     function). A record whose engagement slug is unhashable (the scans' `in slug_set` would raise on it) poisons
-    the view, so every read falls back to the unchanged scan and raises exactly where it did."""
+    the view, so every read falls back to the unchanged scan and raises exactly where it did.
 
-    __slots__ = ("findings", "outcomes", "poisoned")
+    `presentation` is the APEX presentation flag the finding rows are projected under — fixed when the view is
+    seeded, never re-read while folding, and part of the entry's cache identity (``_indexed``): a read under the
+    other value rebuilds rather than answer with rows projected under this one."""
 
-    def __init__(self) -> None:
+    __slots__ = ("findings", "outcomes", "poisoned", "presentation")
+
+    def __init__(self, presentation: bool = False) -> None:
         self.findings: dict = {}
         self.outcomes: dict = {}
         self.poisoned = False
+        self.presentation = bool(presentation)
 
 
 def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
@@ -140,18 +152,39 @@ def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
         return
     if not isinstance(slug, str):
         return                                   # readers ask for str slugs only: keep no unreadable rows
-    row = _finding_json(p, cert) if isinstance(cert, dict) else _outcome_json(p)   # a str slug on a finding => a dict cert
+    # a str slug on a finding => a dict cert; projected under the view's OWN flag value (its cache identity)
+    row = _finding_json(p, cert, present=view.presentation) if isinstance(cert, dict) else _outcome_json(p)
     index.setdefault(slug, []).append((int(getattr(r, "seq", 0)), row))
 
 
 _ASSESSMENTS_FOLD = FoldCache("ui.assessments", step=_assessments_step)
 
 
+def _unpresented(row: dict) -> dict:
+    """``row`` without its ``presentation`` field — a new dict when it had one (the cached row is never mutated),
+    else ``row`` itself."""
+    if "presentation" not in row:
+        return row
+    return {k: v for k, v in row.items() if k != "presentation"}
+
+
 def _indexed(store, which: str, slugs) -> Any:
     """[(seq, json)] of the indexed `which` rows ('findings' / 'outcomes') for `slugs`, or `_UNCACHED`. A
-    `live_window` read: the scans never load the snapshot, so a snapshot that cannot be loaded declines."""
-    return cached_unsigned_read(_ASSESSMENTS_FOLD, store, seed=lambda snap: (_AssessmentsView(), -1), live_window=True,
-                                reader=lambda v: [row for s in slugs for row in getattr(v, which).get(s, ())])
+    `live_window` read: the scans never load the snapshot, so a snapshot that cannot be loaded declines.
+
+    A finding row's projection depends on the APEX presentation flag (``_finding_json``), so the flag is read ONCE
+    per read and is part of the fold's cache IDENTITY: the view is seeded with it (every step projects under it) and
+    an entry built under the other value never answers — the read rebuilds under its own. A read with the flag OFF
+    also drops any ``presentation`` field from the rows it returns: a second, independent refusal, so no cached row
+    can surface the signed block while the flag is off."""
+    present = _presentation_on()
+
+    def reader(v: _AssessmentsView) -> list:
+        rows = [row for s in slugs for row in getattr(v, which).get(s, ())]
+        return rows if present else [(seq, _unpresented(j)) for seq, j in rows]
+
+    return cached_unsigned_read(_ASSESSMENTS_FOLD, store, seed=lambda snap: (_AssessmentsView(present), -1),
+                                live_window=True, identity=("presentation", present), reader=reader)
 
 
 def _newest_first(rows: list, limit: int) -> "tuple[list, int]":

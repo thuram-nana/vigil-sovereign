@@ -122,11 +122,17 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
 
 
 def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tuple[Any, int]"],
-                         reader: Callable[[Any], Any], live_window: bool = False) -> Any:
+                         reader: Callable[[Any], Any], live_window: bool = False, identity: tuple = ()) -> Any:
     """As `cached_read`, for a fold that verifies NO owner signature (the agent budget meter): it depends on the
     records and the loaded snapshot only, so the key is the snapshot by value and the build carries no
     resolver. An owner-key-history record still forces a rebuild (harmless: nothing here reads a key).
-    `live_window` as in `cached_read`."""
+    `live_window` as in `cached_read`.
+
+    `identity` names every OTHER input the folded view depends on — a flag its projection reads (the assessments
+    index carries the signed presentation block only while `VIGIL_APEX_PRESENTATION` is on). It is bound into the
+    key BY VALUE, so an entry built under one value never answers a read under another: that read rebuilds under its
+    own value (and `seed` must build the view for that same value — never re-read it while folding). Empty (the
+    default) leaves the key exactly as it was."""
     if not fold_cache_enabled():
         return UNCACHED
     snap = _snapshot(store, live_window)
@@ -140,7 +146,7 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
     def guarded(view):
         return UNCACHED if getattr(view, "poisoned", False) else reader(view)
 
-    key = (snap,) + _window_key(store)
+    key = (snap,) + _window_key(store) + tuple(identity)
     _maybe_audit(cache, store, key, build)
     try:
         return cache.read(store, key, build=build, reader=guarded)

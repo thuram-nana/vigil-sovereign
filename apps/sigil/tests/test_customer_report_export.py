@@ -10,6 +10,9 @@ Load-bearing invariants (each mutation-verified — the named test reds when its
   * PREVIEW LOCK: a trial-preview org is refused — the full report is what its first purchase unlocks
     (test_a_trial_preview_org_is_refused_the_full_report).
   * SIGNED-ONLY plain language + honest absence (test_plain_language_and_fix_come_only_from_the_signed_block).
+  * FOLD-CACHE IDENTITY: flipping the presentation flag between two reads of one spine under the fold cache gives each
+    read exactly the uncached report for its own value — never the signed fix after the flag went off, never a report
+    missing it after the flag came back on (test_the_presentation_flag_flips_between_two_reads_under_the_fold_cache).
   * PDF SEAM FAIL-CLOSED: no renderer -> refused; a renderer inside the venv, writable by others, failing, hanging,
     oversized or not producing a PDF -> refused; secrets never reach its environment (the test_pdf_* tests).
   * GATING: flag off -> refused + cockpit 404; only view_assessments; rate-limited (test_flag_off_..., test_roles_...,
@@ -107,12 +110,14 @@ def test_the_report_carries_the_summary_roadmap_standards_and_verify_sections():
     assert "not a compliance attestation" in doc and "not a certified rating" in doc
 
 
+_SIGNED = {"schema": 1, "plain_impact": {"what": "An attacker can read your database.",
+                                         "category_consequence": "Data theft.", "established": "The query ran."},
+           "remediation": "Use parameterised queries.", "standards": {"controls": {"owasp": "A03:2021"}}}
+
+
 def test_plain_language_and_fix_come_only_from_the_signed_block(monkeypatch):
     monkeypatch.setenv("VIGIL_APEX_PRESENTATION", "1")
-    signed = {"schema": 1, "plain_impact": {"what": "An attacker can read your database.",
-                                            "category_consequence": "Data theft.", "established": "The query ran."},
-              "remediation": "Use parameterised queries.", "standards": {"controls": {"owasp": "A03:2021"}}}
-    store, _p, _s = _org_with_findings(presentation=signed)
+    store, _p, _s = _org_with_findings(presentation=_SIGNED)
     doc = rx.build_report(store, "acme", now=T)["html"]
     assert "An attacker can read your database." in doc and "Use parameterised queries." in doc
     # f2 has no signed block: no fix is invented for it — the report says so
@@ -120,6 +125,40 @@ def test_plain_language_and_fix_come_only_from_the_signed_block(monkeypatch):
     monkeypatch.delenv("VIGIL_APEX_PRESENTATION")
     off = rx.build_report(store, "acme", now=T)["html"]                                  # presentation flag off
     assert "Use parameterised queries." not in off and off.count("carries no signed fix guidance") == 2
+
+
+@pytest.mark.parametrize("first", [True, False], ids=["on-then-off", "off-then-on"])
+def test_the_presentation_flag_flips_between_two_reads_under_the_fold_cache(monkeypatch, first):
+    """REGRESSION (the "fold cache ON" CI leg). The assessments fold index projected each finding under the value the
+    presentation flag had when the index was BUILT, and its cache identity left the flag out: after a flag-ON read the
+    flag-OFF report still carried the signed fix ("Use parameterised queries.") — and a flag-ON read after a flag-OFF
+    one lost it. Run here with the fold cache forced ON (so every CI leg runs it), starting from each value: every
+    cached read equals the UNCACHED report for its own flag value, a second read under the same value reuses the
+    index entry (the cache still caches), and each entry was built under its read's own value."""
+    from sigil.spine import fold_cache
+    from sigil.ui import assessments as am
+    store, _p, _s = _org_with_findings(presentation=_SIGNED)
+
+    def report(present: bool, *, cached: bool) -> str:
+        monkeypatch.setenv("VIGIL_APEX_PRESENTATION", "1" if present else "")
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1" if cached else "")
+        return rx.build_report(store, "acme", now=T)["html"]
+
+    truth = {present: report(present, cached=False) for present in (False, True)}   # the uncached scan, per value
+    assert "Use parameterised queries." in truth[True] and truth[True].count("carries no signed fix guidance") == 1
+    assert "Use parameterised queries." not in truth[False]
+    assert truth[False].count("carries no signed fix guidance") == 2
+    fold_cache.clear_all()
+    built = []
+    for present in (first, not first, first, not first):   # ON -> OFF: a stale index LEAKS the fix; OFF -> ON: LOSES it
+        assert report(present, cached=True) == truth[present], f"flag {'ON' if present else 'OFF'}"
+        (entry,) = am._ASSESSMENTS_FOLD._entries.values()                            # the cached path answered
+        assert report(present, cached=True) == truth[present]
+        (again,) = am._ASSESSMENTS_FOLD._entries.values()
+        assert again is entry                                                        # ... and reused its entry
+        built.append((present, entry))
+    for present, entry in built:                        # each entry was built under its own read's flag value
+        assert entry.key[-2:] == ("presentation", present) and entry.state.presentation == present
 
 
 def test_another_tenants_finding_is_never_in_the_report():

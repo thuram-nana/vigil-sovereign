@@ -5,6 +5,12 @@ read surface the block, or lets the presentation drift from the signed data):
   * BYTE-IDENTICAL WHEN OFF: with ``VIGIL_APEX_PRESENTATION`` unset, ``assessment_findings`` NEVER carries the
     ``presentation`` cert field even when the certificate HAS one, and the ``assessment_posture`` cockpit action
     is absent (404). Mutation-verify: remove the flag skip and the flag-off test REDS.
+  * ONE FLAG VALUE PER READ on the fold-cache path: the cached findings index is keyed by the flag and folded under
+    the value its read keyed it by, never a value re-read mid-fold
+    (test_the_cached_index_is_projected_under_the_value_its_read_keyed_it_by); and a flag-OFF cached read drops the
+    block even from an index built under the flag ON, a second independent refusal
+    (test_a_flag_off_cached_read_drops_the_block_even_from_an_index_built_on). The flip itself, in both directions,
+    is test_customer_report_export.py::test_the_presentation_flag_flips_between_two_reads_under_the_fold_cache.
   * TENANT ISOLATION (self-red-pen RP1): a posture read for org B NEVER counts or shows org A's finding — and
     thus never its presentation — because the posture reads only ``assessments.all_findings_for_org`` (org B's
     own server-derived slug set; ``_customer_slug`` is a one-way hash). Dropping that scoping REDS the test.
@@ -143,6 +149,49 @@ def test_projection_byte_identical_when_off(monkeypatch):
     out = _assess.assessment_findings(store, "acme", now=NOW)
     assert out["count"] == 1
     assert "presentation" not in out["findings"][0], "flag OFF must not surface the presentation block"
+
+
+# ---- the fold-cache path: one flag value per read, two independent refusals when OFF ----------------------
+def _cached_org(monkeypatch):
+    """A presented finding on a fresh spine, read through the fold cache (forced ON; every cached fold dropped)."""
+    from sigil.spine import fold_cache
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    fold_cache.clear_all()
+    store = _store()
+    _one_org_with_presented_finding(_prov(store, ensure_owner_keypair()), iter(range(1, 10_000)))
+    return store
+
+
+def test_the_cached_index_is_projected_under_the_value_its_read_keyed_it_by(monkeypatch):
+    """The flag is read ONCE per fold-cache read and bound into the view the index is folded into
+    (``_AssessmentsView.presentation``), never re-read while folding: a flag that changes mid-fold cannot leave an
+    entry whose rows disagree with the value in its cache identity (every later read under that value reuses them)."""
+    store = _cached_org(monkeypatch)
+    looks = iter([True])                                   # ON for the read's own look, OFF for any later one
+    monkeypatch.setattr(_assess, "_presentation_on", lambda: next(looks, False))
+    out = _assess.assessment_findings(store, "acme", now=NOW)
+    assert isinstance(out["findings"][0].get("presentation"), dict)
+    (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    assert entry.key[-2:] == ("presentation", True) and entry.state.presentation is True
+    assert all("presentation" in j for rows in entry.state.findings.values() for _seq, j in rows)
+
+
+def test_a_flag_off_cached_read_drops_the_block_even_from_an_index_built_on(monkeypatch):
+    """The second, independent refusal: a flag-OFF fold-cache read drops ``presentation`` from every row it returns,
+    so even an index built under the flag ON — were the flag ever lost from its cache identity (simulated here) —
+    cannot surface the signed block while the flag is off."""
+    store = _cached_org(monkeypatch)
+    real = _assess.cached_unsigned_read
+    monkeypatch.setattr(_assess, "cached_unsigned_read", lambda *a, identity=(), **kw: real(*a, **kw))
+    monkeypatch.setenv("VIGIL_APEX_PRESENTATION", "1")
+    assert isinstance(_assess.assessment_findings(store, "acme", now=NOW)["findings"][0].get("presentation"), dict)
+    (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    monkeypatch.delenv("VIGIL_APEX_PRESENTATION")
+    for rows in (_assess.assessment_findings(store, "acme", now=NOW)["findings"],
+                 _assess.all_findings_for_org(store, "acme", now=NOW)):
+        assert rows and all("presentation" not in f for f in rows), rows
+    (again,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    assert again is entry and entry.state.presentation is True     # served from the flag-ON index, and refused
 
 
 # ---- posture read end-to-end + the SIGNED-only honesty ---------------------------------------------
