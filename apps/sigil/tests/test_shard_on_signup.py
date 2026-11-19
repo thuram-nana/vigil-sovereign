@@ -15,7 +15,9 @@ import tempfile
 import pytest
 
 from sigil.governor.shard_assignment import ShardAssignmentRegistry
-from sigil.governor.shard_on_signup import assign_on_signup, choose_shard, current_loads
+from sigil.governor.shard_on_signup import (
+    assign_on_signup, backfill_placements, choose_shard, current_loads, loads_of,
+)
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
 from vigil_core import ShardAssignmentRecord, sign_shard_assignment_record
@@ -131,3 +133,162 @@ def test_redpen_tenant_cannot_choose_its_own_shard():
     reg = _reg(s)
     placement = assign_on_signup(reg, "newco", shard_ids=["owner-shard"], issued_at=_t())
     assert placement.shard_id == "owner-shard"            # never a tenant-chosen value
+
+
+# -- cost: the sign-up lock is held for at most two signature-verifying folds per placement ---------------------
+
+def _count_folds(monkeypatch):
+    calls = {"n": 0}
+    real = ShardAssignmentRegistry._fold
+
+    def counted(self):
+        calls["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(ShardAssignmentRegistry, "_fold", counted)
+    return calls
+
+
+def test_a_placement_costs_two_folds_and_an_existing_one_costs_one(monkeypatch):
+    s = _store()
+    reg = _reg(s)
+    reg.assign("existing", "s1", issued_at=_t())
+    calls = _count_folds(monkeypatch)
+    p = assign_on_signup(reg, "newco", shard_ids=["s1", "s2"], issued_at=_t())
+    assert calls["n"] == 2, f"{calls['n']} genesis folds for one placement (was 4)"
+    assert (p.tenant_id, p.shard_id, p.epoch) == ("newco", "s2", 1)
+    calls["n"] = 0
+    assert assign_on_signup(reg, "newco", shard_ids=["s1", "s2"], issued_at=_t()) == reg.placement("newco")
+    assert calls["n"] == 2                                # the re-drive fold + the comparison read above
+
+
+def test_the_returned_placement_is_the_one_the_fold_honours():
+    s = _store()
+    reg = _reg(s)
+    got = assign_on_signup(reg, "newco", shard_ids=["s1"], issued_at=_t())
+    assert got == reg.placement("newco")
+
+
+def test_loads_of_counts_per_shard():
+    s = _store()
+    reg = _reg(s)
+    reg.assign("a", "s1", issued_at=_t())
+    reg.assign("b", "s1", issued_at=_t())
+    assert loads_of(reg.placements()) == {"s1": 2} == current_loads(reg)
+
+
+# -- the owner backfill -------------------------------------------------------------------------------------------
+
+class _CountingLock:
+    def __init__(self):
+        self.entered = 0
+
+    def __call__(self):
+        import contextlib
+        outer = self
+
+        @contextlib.contextmanager
+        def held():
+            outer.entered += 1
+            yield
+        return held()
+
+
+def test_backfill_places_every_unplaced_org_once_and_is_idempotent():
+    s = _store()
+    reg = _reg(s)
+    reg.assign("org_old", "s1", issued_at=_t())
+    lock = _CountingLock()
+    r = backfill_placements(reg, ["org_old", "org_a", "org_b", "org_a"], shard_ids=["s1", "s2"], issued_at=_t(),
+                            lock=lock)
+    assert r == {"placed": 2, "already": 1, "failed": 0}
+    assert lock.entered == 2                              # one lock per tenant it placed; none for the placed one
+    assert {p.tenant_id: p.shard_id for p in reg.placements()} == {"org_old": "s1", "org_a": "s2", "org_b": "s1"}
+    again = backfill_placements(reg, ["org_old", "org_a", "org_b"], shard_ids=["s1", "s2"], issued_at=_t(),
+                                lock=lock)
+    assert again == {"placed": 0, "already": 3, "failed": 0}
+    assert len([p for p in reg.placements()]) == 3
+
+
+def test_backfill_rechecks_under_the_lock_so_a_concurrent_signup_is_never_placed_twice():
+    import contextlib
+    s = _store()
+    reg = _reg(s)
+
+    @contextlib.contextmanager
+    def lock_that_loses_a_race():
+        # between the sweep's first read and its lock, a sign-up in another process placed org_a
+        if reg.placement("org_a") is None:
+            reg.assign("org_a", "s2", issued_at=_t())
+        yield
+
+    r = backfill_placements(reg, ["org_a"], shard_ids=["s1", "s2"], issued_at=_t(), lock=lock_that_loses_a_race)
+    assert r == {"placed": 0, "already": 1, "failed": 0}
+    assert [(p.tenant_id, p.shard_id, p.epoch) for p in reg.placements()] == [("org_a", "s2", 1)]
+
+
+def test_backfill_counts_an_unplaceable_org_and_goes_on():
+    s = _store()
+    reg = _reg(s)
+    r = backfill_placements(reg, ["../evil", "org_ok"], shard_ids=["s1"], issued_at=_t(), lock=_CountingLock())
+    assert r == {"placed": 1, "already": 0, "failed": 1}
+    assert [p.tenant_id for p in reg.placements()] == ["org_ok"]
+
+
+def test_backfill_with_no_topology_places_nothing():
+    s = _store()
+    reg = _reg(s)
+    assert backfill_placements(reg, ["org_a"], shard_ids=[], issued_at=_t(), lock=_CountingLock()) == \
+        {"placed": 0, "already": 0, "failed": 0}
+    assert reg.placements() == []
+
+
+def test_backfill_without_the_owner_key_places_nothing():
+    s = _store()
+    keyless = ShardAssignmentRegistry(s, owner_key=None, trusted_pubkey=OP)
+    r = backfill_placements(keyless, ["org_a"], shard_ids=["s1"], issued_at=_t(), lock=_CountingLock())
+    assert r == {"placed": 0, "already": 0, "failed": 1}
+    assert _reg(s).placements() == []
+
+
+# -- `sigil shard backfill` ---------------------------------------------------------------------------------------
+
+def _cli(monkeypatch, tmp_path, *, fair, multi, ids):
+    from sigil import cli
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.governor.orgs import OrgRegistry
+    store = SpineStore(tmp_path / "spine" / "spine.jsonl")
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)     # the verb's default store → this test's
+    for name, on in (("VIGIL_CUSTOMER_FAIR_QUEUE", fair), ("VIGIL_MULTI_SHARD", multi)):
+        if on:
+            monkeypatch.setenv(name, "1")
+        else:
+            monkeypatch.delenv(name, raising=False)
+    if ids:
+        monkeypatch.setenv("VIGIL_SHARD_IDS", ids)
+    else:
+        monkeypatch.delenv("VIGIL_SHARD_IDS", raising=False)
+    ensure_owner_keypair()
+    orgs = OrgRegistry(store)
+    for o in ("org_one", "org_two"):
+        orgs.create_org(o, o, owner="u", issued_at=_t())
+    return cli, store
+
+
+@pytest.mark.parametrize("fair, multi, ids", [(False, True, "s1"), (True, False, "s1"), (True, True, "")])
+def test_the_backfill_verb_refuses_unless_every_gate_is_on(monkeypatch, tmp_path, capsys, fair, multi, ids):
+    cli, store = _cli(monkeypatch, tmp_path, fair=fair, multi=multi, ids=ids)
+    with pytest.raises(SystemExit) as ex:
+        cli.main(["shard", "backfill"])
+    assert ex.value.code == 2 and "refusing" in capsys.readouterr().err
+    assert ShardAssignmentRegistry(store, owner_key=None).placements() == []
+
+
+def test_the_backfill_verb_places_every_org(monkeypatch, tmp_path, capsys):
+    cli, store = _cli(monkeypatch, tmp_path, fair=True, multi=True, ids="s1,s2")
+    cli.main(["shard", "backfill"])
+    assert "2 placed, 0 already placed, 0 could not be placed" in capsys.readouterr().out
+    reg = ShardAssignmentRegistry(store, owner_key=None)
+    assert sorted((p.tenant_id, p.shard_id) for p in reg.placements()) == [("org_one", "s1"), ("org_two", "s2")]
+    cli.main(["shard", "backfill"])
+    assert "0 placed, 2 already placed" in capsys.readouterr().out

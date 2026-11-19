@@ -21,10 +21,17 @@ durable across a crash and safe under concurrent workers:
 * CRASH recovery: a worker that dies mid-run leaves its job in ``running/`` recording the worker's pid+boot;
   :meth:`requeue_stale` renames any such job whose worker is gone back to ``queue/`` — a crashed worker never
   strands a job, and the slug's own lease is independently reclaimable (see slug_lease).
+* TENANT-FAIR CLAIM (consumer PR-F, default-OFF ``VIGIL_CUSTOMER_FAIR_QUEUE``): with the flag on, CLAIM takes the
+  oldest job of the tenant with the fewest jobs running, then the least recent service, instead of the lowest
+  sequence (``vigil_core.fair_share`` — the same policy the sovereign "queued" surface predicts with). It is still
+  one atomic rename per claim, still per-slug exclusive (the lease is untouched), and the service history it
+  needs is persisted under ``fair/`` behind a cross-process lock. With the flag off nothing here changes: the
+  claim is the arrival-order rename above and no ``fair/`` directory is ever created.
 
 Import-clean: stdlib only plus :mod:`framework.v2.slug_lease` (also stdlib-only). ``run_engagement`` is
 imported lazily by :func:`default_engagement_runner` so scheduling a job never drags the heavy engine into
-processes that only enqueue.
+processes that only enqueue; the fair claim's ``vigil_core.fair_share`` and ``xproc_lock`` are imported only when
+the flag is on.
 """
 from __future__ import annotations
 
@@ -42,6 +49,20 @@ from .slug_lease import SlugLease, _boot_id, _pid_alive
 #: numerically).
 _SEQ_WIDTH = 15
 _MAX_SEQ_PROBE = 4096   # bounded search for the next free sequence under concurrent enqueue
+
+# Consumer PR-F — the tenant-fair claim flag, read OFFENSE-SIDE. FATAL-2: the engine never imports the sovereign
+# ``sigil.config``; it reads the SAME ``VIGIL_CUSTOMER_FAIR_QUEUE`` env var with the SAME affirmative set as
+# ``sigil.config._OIDC_AFFIRMATIVE`` (sovereign mirror: ``sigil.config.customer_fair_queue_enabled``). DEFAULT-OFF.
+_FAIR_QUEUE_ENV = "VIGIL_CUSTOMER_FAIR_QUEUE"
+_FAIR_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+_FAIR_MAX_ATTEMPTS = 64  # bounded re-snapshots when an arrival-order claimer / requeue moves the chosen file first
+
+
+def fair_queue_enabled() -> bool:
+    """True iff the tenant-fair claim is on (``VIGIL_CUSTOMER_FAIR_QUEUE`` affirmative). Read at CALL time (every
+    claim), so an operator or a test flips it per process. OFF ⇒ :meth:`EngagementScheduler.claim_next` is the
+    arrival-order claim, byte-identical to the build before PR-F."""
+    return (os.environ.get(_FAIR_QUEUE_ENV) or "").strip().lower() in _FAIR_AFFIRMATIVE
 
 
 @dataclass
@@ -183,7 +204,12 @@ class EngagementScheduler:
         """Atomically claim the head (lowest ``seq``) pending job for execution, moving it ``queue/ →
         running/`` and stamping the claiming worker's pid+boot for crash recovery. Returns the job, or None
         if the queue is empty. Of N workers racing for the head exactly one wins (rename is atomic); a loser
-        transparently tries the next job."""
+        transparently tries the next job.
+
+        With ``VIGIL_CUSTOMER_FAIR_QUEUE`` on (read here, per claim) the job is chosen tenant-fair instead — see
+        :meth:`_claim_next_fair`. Off, this method is exactly the arrival-order claim it always was."""
+        if fair_queue_enabled():
+            return self._claim_next_fair()
         try:
             names = sorted((f.name for f in self.q.iterdir() if f.name.endswith(".json")),
                            key=self._seq_of)
@@ -205,6 +231,91 @@ class EngagementScheduler:
             self._stamp_claimer(dst, job)
             return job
         return None
+
+    def _claim_next_fair(self) -> "EngagementJob | None":
+        """The TENANT-FAIR claim (consumer PR-F): snapshot ``queue/`` + ``running/`` + the persisted service
+        history, let :func:`vigil_core.fair_share.choose` pick (the oldest job of the tenant with the fewest jobs
+        running, then the least recent service; a job whose slug is running waits), claim it with the SAME single
+        atomic rename + claimer stamp as the arrival-order path, and persist the tenant's service tick.
+
+        The whole snapshot → rename → state write runs under one cross-process ``flock`` (``fair/``), so two fair
+        claimers never decide against the same history. A rename lost to an arrival-order claimer or a requeue
+        re-snapshots (bounded); a torn job file is dropped exactly as on the arrival-order path. If the bound is
+        ever exhausted the arrival-order claim runs, so the queue always makes progress. Returns None only when no
+        job is pending."""
+        from vigil_core.fair_share import choose, load_state, record_service, scan_job_dir
+
+        from .xproc_lock import XProcMutex
+
+        fair_dir = self.root / "fair"
+        fair_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        state_path = fair_dir / "state.json"
+        with XProcMutex(fair_dir, "claim").hold():
+            for _attempt in range(_FAIR_MAX_ATTEMPTS):
+                pending = scan_job_dir(self.q) or []
+                if not pending:
+                    return None
+                running = [j for _n, j in (scan_job_dir(self.running) or [])]
+                state = load_state(state_path)
+                names = {fj: name for name, fj in pending}
+                pick = choose([fj for _n, fj in pending], running, state)
+                if pick is None:                    # unreachable while pending is non-empty; stay total
+                    return None
+                name = names[pick]
+                src = self.q / name
+                dst = self.running / name
+                try:
+                    os.rename(str(src), str(dst))   # the same atomic single-claim as the arrival-order path
+                except OSError:
+                    continue                        # moved under us (an arrival-order claimer / requeue) — re-snapshot
+                job = self._read_job(dst)
+                if job is None:
+                    self._safe_unlink(dst)          # torn job file — drop it and choose again
+                    continue
+                self._stamp_claimer(dst, job)
+                live = {fj.tenant for _n, fj in pending} | {fj.tenant for fj in running}
+                self._write_fair_state(state_path, record_service(state, pick.tenant, live=live))
+                return job
+        return self._claim_next_fifo_fallback()
+
+    def _claim_next_fifo_fallback(self) -> "EngagementJob | None":
+        """The arrival-order claim, reached only if the fair claim exhausted its bounded re-snapshots (a pathological
+        stream of lost races). Same rename + stamp as :meth:`claim_next` with the flag off."""
+        try:
+            names = sorted((f.name for f in self.q.iterdir() if f.name.endswith(".json")), key=self._seq_of)
+        except OSError:
+            return None
+        for name in names:
+            dst = self.running / name
+            try:
+                os.rename(str(self.q / name), str(dst))
+            except OSError:
+                continue
+            job = self._read_job(dst)
+            if job is None:
+                self._safe_unlink(dst)
+                continue
+            self._stamp_claimer(dst, job)
+            return job
+        return None
+
+    def _write_fair_state(self, path: Path, state) -> None:
+        """Persist the service history ATOMICALLY (temp file + fsync + rename), so a lock-free reader — the sovereign
+        "queued" surface — sees the old or the new document, never a torn one. Best-effort: a failed write costs one
+        round of service history (the next claim reads the previous state), never the claim itself."""
+        from vigil_core.fair_share import dump_state
+
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(dump_state(state))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(str(tmp), str(path))
+            self._fsync_dir(path.parent)
+        except OSError:
+            self._safe_unlink(tmp)
 
     def _stamp_claimer(self, path: Path, job: EngagementJob) -> None:
         """Record the claiming worker's pid+boot on the running job, so :meth:`requeue_stale` can tell a live

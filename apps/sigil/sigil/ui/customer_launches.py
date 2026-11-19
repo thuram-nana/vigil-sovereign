@@ -20,6 +20,10 @@ memory. This module gives it back, while ``VIGIL_CUSTOMER_LAUNCH_UI`` is on:
     settlement marker before it moves any money. Finished launches are the settle drain's outcome records
     (``assessments.assessment_outcomes``). Each active launch carries the actions the server would accept and — only
     for a member who may run assessments — its signed lease.
+  * QUEUED (consumer PR-F, only while ``VIGIL_CUSTOMER_FAIR_QUEUE`` is on): a started launch whose job is still
+    waiting in the engine's job queue carries ``queued: {"ahead": N}`` — how many jobs the tenant-fair scheduler
+    claims before it (``governor.fair_queue.read_launch_positions``). A count only: the jobs ahead are never named,
+    and only this org's own verified launches are annotated. Off, the read is unchanged.
 
 Credits only, never a cost: no amount, no units and no estimate is projected; a lease is passed through opaque, for the
 app to present back. Tenant isolation is structural: every slug read is ``_customer_slug(org, host)`` of this org's own
@@ -168,6 +172,17 @@ def _row(signed: Any, host: str, slug: str, state: str, *, now: float, control: 
     return row
 
 
+def _queue_positions(org_id: str) -> "dict[tuple[str, str], int]":
+    """``{(slug, nonce): ahead}`` for this org's launches still waiting in the engine job queue — ``{}`` unless
+    ``VIGIL_CUSTOMER_FAIR_QUEUE`` is on (read at call time; off, the queue is not even read). ``org_id`` is the org
+    the caller already admitted from the session, never a request field."""
+    from .. import config
+    if not config.customer_fair_queue_enabled():
+        return {}
+    from ..governor.fair_queue import read_launch_positions
+    return read_launch_positions(org_id)
+
+
 def launches(store: Any, org_id: str, *, now: float, trusted_pubkey: Optional[str], control: bool,
              pause_resume: bool, choices: "list[dict]") -> dict:
     """The launches of ``org_id`` for the customer app (see the module docstring). ``control``: the requester may run
@@ -186,6 +201,7 @@ def launches(store: Any, org_id: str, *, now: float, trusted_pubkey: Optional[st
     verified = _verifier(trusted_pubkey)
     by_slug = {_customer_slug(org_id, h): h for h in AssetOwnershipRegistry(store, owner_key=None)
                .ever_proven_hosts(org_id)}
+    positions = _queue_positions(org_id)
     active: "list[dict]" = []
     for slug, host in sorted(by_slug.items(), key=lambda kv: kv[1]):
         seen: "set[str]" = set()
@@ -196,7 +212,10 @@ def launches(store: Any, org_id: str, *, now: float, trusted_pubkey: Optional[st
             seen.add(nonce)
             if not is_lease_settled(base, slug, nonce):
                 state = "paused" if is_lease_paused(base, slug, nonce) else "running"
-                active.append(_row(signed, host, slug, state, now=now, control=control, pause_resume=pause_resume))
+                row = _row(signed, host, slug, state, now=now, control=control, pause_resume=pause_resume)
+                if state == "running" and (slug, nonce) in positions:
+                    row["queued"] = {"ahead": int(positions[(slug, nonce)])}
+                active.append(row)
         for entry in _load(org_id, slug):
             signed = verified(entry.get("lease"), org_id, slug)
             if signed is None:
