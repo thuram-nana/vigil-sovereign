@@ -23,9 +23,9 @@ Mutation-verify targets (each neuter reds a NAMED test here):
   * reserve ignores the remainder (whole credits, not exact)        -> test_reserve_sizes_from_the_exact_balance
   * reserve rounds the hold DOWN                                    -> test_reserve_holds_the_worst_case_in_whole_credits
   * reserve skips the billing-hold conjunct                         -> test_a_billing_hold_refuses_the_turn
-  * the allowance trusts the grant's slug (no org re-derivation)    -> test_attack_a_grant_naming_another_orgs_hold_gets_no_allowance
+  * the allowance trusts the grant's slug (no org re-derivation)    -> test_attack_a_hold_under_a_slug_that_is_not_the_orgs_own_is_never_a_turn
   * the allowance answers a settled turn                            -> test_a_settled_turns_grant_gets_no_allowance
-  * settle without closing the meter first                          -> test_settle_closes_the_meter_so_the_grant_is_dead
+  * settle reads the use before closing the meter                   -> test_settle_reads_the_use_only_once_the_meter_is_closed
   * settle without the clamp to the hold                            -> test_settle_never_keeps_more_than_the_hold
   * settle writes the seam (seam marker / tombstone)                -> test_settle_writes_nothing_on_the_seam
   * _settle_once without the always-record leg for seam=False       -> test_a_seamless_settle_always_records_its_decision
@@ -1458,3 +1458,45 @@ def test_a_member_who_may_read_but_not_spend_draws_nothing(metered, monkeypatch)
         _P(store).customer_assistant_ask("alice", ORG, "what should I fix first?", ip="1.2.3.4")
     assert "run_engagement" in str(e.value)
     assert _sent(up) == [] and _exact(store) == 100_000 and _ledger(store).turns(ORG) == []
+
+
+def test_attack_a_hold_under_a_slug_that_is_not_the_orgs_own_is_never_a_turn():
+    """The allowance re-derives the turn's slug from the grant's ORG: a reservation of org A under an assistant-shaped
+    slug that is not A's own (B's, say — a launch or a forged grant naming it) backs no grant, is never swept as A's
+    turn and never lands on A's statement as an assistant line."""
+    store = _store()
+    gate = _org(store, ORG, credits=50)
+    nonce = new_grant_id()
+    foreign = aw.assistant_slug(OTHER)
+    gate._spend(ORG, 4, foreign, nonce, NOW)                         # A's credits held under B's assistant slug
+    assert LaunchAllowance(gate).allowance_mc(_grant(ORG, slug=foreign, nonce=nonce)) is None
+    assert _turns(store).stale(now=NOW + 86_400, org_id=None) == []
+    u = _usage(store)
+    assert "Security assistant" not in json.dumps(u) and u["assistant"]["turns"] == 0
+
+
+def test_settle_reads_the_use_only_once_the_meter_is_closed(monkeypatch):
+    """The charge a turn settles on is FINAL: its meter is closed before the use is read, so a request the turn's grant
+    would still get admitted after the read is refused by the closed meter — the settled charge always equals what the
+    meter holds, never a stale read that under-charges."""
+    store = _store()
+    _org(store, credits=50)
+    r, nonce = _reserve(store, need_mc=8_000)
+    _use(ORG, nonce, U500)
+    real = LaunchGate.metered_use_mc
+    late: dict = {}
+
+    def read_then_a_late_request(slug, non):
+        used = real(slug, non)
+        m = gw.GrantMeter(config.MODEL_METER_DIR, rate_card=DEFAULT_RATE_CARD)
+        g = _grant(ORG, nonce=nonce, life=86_400, at=NOW - 60)
+        rid, _res, why = m.reserve(g, 10 ** 6, 25_000, now=NOW + 2)
+        late["why"] = why
+        if why == "":
+            m.commit(g, rid, U2502, 1, request_id="late", now=NOW + 2)
+        return used
+
+    monkeypatch.setattr(LaunchGate, "metered_use_mc", staticmethod(read_then_a_late_request))
+    s = _turns(store).settle(org_id=ORG, nonce=nonce, now=NOW + 5)
+    assert s["ok"] and late["why"] == "closed", (s, late)
+    assert s["consumed_mc"] == real(aw.assistant_slug(ORG), nonce) == 500
