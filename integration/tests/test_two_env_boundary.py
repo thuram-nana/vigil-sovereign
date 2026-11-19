@@ -96,6 +96,9 @@ assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import t
 import sigil.model_gateway                    # PRICING M1: the sovereign model gateway (holds the provider key)
 assert "framework" not in _m, "model_gateway must not import framework at module scope"
 assert "strix" not in _m, "model_gateway must not import strix at module scope"
+import sigil.ui.assistant                      # PR-J: the customer security assistant (sovereign; grounded + metered)
+assert "framework" not in _m, "ui.assistant must not import framework at module scope"
+assert "strix" not in _m, "ui.assistant must not import strix at module scope"
 import sigil.config                           # APEX PR-1: the sovereign autonomous-driver flag accessor (pure env read)
 assert hasattr(sigil.config, "apex_autonomous_enabled"), "sigil.config must expose apex_autonomous_enabled"
 assert "framework" not in _m, "sigil.config must not import framework at module scope"
@@ -211,6 +214,21 @@ assert "framework" not in _m, "live.github_client must not import framework at m
 import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
 assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
 assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
+import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
+assert "framework" not in _m, "notify_channels must not import framework at module scope"
+assert "strix" not in _m, "notify_channels must not import strix at module scope"
+import sigil.governor.issue_sync         # PR-D: the FACT-only issue-tracker sync (SOVEREIGN; auto-close on proven fix)
+assert "framework" not in _m, "issue_sync must not import framework at module scope"
+assert "strix" not in _m, "issue_sync must not import strix at module scope"
+import vigil_integration.jobs.notify_drain  # PR-D: the notify orchestrator — STDLIB ONLY, ALL sovereign logic injected
+assert "framework" not in _m, "jobs.notify_drain must not import framework at module scope"
+assert "strix" not in _m, "jobs.notify_drain must not import strix at module scope"
+import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
+assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
+assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
+import sigil.governor.shard_on_signup  # PR-F: the SOVEREIGN owner-side shard-placement-on-signup policy
+assert "framework" not in _m, "governor.shard_on_signup must not import framework at module scope (owner-signed, no engine)"
+assert "strix" not in _m, "governor.shard_on_signup must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
