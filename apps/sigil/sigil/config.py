@@ -298,6 +298,19 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_assistant_enabled() -> bool:
+    """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
+    (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
+    provisioner action are ABSENT (404 exactly as an unknown route/action), NO model grant is minted for the
+    assistant and NO model request is made — so the server is byte-identical to a build without the assistant. The
+    assistant is a metered NL chat grounded ONLY in the tenant's own oracle-confirmed findings: it summarises /
+    explains / prioritises existing findings as ADVICE, never asserts a new vulnerability and never mints a FACT (the
+    oracle is the sole minter), and every model request goes through the sovereign model gateway (it holds no provider
+    key). Read at call time. Even ON, a turn still fails closed unless the model gateway is reachable and an owner key
+    is present to mint the turn's grant."""
+    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_notify_enabled() -> bool:
     """True iff the customer Notifications & integrations surfaces are ON (`VIGIL_CUSTOMER_NOTIFY` affirmative).
     OFF by default (mirrors `redpen_enabled`): with it off EVERY notify route / channel registration / outbound
@@ -1099,6 +1112,50 @@ def run_model() -> str:
     decision). The model gateway refuses any other model for a run's grant."""
     from vigil_core import model_metering as _mm
     return _mm.run_model()
+
+
+def assistant_model() -> str:
+    """The model the customer security assistant (PR-J) answers with (`VIGIL_ASSISTANT_MODEL`, default = `run_model`).
+    Server-side only — the model identifier is NEVER shown to a customer (design: a customer sees advice, not a
+    provider/model name). The assistant's grant names this model and the gateway refuses any other for that grant; it
+    must be a model the price table can price, so an unset/blank value falls back to the priced `run_model`."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_MODEL") or "").strip()
+    return raw or run_model()
+
+
+def assistant_max_tokens() -> int:
+    """The max output tokens one assistant turn may generate (`VIGIL_ASSISTANT_MAX_TOKENS`, default 1024). A bound on
+    the turn's cost and length; a junk/out-of-range value falls back to the default. The gateway lowers it further to
+    fit the grant's cap, so this is a ceiling, never a spend promise."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_MAX_TOKENS") or "").strip()
+    try:
+        n = int(raw) if raw else 1024
+    except ValueError:
+        return 1024
+    return n if 1 <= n <= 8192 else 1024
+
+
+def assistant_cap_nano_usd() -> int:
+    """The technical ceiling on what ONE assistant turn's model requests may cost VIGIL (`VIGIL_ASSISTANT_CAP_NANO_USD`,
+    default 500_000_000 = $0.50). The grant's cap (a leaked token can never spend past it); the gateway reserves every
+    request against it before forwarding. A junk/out-of-range value falls back to the default."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_CAP_NANO_USD") or "").strip()
+    try:
+        n = int(raw) if raw else 500_000_000
+    except ValueError:
+        return 500_000_000
+    return n if 0 < n <= 10 ** 12 else 500_000_000
+
+
+def assistant_finding_limit() -> int:
+    """The most oracle-confirmed findings one assistant turn grounds on (`VIGIL_ASSISTANT_FINDING_LIMIT`, default 50).
+    Newest-first (the assessments projection's order); a bound on the prompt's input size. Junk/out-of-range → default."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_FINDING_LIMIT") or "").strip()
+    try:
+        n = int(raw) if raw else 50
+    except ValueError:
+        return 50
+    return n if 1 <= n <= 200 else 50
 
 
 def oidc_settings() -> dict:
