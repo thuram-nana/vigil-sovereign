@@ -231,6 +231,8 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/redpen_schedule.py",    # Red-Pen R4: owner-signed System-review schedule + per-period enqueue markers
     #                                   (its own literal signals governor.redpen_schedule / _run; owner-only, no latch)
     "seam_migrate.py",                # the owner-signed seam-migration audit record (its own signal, no latch)
+    "governor/sso_config.py",         # PR-H: owner-signed per-org SSO/SCIM config registry (its own literal signal
+    #                                   governor.sso_config; mirrors orgs/accounts key custody, re-enforced at mint)
 })
 
 # Appends whose kind or source is not a literal: each is reviewed — none can write `kind="event"` with
