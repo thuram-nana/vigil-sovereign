@@ -199,6 +199,12 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/session/delete": _RUN,
     "/api/session/connect": _RUN,
     "/api/session/disconnect": _RUN,
+    # Session FOLDERS (default-OFF, VIGIL_SESSION_FOLDERS): organising sessions into named folders. Same
+    # tier as renaming/deleting a session — organisation only, it mints no fact and authorizes nothing.
+    "/api/folder/create": _RUN,
+    "/api/folder/rename": _RUN,
+    "/api/folder/delete": _RUN,
+    "/api/session/folder": _RUN,
     "/api/chat/stream": _RUN,
     "/api/chat/send": _RUN,
     "/api/chat/attach/begin": _RUN,

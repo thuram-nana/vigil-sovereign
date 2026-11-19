@@ -8357,6 +8357,8 @@
     const C = {
       id: hashQuery().id || "",
       messages: [], sessions: [], chatMeta: {}, st: null, busy: false,
+      // Session FOLDERS: foldersOn only while GET /api/folders answers (VIGIL_SESSION_FOLDERS is on)
+      folders: [], foldersOn: false,
       attach: [], seq: 0, dragDepth: 0,
       // the real tool roster + capability catalog, so the composer's "one tool" mode can send something
       // the launcher actually acts on (see TOOL_LAUNCH)
@@ -8436,8 +8438,10 @@
       return Promise.all([
         V.getJSON(OFF("/api/sessions")).then(function (d) { return (d && d.sessions) || []; }).catch(function () { return []; }),
         V.getJSON(OFF("/api/chat/sessions")).then(function (d) { return (d && d.sessions) || []; }).catch(function () { return []; }),
+        loadFolders(),
       ]).then(function (r) {
         const sess = r[0] || [], chats = r[1] || [];
+        if (r[2]) { C.foldersOn = r[2].on; C.folders = r[2].folders; }   // null = transient: keep last-known
         const meta = {};
         chats.forEach(function (c) { if (c && c.id) meta[c.id] = c; });
         C.chatMeta = meta;
@@ -8446,12 +8450,13 @@
           if (!s || !s.id) return;
           if (s.kind !== "chat" && s.kind !== "mixed") return;
           byId[s.id] = { id: s.id, name: s.name || "", kind: s.kind, connections: (s.connections || []).slice(),
-            updated: Number(s.updated) || 0, runs: (s.run_ids || []).length, registered: true };
+            updated: Number(s.updated) || 0, runs: (s.run_ids || []).length, registered: true,
+            folder: s.folder_id || "" };
         });
         chats.forEach(function (c) {
           if (!c || !c.id || byId[c.id]) return;
           byId[c.id] = { id: c.id, name: c.title || "", kind: "chat", connections: [],
-            updated: Number(c.updated) || 0, runs: 0, registered: false };
+            updated: Number(c.updated) || 0, runs: 0, registered: false, folder: "" };
         });
         C.sessions = Object.keys(byId).map(function (k) { return byId[k]; })
           .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
@@ -8511,8 +8516,44 @@
         .catch(function () { drawMain(); });
     }
 
+    // A dragged chat row carries this type — never "Files" — so the attachment drop guard and the
+    // composer's drop zone ignore it, and folder drop targets accept nothing else.
+    const CHAT_DRAG = "text/x-vigil-chat";
+    const FOLDERS_COLLAPSED_KEY = "vigil.chat.folders.collapsed";
+
+    // One chat row. With folders OFF it is exactly the pre-folders row; with folders ON it also carries
+    // "Move to folder" and can be dragged onto a folder.
+    function chatRow(s) {
+      const active = s.id === C.id;
+      const turns = turnsOf(s.id);
+      const links = (s.connections || []).length;
+      const main = h("button.chat-session" + (active ? ".on" : ""), {
+        title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
+        onClick: function () { openSession(s.id); },
+      }, [
+        h("span.chat-session-t", null, titleOf(s.id)),
+        h("span.chat-session-m", null,
+          (turns != null ? turns + (turns === 1 ? " turn" : " turns") : "") + (links ? " · " + links + "⛓" : "")),
+      ]);
+      const rn = h("button.iconbtn.sm", { title: "Rename chat", "aria-label": "Rename chat",
+        onClick: function (e) { if (e) e.stopPropagation(); renameChat(s); } }, V.icon("edit"));
+      const del = h("button.iconbtn.sm", { title: "Delete chat", "aria-label": "Delete chat",
+        onClick: function (e) { if (e) e.stopPropagation(); deleteChat(s); } }, V.icon("trash"));
+      if (!C.foldersOn) return h("div.chat-session-row" + (active ? ".on" : ""), null, [main, rn, del]);
+      const mv = h("button.iconbtn.sm", { title: "Move to folder", "aria-label": "Move chat to a folder",
+        onClick: function (e) { if (e) e.stopPropagation(); moveChat(s); } }, V.icon("folder"));
+      const row = h("div.chat-session-row" + (active ? ".on" : ""), { draggable: "true" }, [main, mv, rn, del]);
+      row.addEventListener("dragstart", function (e) {
+        if (!e.dataTransfer) return;
+        e.dataTransfer.setData(CHAT_DRAG, s.id);
+        e.dataTransfer.effectAllowed = "move";
+      });
+      return row;
+    }
+
     function drawSessions() {
       const host = V.$("#chat-sessions"); if (!host) return;
+      if (C.foldersOn) { drawFolderedSessions(host); return; }
       const rows = [
         h("button.btn.primary.chat-new", { onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"]),
         h("div.chat-rail-cap", null, "Chats"),
@@ -8520,25 +8561,100 @@
       if (!C.sessions.length) {
         rows.push(h("div.hint", null, "No saved chats yet. Start one above."));
       } else {
-        C.sessions.forEach(function (s) {
-          const active = s.id === C.id;
-          const turns = turnsOf(s.id);
-          const links = (s.connections || []).length;
-          const main = h("button.chat-session" + (active ? ".on" : ""), {
-            title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
-            onClick: function () { openSession(s.id); },
-          }, [
-            h("span.chat-session-t", null, titleOf(s.id)),
-            h("span.chat-session-m", null,
-              (turns != null ? turns + (turns === 1 ? " turn" : " turns") : "") + (links ? " · " + links + "⛓" : "")),
-          ]);
-          const rn = h("button.iconbtn.sm", { title: "Rename chat", "aria-label": "Rename chat",
-            onClick: function (e) { if (e) e.stopPropagation(); renameChat(s); } }, V.icon("edit"));
-          const del = h("button.iconbtn.sm", { title: "Delete chat", "aria-label": "Delete chat",
-            onClick: function (e) { if (e) e.stopPropagation(); deleteChat(s); } }, V.icon("trash"));
-          rows.push(h("div.chat-session-row" + (active ? ".on" : ""), null, [main, rn, del]));
+        C.sessions.forEach(function (s) { rows.push(chatRow(s)); });
+      }
+      V.mount(host, rows);
+    }
+
+    // -- session folders in the chat rail ---------------------------------------
+    function folderOf(s) { return folderIdIn(C.folders, s && s.folder); }
+    function afterFolderChange() { return loadChatList().then(function () { drawSessions(); }); }
+    function moveChat(s) { moveToFolderDialog(titleOf(s.id), s.id, folderOf(s), C.folders, afterFolderChange); }
+
+    // Collapsed folders are a per-viewer convenience: remembered in this browser only, and the rail
+    // renders every folder open when storage is unavailable.
+    function collapsedFolders() {
+      try {
+        const v = JSON.parse(localStorage.getItem(FOLDERS_COLLAPSED_KEY) || "[]");
+        return Array.isArray(v) ? v : [];
+      } catch (e) { return []; }
+    }
+    function toggleFolder(id) {
+      const cur = collapsedFolders(), i = cur.indexOf(id);
+      if (i === -1) cur.push(id); else cur.splice(i, 1);
+      try { localStorage.setItem(FOLDERS_COLLAPSED_KEY, JSON.stringify(cur)); } catch (e) { /* convenience only */ }
+      drawSessions();
+    }
+
+    // Let `el` take a dragged chat; dropping files it in folderId ("" takes it out of its folder).
+    function chatDropTarget(el, folderId) {
+      function isChatDrag(e) {
+        const types = (e.dataTransfer && e.dataTransfer.types) || [];
+        return Array.prototype.indexOf.call(types, CHAT_DRAG) !== -1;
+      }
+      el.addEventListener("dragover", function (e) {
+        if (!isChatDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        el.classList.add("drop-on");
+      });
+      el.addEventListener("dragleave", function () { el.classList.remove("drop-on"); });
+      el.addEventListener("drop", function (e) {
+        el.classList.remove("drop-on");
+        if (!isChatDrag(e)) return;
+        e.preventDefault();
+        const s = rowOf(e.dataTransfer.getData(CHAT_DRAG));
+        if (s && folderOf(s) !== folderId) {
+          fileInFolder(s.id, folderId).then(function (ok) { if (ok) afterFolderChange(); });
+        }
+      });
+      return el;
+    }
+
+    function drawFolderedSessions(host) {
+      const rows = [h("div.chat-rail-top", null, [
+        h("button.btn.primary.chat-new", { onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"]),
+        h("button.iconbtn", { title: "New folder", "aria-label": "New folder",
+          onClick: function () { newFolderDialog(afterFolderChange); } }, V.icon("folder-plus")),
+      ])];
+      const inFolder = {}, unfiled = [];
+      C.sessions.forEach(function (s) {
+        const f = folderOf(s);
+        if (f) (inFolder[f] = inFolder[f] || []).push(s); else unfiled.push(s);
+      });
+      const collapsed = collapsedFolders();
+      if (C.folders.length) {
+        rows.push(h("div.chat-rail-cap", null, "Folders"));
+        C.folders.forEach(function (f) {
+          const inside = inFolder[f.id] || [];
+          const open = collapsed.indexOf(f.id) === -1;
+          const label = f.name + " — " + inside.length + (inside.length === 1 ? " chat" : " chats");
+          rows.push(chatDropTarget(h("div.chat-folder-h" + (open ? ".open" : ""), null, [
+            h("button.chat-folder-t", { title: label, "aria-expanded": open ? "true" : "false",
+              "aria-label": (open ? "Collapse " : "Expand ") + label, onClick: function () { toggleFolder(f.id); } }, [
+              V.icon(open ? "chev-down" : "chev-right"), V.icon("folder"),
+              h("span.chat-folder-n", null, f.name),
+              h("span.chat-folder-c", null, String(inside.length)),
+            ]),
+            h("button.iconbtn.sm", { title: "Rename folder", "aria-label": "Rename folder " + f.name,
+              onClick: function (e) { if (e) e.stopPropagation(); renameFolderDialog(f, afterFolderChange); } },
+              V.icon("edit")),
+            h("button.iconbtn.sm", { title: "Delete folder", "aria-label": "Delete folder " + f.name,
+              onClick: function (e) { if (e) e.stopPropagation(); deleteFolderDialog(f, inside.length, afterFolderChange); } },
+              V.icon("trash")),
+          ]), f.id));
+          if (!open) return;
+          if (!inside.length) {
+            rows.push(h("div.hint.chat-folder-empty", null, "Empty. Drag a chat here, or use its folder button."));
+          }
+          inside.forEach(function (s) { rows.push(h("div.chat-folder-item", null, [chatRow(s)])); });
         });
       }
+      rows.push(chatDropTarget(h("div.chat-rail-cap", { title: "Drop a chat here to take it out of its folder" },
+        "Chats"), ""));
+      if (!C.sessions.length) rows.push(h("div.hint", null, "No saved chats yet. Start one above."));
+      else if (!unfiled.length) rows.push(h("div.hint", null, "Every chat is in a folder."));
+      unfiled.forEach(function (s) { rows.push(chatRow(s)); });
       V.mount(host, rows);
     }
 
@@ -10006,55 +10122,214 @@
     return V.pill(label, tone, null);
   }
 
+  // ---- Session FOLDERS (VIGIL_SESSION_FOLDERS, default-OFF) ---------------------------------------
+  // Organise chats and sessions into operator-named folders. Shared by the chat sidebar and the Sessions
+  // screen. GET /api/folders answers only while the flag is on: a 404 means OFF, remembered for this page
+  // load so the probe is made once, and every caller then renders exactly its pre-folders view. A folder
+  // only organises: it never deletes, gates or authorizes anything, and deleting one moves its sessions out.
+  var FOLDERS_OFF = false;
+  function loadFolders() {
+    if (FOLDERS_OFF) return Promise.resolve({ on: false, folders: [] });
+    return V.getJSON(OFF("/api/folders"))
+      .then(function (d) { return { on: true, folders: (d && d.folders) || [] }; })
+      .catch(function (e) {
+        if (e && e.status === 404) { FOLDERS_OFF = true; return { on: false, folders: [] }; }
+        return null;                       // a transient failure: the caller keeps its last-known folders
+      });
+  }
+  // A session whose folder no longer exists renders as unfiled.
+  function folderIdIn(folders, fid) {
+    return fid && (folders || []).some(function (f) { return f.id === fid; }) ? fid : "";
+  }
+  function fileInFolder(sessionId, folderId) {
+    return V.postJSON(OFF("/api/session/folder"), { id: sessionId, folder_id: folderId || "" })
+      .then(function (d) { if (d && d.error) { V.toast(d.error, true); return false; } return true; })
+      .catch(function (e) { V.toast(String(e), true); return false; });
+  }
+  // Create and rename share one dialog. It stays open on a refusal (an empty or duplicate name) so the
+  // operator can correct it; onDone receives the server's reply.
+  function folderNameDialog(title, initial, verb, submit, onDone) {
+    var nameInput = h("input.input", { type: "text", value: initial || "", placeholder: "Folder name",
+      maxlength: "200", style: { width: "100%" } });
+    var m = null;
+    function save() {
+      var t = (nameInput.value || "").trim();
+      if (!t) { V.toast("A folder needs a name.", true); if (nameInput.focus) nameInput.focus(); return; }
+      submit(t).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); if (nameInput.focus) nameInput.focus(); return; }
+        if (m) m.close();
+        onDone(d);
+      }).catch(function (e) { V.toast(String(e), true); });
+    }
+    nameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); save(); } });
+    m = openModal(title, h("div.stack", null, [nameInput]), [
+      h("button.btn.primary", { onClick: save }, [V.icon("check"), verb]),
+    ]);
+  }
+  // New folder. With fileId set (from a "Move to folder" dialog) that session goes straight into it.
+  function newFolderDialog(onDone, fileId) {
+    folderNameDialog("New folder", "", "Create",
+      function (t) { return V.postJSON(OFF("/api/folder/create"), { name: t }); },
+      function (d) {
+        var fid = d && d.folder && d.folder.id;
+        V.toast("Folder created");
+        if (fileId && fid) fileInFolder(fileId, fid).then(function () { onDone(); });
+        else onDone();
+      });
+  }
+  function renameFolderDialog(f, onDone) {
+    folderNameDialog("Rename folder", f.name, "Rename",
+      function (t) { return V.postJSON(OFF("/api/folder/rename"), { id: f.id, name: t }); },
+      function () { onDone(); });
+  }
+  function deleteFolderDialog(f, count, onDone) {
+    var m = null;
+    function go() {
+      V.postJSON(OFF("/api/folder/delete"), { id: f.id }).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); return; }
+        if (m) m.close();
+        var n = Number(d && d.unfiled) || 0;
+        V.toast("Folder deleted" + (n ? " · " + n + (n === 1 ? " session" : " sessions") + " moved out of it" : ""));
+        onDone();
+      }).catch(function (e) { V.toast(String(e), true); });
+    }
+    m = openModal("Delete folder", h("div.stack", null, [
+      h("p", null, "Delete the folder ‘" + f.name + "’?"),
+      h("p.hint", null, count
+        ? "Nothing inside is deleted: " + (count === 1 ? "its 1 session moves" : "its " + count + " sessions move")
+          + " out of the folder."
+        : "It is empty."),
+    ]), [
+      h("button.btn", { onClick: function () { if (m) m.close(); } }, "Cancel"),
+      h("button.btn.danger", { onClick: go }, [V.icon("trash"), "Delete folder"]),
+    ]);
+  }
+  // "Move to folder": the keyboard-accessible way to file, move or unfile a session or a chat.
+  function moveToFolderDialog(label, sessionId, current, folders, onDone) {
+    var m = null;
+    function pick(fid) {
+      if (m) m.close();
+      if (fid === current) return;
+      fileInFolder(sessionId, fid).then(function (ok) { if (ok) onDone(); });
+    }
+    var choices = (folders || []).map(function (f) {
+      return h("button.btn.folder-pick" + (f.id === current ? ".on" : ""),
+        { "aria-pressed": f.id === current ? "true" : "false", onClick: function () { pick(f.id); } },
+        [V.icon("folder"), h("span", null, f.name)]);
+    });
+    if (current) {
+      choices.push(h("button.btn.folder-pick", { onClick: function () { pick(""); } },
+        [V.icon("x"), h("span", null, "Take it out of its folder")]));
+    }
+    m = openModal("Move ‘" + label + "’", h("div.stack.folder-picks", null, choices.length ? choices
+      : [h("p.hint", null, "No folders yet. Create one and this goes straight into it.")]), [
+      h("button.btn", { onClick: function () { if (m) m.close(); newFolderDialog(onDone, sessionId); } },
+        [V.icon("folder-plus"), "New folder"]),
+    ]);
+  }
+
   function loadSessions() {
     var host = V.$("#sessions-body"); if (!host) return;
-    V.getJSON(OFF("/api/sessions")).then(function (d) { drawSessions((d && d.sessions) || []); })
+    Promise.all([V.getJSON(OFF("/api/sessions")), loadFolders()])
+      .then(function (r) { drawSessions((r[0] && r[0].sessions) || [], r[1]); })
       .catch(function (e) { V.mount(host, h("div.empty", null, "Couldn't load sessions: " + e)); });
   }
 
-  function drawSessions(rows) {
+  function drawSessions(rows, fs) {
     var host = V.$("#sessions-body"); if (!host) return;
+    if (fs && fs.on) { drawFolderedSessionList(host, rows, fs.folders || []); return; }
     if (!rows.length) {
       V.mount(host, h("div.empty", null, "No sessions yet. Create one, or start a chat or assessment."));
       return;
     }
+    V.mount(host, h("div.grid.cols-2", { style: { alignItems: "start" } }, rows.map(function (s) {
+      return sessionCard(s, rows, null);
+    })));
+  }
+
+  // With folders ON the Sessions screen groups its cards: one section per folder (rename / delete it
+  // there), then the sessions not in any folder. Every card gains "Move to folder…".
+  function drawFolderedSessionList(host, rows, folders) {
+    var byFolder = {}, unfiled = [];
+    rows.forEach(function (s) {
+      var f = folderIdIn(folders, s.folder_id);
+      if (f) (byFolder[f] = byFolder[f] || []).push(s); else unfiled.push(s);
+    });
+    var ctx = { folders: folders };
+    var grid = function (list) {
+      return h("div.grid.cols-2", { style: { alignItems: "start" } },
+        list.map(function (s) { return sessionCard(s, rows, ctx); }));
+    };
+    var parts = [h("div.folder-toolbar", null, [
+      h("button.btn", { onClick: function () { newFolderDialog(loadSessions); } }, [V.icon("folder-plus"), "New folder"]),
+    ])];
+    folders.forEach(function (f) {
+      var inside = byFolder[f.id] || [];
+      parts.push(h("section.session-folder", null, [
+        h("div.session-folder-h", null, [
+          V.icon("folder"), h("h2", null, f.name),
+          h("span.dim", null, inside.length + (inside.length === 1 ? " session" : " sessions")),
+          h("span", { style: { flex: "1 1 auto" } }),
+          h("button.btn", { onClick: function () { renameFolderDialog(f, loadSessions); } }, "Rename folder"),
+          h("button.btn.danger", { onClick: function () { deleteFolderDialog(f, inside.length, loadSessions); } },
+            "Delete folder"),
+        ]),
+        inside.length ? grid(inside) : h("div.hint", null, "Empty. Use a session's “Move to folder…” to add it here."),
+      ]));
+    });
+    parts.push(h("section.session-folder", null, [
+      h("div.session-folder-h", null, [
+        h("h2", null, folders.length ? "Not in a folder" : "Sessions"),
+        h("span.dim", null, unfiled.length + (unfiled.length === 1 ? " session" : " sessions")),
+      ]),
+      unfiled.length ? grid(unfiled)
+        : h("div.hint", null, rows.length ? "Every session is in a folder."
+          : "No sessions yet. Create one, or start a chat or assessment."),
+    ]));
+    V.mount(host, parts);
+  }
+
+  // One session card. With ctx null (folders off) it is exactly the pre-folders card; with a folder
+  // context it also carries "Move to folder…".
+  function sessionCard(s, rows, ctx) {
     var linkStyle = { padding: "2px 8px", border: "1px solid var(--border,#334)", borderRadius: "6px",
       fontSize: "12px", textDecoration: "none" };
-    V.mount(host, h("div.grid.cols-2", { style: { alignItems: "start" } }, rows.map(function (s) {
-      var runs = s.run_ids || [];
-      var body = h("div", null, [
-        h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
-          sessionKindPill(s.kind),
-          h("span.dim", null, runs.length + (runs.length === 1 ? " run" : " runs")),
-          s.legacy ? h("span.dim", null, "· legacy chat") : null,
-        ]),
-        runs.length
-          ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap" } },
-              runs.slice(0, 8).map(function (rid) {
-                return h("a", { href: "#/live?run=" + encodeURIComponent(rid), title: "Open in Live",
-                  style: linkStyle }, rid);
-              }))
-          : h("div.dim", { style: { marginTop: "8px" } }, "No runs yet."),
-        (s.connections && s.connections.length)
-          ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap",
-              alignItems: "center" } },
-              [h("span.dim", null, "draws on:")].concat(s.connections.map(function (cid) {
-                return h("span", { style: linkStyle, title: "Connected — click ✕ to disconnect" }, [
-                  cid + " ",
-                  h("a", { href: "#", title: "Disconnect", style: { textDecoration: "none" },
-                    onClick: function (e) { e.preventDefault(); disconnectSession(s, cid); } }, "✕"),
-                ]);
-              })))
-          : null,
-        h("div", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [
-          h("button.btn", { onClick: function () { renameSession(s); } }, "Rename"),
-          h("button.btn", { onClick: function () { connectSession(s, rows); } }, "Connect…"),
-          h("button.btn", { onClick: function () { deleteSession(s, false); } }, "Delete"),
-          h("button.btn.danger", { onClick: function () { deleteSession(s, true); } }, "Delete permanently"),
-        ]),
-      ]);
-      return V.card(s.name || "(unnamed session)", (s.kind || "session").toUpperCase(), body, true);
-    })));
+    var runs = s.run_ids || [];
+    var body = h("div", null, [
+      h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+        sessionKindPill(s.kind),
+        h("span.dim", null, runs.length + (runs.length === 1 ? " run" : " runs")),
+        s.legacy ? h("span.dim", null, "· legacy chat") : null,
+      ]),
+      runs.length
+        ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap" } },
+            runs.slice(0, 8).map(function (rid) {
+              return h("a", { href: "#/live?run=" + encodeURIComponent(rid), title: "Open in Live",
+                style: linkStyle }, rid);
+            }))
+        : h("div.dim", { style: { marginTop: "8px" } }, "No runs yet."),
+      (s.connections && s.connections.length)
+        ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap",
+            alignItems: "center" } },
+            [h("span.dim", null, "draws on:")].concat(s.connections.map(function (cid) {
+              return h("span", { style: linkStyle, title: "Connected — click ✕ to disconnect" }, [
+                cid + " ",
+                h("a", { href: "#", title: "Disconnect", style: { textDecoration: "none" },
+                  onClick: function (e) { e.preventDefault(); disconnectSession(s, cid); } }, "✕"),
+              ]);
+            })))
+        : null,
+      h("div", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+        h("button.btn", { onClick: function () { renameSession(s); } }, "Rename"),
+        h("button.btn", { onClick: function () { connectSession(s, rows); } }, "Connect…"),
+        ctx ? h("button.btn", { onClick: function () {
+          moveToFolderDialog(s.name || s.id, s.id, folderIdIn(ctx.folders, s.folder_id), ctx.folders, loadSessions);
+        } }, [V.icon("folder"), "Move to folder…"]) : null,
+        h("button.btn", { onClick: function () { deleteSession(s, false); } }, "Delete"),
+        h("button.btn.danger", { onClick: function () { deleteSession(s, true); } }, "Delete permanently"),
+      ]),
+    ]);
+    return V.card(s.name || "(unnamed session)", (s.kind || "session").toUpperCase(), body, true);
   }
 
   function connectSession(s, rows) {
