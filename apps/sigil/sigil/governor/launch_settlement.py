@@ -95,9 +95,10 @@ _SETTLED_CORE_V1 = ("signal", "org_id", "slug", "nonce", "consumed", "issued_at"
 SETTLE_WALLET_PREFIX = "settle-wallet:"
 SETTLE_PLAN_PREFIX = "settle-plan:"
 MODE_PREPAID, MODE_POSTPAID = "prepaid", "postpaid"
-#: Which caller decided a settlement (the record's ``basis``).
+#: Which caller decided a settlement (the record's ``basis``). ``assistant`` (PR-J2): one customer security-assistant
+#: turn's exact settle (``ui.assistant_wallet``) — its own reserve, settled exactly once like any lease.
 BASES = frozenset({"completion:completed", "completion:canceled", "completion:failed", "cancel", "sweep:refund",
-                   "sweep:paused", "settle"})
+                   "sweep:paused", "settle", "assistant"})
 _MAX_BASIS = 64
 
 #: The bounded wait of :func:`settle_lock` timed out: another settle / publish holds it. Retry; nothing was done.

@@ -2020,6 +2020,9 @@ def cmd_ops_sweep(a) -> None:
         # listing above — under the same report-by-default / --apply gates (rows only when there are any).
         out["items"].extend(ops_sweeps.sweep_superseded_reservations(
             gate, now=now, ttl_s=a.ttl, apply=a.apply, completion_spool=(a.completion_spool or None))["items"])
+        # PR-J2: customer security-assistant turns a crash left unsettled — behind VIGIL_CUSTOMER_ASSISTANT_WALLET
+        # (off: no rows), under the same report-by-default / --apply gates
+        out["items"].extend(ops_sweeps.sweep_assistant_turns(gate, now=now, apply=a.apply)["items"])
     elif a.sweep_cmd == "reconcile":
         # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
         # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed
