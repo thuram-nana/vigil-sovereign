@@ -3404,6 +3404,7 @@ class Provisioner:
         from . import finding_presentation as _fp
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _fp.assessment_posture(s, o, now=_t.time()))
+
     def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
         """PR-J — answer ONE customer security question for the SESSION org, grounded ONLY in that org's oracle-confirmed
         findings and metered through the sovereign model gateway. Absent unless VIGIL_CUSTOMER_ASSISTANT is on (gated at

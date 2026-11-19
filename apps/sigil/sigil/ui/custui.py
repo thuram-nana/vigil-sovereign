@@ -1457,6 +1457,8 @@ def _presentation_on() -> bool:
     # APEX PR-A — the same master flag that arms the mint-side presentation block + the cockpit posture action.
     from .. import config as _config
     return _config.presentation_enabled()
+
+
 def _assistant_on() -> bool:
     from .. import config as _config
     return _config.customer_assistant_enabled()
