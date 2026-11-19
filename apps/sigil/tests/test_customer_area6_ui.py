@@ -595,15 +595,21 @@ def _signup(op, ep, email="a@acme.com"):
 
 
 def test_flags_off_the_edge_answers_404(tmp_path, monkeypatch):
+    """Off, each route is the EDGE's own unknown-route answer (status AND body) — it never hops to the cockpit, whose
+    own refusal ("unknown provision action") would otherwise mask an edge that served the route (two independent
+    refusals, each checked on its own: the cockpit leg is test_flags_off_the_plans_surface_is_absent & co)."""
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
     try:
         op = _opener()
         _signup(op, ep)
+        unknown_get = _get(op, ep, "/api/customer/no-such-read")
+        unknown_post = _post(op, ep, "/api/customer/no-such-action", {"price_id": "vigil_pro_monthly"})
+        assert unknown_get[0] == 404 and unknown_post[0] == 404
         for path in _ROUTES:
-            assert _get(op, ep, path)[0] == 404, path
-        assert _post(op, ep, "/api/customer/billing/plan-change", {"price_id": "vigil_pro_monthly"})[0] == 404
+            assert _get(op, ep, path) == unknown_get, path
+        assert _post(op, ep, "/api/customer/billing/plan-change", {"price_id": "vigil_pro_monthly"}) == unknown_post
         monkeypatch.setenv("VIGIL_CUSTOMER_PLANS", "1")              # Plans alone: the change route stays absent
-        assert _post(op, ep, "/api/customer/billing/plan-change", {"price_id": "vigil_pro_monthly"})[0] == 404
+        assert _post(op, ep, "/api/customer/billing/plan-change", {"price_id": "vigil_pro_monthly"}) == unknown_post
     finally:
         sov.shutdown(); edge.shutdown()
 
