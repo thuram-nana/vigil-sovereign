@@ -1038,6 +1038,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._monitoring(action, body)
         if action in _CODE_ACTIONS and _redpen_on():                 # C6 Code screen (flag OFF -> unknown-action 404)
             return self._code(action, body)
+        if action == "assistant/ask" and _assistant_on():            # PR-J assistant (flag OFF -> unknown-action 404)
+            return self._assistant(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1226,6 +1228,20 @@ class CustomerHandler(BaseHTTPRequestHandler):
             if k in body:
                 payload[k] = body[k]
         c, r = self._provision(target, str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _assistant(self, body: dict):
+        """PR-J — the security assistant. REQUESTER + ORG from the SERVER-side session, never the body (a body org_id is
+        ignored): a customer asks about THEIR bound org only. Only the customer's QUESTION travels. The sovereign
+        provisioner admits view_assessments, grounds the answer in the session org's own oracle-confirmed findings and
+        meters the model call through the gateway; back comes ADVICE (``kind="assistant_advice"``) — never a finding,
+        never a cost or a model name."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "question": body.get("question", "")}   # the question only, from the body
+        c, r = self._provision("assistant_ask", str(rec.get("username") or ""), payload)
         return self._json(r, c)
 
     def _code_connected(self):
@@ -1441,6 +1457,9 @@ def _presentation_on() -> bool:
     # APEX PR-A — the same master flag that arms the mint-side presentation block + the cockpit posture action.
     from .. import config as _config
     return _config.presentation_enabled()
+def _assistant_on() -> bool:
+    from .. import config as _config
+    return _config.customer_assistant_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

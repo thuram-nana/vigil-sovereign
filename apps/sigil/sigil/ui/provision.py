@@ -3404,6 +3404,57 @@ class Provisioner:
         from . import finding_presentation as _fp
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _fp.assessment_posture(s, o, now=_t.time()))
+    def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
+        """PR-J — answer ONE customer security question for the SESSION org, grounded ONLY in that org's oracle-confirmed
+        findings and metered through the sovereign model gateway. Absent unless VIGIL_CUSTOMER_ASSISTANT is on (gated at
+        the dispatch). Gated like the assessments read — ``admit_customer(view_assessments)`` on the session org, NO
+        global leg (a customer uses the assistant only for their own tenant); ``requester``/``requester_org_id`` are the
+        hop-bound session principal, NEVER a body field. The assistant summarises / explains / prioritises EXISTING
+        findings as ADVICE: it never asserts or mints a vulnerability (``ui/assistant`` has no mint path; the oracle
+        alone mints a FACT), tenant isolation is the findings read's (structural — ``_customer_slug`` one-way hash), and
+        the model is reached ONLY through the gateway with an owner-signed per-turn grant (this process hands the
+        provider key to nothing — the gateway holds it). Returns the advice projection (``kind="assistant_advice"``),
+        never a finding and never a model/provider name."""
+        import time as _t
+        from .. import config
+        from . import assistant as _assistant
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not use the assistant for this org (view_assessments)")
+        q = _assistant.valid_question(question)
+        if q is None:
+            raise ProvisionDenied("the question is empty or too long")
+        # HONEST TODO (money-doctrine): the assistant's model spend is not yet drawn from the customer WALLET. With
+        # metered billing ON the gateway requires a per-grant ALLOWANCE (``LaunchAllowance`` is keyed by a launch lease,
+        # not by an assistant grant), so an assistant grant would be refused by the gateway. Until the assistant meter is
+        # wired into the wallet + statement, fail closed here rather than mint a grant the gateway cannot admit. The
+        # gateway still METERS the turn against the grant cap when metered billing is off (the invariant holds); what is
+        # unbuilt is only the wallet DRAW + its statement line.
+        if config.metered_billing_enabled():
+            raise ProvisionDenied("the assistant is not yet available while metered billing is enabled")
+        owner_key = getattr(self.orgs, "owner_key", None)
+        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):
+            raise ProvisionDenied("the assistant needs the owner key to mint its model grant")
+        token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
+        call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
+        reply = _assistant.answer(self.store, requester_org_id, q, model_call=call, now=_t.time(),
+                                  model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
+                                  limit=config.assistant_finding_limit())
+        return reply.as_dict()
+
+    def _mint_assistant_grant(self, org_id: str, owner_key: Any, *, now: float) -> str:
+        """Mint a short-lived owner-signed MODEL GRANT for ONE assistant turn: the turn's model
+        (``config.assistant_model``), the cheapest effort, a small per-turn cap (a technical ceiling a leaked token can
+        never spend past), a fresh nonce (a fresh meter per turn) and a 5-minute life. Its meter is the org's assistant
+        meter (``assistant:<customer_slug>``), separate from any launch's. Sovereign-side only (it holds the owner
+        private key); the token is handed only to the gateway dial, never logged or returned to the customer."""
+        from vigil_core.model_grant import ModelGrant, encode_token, new_grant_id
+        from .. import config
+        from .target_authorization import _customer_slug
+        slug = "assistant:" + _customer_slug(org_id, "__assistant__")
+        grant = ModelGrant(grant_id=new_grant_id(), org_id=org_id, engagement_slug=slug, nonce=new_grant_id(),
+                           model=config.assistant_model(), effort="high", cap_nano_usd=config.assistant_cap_nano_usd(),
+                           not_after=now + 300.0, issued_at=now)
+        return encode_token(grant, owner_key.private_key_b64)
 
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:

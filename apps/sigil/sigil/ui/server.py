@@ -1808,6 +1808,15 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.presentation_enabled():
                 return None
             return p.customer_assessment_posture(requester, str(body.get("org_id", "")), ip=ip)
+        # PR-J — the customer security ASSISTANT: a metered NL answer grounded ONLY in the session org's own oracle-
+        # confirmed findings. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_ASSISTANT is on; org from the edge
+        # SESSION, the question from the body (treated strictly as data by the grounded prompt). Never mints a finding.
+        if action == "assistant_ask":
+            from .. import config as _config
+            if not _config.customer_assistant_enabled():
+                return None
+            return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
+                                            str(body.get("question", "")), ip=ip)
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
