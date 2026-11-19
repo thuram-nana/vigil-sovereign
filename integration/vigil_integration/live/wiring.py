@@ -1943,13 +1943,15 @@ def _spec_is_oob_consumable(redrive: dict, info: "Optional[dict]" = None) -> boo
         return True
     try:
         from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
-        from .runtime_redrive import OOB_REDRIVE_CLASSES  # noqa: PLC0415 (framework at CALL — FATAL-2)
+        from .runtime_redrive import oob_redrive_classes  # noqa: PLC0415 (framework at CALL — FATAL-2)
     except Exception:  # noqa: BLE001 — module unavailable ⇒ not consumable ⇒ no injection (fail-closed)
         return False
     bug_class = redrive.get("bug_class")
     if not bug_class and isinstance(info, dict):
         bug_class = info.get("bug_class")     # mirror the consumer's `redrive OR info` resolution exactly
-    return normalize_bug_class(str(bug_class or "")) in OOB_REDRIVE_CLASSES
+    # APEX PR-2: the EFFECTIVE out-of-band set (base 7, + blind_ssti only when VIGIL_APEX_OOB is on). With the
+    # flag off this is the frozen 7 ⇒ byte-identical; the strip stays unconditional either way (defense-in-depth).
+    return normalize_bug_class(str(bug_class or "")) in oob_redrive_classes()
 
 
 def _with_trusted_oob_material(redrive: "Optional[dict]",
@@ -2941,12 +2943,13 @@ def _live_oob_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
         return None
     try:
         from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
-        from .runtime_redrive import OOB_REDRIVE_CLASSES, oob_callback_redrive  # noqa: PLC0415 (framework at CALL)
+        from .runtime_redrive import oob_callback_redrive, oob_redrive_classes  # noqa: PLC0415 (framework at CALL)
     except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
         return None
     claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
-    if claimed not in OOB_REDRIVE_CLASSES:
-        return None    # not an oob-redrive class → nothing for this seam to confirm → LEAD
+    if claimed not in oob_redrive_classes():
+        return None    # not an oob-redrive class → nothing for this seam to confirm → LEAD (APEX PR-2: the
+        #                effective set adds blind_ssti only when VIGIL_APEX_OOB is on; off ⇒ frozen 7 ⇒ LEAD)
     material = dict(oob_material)
     material["bug_class"] = claimed    # the claimed class rides on the trusted material bundle for the arm
     try:

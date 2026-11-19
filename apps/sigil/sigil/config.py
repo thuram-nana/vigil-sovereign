@@ -315,6 +315,21 @@ def presentation_enabled() -> bool:
     return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def apex_autonomous_enabled() -> bool:
+    """True iff the APEX autonomous DRIVER is ON (`VIGIL_APEX_AUTONOMOUS` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it OFF an engagement runs the exact current fixed pipeline — crawl →
+    audit → confirm → chain → ground — and the autonomous OODA loop stays a post-scan advisory appendix
+    behind `--autonomous`; nothing in the primary path changes and `make gate` is byte-identical. With it
+    ON, `framework.v2.engage.run_engagement` keeps the one gated scan executor OPEN past the scan and drives
+    the select→act→observe→reorient loop IN-ENGAGEMENT over it (one shared request budget), so a recon-
+    discovered surface is promoted → crawled → probed → oracle-confirmed WITHOUT a human pointing at it —
+    the loop proposes, the gate authorizes, the oracle confirms (no new mint site). Read at call time.
+    FATAL-2 safe: a pure env read; this sovereign accessor loads no offense module, and the offense engine
+    reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
+    closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
+    return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 # A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL
 # (`https://github.com/apps/<slug>/installations/new`) accepts — the numeric App id cannot build it. The owner sets
 # it when they register the real App (go-live, HANDOFF §6); unset ⇒ the Code screen's Connect GitHub refuses with a
@@ -531,6 +546,54 @@ def multi_shard_enabled() -> bool:
     gates only the in-repo resolution + orchestration code); the production flip stays the OWNER's, after S4 is
     green (HANDOFF §13.1)."""
     return (os.environ.get("VIGIL_MULTI_SHARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_fair_queue_enabled() -> bool:
+    """True iff the customer FAIR cross-tenant launch QUEUE + shard-placement-on-signup are on
+    (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative; consumer PR-F). OFF by default (mirrors `redpen_enabled` /
+    `customer_monitoring_enabled`): with it off a sign-up mints NO shard assignment (the historical
+    single-placement deployment), the launch surface shows NO cross-tenant queue position, and every surface is
+    byte-identical to a build without PR-F.
+
+    When ON (together with `multi_shard_enabled()` AND an owner-set `shard_ids()` topology) a sign-up is placed on
+    a shard by the OWNER-signed provisioner — a tenant NEVER self-assigns (the shard is server-chosen from owner
+    topology + current load, exactly like a launch AMOUNT is server-decided), and the launch surface may show an
+    honest cross-tenant "queued" position so load surfaces as a truthful wait, never a silent drop.
+
+    Fairness is a cross-TENANT ORDERING only: it NEVER parallelizes one target (per-target scan stays SERIAL — the
+    engine's slug lease / serial-proof-per-host governor is untouched) and it mints NO FACT (only the oracle mints
+    facts; a queue position is a UI notice, never a finding). The elastic we-host k8s/Firecracker fleet these
+    shards map to is OWNER-GATED infra, out of this code's scope — this flag gates only the in-repo placement +
+    ordering. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_FAIR_QUEUE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# A SAFE single shard-id path component — mirrors ``vigil_core.shard_assignment_record._TENANT_RE`` (replicated
+# here as a config-time pre-filter, so a malformed owner entry is DROPPED rather than reaching the signer):
+# alnum start then [A-Za-z0-9._-], max 64, no separators / ``.``/``..`` traversal / absolute path / NUL.
+_SHARD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def shard_ids() -> "tuple[str, ...]":
+    """The owner-set shard topology for placement-on-signup (`VIGIL_SHARD_IDS`, a comma-separated list of safe
+    shard-id components, e.g. ``shard01,shard02``), de-duplicated with order preserved. EMPTY by default: with no
+    topology the provisioner places NOTHING on sign-up (fail-safe — a tenant is never guessed onto a shard, and
+    routing then fails closed for it), so even with the flags on, shard-on-signup stays inert until the owner
+    names the shards. A malformed entry (not a safe single path component) is DROPPED, so a bad owner value can
+    never traverse a path. The owner stands up the matching cross-HOST fleet separately — that elastic we-host
+    k8s/Firecracker infra is OWNER-GATED and out of this code's scope. Read at call time."""
+    raw = (os.environ.get("VIGIL_SHARD_IDS") or "").strip()
+    if not raw:
+        return ()
+    out: "list[str]" = []
+    seen: "set[str]" = set()
+    for part in raw.split(","):
+        c = part.strip()
+        if not c or c in seen or not _SHARD_ID_RE.fullmatch(c):
+            continue
+        seen.add(c)
+        out.append(c)
+    return tuple(out)
 
 
 def billing_plan_alarm_enabled() -> bool:
@@ -1429,3 +1492,18 @@ def doctor() -> list[tuple[str, bool, str]]:
     checks.append(_check_qdrant())
     checks.append(_check_keyring())
     return checks
+
+
+def apex_oob_enabled() -> bool:
+    """True iff APEX PR-2 OOB-First confirmation is ON (`VIGIL_APEX_OOB` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off the one genuinely-new OOB class — blind SSTI — is absent from the
+    effective out-of-band re-drive set, so the autonomous router/feeder/arm never route a `blind_ssti`
+    candidate to the out-of-band confirmation seam and such a claim stays a LEAD, byte-identical to a build
+    without APEX OOB. The already-merged out-of-band classes (ssrf / xxe / blind_xxe / rce / command_injection
+    / deserialization / oob_sqli) are UNAFFECTED by this flag — they ship on the standing VF-2b collector path.
+    Read at call time. The offense/integration plane reads the SAME `VIGIL_APEX_OOB` env var directly
+    (``runtime_redrive.apex_oob_enabled`) — it may not import this sovereign module (FATAL-2); this function is
+    the sovereign-side convenience + the canonical place the flag is documented. Even ON, a blind-SSTI OOB
+    FACT still requires the full collector provisioning (an owner-pinned collector pubkey + the deployment
+    collector private key + a verified owner-signed authority), exactly like every other out-of-band class."""
+    return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE

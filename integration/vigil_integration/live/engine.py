@@ -920,10 +920,11 @@ class VigilEngine:
         # ADDITIVE: a separate dispatch set + the "oob" spec kind, so the runtime/web/sqli/injection/credential arms
         # above are untouched and make gate stays byte-identical. The seam re-normalizes + re-gates.
         try:
-            from .runtime_redrive import OOB_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+            from .runtime_redrive import oob_redrive_classes  # noqa: PLC0415 — import-clean fn (FATAL-2)
+            _oob_classes = oob_redrive_classes()   # APEX PR-2: frozen 7 off, +blind_ssti when VIGIL_APEX_OOB on
         except Exception:  # noqa: BLE001 — module unavailable ⇒ no oob re-drive (other paths work)
-            OOB_REDRIVE_CLASSES = ()
-        if bug_class in OOB_REDRIVE_CLASSES:
+            _oob_classes = ()
+        if bug_class in _oob_classes:
             full = target if "://" in target else "http://" + target
             return {"kind": "oob", "url": full, "bug_class": bug_class}
 

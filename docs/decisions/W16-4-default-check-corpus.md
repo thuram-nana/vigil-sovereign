@@ -12,7 +12,7 @@ There are two check rosters in the scanner:
   `open_redirect`, `ssrf`, `blind_xxe`, `command_injection`, `deserialization`). Every check is
   oracle-anchored and confirms end to end. This roster is the **default check corpus**: it runs on
   every `scan` and `engage` with no flag.
-- **The declarative check library** — `scanner.library`, **173 entries across 23 bug classes**.
+- **The declarative check library** — `scanner.library`, **181 entries across 24 bug classes**.
   Its POINT checks add 12 bug classes the seed roster does not cover (`nosqli`, `ldap_injection`,
   `xpath_injection`, `el_injection`, `sqli`, `time_based_sqli`, `time_based_command_injection`,
   `time_based`, `lfi`, `xxe`, `rce`, `auth_bypass`); its two REQUEST-level classes
@@ -55,8 +55,8 @@ This claim is TRUE of the code as of W16-4:
   corpus (`corpus_classes`, `classes_exercised`, `classes_inconclusive`, `clean_is_corpus_wide`).
 - **The corpus** — `scanner.campaign._corpus_bug_classes()` derives the corpus from the loaded
   registry (`DEFAULT_CHECKS` ∪ `scanner.library` POINT checks), never a hardcoded number, so the
-  disclosure tracks the library as entries are added/removed. Today it is **22 distinct point-check
-  classes** (10 built-in ∪ 12 library-only).
+  disclosure tracks the library as entries are added/removed. Today it is **23 distinct point-check
+  classes** (10 built-in ∪ 13 library-only).
 - **The disclosure surfaces** — the machine JSON report (`scanner.report.build_report`) carries a
   `verdict_by_class` map and a `coverage_verdict` block; the HTML note and the operator-facing text
   line (`scanner.report.coverage_line`, printed by both `scan` and `engage`) both state

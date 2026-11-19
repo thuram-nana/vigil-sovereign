@@ -90,6 +90,10 @@ assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import t
 import sigil.model_gateway                    # PRICING M1: the sovereign model gateway (holds the provider key)
 assert "framework" not in _m, "model_gateway must not import framework at module scope"
 assert "strix" not in _m, "model_gateway must not import strix at module scope"
+import sigil.config                           # APEX PR-1: the sovereign autonomous-driver flag accessor (pure env read)
+assert hasattr(sigil.config, "apex_autonomous_enabled"), "sigil.config must expose apex_autonomous_enabled"
+assert "framework" not in _m, "sigil.config must not import framework at module scope"
+assert "strix" not in _m, "sigil.config must not import strix at module scope"
 import vigil_integration.live.approval_broker  # A2: the offense-side per-action approval queue/broker
 assert "framework" not in _m, "approval_broker must not import framework at module scope"
 assert "strix" not in _m, "approval_broker must not import strix at module scope"
@@ -207,6 +211,12 @@ assert "strix" not in _m, "standards_mirror must not import strix at module scop
 import sigil.ui.finding_presentation          # APEX PR-A: the sovereign posture/presentation head (renders via the mirror)
 assert "framework" not in _m, "finding_presentation must not import framework at module scope"
 assert "strix" not in _m, "finding_presentation must not import strix at module scope"
+import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
+assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
+assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
+import sigil.governor.shard_on_signup  # PR-F: the SOVEREIGN owner-side shard-placement-on-signup policy
+assert "framework" not in _m, "governor.shard_on_signup must not import framework at module scope (owner-signed, no engine)"
+assert "strix" not in _m, "governor.shard_on_signup must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

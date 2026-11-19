@@ -255,6 +255,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "ssti": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    # APEX PR-2 — blind SSTI (the OUT-OF-BAND variant of SSTI, whose template evaluation leaves no readable
+    # response byte and is proven ONLY by an out-of-band interaction the evaluated construct triggers). Routes
+    # to the EXISTING OracleKind.OOB_CALLBACK (NO new OracleKind — _ALL_ORACLES stays 15), exactly as `oob_sqli`
+    # is kept DISTINCT from the in-corpus `sqli`: here `blind_ssti` is kept distinct from the in-corpus `ssti`
+    # (whose EVALUATION row proves the REFLECTED variant) so the blind row is NOT hijacked by the evaluation
+    # family and, being absent from every benchmark corpus, is INERT on the gate (`make gate` byte-identical).
+    # This row is PERMANENT (never flag-gated), so an offline re-verify of a minted blind_ssti FACT routes the
+    # oracle identically regardless of VIGIL_APEX_OOB — only LIVE production of the attempt is flag-gated (see
+    # live.runtime_redrive.oob_redrive_classes). VIGIL mints its OWN callback token and the oracle adjudicates.
+    "blind_ssti": (OracleKind.OOB_CALLBACK,),
     "el_injection": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT),
     # Wave-4.1 Server-Side Includes (SSI, CWE-97). REUSES the frozen EVALUATION kind exactly like SSTI (adds
     # NO new OracleKind, so _ALL_ORACLES stays EXACTLY 15 and `make gate` is byte-identical). EVALUATION is
@@ -1619,6 +1629,21 @@ class OracleVerifier:
                 )
             return None
         if kind is OracleKind.ERROR_SIGNATURE:
+            # -- Parser-state toggle (nosqli/ldap_injection/xpath_injection datastore QUERY BREAK) — REUSES
+            #    the FROZEN ERROR_SIGNATURE kind (as smuggling_desync reuses DIFFERENTIAL_RESPONSE), but
+            #    fires ONLY when the ctx carries the fresh `parser_state_toggle` record: the three retained
+            #    legs (break/balanced/control) + the three payloads over which it re-derives the break-vs-
+            #    repair toggle OFFLINE. No benchmark/scan/engage finding carries this key, so this branch is
+            #    inert on the gate path (byte-identical) and oracle_version(ERROR_SIGNATURE) is untouched; an
+            #    ordinary error_signature finding (error_observed) is handled by the arm below. Proves a
+            #    GENUINE query break, never mere CONDITIONAL emission of an error-shaped string.
+            #    PRECISE routing (`is not None`, NOT `in ctx`): a plain error_signature context serialized via
+            #    FindingContext.model_dump carries EVERY optional field as null, including `parser_state_toggle`,
+            #    so a bare `in ctx` would hijack an ordinary error_based finding onto the toggle path (which
+            #    needs the 3-leg record) and stop error_signature re-firing — the ebsqli-1 witness-quorum
+            #    regression. None ⇒ absent ⇒ fall through to error_observed exactly as before (byte-identical).
+            if ctx.get("parser_state_toggle") is not None:
+                return oracles.parser_state_toggle_oracle(ctx["parser_state_toggle"])
             if "error_observed" in ctx:
                 return oracles.error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
             return None

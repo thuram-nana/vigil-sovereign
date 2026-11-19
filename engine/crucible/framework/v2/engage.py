@@ -97,6 +97,37 @@ class EngagementPaused(RuntimeError):
     is enabled (nothing records a pause), so the engine is byte-identical."""
 
 
+# APEX PR-1 — the autonomous DRIVER flag, read OFFENSE-SIDE. FATAL-2: the offense engine never imports the
+# sovereign ``sigil.config``; it reads the SAME ``VIGIL_APEX_AUTONOMOUS`` env var, with the SAME affirmative
+# set as ``sigil.config._OIDC_AFFIRMATIVE``, so both planes agree on "on" with no cross-plane import. DEFAULT-OFF.
+_APEX_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+# Bound on the in-engagement OODA cycles the driver runs (OPSEC/cost cap; the shared request budget is the
+# real limiter — a cycle that finds no open action breaks early). Operator-tunable via VIGIL_APEX_MAX_CYCLES.
+_APEX_MAX_CYCLES_DEFAULT = 64
+
+
+def _apex_autonomous_enabled() -> bool:
+    """True iff the APEX autonomous driver is ON (``VIGIL_APEX_AUTONOMOUS`` affirmative). Read at CALL time so
+    a test / operator can flip it per process. OFF (the default) ⇒ ``run_engagement`` runs the exact current
+    fixed pipeline and closes the scan executor exactly as before — byte-identical; ``make gate`` (which never
+    calls ``run_engagement``) is doubly insulated. Sovereign mirror: ``sigil.config.apex_autonomous_enabled``."""
+    return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _APEX_AFFIRMATIVE
+
+
+def _apex_max_cycles() -> int:
+    """The in-engagement OODA cycle bound (``VIGIL_APEX_MAX_CYCLES``, default ``_APEX_MAX_CYCLES_DEFAULT``).
+    Fail-safe: a missing / non-integer / non-positive value falls back to the default."""
+    raw = (os.environ.get("VIGIL_APEX_MAX_CYCLES") or "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v >= 1:
+                return v
+        except ValueError:
+            pass
+    return _APEX_MAX_CYCLES_DEFAULT
+
+
 @dataclass
 class EngagementResult:
     """The full outcome of an engagement: the oracle-confirmed scan report AND the
@@ -155,6 +186,13 @@ class EngagementResult:
     # engage_worker emits a COMPLETED signal → completion_spool.settle_launch settles the reservation
     # consumed-so-far — the launch is neither stranded (lost reservation) nor double-charged.
     stopped_reason: str | None = None
+    # APEX PR-1 — the in-engagement AUTONOMOUS driver's telemetry (``engage_autonomous.AutonomyResult``),
+    # attached ONLY when ``VIGIL_APEX_AUTONOMOUS`` is ON and the loop ran over the scan's still-open gated
+    # executor. None on every default run (flag OFF) → byte-identical. The loop promotes recon assets,
+    # crawls/probes them through the SHARED gated executor (one request budget), and folds oracle-confirmed
+    # discoveries into ``report.active_findings`` BEFORE the reasoning phases, so they are chained + grounded
+    # like scan findings. It mints nothing itself — the oracle stays the sole authority.
+    autonomy: object = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -1668,6 +1706,27 @@ def run_engagement(
     # extra request), and record a legible INCONCLUSIVE surface below so a dead seed stops looking clean.
     _seed_probe: dict = {"captured": False, "empty": False}
 
+    # APEX PR-1 — the in-engagement AUTONOMOUS driver (behind ``VIGIL_APEX_AUTONOMOUS``, default OFF). When ON,
+    # the scan's gated executor is kept OPEN past the scan (stashed in ``_apex_hold``) and the OODA loop drives
+    # select→act→observe→reorient over its ``gated_fetch`` under the SAME ``request_budget`` — so a recon-
+    # discovered surface is promoted → crawled → probed → oracle-confirmed with no human pointing at it. OFF ⇒
+    # ``_do_scan`` closes the executor exactly as before and nothing below runs ⇒ byte-identical. Read ONCE here
+    # so the whole run sees a single consistent value.
+    apex_autonomous = _apex_autonomous_enabled()
+    _apex_hold: dict = {"ex": None}
+
+    def _apex_release_executor() -> None:
+        """Close + clear the stashed scan executor (idempotent; HttpExecutor.close is itself idempotent). Called
+        after the in-engagement driver runs AND on every early exit (pause raise) that skips the driver, so the
+        kept-open executor never leaks. A no-op when apex is OFF / nothing was stashed."""
+        ex = _apex_hold.get("ex")
+        if ex is not None:
+            _apex_hold["ex"] = None
+            try:
+                ex.close()
+            except Exception:
+                pass
+
     def _do_scan() -> ScanReport:
         """Build the gated executor (+ optional fail-closed arsenal-authz + access-control pack)
         and run the Wave-1 campaign to a ScanReport, always closing the executor. Extracted so a
@@ -1779,8 +1838,15 @@ def run_engagement(
                 except Exception:
                     pass
             return resp
+        # APEX PR-1 — when the driver is ON, hand the OPEN executor to the in-engagement OODA loop (the
+        # caller closes it after driving the loop, via ``_apex_release_executor``) instead of closing it
+        # here. ``_apex_keep`` is set ONLY after the scan returns normally, so an exception (incl. the
+        # RunBudgetExceeded stop, which propagates from here) still closes the executor in ``finally`` —
+        # nothing is kept open on a failed scan. OFF ⇒ ``_apex_keep`` stays False ⇒ the executor is closed
+        # exactly as before (byte-identical).
+        _apex_keep = False
         try:
-            return WebScanCampaign(
+            report = WebScanCampaign(
                 _seed_recording_send,
                 max_pages=max_pages,
                 max_audit_requests=max_audit_requests,
@@ -1811,8 +1877,13 @@ def run_engagement(
                 priors=priors,
                 progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
             ).run(seed_url)
+            if apex_autonomous:
+                _apex_hold["ex"] = ex      # keep OPEN for the in-engagement driver; the caller closes it
+                _apex_keep = True
+            return report
         finally:
-            ex.close()
+            if not _apex_keep:
+                ex.close()
 
     # SCAN phase — the one traffic-sending phase, so resume matters most here. On --resume, if a
     # prior run COMPLETED the scan, reload its snapshotted authoritative report and SKIP re-
@@ -1897,6 +1968,9 @@ def run_engagement(
     # scan is still truncated, so the launch must re-drive (and re-scan) rather than settle on it.
     # DEFAULT-OFF: no nonce / no pause marker ⇒ _lease_is_paused is False ⇒ never raised ⇒ byte-identical.
     if _scan_cut_by_pause or _lease_is_paused(_pause_base, slug, _pause_nonce):
+        # APEX: a paused run skips the in-engagement driver — close the kept-open executor before raising so
+        # it never leaks (no-op when apex is OFF / nothing was stashed; close is idempotent).
+        _apex_release_executor()
         raise EngagementPaused(
             f"customer launch {slug!r} cooperatively halted — its credit-launch lease was paused mid-run (a "
             f"reversible operator halt). Re-driveable: resume (clear the pause) re-arms the SAME lease without "
@@ -1905,6 +1979,30 @@ def run_engagement(
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.
     result = EngagementResult(report=report, world=world)
+
+    # APEX PR-1 — the IN-ENGAGEMENT autonomous DRIVER (behind ``VIGIL_APEX_AUTONOMOUS``, default OFF). Runs
+    # HERE — after the authoritative scan, BEFORE the reasoning phases — so any oracle-confirmed finding the
+    # loop DISCOVERS is folded into ``report.active_findings`` and then flows through finding-confidence,
+    # chaining and the GROUNDING veracity firewall exactly like a scan finding (the "primary driver", not a
+    # post-return appendix over a throwaway executor). It drives ``run_autonomous_cycle`` over the scan's
+    # STILL-OPEN gated executor (one shared ``request_budget``): every probe rides ``gated_fetch`` (full
+    # kill-switch → scope → budget → egress chain) and the oracle stays the sole mint authority. On resume
+    # the scan was reloaded (no open executor) so the driver is skipped. The executor is ALWAYS closed after
+    # (``finally``). OFF / nothing stashed ⇒ this block is inert ⇒ byte-identical.
+    if apex_autonomous and _apex_hold.get("ex") is not None:
+        try:
+            result.autonomy = _run_apex_driver(
+                result, slug=slug, seed_url=seed_url, executor=_apex_hold["ex"],
+                request_budget=request_budget, prompt_callback=prompt_callback,
+                spine=spine, run_dir=(run_dir or _engage_run_dir()))
+        except _RunBudgetExceeded as _rbx:
+            # EC-3 money-seam — a RUN-SCOPED HARD token-budget stop inside the driver is a CLEAN terminal stop,
+            # NOT a crash: record it and fall through to the tail, which sets ``stopped_reason`` and returns the
+            # PARTIAL result normally (the worker then emits COMPLETED → settle consumed-so-far), EXACTLY as when
+            # the scan itself hits the ceiling. Default-OFF: unarmed runs never raise this, so this is inert.
+            _rb_stopped = _rbx
+        finally:
+            _apex_release_executor()
 
     def _do_intel_finalize() -> None:
         result.entities, result.predictions = _intel_finalize(ingest, report)
@@ -2195,6 +2293,88 @@ def _resolve_fuse_sensors(slug: str, *, fuse_sensors: bool, no_fuse_sensors: boo
     enabled = (fuse_sensors or manifest_present) and not no_fuse_sensors
     auto_activated = bool(enabled and manifest_present and not fuse_sensors)
     return enabled, auto_activated
+
+
+def _run_apex_driver(
+    result: EngagementResult, *, slug: str, seed_url: str, executor: object,
+    request_budget: int, prompt_callback: PromptCallback | None, spine: object,
+    run_dir: "str | None",
+) -> object:
+    """APEX PR-1 — drive the in-engagement AUTONOMOUS OODA loop over the scan's STILL-OPEN gated executor.
+
+    This is the ``VIGIL_APEX_AUTONOMOUS`` promotion: instead of the post-return ``_run_autonomous`` appendix
+    building a THROWAWAY executor with its own tiny budget, the engagement keeps the ONE scan executor open
+    and drives ``run_autonomous_cycle`` over its ``gated_fetch`` under the SAME ``request_budget``. Every
+    probe therefore rides the full fail-closed chain (kill-switch → scope → budget → egress → rate) and is
+    COUNTED against the one shared budget the scan already consumed from — a genuinely shared ledger, because
+    it is the same executor instance (its ``_requests_made`` spans scan + loop).
+
+    The loop runs the DISCOVERING slices by default (promote recon assets → crawl-expand their real surfaces →
+    probe), the CURATED multi-class arsenal (XSS / open-redirect / path-traversal / SSTI — "widen ACT beyond
+    the two built-in tools"), the AUTO-TEST posture (the operator opted into autonomy by flipping the flag),
+    and a multi-agent SURFACE-DECOMPOSITION selector (recon / auth / injection / access-control / business-
+    logic / ssrf-oob / exploit-chain) over the existing path-aware ``_select`` planner, so no surface class is
+    starved. It mints NOTHING itself — ``probe_surface`` runs an existing scanner check whose deterministic
+    ORACLE is the sole authority; only a finding that carries its retained ``oracle_context`` is folded into
+    the authoritative report (prove-don't-guess). Best-effort: any failure returns the partial telemetry and
+    never sinks the already-authoritative engagement. Returns the ``engage_autonomous.AutonomyResult`` (or
+    None on an import/other error)."""
+    try:
+        from .engage_autonomous import run_autonomous_cycle
+        from .engage_surface_selectors import SurfaceSelector
+    except Exception:
+        return None
+    try:
+        gated_fetch = getattr(executor, "gated_fetch", None)
+        if not callable(gated_fetch):
+            return None
+        try:
+            requests_before = int(executor.stats().get("requests_made", 0))  # type: ignore[attr-defined]
+        except Exception:
+            requests_before = 0
+        out = run_autonomous_cycle(
+            result, slug=slug,
+            seed_url=seed_url,
+            max_cycles=_apex_max_cycles(),
+            # The SHARED budget: the planner reasons about the engagement's request budget, and — because
+            # ``discover_send`` IS the scan executor's ``gated_fetch`` — every probe is enforced against the
+            # SAME executor's remaining budget (its ``_requests_made`` already carries the scan's spend).
+            request_budget=max(1, int(request_budget)),
+            prompt_callback=prompt_callback,
+            # DISCOVER over the shared gated executor: promote in-scope recon/sensor assets → crawl-expand
+            # their real param-bearing surfaces → probe. ``discover_send`` is the ONE kept-open executor.
+            enable_discover=True,
+            discover_send=gated_fetch,
+            enable_crawl_expand=True,
+            # Widen ACT: the curated near-zero-FP multi-class check set (not just REFLECTED_XSS).
+            enable_multi_probe=True,
+            # AUTO-TEST: the flag IS the operator's opt-in to active autonomy (vs the CLI's safe discover-queue).
+            probe_posture="auto-test",
+            # Multi-agent surface decomposition over the existing path-aware planner (default greedy depth-1).
+            select_fn=SurfaceSelector(),
+            blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
+            run_dir=run_dir,
+        )
+        # Surface the SHARED-budget evidence on the telemetry (the acceptance proof: the loop's probes were
+        # counted against the SAME executor budget the scan consumed from).
+        try:
+            stats = executor.stats()  # type: ignore[attr-defined]
+            out.shared_budget = int(stats.get("budget", request_budget))
+            out.shared_requests_made = int(stats.get("requests_made", 0))
+            out.shared_requests_before = int(requests_before)
+        except Exception:
+            pass
+        return out
+    except (_RunBudgetExceeded, EngagementPaused, EngagementRefused):
+        # EC-3 money-seam + pause/authorization control: these are NOT best-effort errors — a hard token-budget
+        # stop, a cooperative pause, or an authorization refusal raised inside the loop must PROPAGATE so the run
+        # honors it exactly as on the non-driver path (``RunBudgetExceeded`` surfaces as a CLEAN partial result;
+        # a pause/refusal unwinds). Swallowing any of them into ``return None`` would let the run continue past a
+        # credit ceiling / past a revoked authorization — the exact seam this re-raise closes. Re-raised BEFORE
+        # the broad best-effort catch below.
+        raise
+    except Exception:
+        return None
 
 
 def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: object) -> object:
@@ -2931,12 +3111,27 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
         print(f"  fused sensors     : {result.fused_leads} lead(s) folded, "
               f"{result.fused_facts} oracle-promoted fact(s) "
               f"(from targets/{args.slug}/fusion.json; leads stay leads, oracles prove facts)")
+    # APEX PR-1 — surface the IN-ENGAGEMENT driver's result when it ran (``VIGIL_APEX_AUTONOMOUS`` ON). The
+    # driver already drove the loop INSIDE ``run_engagement`` over the scan's shared executor and folded any
+    # discovery into the report printed above; here we just render its summary. When ON, the post-return
+    # ``--autonomous`` appendix below is SKIPPED (it would re-drive with a throwaway executor + budget).
+    if _apex_autonomous_enabled() and getattr(result, "autonomy", None) is not None:
+        try:
+            from .engage_autonomous import render_summary
+            for line in render_summary(result.autonomy):
+                print(line)
+        except Exception:
+            pass
     # Opt-in AUTONOMOUS OODA cycle (default OFF → this whole block is skipped and the engagement is
     # byte-identical). It runs AFTER the authoritative scan/report has already been PRINTED. Under
     # --autonomous-discover it folds newly-discovered oracle-confirmed findings into the IN-MEMORY
     # result.report.active_findings (deterministic + deduped, for downstream consumers / the spine);
     # the already-printed report and the byte-identical default/benchmark path are unaffected.
-    if getattr(args, "autonomous", False):
+    # APEX PR-1: when the driver flag is ON the in-engagement primary driver already ran the loop (over the
+    # shared scan executor); skip the post-return appendix so the loop is not re-driven with a throwaway
+    # executor. OFF ⇒ ``not _apex_autonomous_enabled()`` is True ⇒ the appendix runs iff --autonomous ⇒
+    # byte-identical.
+    if getattr(args, "autonomous", False) and not _apex_autonomous_enabled():
         try:
             _run_autonomous(args, result, spine)
         except EngagementRefused as e:
