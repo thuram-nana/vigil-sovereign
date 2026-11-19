@@ -22,7 +22,9 @@
   // ---- the guide's content ---------------------------------------------------------------------------------------
   // Each chapter is a sequence the customer follows in order. A step names the screen it happens on (`where`: the
   // label shown, and `route`: the app's own hash when the screen exists in the top bar), the clicks, in order
-  // (`clicks`), and what VIGIL does meanwhile (`why`).
+  // (`clicks`), and what VIGIL does meanwhile (`why`). A step on a screen a page switch turns on also names that switch
+  // (`when`: the name app.js reads with pageFlag); the Guide screen lists such a step only where app.js says its screen
+  // is shown (viewGuide's `shown`), so with the switch off the guide is exactly what it was without the step.
   var CHAPTERS = [
     {
       id: "start", title: "Get started",
@@ -90,6 +92,15 @@
                    "The number on the bell counts what you have not read yet. Select Mark all read to clear it.",
                    "Untick Sound to silence the chime, or untick Enabled to turn notifications off on this device."],
           why: "Notifications show your workspace only. What you have read, and your settings, are remembered on this device." },
+        // The settings shell (legal/governance S1): served under data-settings (VIGIL_CUSTOMER_SETTINGS, default OFF).
+        { id: "organization", title: "Record your organization's details", where: "Settings", route: "#/settings",
+          when: "settings",
+          clicks: ["Select Settings in the top bar.",
+                   "Under General, enter your legal entity name, its registered or operating address and the email of your primary contractual contact.",
+                   "Add your emergency operational contact: a name, a phone number and an email.",
+                   "Select Save. VIGIL keeps these details with your account, and you can change them at any time.",
+                   "Under Your organization, select Account security & sign-in, Authorized administrators or Billing to open that screen and change its settings there."],
+          why: "Settings records these details and links to the screens that already exist. It never changes who can do what and never charges anything: roles are changed on Team, and credits are bought on Billing." },
       ],
     },
     {
@@ -487,10 +498,16 @@
   // ---- the Guide screen ----------------------------------------------------------------------------------------------
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
 
+  /** Whether the Guide screen lists step `s`: always, unless it names a page switch (`when`) — then only where
+   *  `shown(route)` says this deployment shows its screen (no `shown` at all: not listed, the safe direction). */
+  function listed(s, shown) { return !s.when || (typeof shown === "function" && !!shown(s.route)); }
+
   /**
    * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
    * step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
-   * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides.
+   * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides,
+   * and a step that names a page switch (`when`) is listed only where shown(route) says its screen is shown (with no
+   * shown(), never) — so a switched-off screen leaves the guide exactly as it was without that step.
    */
   function viewGuide(env) {
     var h = env.h;
@@ -514,7 +531,8 @@
         })));
         return;
       }
-      var cards = ch.steps.map(function (s, n) {
+      var steps = ch.steps.filter(function (s) { return listed(s, env.shown); });
+      var cards = steps.map(function (s, n) {
         var key = stepKey(env.username, ch.id, s.id);
         var isDone = !!safeGet(env.storage, key);
         var open = n === 0;

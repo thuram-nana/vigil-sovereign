@@ -14,10 +14,13 @@ server-side, per account:
     saving the tab;
   * the cockpit's provision dispatch is absent (unknown action -> 404) unless the flag is on, and acts for the hop
     principal, never a body field;
-  * the edge route GET/POST api/customer/preferences is absent (404) unless the flag is on, needs a session (401), and
-    reads/records for the session's account only — a body naming another account changes nothing for it;
+  * the edge route GET/POST api/customer/preferences is absent (404) unless the flag is on — the EDGE's own unknown-route
+    / unknown-action 404, with nothing relayed to the cockpit — needs a session (401), and reads/records for the
+    session's account only — a body naming another account changes nothing for it;
   * app.js adds the Settings tab + #/settings hub only while data-settings="1"; off, it is byte-identical (no tab,
-    #/settings is the home screen, no preferences call is made).
+    #/settings is the home screen, no preferences call is made);
+  * the in-app guide covers the Settings screen (its step names the page switch, ``when: "settings"``) and lists it only
+    while routeShown shows #/settings: with the flag off the Guide screen is byte-identical and the tour never visits it.
 
 Each test here is one acceptance bullet for slice S1. Mutation-verify targets (each neuter reds a NAMED test here):
   * read_prefs ignores the file (always defaults)             -> test_9_get_post_get_round_trips_for_the_same_account
@@ -26,10 +29,17 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
   * the provisioner skips the active-customer check           -> test_5_account_is_the_hop_principal_no_cross_account
   * the provisioner audits / writes the spine                 -> test_8_preferences_never_touch_the_signed_spine
   * the cockpit dispatch ignores the flag / takes the body    -> test_5_account_is_the_hop_principal_no_cross_account
-  * the edge route ignores the flag                           -> test_1_flag_off_route_404_page_and_nav_byte_identical
+  * the edge GET route ignores the flag                       -> test_1b_flag_off_the_edge_answers_its_own_404_and_relays_nothing
+                                                                 (and test_1, by the 404's exact body)
+  * the edge POST action ignores the flag                     -> test_1b_flag_off_the_edge_answers_its_own_404_and_relays_nothing
+                                                                 (and test_1, by the 404's exact body)
   * the edge takes the account from the body                  -> test_5_account_is_the_hop_principal_no_cross_account
   * the edge always writes data-settings="1"                  -> test_1_flag_off_route_404_page_and_nav_byte_identical
   * the hub invents an authority/money control                -> test_2_flag_on_hub_renders_and_links_existing_screens
+  * the guide has no Settings step                            -> test_11_the_guide_covers_settings_only_while_it_is_shown
+                                                                 (and test_customer_onboarding's screen census)
+  * the guide lists a switch-named step whatever the switch   -> test_11_the_guide_covers_settings_only_while_it_is_shown
+  * routeShown ignores the settings flag                      -> test_11_the_guide_covers_settings_only_while_it_is_shown
 """
 from __future__ import annotations
 
@@ -56,7 +66,7 @@ from sigil.governor.wallet import WalletRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
 from sigil.ui import preferences_store as store
-from sigil.ui.custui import build_customer_server
+from sigil.ui.custui import CustomerHandler, build_customer_server
 from sigil.ui.email_channel import EmailTokenLedger, NullEmailSender
 from sigil.ui.login_ratelimit import LoginRateLimiter
 from sigil.ui.provision import ProvisionDenied, ProvisionError, Provisioner
@@ -134,6 +144,20 @@ def _page_and_build(tmp_path):
         srv.server_close()
 
 
+def _edge_stub(session):
+    """The edge's OWN handler, I/O stubbed: the session it sees, and every hop to the cockpit RECORDED (an ``action`` in
+    ``sent`` means the edge relayed) — so a test sees what the edge itself answers, never what the cockpit would."""
+    h = object.__new__(CustomerHandler)
+    sent = {}
+    h._session = lambda: session
+    h._ip = lambda: "1.2.3.4"
+    h._provision = lambda action, principal, body: (sent.update(action=action, principal=principal, body=body)
+                                                    or (200, {"ok": True, "preferences": store.DEFAULTS}))
+    h._json = lambda obj, code=200: sent.update(code=code, out=obj)
+    h._deny = lambda code=403, msg="forbidden": sent.update(code=code, out={"error": msg})
+    return h, sent
+
+
 # --- the executed-JS harness for the hub (node) ----------------------------------------------------------------------
 def _settings_block(src: str) -> str:
     i = src.index("  // ---- Settings (VIGIL_CUSTOMER_SETTINGS)")
@@ -189,8 +213,12 @@ def test_1_flag_off_route_404_page_and_nav_byte_identical(tmp_path, monkeypatch,
     # the edge route is exactly an unknown route (404) with the flag off, and nothing is served or recorded
     sov, edge, ep, op, user = _signed_up(tmp_path, monkeypatch, "off@acme.io")
     try:
-        assert _get(op, ep, "/api/customer/preferences")[0] == 404
-        assert _post(op, ep, "/api/customer/preferences", {"preferences": _PROFILE})[0] == 404
+        # the EDGE's own answers (its unknown-route / unknown-action 404), signed in or not — never the cockpit's
+        # "unknown provision action", which is what a request the edge had relayed would get back
+        for who in (op, _opener()):
+            assert _get(who, ep, "/api/customer/preferences") == (404, {"error": "not found"})
+            assert _post(who, ep, "/api/customer/preferences",
+                         {"preferences": _PROFILE}) == (404, {"error": "unknown action"})
         assert not home.exists()
     finally:
         sov.shutdown()
@@ -213,6 +241,38 @@ def test_1_flag_off_route_404_page_and_nav_byte_identical(tmp_path, monkeypatch,
     assert '.concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])' in src
     assert ('    "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard())'
             ' : viewLogin(); },') in src
+
+
+# =====================================================================================================================
+# 1b. Flag OFF: the EDGE itself refuses both verbs and relays nothing — independently of the cockpit's own gate
+# =====================================================================================================================
+def test_1b_flag_off_the_edge_answers_its_own_404_and_relays_nothing(monkeypatch):
+    """The edge's two flag gates stand on their own, not only behind the cockpit's: with the flag off the POST action is
+    the edge's OWN unknown-action 404 and the GET its own unknown-route 404, and NOTHING is relayed to the cockpit —
+    even for a signed-in account. (End to end, a relayed request would 404 too, at the cockpit's gate, so a bare 404
+    status cannot tell the two gates apart; here the stubbed hop records any relay the edge attempts.)"""
+    session = {"username": "cust_ana", "org_id": "org_a"}
+    for value in (None, "0", "", "no", "off", "maybe"):
+        if value is None:
+            monkeypatch.delenv(FLAG, raising=False)
+        else:
+            monkeypatch.setenv(FLAG, value)
+        h, sent = _edge_stub(session)
+        h._dispatch("preferences", {"preferences": _PROFILE, "username": "cust_eve"})
+        assert sent == {"code": 404, "out": {"error": "unknown action"}}, value     # no "action": nothing relayed
+        h, sent = _edge_stub(session)
+        h.path = "/api/customer/preferences"
+        h.do_GET()
+        assert sent == {"code": 404, "out": {"error": "not found"}}, value
+    # positive control: the very same stubbed edge, flag on, relays each verb for the session's account
+    monkeypatch.setenv(FLAG, "1")
+    h, sent = _edge_stub(session)
+    h._dispatch("preferences", {"preferences": _PROFILE})
+    assert (sent["action"], sent["principal"], sent["code"]) == ("preferences_set", "cust_ana", 200)
+    h, sent = _edge_stub(session)
+    h.path = "/api/customer/preferences"
+    h.do_GET()
+    assert (sent["action"], sent["principal"], sent["code"]) == ("preferences_get", "cust_ana", 200)
 
 
 # =====================================================================================================================
@@ -319,19 +379,6 @@ def test_5_account_is_the_hop_principal_no_cross_account(home, tmp_path, monkeyp
                        ("preferences_set", ("cust_ana", {"legal_entity_name": "A"}), {})]
 
     # (b) the edge: a query/body naming another account changes nothing; the principal is the session username
-    from sigil.ui.custui import CustomerHandler
-
-    def _edge_stub(session):
-        h = object.__new__(CustomerHandler)
-        sent = {}
-        h._session = lambda: session
-        h._ip = lambda: "1.2.3.4"
-        h._provision = lambda action, principal, body: (sent.update(action=action, principal=principal, body=body)
-                                                        or (200, {"ok": True, "preferences": store.DEFAULTS}))
-        h._json = lambda obj, code=200: sent.update(code=code, out=obj)
-        h._deny = lambda code=403, msg="forbidden": sent.update(code=code, out={"error": msg})
-        return h, sent
-
     h, sent = _edge_stub({"username": "cust_ana", "org_id": "org_a"})
     h.path = "/api/customer/preferences?username=cust_eve"
     h.do_GET()
@@ -519,3 +566,85 @@ def test_10_backup_excludes_customer_store_and_toggle_off_is_byte_identical(tmp_
     finally:
         sov.shutdown()
         edge.shutdown()
+
+
+# =====================================================================================================================
+# 11. The in-app guide covers Settings — only while it is shown: with the flag off the guide is byte-identical
+# =====================================================================================================================
+_GUIDE_WORLD = r"""
+document.body.dataset.settings = __FLAG__;
+const VUI = window.VUI, G = window.VIGIL_GUIDE, navs = [];
+var MONITORING_ON = false, CODE_ON = false;          // the other screens routeShown answers for: off here
+// The Guide screen as app.js mounts it (viewGuideScreen passes shown: routeShown): every chapter tab in turn, serialized.
+function guideTabs(shown) {
+  const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown });
+  document.body.appendChild(g);
+  const seen = {};
+  for (const title of G.CHAPTERS.map(c => c.title).concat(["Questions"])) {
+    g.querySelectorAll("button.cust-guide-tab").filter(b => b.textContent === title)[0].click();
+    seen[title] = ser(g);
+  }
+  return seen;
+}
+"""
+
+
+def _guide_app(flag: str) -> str:
+    """guide.js (loaded by the harness) plus app.js's own SETTINGS_ON and routeShown lines, verbatim."""
+    src = APP_JS.read_text(encoding="utf-8")
+    return "\n".join([_GUIDE_WORLD.replace("__FLAG__", json.dumps(flag)),
+                      _line(src, r"^  function h\(\) \{.*\}$"), _fn(src, "pageFlag"),
+                      _line(src, r'^  var SETTINGS_ON = pageFlag\("settings"\);$'),
+                      _line(src, r"^  function routeShown\(route\) \{.*\}$")])
+
+
+def test_11_the_guide_covers_settings_only_while_it_is_shown():
+    """The guide covers the Settings screen as it covers every screen the app routes to (the census:
+    test_customer_onboarding.py::test_the_guide_covers_every_screen_of_the_app), in the screen's own words — and, like
+    the screen, only while the flag is on: the step names its page switch (``when: "settings"``, the very name
+    SETTINGS_ON reads), routeShown hides #/settings while the flag is off, and the Guide screen lists a switch-named step
+    only where routeShown shows its screen. So with the flag off every chapter of the Guide screen is byte-identical to
+    the guide without the step; the tour never visits it; with the flag on the step is listed and leads to #/settings."""
+    _need_node()
+    src = APP_JS.read_text(encoding="utf-8")
+    data = _node("out.chapters = window.VIGIL_GUIDE.CHAPTERS; out.tour = window.VIGIL_GUIDE.TOUR;")
+    steps = {(ch["id"], st["id"]): st for ch in data["chapters"] for st in ch["steps"]}
+    st = steps[("workspace", "organization")]
+    assert (st["where"], st["route"], st["when"]) == ("Settings", "#/settings", "settings")
+    assert '  var SETTINGS_ON = pageFlag("settings");' in src      # the switch the step names is the one app.js reads
+    # every control the step names is one the hub really shows (its own literal in the Settings block)
+    told, block = " ".join(st["clicks"]), _settings_block(src)
+    for label in ("Settings", "General", "Save", "Your organization", "Account security & sign-in",
+                  "Authorized administrators", "Billing"):
+        assert label in told and f'"{label}"' in block, label
+    assert 'navLink("Settings", "#/settings")' in src and "roles are changed on Team" in st["why"]
+    # a switch-named step is never on the tour, so the tour is the same whatever the flag
+    scoped = {key for key, s in steps.items() if s.get("when")}
+    assert ("workspace", "organization") in scoped
+    assert [t for t in data["tour"] if (t.get("chapter"), t.get("step")) in scoped] == []
+    # flag off: the Guide screen, every chapter tab, is byte-identical to the guide without the step
+    for flag in ("0", "", "__VIGIL_SETTINGS__"):
+        out = _node(_guide_app(flag) + r"""
+out.shown = [routeShown("#/settings"), routeShown("#/billing")];
+out.off = guideTabs(routeShown);
+const ws = G.CHAPTERS.filter(c => c.id === "workspace")[0];
+ws.steps = ws.steps.filter(s => s.id !== "organization");          // the guide without the Settings step
+out.base = guideTabs(routeShown);
+out.navs = navs;
+""")
+        assert out["shown"] == [False, True], flag
+        assert out["off"] == out["base"] and out["navs"] == [], flag
+    # flag on: the step is listed on its chapter, and its "Go to Settings" opens the hub
+    on = _node(_guide_app("1") + r"""
+out.shown = [routeShown("#/settings"), routeShown("#/billing")];
+const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown: routeShown,
+                        chapter: "workspace" });
+document.body.appendChild(g);
+out.titles = g.querySelectorAll("span.cust-guide-step-title").map(e => text(e));
+out.go = buttons(g).filter(t => t.indexOf("Go to ") === 0);
+button(g, "Go to Settings").click();
+out.navs = navs;
+""")
+    assert on["shown"] == [True, True]
+    assert on["titles"] == ["The Overview", "Bring in your team", "Notifications", "Record your organization's details"]
+    assert on["go"] == ["Go to Overview", "Go to Team", "Go to Settings"] and on["navs"] == ["#/settings"]

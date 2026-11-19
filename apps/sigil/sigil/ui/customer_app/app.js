@@ -158,8 +158,9 @@
                         shown: routeShown })]),
     "#/guide");
   }
-  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON); }
+  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
+  // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/settings" || SETTINGS_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2649,13 +2650,14 @@
   }
 
   // ---- Settings (VIGIL_CUSTOMER_SETTINGS): the settings shell + the General preferences tab ------------------------
-  // Shown only while the edge writes data-settings="1"; off, #/settings is the home screen exactly as any unknown route
-  // and no preferences call is made. The hub is navigation plus a General tab that captures the workspace's legal-entity
-  // / contact profile (GET/POST api/customer/preferences for the SESSION's account only — a UI preference, never money,
-  // never authority, never on the signed spine; the SERVER enforces the closed key allowlist and the account). It LINKS
-  // the screens that already exist — Account security & sign-in (#/security), Authorized administrators (#/team, the
-  // existing member/role controls) and Billing (#/billing) — and adds NO new authority or money control of its own:
-  // roles are still changed on #/team over the existing routes, and credits are still bought on #/billing.
+  // Shown only while the edge writes data-settings="1". Off, #/settings is the home screen exactly as any unknown
+  // route, no preferences call is made, and the guide does not list its step (routeShown). The hub is navigation plus
+  // a General tab that captures the workspace's legal-entity / contact profile (GET/POST api/customer/preferences for
+  // the SESSION's account only — a UI preference, never money, never authority, never on the signed spine; the SERVER
+  // enforces the closed key allowlist and the account). It LINKS the screens that already exist — Account security &
+  // sign-in (#/security), Authorized administrators (#/team, the existing member/role controls) and Billing
+  // (#/billing) — and adds NO new authority or money control of its own: roles are still changed on #/team over the
+  // existing routes, and credits are still bought on #/billing.
   var SETTINGS_ON = pageFlag("settings");
   // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
   // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.

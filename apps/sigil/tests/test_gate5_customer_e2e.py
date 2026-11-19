@@ -91,6 +91,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/assessments": ("Assessments", ("api/customer/assessments", "api/customer/launches")),
     "#/team": ("Team", ("api/customer/members",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/settings": ("Settings", ("api/customer/preferences",)),
     "#/guide": ("Guide", ()),
 }
 _PREAUTH: dict[str, str] = {"#/login": "Sign in", "#/signup": "Create your account",
@@ -104,6 +105,7 @@ _CONTROLS: dict[str, tuple[str, ...]] = {
     "#/assessments": ("Launch", "Pause", "View findings"),
     "#/team": ("Add member", "Change role", "Remove"),
     "#/monitoring": ("Turn on Observe", "Turn on Respond", "Switch to Respond", "Turn off"),
+    "#/settings": ("Save", "Account security & sign-in", "Authorized administrators"),
     "#/guide": ("Replay the welcome tour",),
 }
 # The pending screens that will add a ROUTE: stage -> (route, its own <h2> or None, its read or None, TODO, why
@@ -123,11 +125,12 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does).
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
-               "code": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0"}
+               "code": "1", "settings": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0"}
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on.
 _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
-              "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI")
+              "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
+              "VIGIL_CUSTOMER_SETTINGS")
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -303,6 +306,11 @@ _FAKE_SERVER = {
                                 "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
     "api/customer/monitoring/events": {"org_id": "org_acme", "events": []},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
+    # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
+    "api/customer/preferences": {"ok": True, "preferences": {
+        "legal_entity_name": "Acme SAS", "registered_address": "1 Example Street, Example City",
+        "contractual_contact_email": "legal@acme.com", "emergency_contact_name": "Dana Ops",
+        "emergency_contact_phone": "+1 555 0100", "emergency_contact_email": "soc@acme.com"}},
 }
 
 
@@ -529,7 +537,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers"):
+        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers",
+                  "preferences"):
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

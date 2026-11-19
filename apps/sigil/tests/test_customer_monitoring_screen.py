@@ -623,4 +623,5 @@ process.stdout.write(JSON.stringify(out));
     src = _src()
     assert "shown: routeShown" in _fn(src, "viewGuideScreen")
     assert re.search(r'function routeShown\(route\) \{ return \(route !== "#/monitoring" \|\| MONITORING_ON\) '
-                     r'&& \(route !== "#/code" \|\| CODE_ON\); \}', src)
+                     r'&& \(route !== "#/code" \|\| CODE_ON\) '
+                     r'&& \(route !== "#/settings" \|\| SETTINGS_ON\); \}', src)
