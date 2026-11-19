@@ -894,12 +894,15 @@ def test_a_close_from_another_process_stops_the_run(gateway, upstream, tmp_path)
 
 
 def test_a_close_waits_for_the_requests_in_flight(gateway, upstream, tmp_path):
-    upstream.delay = 0.5
+    upstream.delay = 2.0     # keeps the request in flight across every check below, even on a loaded CI runner
     g = _grant()
     token = _tok(g)
     flying = threading.Thread(target=_call, args=(gateway, BODY, token), daemon=True)
     flying.start()
     assert _wait(lambda: gateway.gateway.meter.pending(g.meter_id) > 0)
+    # ... and has REACHED the provider: admission (pending) precedes arrival (seen), so without this wait `n` below
+    # can be read before the in-flight request lands and then mistake its legitimate arrival for a leaked forward
+    assert _wait(lambda: len(upstream.seen) >= 1)
     settle = gw.GrantMeter(tmp_path / "meter")
     with pytest.raises(gw.MeterBusy):
         settle.close(g.meter_id, now=NOW)                              # its total would miss the response in flight
