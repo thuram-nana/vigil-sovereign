@@ -539,9 +539,15 @@ class Provisioner:
                  checkout_limiter=None, pending_checkouts=None,
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
+                 shard_assignments=None,
                  saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
+        # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up. None
+        # (the default, and every pre-PR-F construction) ⇒ shard-on-signup is a byte-identical no-op. Even when
+        # injected it stays inert unless `customer_fair_queue_enabled()` + `multi_shard_enabled()` + an owner
+        # `shard_ids()` topology are all set — a tenant NEVER chooses its shard (see `_place_on_signup`).
+        self.shard_assignments = shard_assignments
         self.customers = customers
         self.orgs = orgs
         self.wallet = wallet
@@ -654,6 +660,28 @@ class Provisioner:
         nxt = t if t > self._last_issued else math.nextafter(self._last_issued, math.inf)
         self._last_issued = nxt
         return nxt
+
+    def _place_on_signup(self, org_id: str) -> None:
+        """PR-F: owner-sign a SHARD PLACEMENT for a newly-created tenant, when the fair-queue + multi-shard flags
+        are on and the owner has named a shard topology. A byte-identical NO-OP otherwise: without an injected
+        registry (every pre-PR-F build), with either flag off, or with no owner `shard_ids()` nothing is read,
+        minted or appended. A tenant NEVER chooses its shard — the shard is server-chosen from owner topology +
+        current load and owner-signed (`shard_on_signup.assign_on_signup`). IDEMPOTENT (a tenant already placed is
+        a no-op), so it rides the idempotent-forward sign-up transaction: the caller runs it under the sign-up lock
+        before the commit marker, so a crash before the commit re-drives to exactly one placement. A placement
+        failure (e.g. a mis-named shard) fails the sign-up CLOSED (the token stays valid for a safe retry) rather
+        than leaving a routable-but-unplaced tenant — consistent with Finding A's 'ONE account/org/trial — or
+        nothing'."""
+        if self.shard_assignments is None:
+            return
+        from .. import config
+        if not (config.customer_fair_queue_enabled() and config.multi_shard_enabled()):
+            return
+        shard_ids = config.shard_ids()
+        if not shard_ids:
+            return
+        from ..governor.shard_on_signup import assign_on_signup
+        assign_on_signup(self.shard_assignments, org_id, shard_ids=shard_ids, issued_at=self._next_issued())
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
@@ -1042,6 +1070,7 @@ class Provisioner:
             role = _signup_role(self._founder_latch_open)
             self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
             trial = self._grant_signup_trial(org_id, email, source_ref="signup", ip=ip)
+            self._place_on_signup(org_id)                  # PR-F: owner-signed shard placement (no-op unless on)
             # durable audit BEFORE the commit marker (fail-closed): a failure leaves the token valid to retry,
             # and the mutations above are idempotent, so the retry is safe.
             self._audit("signup", requester=username, org_id=org_id, target=username, outcome="created",
@@ -1235,6 +1264,7 @@ class Provisioner:
         role = _signup_role(self._founder_latch_open)
         self.orgs.grant_membership(org_id, username, role, issued_at=self._next_issued())
         self._grant_signup_trial(org_id, email, source_ref="signup-google", ip=ip)
+        self._place_on_signup(org_id)                      # PR-F: owner-signed shard placement (no-op unless on)
         # owner-sign the (iss,sub) binding LAST among the mints (its own global-uniqueness guard refuses a
         # cross-customer rebind): a crash before it leaves by_federated unresolved ⇒ a safe retry re-provisions.
         self.customer_credentials.link_federated(username, iss=iss, sub=sub, issued_at=self._next_issued())
@@ -3063,7 +3093,10 @@ class Provisioner:
                     row["used_this_month"] = spend.charged(requester_org_id, doc.repo, now=t)
                 repos.append(row)
         available = {"connect": bool(config.github_app_slug())}
-        available.update({a: a in self._REDPEN_EXECUTION_LIVE for a in ("review", "schedule", "fix", "retest")})
+        live = set(self._REDPEN_EXECUTION_LIVE)
+        if config.customer_fix_it_enabled():      # PR-K: "Fix this" dispatches to the built R5 worker when on
+            live.add("fix")
+        available.update({a: a in live for a in ("review", "schedule", "fix", "retest")})
         return {"org_id": requester_org_id, "repos": repos, "available": available}
 
     # The Connect GitHub `state`: an OWNER-signed {kind, org_id, exp, nonce}, base64url-JSON, that round-trips the session
@@ -3311,11 +3344,49 @@ class Provisioner:
     def redpen_fix_this(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
                         mfa_at=0.0, now: "Optional[float]" = None) -> dict:
         """Fix this — VIGIL writes a patch for one reproduced finding, checks it, and opens a pull request for the
-        customer to review (R5 ``redpen_fix_this``). VIGIL never merges anything itself."""
+        customer to review (R5 ``redpen_fix_this``). VIGIL never merges anything itself.
+
+        Behind ``VIGIL_CUSTOMER_FIX_IT`` (PR-K; nested under ``VIGIL_REDPEN_ENABLED``): OFF (default) keeps the
+        honest inert ``coming`` answer, fully guarded, byte-identical to a build without the dispatch. ON
+        DISPATCHES the action to the already-built offense Fix worker — the full guard chain (manage_code admit +
+        E3c step-up + a ``reserve_redpen_review`` that re-verifies the connected-repo record, holds the wallet
+        reservation and meters the model spend) runs first, then a validated marker is published to the dedicated
+        ``redpen-actions`` seam. The offense plane re-checks every authority where it WRITES and opens only a
+        gated, m-of-n PR (VIGIL never merges). Nothing here mints a fact or asserts a clearance."""
+        from .. import config
         t = self._now() if now is None else float(now)
         fref = self._redpen_finding_ref(finding_ref)
-        ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
-        return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+        if not config.customer_fix_it_enabled():
+            # Dispatch not enabled on this deployment (default): keep the honest, fully-guarded "coming" answer so
+            # the console is byte-identical to a build without PR-K (no reservation, nothing published).
+            ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
+            return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+        return self._redpen_dispatch_fix(requester, requester_org_id, repo, fref, mfa_at=mfa_at, now=t)
+
+    def _redpen_dispatch_fix(self, requester: str, org_id: str, repo: str, finding_ref: str, *, mfa_at,
+                             now: float) -> dict:
+        """PR-K dispatch tail (reached ONLY with ``VIGIL_CUSTOMER_FIX_IT`` on): hand one customer "Fix this" to
+        the built offense Fix worker. Reuses the merged sovereign dispatch (``redpen_provision.redpen_fix_this``),
+        which runs the SAME guard chain the inert path's guards did (flag + ``manage_code`` admit + E3c step-up)
+        and then reserves/meters via ``reserve_redpen_review`` (the connected-repo record is the authorization of
+        record) and publishes the fix marker on the dedicated ``redpen-actions`` seam. The step-up is the
+        provisioner's own E3c check, bound to ``now``.
+
+        The returned payload is CUSTOMER-SAFE: it names no model, price, estimate or credit count (the reservation
+        is metered sovereign-side; the customer-facing answer only says the fix was handed off). The dispatch
+        grants no bypass — the marker is an untrusted trigger and the offense plane re-checks the owner-signed
+        ``"pr"`` grant + the signed-spine FACT, re-reviews the patch, and opens only a gated m-of-n PR. A refused
+        conjunct raises (``ProvisionDenied`` / ``ProvisionStepUpRequired``) and nothing is reserved or published."""
+        from . import redpen_provision
+        from .launch_gate import LaunchGate
+        res = redpen_provision.redpen_fix_this(
+            requester=requester, org_id=org_id, repo=repo, finding_ref=finding_ref, orgs=self.orgs,
+            launch_gate=LaunchGate(self.store), now=now, mfa_at=mfa_at,
+            require_stepup=lambda m: self._require_stepup(m, now=now))
+        ref = str(res.get("repo") or "")
+        self._audit("redpen_fix_this", requester=requester, org_id=org_id, target=ref, outcome="dispatched",
+                    critical=True)
+        return {"org_id": org_id, "repo": ref, "finding_ref": finding_ref, "dispatched": True}
 
     def redpen_retest(self, requester: str, requester_org_id: str, repo: str, finding_ref: str, *, ip: str = "",
                       mfa_at=0.0, now: "Optional[float]" = None) -> dict:
@@ -3399,6 +3470,70 @@ class Provisioner:
         if config.customer_retest_ui_enabled() and isinstance(out, dict) and isinstance(out.get("findings"), list):
             _assess.overlay_retests(self.store, out["findings"], now=t)
         return out
+
+    def customer_assessment_posture(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """APEX PR-A — the session org's security POSTURE (0-100 score + worst-first triage + per-finding
+        plain-language impact / standards chips / remediation), derived ONLY from its OWN proven findings.
+        Tenant-scoped identically to :func:`customer_assessment_findings` (the IDOR class — the posture reads
+        only the org's own tenant-scoped findings, so another tenant's finding is structurally never counted or
+        shown). Gated at the cockpit dispatch by ``presentation_enabled()`` (404 when off); requester + org are
+        the hop-bound session principal, never a body field."""
+        import time as _t
+        from . import finding_presentation as _fp
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _fp.assessment_posture(s, o, now=_t.time()))
+
+    def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
+        """PR-J — answer ONE customer security question for the SESSION org, grounded ONLY in that org's oracle-confirmed
+        findings and metered through the sovereign model gateway. Absent unless VIGIL_CUSTOMER_ASSISTANT is on (gated at
+        the dispatch). Gated like the assessments read — ``admit_customer(view_assessments)`` on the session org, NO
+        global leg (a customer uses the assistant only for their own tenant); ``requester``/``requester_org_id`` are the
+        hop-bound session principal, NEVER a body field. The assistant summarises / explains / prioritises EXISTING
+        findings as ADVICE: it never asserts or mints a vulnerability (``ui/assistant`` has no mint path; the oracle
+        alone mints a FACT), tenant isolation is the findings read's (structural — ``_customer_slug`` one-way hash), and
+        the model is reached ONLY through the gateway with an owner-signed per-turn grant (this process hands the
+        provider key to nothing — the gateway holds it). Returns the advice projection (``kind="assistant_advice"``),
+        never a finding and never a model/provider name."""
+        import time as _t
+        from .. import config
+        from . import assistant as _assistant
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not use the assistant for this org (view_assessments)")
+        q = _assistant.valid_question(question)
+        if q is None:
+            raise ProvisionDenied("the question is empty or too long")
+        # HONEST TODO (money-doctrine): the assistant's model spend is not yet drawn from the customer WALLET. With
+        # metered billing ON the gateway requires a per-grant ALLOWANCE (``LaunchAllowance`` is keyed by a launch lease,
+        # not by an assistant grant), so an assistant grant would be refused by the gateway. Until the assistant meter is
+        # wired into the wallet + statement, fail closed here rather than mint a grant the gateway cannot admit. The
+        # gateway still METERS the turn against the grant cap when metered billing is off (the invariant holds); what is
+        # unbuilt is only the wallet DRAW + its statement line.
+        if config.metered_billing_enabled():
+            raise ProvisionDenied("the assistant is not yet available while metered billing is enabled")
+        owner_key = getattr(self.orgs, "owner_key", None)
+        if owner_key is None or not getattr(owner_key, "private_key_b64", ""):  # gitleaks:allow — attr name, not a key
+            raise ProvisionDenied("the assistant needs the owner key to mint its model grant")
+        token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
+        call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
+        reply = _assistant.answer(self.store, requester_org_id, q, model_call=call, now=_t.time(),
+                                  model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
+                                  limit=config.assistant_finding_limit())
+        return reply.as_dict()
+
+    def _mint_assistant_grant(self, org_id: str, owner_key: Any, *, now: float) -> str:
+        """Mint a short-lived owner-signed MODEL GRANT for ONE assistant turn: the turn's model
+        (``config.assistant_model``), the cheapest effort, a small per-turn cap (a technical ceiling a leaked token can
+        never spend past), a fresh nonce (a fresh meter per turn) and a 5-minute life. Its meter is the org's assistant
+        meter (``assistant:<customer_slug>``), separate from any launch's. Sovereign-side only (it holds the owner
+        private key); the token is handed only to the gateway dial, never logged or returned to the customer."""
+        from vigil_core.model_grant import ModelGrant, encode_token, new_grant_id
+        from .. import config
+        from .target_authorization import _customer_slug
+        slug = "assistant:" + _customer_slug(org_id, "__assistant__")
+        grant = ModelGrant(grant_id=new_grant_id(), org_id=org_id, engagement_slug=slug, nonce=new_grant_id(),
+                           model=config.assistant_model(), effort="high", cap_nano_usd=config.assistant_cap_nano_usd(),
+                           not_after=now + 300.0, issued_at=now)
+        return encode_token(grant, owner_key.private_key_b64)
 
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:
