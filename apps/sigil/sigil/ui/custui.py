@@ -89,6 +89,11 @@ _SLOW_HOP_TIMEOUTS_S = {
     # against _HASH_WAIT_S by test_custui_hop_budget.py.
     "signup_confirm": 45.0,
     "recover_confirm": 45.0,
+    # PR-G: a plan change makes up to 4 Stripe calls (2 reads + 2 writes), each bounded per blocking socket op by
+    # plan_change.EGRESS_TIMEOUT_S (connect + read) -> 48 s + margin. Pinned by test_customer_plans.py.
+    "billing_plan_change": 55.0,
+    # PR-G: the report PDF runs the owner's renderer for at most report_pdf.RENDER_TIMEOUT_S, after building the report.
+    "report_export_pdf": 35.0,
 }
 
 
@@ -204,6 +209,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # standards chips / remediation) is on — the same VIGIL_APEX_PRESENTATION that serves its route; a non-secret
     # on/off value written into the page, counting in the build id.
     presentation = _config.presentation_enabled()
+    # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
+    # routes, a non-secret on/off value written into the page and counting in the build id.
+    area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
+             "__VIGIL_REPORT_EXPORT__": "1" if _config.customer_report_export_enabled() else "0",
+             "__VIGIL_COMPLIANCE__": "1" if _config.customer_compliance_map_enabled() else "0"}
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -222,7 +232,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
-                                     "__VIGIL_PRESENTATION__": "1" if presentation else "0"})
+                                     "__VIGIL_PRESENTATION__": "1" if presentation else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -638,6 +648,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_events")
         if path == "/api/customer/assessments/posture" and _presentation_on():   # PR-A (flag OFF -> unknown-route 404)
             return self._customer_read_relay("assessment_posture")
+        if path == "/api/customer/billing/plans" and _plans_on():       # PR-G Plans (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_plans")
+        if path in ("/api/customer/report", "/api/customer/report/pdf") and _report_export_on():   # PR-G (OFF -> 404)
+            return self._customer_read_relay("report_export_pdf" if path.endswith("/pdf") else "report_export")
+        if path == "/api/customer/compliance" and _compliance_on():     # PR-G compliance view (flag OFF -> 404)
+            return self._customer_read_relay("compliance_view")
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
@@ -1044,6 +1060,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
             return self._auto_topup_set(body)
+        if action == "billing/plan-change" and _plan_change_on():    # PR-G (flag OFF -> unknown-action 404)
+            return self._plan_change(body)
         if action == "onboarding" and _onboarding_on():              # the tour closed (flag OFF -> unknown-action 404)
             return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
@@ -1189,6 +1207,21 @@ class CustomerHandler(BaseHTTPRequestHandler):
                                       "monthly_cap_credits": body.get("monthly_cap_credits"),
                                       "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
         c, r = self._provision("billing_auto_topup_set", requester, payload)
+        return self._json(r, c)
+
+    def _plan_change(self, body: dict):
+        """PR-G — change, keep or end the session org's credit plan at its next renewal. REQUESTER + ORG + the step-up
+        stamp from the SERVER-side session, never the body (a body org_id is ignored): a customer can only change THEIR
+        bound org's plan. The body carries ONLY the plan choice — a catalog ``price_id`` or ``cancel: true`` — never an
+        amount; the provisioner validates it against the owner catalog and the processor's subscription."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""),
+                                      "price_id": str(body.get("price_id") or "")[:64],
+                                      "cancel": body.get("cancel") is True, "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_plan_change", str(rec.get("username") or ""), payload)
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -1457,6 +1490,27 @@ def _presentation_on() -> bool:
     # APEX PR-A — the same master flag that arms the mint-side presentation block + the cockpit posture action.
     from .. import config as _config
     return _config.presentation_enabled()
+
+
+# PR-G (Area 6) — each read at call time, the same flag the cockpit action re-checks.
+def _plans_on() -> bool:
+    from .. import config as _config
+    return _config.customer_plans_enabled()
+
+
+def _plan_change_on() -> bool:
+    from .. import config as _config
+    return _config.customer_plans_enabled() and _config.customer_plan_change_enabled()
+
+
+def _report_export_on() -> bool:
+    from .. import config as _config
+    return _config.customer_report_export_enabled()
+
+
+def _compliance_on() -> bool:
+    from .. import config as _config
+    return _config.customer_compliance_map_enabled()
 
 
 def _assistant_on() -> bool:

@@ -157,3 +157,34 @@ def tier(severity: str, size: str) -> int:
 def tier_label(t: int) -> str:
     """The display label for a remediation tier."""
     return _TIER_LABELS.get(str(t), "")
+
+
+# --- PR-G (Area 6): the control universe + OWASP names the compliance view renders ----------------------------
+
+_OWASP_NAMES: dict[str, str] = _MIRROR.get("owasp_names", {})
+
+
+def owasp_categories() -> tuple[str, ...]:
+    """Every OWASP Top 10:2021 category id the engine names, in order (``A01:2021`` .. ``A10:2021``)."""
+    return tuple(sorted(_OWASP_NAMES))
+
+
+def owasp_name(category: str) -> str:
+    """The engine's display NAME for an OWASP Top 10:2021 category id (``A03:2021`` -> ``Injection``), or ``""``."""
+    return _OWASP_NAMES.get(str(category), "")
+
+
+def control_universe(framework: str) -> tuple[str, ...]:
+    """Every control id of ``framework`` that ANY mapped weakness class implicates, sorted — the mapper's KNOWN
+    universe, exactly as the engine's ``report.standards._control_universe`` derives it from the same table. DATA:
+    a control in this set is one VIGIL's checks can implicate, never one VIGIL asserts is met."""
+    ids: set[str] = set()
+    for mapping in _CONTROLS.values():
+        val = mapping.get(framework) if isinstance(mapping, dict) else None
+        if not val:
+            continue
+        if isinstance(val, str):
+            ids.add(val)
+        else:
+            ids.update(str(v) for v in val)
+    return tuple(sorted(ids))

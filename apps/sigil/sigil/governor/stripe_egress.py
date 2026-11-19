@@ -314,3 +314,66 @@ def make_payment_intent_creator(*, transport=None):
         return resp
 
     return create
+
+
+# ---- PR-G (Area 6): the self-serve credit-plan change (scheduled at the next renewal) ------------------------------
+_SUBSCRIPTION_ID = re.compile(r"sub_[A-Za-z0-9]{1,255}")
+
+
+def _require_idempotency_key(key: object, what: str) -> str:
+    if (not isinstance(key, str) or not key or len(key) > _MAX_IDEMPOTENCY_KEY
+            or any(not (0x21 <= ord(c) <= 0x7e) for c in key)):
+        raise StripeEgressError(f"refusing a Stripe {what} without a valid Idempotency-Key")
+    return key
+
+
+def make_product_creator(*, transport=None):
+    """Build ``create(params, *, idempotency_key)``: POST ``/v1/products`` form-encoded with the ``Idempotency-Key``
+    header — the product a scheduled plan change's new subscription price belongs to (Stripe requires a product for an
+    inline ``price_data`` on a subscription item; it is named after the OWNER CATALOG plan). Returns the parsed
+    product object; anything that is not a product raises."""
+    send = transport or _request
+
+    def create(params: "Mapping[str, Any]", *, idempotency_key: str) -> "Mapping[str, Any]":
+        key = _require_idempotency_key(idempotency_key, "product create")
+        secret = _require_secret()
+        resp = send("POST", f"{_API_BASE}/v1/products", secret=secret, form=params, idempotency_key=key)
+        if not isinstance(resp, Mapping) or resp.get("object") != "product":
+            raise StripeEgressError("Stripe product create returned an unexpected object")
+        return resp
+
+    return create
+
+
+def make_subscription_updater(*, transport=None):
+    """Build ``update(subscription_id, params, *, idempotency_key)``: POST ``/v1/subscriptions/<id>`` form-encoded with
+    the ``Idempotency-Key`` header — the scheduled plan change (the item's new catalog price with
+    ``proration_behavior=none``, or ``cancel_at_period_end``). The id must be a ``sub_`` id (one path segment); the
+    params are built upstream from the OWNER CATALOG (this poster never edits money). Returns the parsed subscription,
+    which must be the one asked for."""
+    send = transport or _request
+
+    def update(subscription_id: str, params: "Mapping[str, Any]", *, idempotency_key: str) -> "Mapping[str, Any]":
+        if not isinstance(subscription_id, str) or not _SUBSCRIPTION_ID.fullmatch(subscription_id):
+            raise StripeEgressError("refusing a Stripe subscription update for a malformed id")
+        key = _require_idempotency_key(idempotency_key, "subscription update")
+        secret = _require_secret()
+        resp = send("POST", f"{_API_BASE}/v1/subscriptions/{quote(subscription_id, safe='')}", secret=secret,
+                    form=params, idempotency_key=key)
+        if not isinstance(resp, Mapping) or resp.get("object") != "subscription" or resp.get("id") != subscription_id:
+            raise StripeEgressError("Stripe subscription update returned an unexpected object")
+        return resp
+
+    return update
+
+
+def with_timeout(timeout_s: float, *, transport=None):
+    """A transport for the builders above (and ``make_object_fetcher``) whose every blocking socket operation is bounded
+    by ``timeout_s`` instead of the default — so a multi-call action (the plan change: two reads + two writes) stays
+    inside its edge hop budget."""
+    send = transport or _request
+
+    def bounded(method: str, url: str, **kw: Any) -> Any:
+        return send(method, url, timeout=float(timeout_s), **kw)
+
+    return bounded

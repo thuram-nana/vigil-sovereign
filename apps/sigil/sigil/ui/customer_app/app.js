@@ -73,6 +73,12 @@
  * Retest, and Disconnect (confirmed in the page) — each offered only where the server says this deployment runs it. The
  * server decides who may manage code review; this page sends only a repository the server listed and the choice. Off,
  * there is no tab, #/code is the home screen exactly as any unknown route, and no call is made.
+ *
+ * PLANS AND REPORTS (PR-G). With data-plans="1" (VIGIL_CUSTOMER_PLANS) the top bar has Plans (#/plans): the owner's
+ * plans compared, the workspace's plan, a one-click choice through the existing checkout and, where the server allows
+ * it, a switch or cancellation that takes effect at the next renewal. With data-report-export="1" (VIGIL_CUSTOMER_PDF_
+ * REPORT) or data-compliance="1" (VIGIL_CUSTOMER_COMPLIANCE_MAP) it has Reports (#/reports): the downloadable report of
+ * the proven findings and the standards they implicate. Off, each is absent exactly as an unknown route.
  */
 (function () {
   "use strict";
@@ -155,11 +161,12 @@
     var w = state.get().who || {};
     return shell(h("div", {}, [h("h2", { text: "Guide" }),
       GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour,
-                        shown: routeShown })]),
+                        shown: routeShown, flag: pageFlag })]),   // flag: PR-G's guide steps that need a page switch
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON); }
+  // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2459,6 +2466,359 @@
     err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
   }
 
+  // ---- Plans, Reports and the standards mapping (PR-G, Area 6) -----------------------------------------------------
+  // PLANS (data-plans="1", VIGIL_CUSTOMER_PLANS — the switch that also serves api/customer/billing/plans): #/plans
+  // compares the trial, pay as you go and every plan the owner sells — its price, the credits it adds each period and
+  // the period — from that one read, and marks the workspace's plan and any change already set for its renewal. A plan
+  // is chosen with the EXISTING checkout (startCheckout: this page sends only the plan's price_id, never an amount). A
+  // workspace with a plan switches or ends it with billing/plan-change ({price_id} or {cancel: true}), asked first in the
+  // page and sent through the step-up: the change takes effect at the next renewal, so nothing is charged or refunded on
+  // the day. Only the actions the read lists are offered; the server decides who may take them.
+  // REPORTS (data-report-export="1", VIGIL_CUSTOMER_PDF_REPORT; data-compliance="1", VIGIL_CUSTOMER_COMPLIANCE_MAP):
+  // #/reports downloads the workspace's report (api/customer/report as HTML, api/customer/report/pdf as a PDF where the
+  // deployment renders one) and shows the OWASP Top 10 / PCI DSS / SOC 2 controls its PROVEN findings implicate
+  // (api/customer/compliance) — never a claim that a control is met. Off: no tab, the route is the home screen exactly
+  // as an unknown route, and nothing is fetched. Nothing here shows an estimate or an engine name.
+  var PLANS_ON = pageFlag("plans");
+  var REPORT_EXPORT_ON = pageFlag("reportExport");
+  var COMPLIANCE_ON = pageFlag("compliance");
+  var REPORTS_ON = REPORT_EXPORT_ON || COMPLIANCE_ON;
+  // The server's own fixed sentence (ui/compliance_view.STATEMENT), kept here so the screen never shows other words.
+  var COMPLIANCE_STATEMENT = "This view lists only the controls that weaknesses VIGIL proved in this workspace "
+    + "implicate. It never states that a control is met or compliant: a control with no proven weakness here was not "
+    + "assessed for compliance, and the absence of a finding is not evidence that the control is in place.";
+  var COMPLIANCE_STATUS = { weakness_proven: "Proven weakness", weakness_fixed: "Fixed (retest)",
+                            no_proven_weakness: "No proven weakness", not_mapped: "Not mapped by VIGIL's checks" };
+
+  // A label from one of the tables above for a value the server sent — never an inherited member.
+  function area6Label(table, key) {
+    var k = String(key == null ? "" : key);
+    return Object.prototype.hasOwnProperty.call(table, k) ? table[k] : "";
+  }
+  function plansButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  function plansDays(n) {
+    var d = Number(n);
+    if (!isFinite(d) || d <= 0) return "—";
+    return (d >= 28 && d <= 31) ? "month" : (String(d) + " days");
+  }
+  // One screen read: a holder now, the read's body when it lands. 401 asks for sign-in, 403 is `forbidden`, anything
+  // else an honest "could not load" — never the server's words. A read that lands after the person left changes nothing.
+  function area6View(current, title, lead, path, forbidden, renderOk) {
+    var holder = h("div#cust-area6", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(path); }
+      catch (e) {
+        if (here() !== current) return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403) ? forbidden
+          : "Could not load " + title + " right now." }));
+      }
+      if (here() !== current) return;
+      VUI.mount(holder, renderOk(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: title }), h("p.cust-muted", { text: lead }), holder]), current);
+  }
+
+  function viewPlans() {
+    return area6View("#/plans", "Plans", "Compare plans and choose the one that fits. A plan adds credits at the start "
+      + "of each period; it never sets what an assessment costs.", API + "/billing/plans",
+      "Only members who can see billing — the founder or an admin — can compare plans.", plansBody);
+  }
+  function plansBody(d) {
+    var tiers = (Array.isArray(d.tiers) ? d.tiers : []).filter(function (t) { return t && t.price_id; });
+    var cards = [plansTrialCard(d), plansPaygCard(d)].concat(tiers.map(function (t) { return plansTierCard(d, t); }));
+    var depths = (Array.isArray(d.depths) ? d.depths : []).filter(function (x) { return x && x.name; });
+    return h("div", {}, [
+      plansCurrentCard(d),
+      h("div.cust-grid", {}, cards),
+      depths.length ? h("p.cust-muted", { text: "Every plan runs the same assessments: "
+        + depths.map(function (x) { return x.name; }).join(", ") + "." }) : null,
+    ]);
+  }
+  function plansCurrentCard(d) {
+    var cur = d.current, sch = d.scheduled_change, acts = d.actions || {};
+    var rows = [], foot = h("div.cust-mon-actions", {});
+    if (cur) {
+      rows.push(kv("Plan", (cur.name || cur.plan_id) + (cur.retired ? " (no longer sold)" : "")));
+      // `active` is the server's word that the plan is in force now; a plan past its period has ended, whatever its
+      // last recorded status.
+      var ended = !cur.active && cur.status !== "past_due";
+      rows.push(kv("Status", cur.active ? "Active" : (ended ? "Ended" : "Payment past due")));
+      rows.push(kv(ended ? "Ended on" : (cur.active && !(sch && sch.kind === "cancel") ? "Renews on"
+        : "Period ends on"), fmtDate(cur.period_end)));
+      rows.push(kv("Credits each period", groupInt(cur.credits_per_period)));
+    } else {
+      rows.push(h("p.cust-muted", { text: (d.trial && d.trial.preview_locked)
+        ? "This workspace is on its trial. Choose a plan, or buy credits on Billing, to unlock every finding in full."
+        : "This workspace has no plan: it buys credits as it needs them." }));
+    }
+    if (sch && cur) {
+      rows.push(h("div.cust-launch-note", { role: "status" }, h("p", { text: sch.kind === "cancel"
+        ? "Your plan ends on " + fmtDate(sch.effective_at) + ". It will not renew."
+        : "Your plan changes to " + (sch.name || "a new plan") + " on " + fmtDate(sch.effective_at) + "." })));
+      if (acts.change && cur.price_id) {
+        foot.appendChild(plansButton("Keep my current plan", function (b) {
+          plansChange({ price_id: cur.price_id }, b, foot); }));
+      }
+    }
+    if (cur && acts.cancel) {
+      foot.appendChild(plansButton("Cancel plan", function () { plansConfirmCancel(d, foot); }, "danger"));
+    }
+    if (cur && !acts.change && acts.change_unavailable_reason && d.can_manage) {
+      rows.push(h("p.cust-muted", { text: "Changing this plan here is not possible right now: "
+        + acts.change_unavailable_reason + "." }));
+    }
+    if (!d.can_manage) rows.push(h("p.cust-muted", { text: "Only the founder or an admin can change the plan." }));
+    rows.push(foot);
+    return VUI.card("Your plan", null, rows);
+  }
+  function plansTrialCard(d) {
+    var t = d.trial || {};
+    if (!(Number(t.credits) > 0) && !t.had_trial) return null;
+    var rows = [kv("Trial credits", groupInt(t.credits))];
+    (t.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    if (t.preview_locked) rows.push(h("span.cust-badge.cust-badge-pending", { text: "This workspace" }));
+    return VUI.card("Trial", null, rows);
+  }
+  function plansPaygCard(d) {
+    var p = d.pay_as_you_go || {};
+    var rows = (p.packs || []).filter(function (x) { return x && x.price_id; }).map(function (x) {
+      return kv(groupInt(x.credits) + " credits", money(x.amount_minor, x.currency));
+    });
+    (p.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    rows.push(h("div.cust-mon-actions", {}, plansButton("Buy credits on Billing", function () { nav("#/billing"); })));
+    return VUI.card("Pay as you go", null, rows);
+  }
+  function plansTierCard(d, t) {
+    var foot = h("div.cust-mon-actions", {});
+    VUI.mount(foot, plansAction(d, t, foot));
+    var rows = [h("p.cust-plan-price", { text: money(t.amount_minor, t.currency) + " per " + plansDays(t.period_days) }),
+                kv("Credits each period", groupInt(t.credits_per_period)), kv("Billing period", plansDays(t.period_days))];
+    (t.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    rows.push(foot);
+    return VUI.card(String(t.name || t.price_id), null, rows);
+  }
+  // The one action a plan card offers, exactly as the read listed it (never one the server would refuse).
+  function plansAction(d, t, foot) {
+    if (t.current) return h("span.cust-badge.cust-badge-verified", { text: "Current plan" });
+    if (t.scheduled) return h("span.cust-badge.cust-badge-pending", { text: "Starts at your renewal" });
+    if (t.action === "checkout") {
+      return plansButton("Choose " + String(t.name || "this plan"), function (b) {
+        startCheckout({ price_id: t.price_id }, b); }, "primary");
+    }
+    if (t.action === "upgrade" || t.action === "downgrade") {
+      return plansButton(t.action === "upgrade" ? "Upgrade" : "Downgrade", function () { plansConfirm(d, t, foot); },
+        t.action === "upgrade" ? "primary" : "");
+    }
+    return null;
+  }
+  // A switch is asked here first, in place of its button; nothing is sent until it is confirmed.
+  function plansConfirm(d, t, foot) {
+    var when = fmtDate(d.current && d.current.period_end);
+    VUI.mount(foot, h("div.cust-mon-confirm", { role: "group", "aria-label": "Switch to " + t.name }, [
+      h("p", { text: "Switch to " + t.name + " at your next renewal, on " + when + "? Until then you keep your current "
+        + "plan and its credits. From then on the plan costs " + money(t.amount_minor, t.currency) + " per "
+        + plansDays(t.period_days) + " and adds " + groupInt(t.credits_per_period) + " credits each period. "
+        + "Nothing is charged today." }),
+      t.action === "upgrade" ? h("p.cust-muted", { text: "Need more credits before then? Buy a credit pack on "
+        + "Billing: bought credits never expire." }) : null,
+      h("div.cust-mon-actions", {}, [
+        plansButton("Yes, switch at renewal", function (b) { plansChange({ price_id: t.price_id }, b, foot); },
+          "primary"),
+        plansButton("Not now", function () { VUI.mount(foot, plansAction(d, t, foot)); }),
+      ]),
+    ]));
+  }
+  function plansConfirmCancel(d, foot) {
+    var when = fmtDate(d.current && d.current.period_end);
+    VUI.mount(foot, h("div.cust-mon-confirm", { role: "group", "aria-label": "Cancel plan" }, [
+      h("p", { text: "End your plan on " + when + "? It will not renew, and nothing more is charged for it. You keep "
+        + "its credits until then, and credits you bought separately never expire." }),
+      h("div.cust-mon-actions", {}, [
+        plansButton("Yes, cancel", function (b) { plansChange({ cancel: true }, b, foot); }, "danger"),
+        plansButton("Keep my plan", function () { if (here() === "#/plans") render(); }),
+      ]),
+    ]));
+  }
+  async function plansChange(body, btn, where) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      var r = await withStepUp(function () { return VUI.postJSON(API + "/billing/plan-change", body); }, where);
+      var when = fmtDate(r && r.effective_at);
+      VUI.toast(r && r.kind === "cancel" ? "Your plan ends on " + when + "."
+        : (r && r.kind === "keep" ? "Your plan stays as it is." : "Your plan changes to " + ((r && r.name) || "the new plan")
+          + " on " + when + ". Nothing was charged today."));
+      if (here() === "#/plans") render();
+    } catch (e) { btn.disabled = false; await plansFailed(e); }
+  }
+  // Why a change did not go through: fixed words for each answer, and the server's own reason for a refusal it
+  // explained (it is written for customers). When the outcome is not known, the screen is read again.
+  async function plansFailed(e) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (e && e.stepUpCancelled) return;
+    if (status === 401 && d.step_up_required) {
+      return err("For your security, changing a plan needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.");
+    }
+    if (status === 401) { await refreshWho(); nav("#/login"); return; }
+    if (status === 404) return err("Changing plans is not available on this deployment. Nothing was changed.");
+    if (status === 429) return err("Too many attempts — wait a moment and try again. Nothing was changed.");
+    if (status === 503) return err("VIGIL is updating. Try again in a moment. Nothing was changed.");
+    var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
+      .replace(/\.$/, "");
+    if (!status || status >= 500 || why.indexOf("did not confirm") >= 0) {
+      err("VIGIL could not confirm the change" + (why ? ": " + why : "") + ". This screen now shows your plan as it is.");
+      if (here() === "#/plans") render();
+      return;
+    }
+    err("The plan was not changed" + (why ? ": " + why : "") + ".");
+  }
+
+  function viewReports() {
+    var parts = [h("h2", { text: "Reports" }), h("p.cust-muted", { text: "Reports of this workspace's proven "
+      + "findings, to keep or to hand to an auditor or a customer. Only proven findings are in them." })];
+    if (REPORT_EXPORT_ON) parts.push(reportsDownloadCard());
+    if (COMPLIANCE_ON) parts.push(complianceSection());
+    return shell(h("div", {}, parts), "#/reports");
+  }
+  function reportsDownloadCard() {
+    var note = h("div", { role: "status" });
+    return VUI.card("Download a report", null, [
+      h("p.cust-muted", { text: "Every proven finding, worst first and in plain language: what to fix first, how to "
+        + "fix each one, the standards it touches and the command that re-runs its proof without VIGIL." }),
+      h("div.cust-mon-actions", {}, [
+        plansButton("Download report", function (b) { reportsDownload("", b, note); }, "primary"),
+        plansButton("Download PDF", function (b) { reportsDownload("/pdf", b, note); }),
+      ]),
+      note]);
+  }
+  // The file the server built, saved as it is: an HTML document, or a PDF where this deployment renders one.
+  function reportsBlob(r) {
+    if (r && r.format === "html" && typeof r.html === "string") {
+      return new Blob([r.html], { type: "text/html;charset=utf-8" });
+    }
+    if (r && r.format === "pdf" && typeof r.pdf_b64 === "string") {
+      try {
+        var bin = atob(r.pdf_b64), u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return new Blob([u8], { type: "application/pdf" });
+      } catch (e) { return null; }
+    }
+    return null;
+  }
+  function reportsSave(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = h("a", { href: url, download: name });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+  async function reportsDownload(suffix, btn, note) {
+    clearErr();
+    btn.disabled = true;
+    VUI.mount(note, h("p.cust-muted", { text: "Preparing your report…" }));
+    try {
+      var r = await VUI.getJSON(API + "/report" + suffix);
+      var blob = reportsBlob(r);
+      if (!blob) {
+        VUI.mount(note, h("p.cust-muted", { text: "The report VIGIL sent could not be read, so nothing was saved. "
+          + "Try again." }));
+      } else {
+        var name = String((r && r.filename) || "vigil-report").replace(/[^A-Za-z0-9._-]/g, "-");
+        reportsSave(blob, name);
+        VUI.mount(note, h("p.cust-muted", { text: "Saved " + name + "." }));
+      }
+    } catch (e) {
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(note, reportsFailed(e, suffix === "/pdf"));
+    }
+    btn.disabled = false;
+  }
+  // Fixed words for each refusal, chosen from what the server refused — never its own text.
+  function reportsFailed(e, pdf) {
+    var status = e && e.status, why = String((e && e.data && e.data.error) || "").toLowerCase();
+    if (why.indexOf("unlocks with your first purchase") >= 0) {
+      return h("div", {}, [h("p.cust-muted", { text: "The full report unlocks with your first purchase. Buy credits "
+        + "in Billing to download it." }),
+        plansButton("Go to Billing", function () { nav("#/billing"); })]);
+    }
+    if (pdf && why.indexOf("pdf") >= 0) {
+      return h("p.cust-muted", { text: "A PDF is not available on this deployment right now. Download the report "
+        + "instead and print it to PDF from your browser." });
+    }
+    if (status === 403) {
+      return h("p.cust-muted", { text: "Only members who can read assessments — the founder, or an Operator VIGIL "
+        + "has added — can download the report." });
+    }
+    if (status === 404) return h("p.cust-muted", { text: "Downloading a report is not available right now." });
+    if (status === 429) return h("p.cust-muted", { text: "Too many reports in a short time — try again later." });
+    return h("p.cust-muted", { text: "The report could not be prepared just now. Try again in a moment." });
+  }
+
+  function complianceSection() {
+    var holder = h("div#cust-compliance", {}, loadingHolder("Loading your standards mapping…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/compliance"); }
+      catch (e) {
+        if (here() !== "#/reports") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403)
+          ? "Only members who can read assessments can see the standards mapping."
+          : "Could not load the standards mapping right now." }));
+      }
+      if (here() !== "#/reports") return;
+      VUI.mount(holder, complianceBody(d || {}));
+    })();
+    return h("div", {}, [h("h3", { text: "Standards mapping" }), holder]);
+  }
+  function complianceBody(d) {
+    var fws = (Array.isArray(d.frameworks) ? d.frameworks : []).filter(function (f) { return f && f.framework; });
+    return h("div", {}, [
+      h("p.cust-muted", { text: COMPLIANCE_STATEMENT }),
+      Number(d.findings_total) > 0 ? null
+        : h("p.cust-muted", { text: "No proven findings yet, so no control is implicated." }),
+      h("div.cust-grid", {}, fws.map(complianceCard)),
+    ]);
+  }
+  function complianceCard(fw) {
+    var controls = (Array.isArray(fw.controls) ? fw.controls : []).filter(function (c) { return c && c.id; });
+    var hit = controls.filter(function (c) {
+      return c.status === "weakness_proven" || c.status === "weakness_fixed"; });
+    // OWASP lists every Top 10 category; the other frameworks list only the controls a proven weakness implicates.
+    var shown = fw.framework === "owasp" ? controls : hit;
+    var rows = [h("p.cust-muted", { text: String(fw.version || "") })];
+    shown.forEach(function (c) {
+      var fs = Array.isArray(c.findings) ? c.findings : [];
+      rows.push(h("div.cust-kv", {}, [h("span.k", { text: c.id + (c.name ? " — " + c.name : "") }),
+        h("span", { text: area6Label(COMPLIANCE_STATUS, c.status) + (fs.length ? " · " + fs.length + " finding(s)"
+          : "") })]));
+      if (fs.length) {
+        rows.push(h("p.cust-muted", { text: fs.map(function (f) {
+          return String(f.title || f.finding_ref || "Finding") + (f.host ? " on " + f.host : "")
+            + (f.retest === "fixed" ? " (fixed)" : ""); }).join("; ") }));
+      }
+    });
+    if (!hit.length) {
+      rows.push(h("p.cust-muted", { text: "No proven weakness in this workspace implicates a control of this "
+        + "framework." }));
+    }
+    var others = controls.length - hit.length;
+    if (fw.framework !== "owasp" && others > 0) {
+      rows.push(h("p.cust-muted", { text: others + " other control(s) VIGIL's checks map have no proven weakness "
+        + "here. That is not an assessment that they are met." }));
+    }
+    return VUI.card(String(fw.label || fw.framework), null, rows);
+  }
+  // ---- end of Plans, Reports and the standards mapping (PR-G) ------------------------------------------------------
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -2664,6 +3024,9 @@
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
+        // PR-G (Area 6): the same page switches PLANS_ON / REPORTS_ON hold, read here so the top bar stays self-contained
+        .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
+        .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -2739,6 +3102,9 @@
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
     "#/code": function () { return authed() ? (CODE_ON ? viewCode() : viewDashboard()) : viewLogin(); },
+    // PR-G (Area 6) off: #/plans and #/reports are the home screen, exactly as any unknown route is
+    "#/plans": function () { return authed() ? (PLANS_ON ? viewPlans() : viewDashboard()) : viewLogin(); },
+    "#/reports": function () { return authed() ? (REPORTS_ON ? viewReports() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is

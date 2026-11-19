@@ -108,7 +108,21 @@
                    "Plan credits are used first and expire at the end of their period. Credits you buy separately never expire.",
                    "Your plan, its status and its credits for this period appear under Subscription on Billing.",
                    "A workspace has one plan at a time. To change plans, contact VIGIL."],
+          // PR-G: where this deployment shows Plans, the same step's clicks with the last one pointing there instead.
+          alt: { when: "plans",
+                 clicks: ["Under Buy credits, a plan adds a set of credits at the start of every billing period.",
+                          "Plan credits are used first and expire at the end of their period. Credits you buy separately never expire.",
+                          "Your plan, its status and its credits for this period appear under Subscription on Billing.",
+                          "A workspace has one plan at a time. To change it, use Plans in the top bar."] },
           why: "A plan's credits and a pack's credits are spent the same way; only their expiry differs." },
+        // PR-G: shown only where this deployment shows Plans (`when`: the page switch, asked of the app's `flag`).
+        { id: "compare", title: "Compare plans and change yours", where: "Plans", route: "#/plans", when: "plans",
+          clicks: ["Select Plans in the top bar to compare the trial, pay as you go and every plan: its price, the credits it adds each period and how long a period lasts.",
+                   "With no plan yet, select Choose on a plan and pay on the payment processor's secure page, as when you buy credits.",
+                   "With a plan, select Upgrade or Downgrade on another plan, then Yes, switch at renewal. The new plan starts at your next renewal; until then you keep your current plan and its credits, and nothing is charged that day.",
+                   "Select Cancel plan, then Yes, cancel, to end it when the period you paid for ends. Keep my current plan undoes a switch or a cancellation before the renewal.",
+                   "Only the founder or an admin can change the plan, and VIGIL may ask for a fresh code from your authenticator app."],
+          why: "A plan change never cuts short a period you paid for and never charges you twice. A plan sets how many credits arrive each period, not what an assessment costs." },
         { id: "trial", title: "Trial credits", where: "Billing", route: "#/billing",
           clicks: ["A new workspace may start with trial credits: one trial per email address and per domain.",
                    "Trial credits are spent like any others, and you still prove you control a host before testing it.",
@@ -189,6 +203,19 @@
                    "When the proof no longer works, the finding is marked fixed.",
                    "Or launch a new assessment of the host to check everything again."],
           why: "A finding counts as fixed only when its proof stops working." },
+        // PR-G: each shown only where this deployment offers that part of Reports (`when`: its page switch).
+        { id: "report", title: "Download a report", where: "Reports", route: "#/reports", when: "reportExport",
+          clicks: ["Select Reports in the top bar, then Download report.",
+                   "The report lists every proven finding worst first, in plain language: what it is, how to fix it, the standards it touches and the command that re-runs its proof without VIGIL.",
+                   "Select Download PDF for the same report as a PDF, where your workspace offers one.",
+                   "During a trial, the full report unlocks with your first purchase."],
+          why: "The report holds only what VIGIL proved, so you can hand it to an auditor or a customer as it is." },
+        { id: "standards", title: "See the standards your findings touch", where: "Reports", route: "#/reports",
+          when: "compliance",
+          clicks: ["On Reports, Standards mapping lists the OWASP Top 10 categories, PCI DSS requirements and SOC 2 criteria that your proven findings implicate, each with the findings behind it.",
+                   "A finding whose retest shows its proof no longer works is marked fixed.",
+                   "A control with no proven weakness is only that: VIGIL never states that a control is met or that you are compliant."],
+          why: "The mapping comes only from proven findings, never from a guess." },
       ],
     },
     {
@@ -332,6 +359,8 @@
       a: "A finding is confirmed by a deterministic check that fired on evidence from your host, and it includes the steps to re-run that check yourself. Anything VIGIL could not prove is never presented as a finding." },
     { q: "Who in my organization can see our findings?",
       a: "The founder, and any teammate VIGIL has made an Operator. Admins see billing, the team and monitoring, but not findings. Analysts and viewers see neither billing nor findings." },
+    { q: "Can I give our results to an auditor or a customer?", when: "reportExport",   // PR-G: only with the report
+      a: "Yes. On Reports, select Download report. It holds only the findings VIGIL proved, each with the command that re-checks it without VIGIL, and the standards they touch. VIGIL never states that you are compliant: the mapping shows only what proven findings implicate." },
     { q: "How do I see this guide again?",
       a: "Select Guide in the top bar. Replay the welcome tour shows the tour again." },
   ];
@@ -487,10 +516,15 @@
   // ---- the Guide screen ----------------------------------------------------------------------------------------------
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
 
+  // PR-G: a step, a question or a step's `alt` clicks that carry `when` (the name of a page switch, e.g. "plans") exist
+  // only where the app's `flag(when)` says the edge turned that switch on; without a `flag`, never. Nothing else moves.
+  function guideWhen(env, when) { return !when || (typeof env.flag === "function" && env.flag(when) === true); }
+
   /**
-   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
-   * step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
+   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown, flag}. Chapter tabs on top;
+   * each step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
    * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides.
+   * `flag(name)` (optional) answers a page switch, for the steps and questions that carry `when` (see guideWhen).
    */
   function viewGuide(env) {
     var h = env.h;
@@ -509,17 +543,18 @@
       if (!ch) {                                            // the Questions tab
         clear(root);
         root.appendChild(h("div.cust-guide-tabs", { role: "group", "aria-label": "Guide chapters" }, tabs));
-        root.appendChild(h("div.cust-guide-steps", {}, FAQ.map(function (f) {
+        root.appendChild(h("div.cust-guide-steps", {}, FAQ.filter(function (f) { return guideWhen(env, f.when); }).map(function (f) {
           return h("details.card.cust-guide-faq", {}, [h("summary", { text: f.q }), h("p.cust-tour-why", { text: f.a })]);
         })));
         return;
       }
-      var cards = ch.steps.map(function (s, n) {
+      var cards = ch.steps.filter(function (s) { return guideWhen(env, s.when); }).map(function (s, n) {
         var key = stepKey(env.username, ch.id, s.id);
         var isDone = !!safeGet(env.storage, key);
         var open = n === 0;
+        var clicks = (s.alt && s.alt.when && guideWhen(env, s.alt.when)) ? s.alt.clicks : s.clicks;
         var detail = h("div.cust-guide-detail", {}, [
-          h("ol.cust-tour-clicks", {}, s.clicks.map(function (c) { return h("li", { text: c }); })),
+          h("ol.cust-tour-clicks", {}, clicks.map(function (c) { return h("li", { text: c }); })),
           h("p.cust-tour-why", { text: s.why }),
         ]);
         detail.hidden = !open;

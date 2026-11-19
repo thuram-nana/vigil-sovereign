@@ -77,3 +77,18 @@ def test_mirror_priority_matches_engine():
             assert sm.tier(sev, sm.effort_size(bc)) == P._tier(sev, P.effort_size(bc)), (sev, bc)
     # (the mirror's namespace-purity — that it imports no `framework` — is proven authoritatively by the
     # sovereign two-env boundary test, which imports it in a REAL engine-free venv.)
+
+
+def test_mirror_control_universe_and_owasp_names_match_engine():
+    """PR-G (Area 6): the consumer compliance view's control universe and OWASP category names are the engine's
+    own (``standards._control_universe`` / ``OWASP_2021_NAMES``) — so the view can never list a control the engine
+    does not map, nor name a category differently from the engine's report."""
+    from framework.v2.report import standards as S
+    sm = _mirror()
+    universe = S._control_universe()
+    for fw in S._FRAMEWORKS:
+        assert list(sm.control_universe(fw)) == universe[fw], fw
+    assert sm.owasp_categories() == tuple(sorted(S.OWASP_2021_NAMES))
+    for cid, name in S.OWASP_2021_NAMES.items():
+        assert sm.owasp_name(cid) == name, cid
+    assert sm.control_universe("no_such_framework") == () and sm.owasp_name("A99:2021") == ""
