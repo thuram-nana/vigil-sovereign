@@ -221,6 +221,10 @@ _STANDARDS: dict[str, ControlMapping] = {
               attack=("T1059", "T1190")),
     "ssti": _m("A03:2021", ("CWE-1336", "CWE-94"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                attack=("T1059", "T1190")),
+    # Blind SSTI confirmed OUT-OF-BAND — kept DISTINCT from the in-corpus `ssti` (verify/verifier.py
+    # pins blind_ssti -> OOB_CALLBACK). Same injection taxonomy as ssti: A03, template-injection CWE.
+    "blind_ssti": _m("A03:2021", ("CWE-1336", "CWE-94"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                     attack=("T1059", "T1190")),
     "el_injection": _m("A03:2021", ("CWE-917",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                        attack=("T1059", "T1190")),
     # Wave-4.1 Server-Side Includes (SSI) — CWE-97 (improper neutralization of SSI); an evaluated include
@@ -558,7 +562,7 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
     # ---- OS-command / code-execution injection — executable allowlisting is the clean D3FEND dual ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), ("D3-EAL",), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
      ("time_based_command_injection", "command_injection", "command_injection_attempt", "rce", "ssti",
-      "el_injection", "ssi", "deserialization")),
+      "el_injection", "ssi", "deserialization", "blind_ssti")),
     # ---- other server-side injection (LDAP / XPath / generic-time / XXE / WS) — no clean D3FEND id ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
      ("ldap_injection", "xpath_injection", "time_based", "xxe", "xxe_attempt", "blind_xxe", "websocket_injection")),
