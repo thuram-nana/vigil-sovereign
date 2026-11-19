@@ -298,6 +298,28 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_fix_it_enabled() -> bool:
+    """True iff the customer one-click "Fix it for me" DISPATCH (consumer Area 10 / PR-K) is ON
+    (`VIGIL_CUSTOMER_FIX_IT` affirmative). OFF by default and NESTED under `VIGIL_REDPEN_ENABLED` (which gates the
+    whole Code screen): with it off the Code screen's Fix this action keeps returning the honest inert "coming"
+    answer — byte-identical to a build without the dispatch — and the overview advertises `fix` as unavailable;
+    nothing is reserved, metered or published to the `redpen-actions` seam.
+
+    With it ON (and `VIGIL_REDPEN_ENABLED` also on), an explicit customer "Fix this" on ONE reproduced finding
+    DISPATCHES to the already-built offense Fix worker (`vigil_integration.jobs.redpen_fix`) by publishing a
+    validated action marker to the dedicated `redpen-actions` seam — but ONLY after the full sovereign guard
+    chain that was already present: the `manage_code` admit (decision O-4), the E3c step-up (a fix opens a PR —
+    sensitive), and a `reserve_redpen_review` that re-verifies the active owner-signed connected-repo record +
+    the wallet floor + the per-repo monthly limit and METERS the model spend with no estimate. The dispatch
+    GRANTS NO BYPASS: the marker is an untrusted trigger and the offense plane re-checks every authority where it
+    WRITES (the owner-signed repo-exact `"pr"` grant + the signed-spine FACT), re-reviews the patch, and opens
+    only a gated, m-of-n-quorum PR from a fix branch — VIGIL never merges. It mints NO fact and implies NO
+    clearance: a clearance is the signed NEGATIVE remediation cert the independent verification path earns, never
+    a button's claim. Read at call time; a pure env read (FATAL-2 clean — this sovereign accessor loads no
+    offense module, and the offense plane reads the same master `VIGIL_REDPEN_ENABLED` through its own helper)."""
+    return (os.environ.get("VIGIL_CUSTOMER_FIX_IT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def presentation_enabled() -> bool:
     """True iff the APEX PR-A presentation spine is ON (`VIGIL_APEX_PRESENTATION` affirmative). OFF by default
     (mirrors `redpen_enabled`): with it off the customer Posture read (``/api/customer/assessments/posture`` →
