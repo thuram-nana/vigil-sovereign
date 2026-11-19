@@ -662,6 +662,8 @@ jobs:
               integration/tests/test_fix_ladder_matches_the_gate.py \
               integration/tests/test_remediation_cert.py \
               integration/tests/test_remediation_conformance.py \
+              integration/tests/test_apex_pcr.py \
+              integration/tests/test_apex_impact_e2e.py \
               integration/tests/test_prove_driver.py \
               integration/tests/test_prove_driver_differential.py \
               integration/tests/test_attestation_log.py \

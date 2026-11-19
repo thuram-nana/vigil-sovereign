@@ -187,6 +187,18 @@ class EvidenceCertificate(BaseModel):
     # bytes ONLY when it is a NON-FACT value (e.g. ``"llm"``), which is exactly the case the offline re-check
     # refuses.
     provenance: str = "reproduced"
+    # ---- APEX PR-A: the ADDITIVE SIGNED PRESENTATION block (plain-language impact + standards chips + exact
+    # remediation), derived DETERMINISTICALLY at mint from the finding's OWN bug_class / title / surface / firing
+    # oracle via the report primitives (``report.plainspeak`` / ``report.standards`` / ``report.howto`` /
+    # ``report.priority``). It is PURELY DESCRIPTIVE DATA that travels with the certificate so a customer sees
+    # exactly what was signed (tamper-evident). It is NEVER consulted by ``verify_certificate`` /
+    # ``reverify_context`` / ``oracle_confirms_class`` — the FACT/oracle VERDICT is a pure function of the
+    # oracle_context re-fire, so a flipped or forged presentation can NEVER change a verdict (it only breaks
+    # authenticity if altered after signing). ``None`` by default and DROPPED from the canonical form when empty
+    # (serializer below), so a certificate minted WITHOUT it — and every existing evidence bundle — serialises
+    # BYTE-IDENTICALLY and keeps its signature valid. Only ever populated when the mint runs with
+    # ``VIGIL_APEX_PRESENTATION`` on (see ``evidence.certify._cert_presentation``).
+    presentation: dict | None = None
 
     # The additive D2 members whose empty value is dropped for byte-identity (canonical bytes sort keys, so
     # order-independent — listed once here so the serializer and the ``bound_identity`` view agree).
@@ -257,6 +269,10 @@ class EvidenceCertificate(BaseModel):
         # refuses); such a certificate is never one the mint produces.
         if data.get("provenance") in _REPRODUCED_PROVENANCE:
             data.pop("provenance", None)
+        # APEX PR-A: drop the additive ``presentation`` block when empty/absent, so a certificate minted without
+        # it — and every existing evidence bundle — serialises byte-identically to before this field existed.
+        if not data.get("presentation"):
+            data.pop("presentation", None)
         for k in self._D2_FIELDS:
             if not data.get(k):        # None / "" / {} / 0 are all "absent" for canonical bytes
                 data.pop(k, None)

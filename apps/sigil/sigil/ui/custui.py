@@ -214,6 +214,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     overview = _config.customer_overview_enabled()
     # W6: the fuller Billing screen (the same billing reads either way; only how much the screen renders changes)
     billing_dashboard = _config.customer_billing_dashboard_enabled()
+    # APEX PR-A: whether the Posture screen (score + worst-first triage + per-finding plain-language impact /
+    # standards chips / remediation) is on — the same VIGIL_APEX_PRESENTATION that serves its route; a non-secret
+    # on/off value written into the page, counting in the build id.
+    presentation = _config.presentation_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -231,7 +235,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
-                                     "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0"})
+                                     "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
+                                     "__VIGIL_PRESENTATION__": "1" if presentation else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -645,6 +650,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/assessments/posture" and _presentation_on():   # PR-A (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("assessment_posture")
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
@@ -1458,6 +1465,12 @@ def _retest_on() -> bool:
 def _redpen_on() -> bool:
     from .. import config as _config
     return _config.redpen_enabled()
+
+
+def _presentation_on() -> bool:
+    # APEX PR-A — the same master flag that arms the mint-side presentation block + the cockpit posture action.
+    from .. import config as _config
+    return _config.presentation_enabled()
 
 
 def _assistant_on() -> bool:

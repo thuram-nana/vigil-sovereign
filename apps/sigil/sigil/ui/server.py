@@ -1800,6 +1800,15 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assessments(requester, str(body.get("org_id", "")), ip=ip)
         if action == "assessment_findings":
             return p.customer_assessment_findings(requester, str(body.get("org_id", "")), ip=ip)
+        # APEX PR-A — the session org's posture (0-100) + worst-first triage. Absent (unknown action -> 404)
+        # unless VIGIL_APEX_PRESENTATION is on, the same flag that serves its edge route and arms the mint-side
+        # presentation block; org from the edge SESSION (never a free body field).
+        if action == "assessment_posture":
+            from .. import config as _config
+            if not _config.presentation_enabled():
+                return None
+            return p.customer_assessment_posture(requester, str(body.get("org_id", "")), ip=ip)
+
         # PR-J — the customer security ASSISTANT: a metered NL answer grounded ONLY in the session org's own oracle-
         # confirmed findings. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_ASSISTANT is on; org from the edge
         # SESSION, the question from the body (treated strictly as data by the grounded prompt). Never mints a finding.

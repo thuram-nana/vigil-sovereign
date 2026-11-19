@@ -298,6 +298,23 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def presentation_enabled() -> bool:
+    """True iff the APEX PR-A presentation spine is ON (`VIGIL_APEX_PRESENTATION` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off the customer Posture read (``/api/customer/assessments/posture`` →
+    the ``assessment_posture`` cockpit action → ``finding_presentation.assessment_posture``) is absent (404 exactly
+    as an unknown route), the findings projection NEVER carries the ``presentation`` cert field, and the page's
+    ``__VIGIL_PRESENTATION__`` switch is "0" — so the server is byte-identical to a build without the feature.
+
+    This is the SOVEREIGN-side master flag over the consumer surface (the Posture screen + the per-finding
+    plain-language/standards/remediation projection). The ENGINE reads the SAME env var at FACT-mint
+    (``evidence.certify``) to decide whether to embed the additive SIGNED ``presentation`` block into a
+    certificate; both planes read ``VIGIL_APEX_PRESENTATION`` independently (no cross-env import — the engine
+    reads ``os.environ`` directly, the sovereign plane reads it here), so one value turns the whole feature on.
+    The ``presentation`` block is ADDITIVE SIGNED DATA that never changes a FACT/oracle verdict, and posture +
+    triage are derived SOVEREIGN-side ONLY from the org's own proven findings. Read at call time."""
+    return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_assistant_enabled() -> bool:
     """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
     (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
@@ -383,6 +400,23 @@ def apex_autonomous_enabled() -> bool:
     reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
     closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
     return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def apex_impact_enabled() -> bool:
+    """True iff the APEX Impact & Closure surfaces are ON (``VIGIL_APEX_IMPACT`` affirmative). OFF by default
+    (mirrors ``redpen_enabled``): with it off EVERY APEX impact/closure capability is inert and the server is
+    byte-identical to a build without it — the engagement's chaining phase pursues NO impact (it stays pure
+    reasoning over the report), the autonomous proof-carrying-remediation close-the-loop is a no-op (status
+    ``disabled``, nothing proposed, no PR, no certificate minted), and the continuous retest scheduler runs no
+    cadence tick. The master flag over PR-3's three capabilities: chaining-to-demonstrated-impact, autonomous
+    PCR (confirmed FACT → gated fix PR → signed NEGATIVE remediation certificate), and continuous prove-clean
+    retesting. Read at call time. Even when ON, each leg still fails closed unless its own inputs are provisioned
+    (an oracle-confirmed FACT to drive PCR, governance signers to sign the negative cert, a verified authority +
+    the m-of-n destruction quorum for the gated PR), so flipping this flag alone grants no new reach — it only
+    un-gates machinery that still obeys every FACT-gate, offense-gate and signature check beneath it. Keyless:
+    an env flag, never a secret — FATAL-2 clean; the offense plane reads the SAME env var through its own
+    ``apex_impact_enabled`` helpers (``framework.v2.apex_impact`` / ``vigil_integration.apex_flags``)."""
+    return (os.environ.get("VIGIL_APEX_IMPACT") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 # A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL
