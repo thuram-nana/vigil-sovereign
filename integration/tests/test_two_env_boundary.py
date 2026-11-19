@@ -205,6 +205,15 @@ assert "framework" not in _m, "live.github_client must not import framework at m
 import vigil_integration.jobs.redpen_fix  # R5: Fix-this + Retest engine — framework (ladder/fix-PR/certify/oracle) LAZY
 assert "framework" not in _m, "jobs.redpen_fix must not import framework at module scope (ladder/fix-PR/certify/oracle are lazy)"
 assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope"
+import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
+assert "framework" not in _m, "notify_channels must not import framework at module scope"
+assert "strix" not in _m, "notify_channels must not import strix at module scope"
+import sigil.governor.issue_sync         # PR-D: the FACT-only issue-tracker sync (SOVEREIGN; auto-close on proven fix)
+assert "framework" not in _m, "issue_sync must not import framework at module scope"
+assert "strix" not in _m, "issue_sync must not import strix at module scope"
+import vigil_integration.jobs.notify_drain  # PR-D: the notify orchestrator — STDLIB ONLY, ALL sovereign logic injected
+assert "framework" not in _m, "jobs.notify_drain must not import framework at module scope"
+assert "strix" not in _m, "jobs.notify_drain must not import strix at module scope"
 import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
 assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
 assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
