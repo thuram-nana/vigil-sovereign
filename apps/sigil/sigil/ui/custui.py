@@ -214,6 +214,12 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
              "__VIGIL_REPORT_EXPORT__": "1" if _config.customer_report_export_enabled() else "0",
              "__VIGIL_COMPLIANCE__": "1" if _config.customer_compliance_map_enabled() else "0"}
+    # APEX PR-L (Area 11): whether the customer Attack-path storytelling screen and the blind-vuln (out-of-band)
+    # confirmation badge are on. Each is a non-secret on/off value written into the page (counting in the build
+    # id); with each off its SPA surface is absent and the sovereign findings projection never surfaces the inert
+    # attack_path / oob_attestation field (byte-identical). Same flags that gate the projection in config.py.
+    attack_path = _config.customer_attack_path_enabled()
+    blind_vuln = _config.customer_blind_vuln_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -232,7 +238,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
-                                     "__VIGIL_PRESENTATION__": "1" if presentation else "0", **area6})
+                                     "__VIGIL_PRESENTATION__": "1" if presentation else "0",
+                                     "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
+                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
