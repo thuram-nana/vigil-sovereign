@@ -298,6 +298,32 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_assistant_enabled() -> bool:
+    """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
+    (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
+    provisioner action are ABSENT (404 exactly as an unknown route/action), NO model grant is minted for the
+    assistant and NO model request is made — so the server is byte-identical to a build without the assistant. The
+    assistant is a metered NL chat grounded ONLY in the tenant's own oracle-confirmed findings: it summarises /
+    explains / prioritises existing findings as ADVICE, never asserts a new vulnerability and never mints a FACT (the
+    oracle is the sole minter), and every model request goes through the sovereign model gateway (it holds no provider
+    key). Read at call time. Even ON, a turn still fails closed unless the model gateway is reachable and an owner key
+    is present to mint the turn's grant."""
+    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_notify_enabled() -> bool:
+    """True iff the customer Notifications & integrations surfaces are ON (`VIGIL_CUSTOMER_NOTIFY` affirmative).
+    OFF by default (mirrors `redpen_enabled`): with it off EVERY notify route / channel registration / outbound
+    delivery / issue-tracker sync / notify-drain is absent (404 exactly as an unknown route), no channel config is
+    written, no outbound socket opens and no tracker issue is opened or closed — so the server is byte-identical to a
+    build without the notify consumer. The master flag over the whole PR-D pipeline (the per-tenant channel registry,
+    the SSRF-guarded delivery egress, the notify-drain and the Jira/Linear/GitHub issue sync). Read at call time.
+    Even when ON, each leg still fails closed unless its own delivery credential is provisioned (an SMTP relay, a
+    tracker API token) AND the target host is on the owner-reviewed outbound allowlist — a notification is a DELIVERY
+    of an oracle-minted FACT, never a FACT source (the oracle alone mints a finding)."""
+    return (os.environ.get("VIGIL_CUSTOMER_NOTIFY") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def apex_autonomous_enabled() -> bool:
     """True iff the APEX autonomous DRIVER is ON (`VIGIL_APEX_AUTONOMOUS` affirmative). OFF by default
     (mirrors `redpen_enabled`): with it OFF an engagement runs the exact current fixed pipeline — crawl →
@@ -546,6 +572,54 @@ def multi_shard_enabled() -> bool:
     gates only the in-repo resolution + orchestration code); the production flip stays the OWNER's, after S4 is
     green (HANDOFF §13.1)."""
     return (os.environ.get("VIGIL_MULTI_SHARD") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_fair_queue_enabled() -> bool:
+    """True iff the customer FAIR cross-tenant launch QUEUE + shard-placement-on-signup are on
+    (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative; consumer PR-F). OFF by default (mirrors `redpen_enabled` /
+    `customer_monitoring_enabled`): with it off a sign-up mints NO shard assignment (the historical
+    single-placement deployment), the launch surface shows NO cross-tenant queue position, and every surface is
+    byte-identical to a build without PR-F.
+
+    When ON (together with `multi_shard_enabled()` AND an owner-set `shard_ids()` topology) a sign-up is placed on
+    a shard by the OWNER-signed provisioner — a tenant NEVER self-assigns (the shard is server-chosen from owner
+    topology + current load, exactly like a launch AMOUNT is server-decided), and the launch surface may show an
+    honest cross-tenant "queued" position so load surfaces as a truthful wait, never a silent drop.
+
+    Fairness is a cross-TENANT ORDERING only: it NEVER parallelizes one target (per-target scan stays SERIAL — the
+    engine's slug lease / serial-proof-per-host governor is untouched) and it mints NO FACT (only the oracle mints
+    facts; a queue position is a UI notice, never a finding). The elastic we-host k8s/Firecracker fleet these
+    shards map to is OWNER-GATED infra, out of this code's scope — this flag gates only the in-repo placement +
+    ordering. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_FAIR_QUEUE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# A SAFE single shard-id path component — mirrors ``vigil_core.shard_assignment_record._TENANT_RE`` (replicated
+# here as a config-time pre-filter, so a malformed owner entry is DROPPED rather than reaching the signer):
+# alnum start then [A-Za-z0-9._-], max 64, no separators / ``.``/``..`` traversal / absolute path / NUL.
+_SHARD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def shard_ids() -> "tuple[str, ...]":
+    """The owner-set shard topology for placement-on-signup (`VIGIL_SHARD_IDS`, a comma-separated list of safe
+    shard-id components, e.g. ``shard01,shard02``), de-duplicated with order preserved. EMPTY by default: with no
+    topology the provisioner places NOTHING on sign-up (fail-safe — a tenant is never guessed onto a shard, and
+    routing then fails closed for it), so even with the flags on, shard-on-signup stays inert until the owner
+    names the shards. A malformed entry (not a safe single path component) is DROPPED, so a bad owner value can
+    never traverse a path. The owner stands up the matching cross-HOST fleet separately — that elastic we-host
+    k8s/Firecracker infra is OWNER-GATED and out of this code's scope. Read at call time."""
+    raw = (os.environ.get("VIGIL_SHARD_IDS") or "").strip()
+    if not raw:
+        return ()
+    out: "list[str]" = []
+    seen: "set[str]" = set()
+    for part in raw.split(","):
+        c = part.strip()
+        if not c or c in seen or not _SHARD_ID_RE.fullmatch(c):
+            continue
+        seen.add(c)
+        out.append(c)
+    return tuple(out)
 
 
 def billing_plan_alarm_enabled() -> bool:
@@ -1057,6 +1131,50 @@ def run_model() -> str:
     return _mm.run_model()
 
 
+def assistant_model() -> str:
+    """The model the customer security assistant (PR-J) answers with (`VIGIL_ASSISTANT_MODEL`, default = `run_model`).
+    Server-side only — the model identifier is NEVER shown to a customer (design: a customer sees advice, not a
+    provider/model name). The assistant's grant names this model and the gateway refuses any other for that grant; it
+    must be a model the price table can price, so an unset/blank value falls back to the priced `run_model`."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_MODEL") or "").strip()
+    return raw or run_model()
+
+
+def assistant_max_tokens() -> int:
+    """The max output tokens one assistant turn may generate (`VIGIL_ASSISTANT_MAX_TOKENS`, default 1024). A bound on
+    the turn's cost and length; a junk/out-of-range value falls back to the default. The gateway lowers it further to
+    fit the grant's cap, so this is a ceiling, never a spend promise."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_MAX_TOKENS") or "").strip()
+    try:
+        n = int(raw) if raw else 1024
+    except ValueError:
+        return 1024
+    return n if 1 <= n <= 8192 else 1024
+
+
+def assistant_cap_nano_usd() -> int:
+    """The technical ceiling on what ONE assistant turn's model requests may cost VIGIL (`VIGIL_ASSISTANT_CAP_NANO_USD`,
+    default 500_000_000 = $0.50). The grant's cap (a leaked token can never spend past it); the gateway reserves every
+    request against it before forwarding. A junk/out-of-range value falls back to the default."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_CAP_NANO_USD") or "").strip()
+    try:
+        n = int(raw) if raw else 500_000_000
+    except ValueError:
+        return 500_000_000
+    return n if 0 < n <= 10 ** 12 else 500_000_000
+
+
+def assistant_finding_limit() -> int:
+    """The most oracle-confirmed findings one assistant turn grounds on (`VIGIL_ASSISTANT_FINDING_LIMIT`, default 50).
+    Newest-first (the assessments projection's order); a bound on the prompt's input size. Junk/out-of-range → default."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_FINDING_LIMIT") or "").strip()
+    try:
+        n = int(raw) if raw else 50
+    except ValueError:
+        return 50
+    return n if 1 <= n <= 200 else 50
+
+
 def oidc_settings() -> dict:
     """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
     override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
@@ -1136,6 +1254,28 @@ STRIPE_CHECKOUT_LINK_HOSTS = frozenset({"checkout.stripe.com"})
 # credentials (`VIGIL_GITHUB_APP_ID` + `VIGIL_GITHUB_APP_PRIVATE_KEY`/SSM): unset ⇒ nothing is wired and no GitHub
 # egress exists. There is no API-base override, so the credential-holding egress can only ever reach this host.
 GITHUB_APP_EGRESS_ALLOWLIST = frozenset({"api.github.com"})
+
+
+# --- Customer Notifications & integrations OUTBOUND egress (PR-D — SHIPPED OFF BY DEFAULT) --------------
+# The OWNER-REVIEWED outbound host allowlist for delivering an oracle-minted FACT finding to a tenant's out-of-band
+# channels — Slack / Discord / a generic customer webhook — enforced by `governor.notify_channels.guard_outbound_url`
+# BEFORE any socket opens (mirrors GITHUB_APP_EGRESS_ALLOWLIST above). A tenant SUPPLIES a webhook URL, but it can
+# only ever reach a host the OWNER has reviewed here (exact host, or an allowed suffix) AND that resolves ENTIRELY to
+# PUBLIC addresses — so a tenant can never steer the delivery egress at an internal / loopback / cloud-metadata
+# (169.254.169.254) host (the SSRF class). Gated DEFAULT-OFF on `customer_notify_enabled()`: unset ⇒ nothing is
+# wired and no notify egress exists. A generic customer webhook host the owner has reviewed is added here (exact).
+NOTIFY_WEBHOOK_HOST_ALLOWLIST = frozenset({"hooks.slack.com"})
+# Suffixes the owner has reviewed for providers that mint many sender hosts; a host is allowed iff it EQUALS a
+# member above OR ends with ("." + a member here) — ".discord.com" admits discord.com's own webhook host without
+# admitting a look-alike like `discord.com.evil.test` (that ends with `.evil.test`, never `.discord.com`).
+NOTIFY_WEBHOOK_HOST_ALLOWLIST_SUFFIXES = frozenset({"discord.com", "discordapp.com"})
+# The issue-tracker API hosts the sync may reach (exact host). A customer's self-hosted Jira host is NOT here by
+# default — the owner adds the specific host after review; this is the OWNER's allowlist, never a tenant free-form.
+NOTIFY_ISSUE_API_ALLOWLIST = frozenset({
+    "api.github.com",            # GitHub issues REST
+    "api.atlassian.com",         # Jira Cloud REST (api.atlassian.com/ex/jira/{cloudid})
+    "api.linear.app",            # Linear GraphQL
+})
 
 
 def customer_oidc_enabled() -> bool:
