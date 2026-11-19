@@ -54,6 +54,9 @@ SERVER_SRC = Path(server.__file__).read_text(encoding="utf-8")
 _SPECIAL_GET_ROUTES = (
     "/api/events", "/api/blackboard", "/api/chat/sessions", "/api/chat/session/",
     "/api/chat/hypotheses", "/api/chat/models", "/api/aegis/verdicts", "/api/dossier/",
+    # Session FOLDERS: special-cased because it is served only while VIGIL_SESSION_FOLDERS is on (else it
+    # falls through to the unknown-endpoint 404). Consumed by the chat rail + Sessions screen (loadFolders).
+    "/api/folders",
     "/api/brain/decision", "/api/strix/control",
     # do_GET special-cases `/api/remediate/<run>/<ref>/diff` ABOVE the `/api/remediate/` prefix loop (so the
     # verified-fix .patch download is not swallowed by remediate_plan). The prefix is also a _PREFIX_ROUTES

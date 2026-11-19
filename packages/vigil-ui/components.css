@@ -838,6 +838,29 @@ select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-runni
 .chat-session-m { font-size: var(--fs-xs); color: var(--text-2); }
 .iconbtn.sm { width: 30px; height: 30px; }
 .chat-empty { padding: 24px; }
+/* Session folders (VIGIL_SESSION_FOLDERS): chat-rail groups + the Sessions screen sections */
+.chat-rail-top { display: flex; gap: 6px; align-items: stretch; }
+.chat-rail-top .chat-new { flex: 1 1 auto; width: auto; }
+.chat-folder-h { display: flex; gap: 4px; align-items: stretch; border-radius: var(--r-2); }
+.chat-folder-h .iconbtn.sm { opacity: 0; transition: opacity .12s ease; }
+.chat-folder-h:hover .iconbtn.sm, .chat-folder-h:focus-within .iconbtn.sm { opacity: 1; }
+.chat-folder-t { flex: 1 1 auto; min-width: 0; display: flex; gap: 6px; align-items: center; text-align: left;
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-2); padding: 6px 8px;
+  cursor: pointer; color: var(--text-0); font-size: var(--fs-sm); }
+.chat-folder-t:hover { background: var(--bg-2); border-color: var(--border); }
+.chat-folder-t .glyph svg { width: 16px; height: 16px; }
+.chat-folder-n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-folder-c { font-size: var(--fs-xs); color: var(--text-2); }
+.chat-folder-item { padding-left: 18px; }
+.chat-folder-empty { padding-left: 26px; font-size: var(--fs-xs); }
+.chat-session-row[draggable="true"] { cursor: grab; }
+.drop-on { outline: 2px dashed var(--border-strong); outline-offset: -2px; background: var(--bg-2); }
+.folder-picks .folder-pick { width: 100%; justify-content: flex-start; gap: 8px; }
+.folder-picks .folder-pick.on { border-color: var(--border-strong); background: var(--bg-3); }
+.folder-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.session-folder { margin-bottom: 18px; }
+.session-folder-h { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
+.session-folder-h h2 { font-size: var(--fs-md, 15px); margin: 0; }
 
 /* Calibrated critic feed: a routine critic check about a LEAD (advisory only; never affects a fact) and
    the folded "N routine critic checks" summary read as quiet context, not an alarm. Genuine demotions
