@@ -117,6 +117,14 @@ _MAX_GROUP = 256
 _MAX_GROUP_MAP = 256          # at most this many group→role entries (bound the signed record)
 _MAX_CERTS = 8                # at most this many IdP signing certs (rotation overlap); bounds the signed record
 
+# The clock skew (seconds) a config may widen an assertion's / id_token's validity window by. BOUNDED: the skew
+# stretches NotOnOrAfter / exp, and the SAML replay ledger keeps a spent assertion id until that widened window has
+# closed — an unbounded skew would make both the validity window and the ledger's retention unbounded. Refused at
+# sign time AND re-checked when a config is folded back (a hand-crafted record over the bound is inert); `ui.saml`
+# refuses an over-bound skew again at verification (an independent second refusal — a lockstep test keeps the two
+# literals equal).
+MAX_CLOCK_SKEW_SECONDS = 600
+
 # The asymmetric-only OIDC signing algs an enterprise config may pin (mirrors ui.oidc.KNOWN_ASYMMETRIC_ALGS —
 # a lockstep test keeps them equal). A symmetric / `none` alg is refused at bind time so it can never reach
 # verification.
@@ -171,6 +179,17 @@ def check_provisionable_role(role: str) -> str:
             f"SSO/SCIM may provision ONLY {sorted(SSO_PROVISIONABLE_ROLES)} (the absolute role ceiling); "
             f"{role!r} is refused — operator/founder/owner and any money/offense role stay owner-signed")
     return r
+
+
+def _check_clock_skew(value: int) -> int:
+    """The config's clock skew in whole seconds. A negative skew is the strictest window (0); one above
+    `MAX_CLOCK_SKEW_SECONDS` is REFUSED — never silently clamped, since the owner asked for a window the verifier
+    would not honor."""
+    skew = max(0, int(value))
+    if skew > MAX_CLOCK_SKEW_SECONDS:
+        raise SsoConfigError(f"clock_skew_seconds must be at most {MAX_CLOCK_SKEW_SECONDS} (got {skew}): the skew "
+                             f"widens every assertion's / id_token's validity window and the replay ledger's retention")
+    return skew
 
 
 def _check_str(value: object, what: str, *, required: bool) -> str:
@@ -412,7 +431,7 @@ def _config_from_payload(p: dict, issued_at: float) -> Optional[SsoConfig]:
             oidc_signing_algs=algs, oidc_egress_hosts=tuple(str(h).strip().lower()
                                                             for h in _as_tuple(p.get("oidc_egress_hosts")) if str(h).strip()),
             default_role=default_role, group_role_map=group_map, role_cap=role_cap,
-            clock_skew_seconds=max(0, _as_int(p.get("clock_skew_seconds"), 60)),
+            clock_skew_seconds=_check_clock_skew(_as_int(p.get("clock_skew_seconds"), 60)),
             scim_enabled=bool(p.get("scim_enabled")), scim_token_fp=str(p.get("scim_token_fp") or ""),
         )
     except (SsoConfigError, KeyError, TypeError, ValueError):
@@ -477,7 +496,7 @@ class SsoConfigRegistry:
             "oidc_issuer": "", "oidc_client_id": "", "oidc_jwks_uri": "", "oidc_authorize_endpoint": "",
             "oidc_token_endpoint": "", "oidc_redirect_uri": "", "oidc_signing_algs": [], "oidc_egress_hosts": [],
             "default_role": default_role, "group_role_map": _check_group_role_map(group_role_map, role_cap),
-            "role_cap": role_cap, "clock_skew_seconds": max(0, int(clock_skew_seconds)),
+            "role_cap": role_cap, "clock_skew_seconds": _check_clock_skew(clock_skew_seconds),
             "scim_enabled": bool(scim_enabled),
             "scim_token_fp": token_fingerprint(scim_token) if scim_token else "",
         }
@@ -521,7 +540,7 @@ class SsoConfigRegistry:
                                                          allow_http=True),
             "oidc_signing_algs": list(algs), "oidc_egress_hosts": list(hosts),
             "default_role": default_role, "group_role_map": _check_group_role_map(group_role_map, role_cap),
-            "role_cap": role_cap, "clock_skew_seconds": max(0, int(clock_skew_seconds)),
+            "role_cap": role_cap, "clock_skew_seconds": _check_clock_skew(clock_skew_seconds),
             "scim_enabled": bool(scim_enabled),
             "scim_token_fp": token_fingerprint(scim_token) if scim_token else "",
         }

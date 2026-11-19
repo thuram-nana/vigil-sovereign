@@ -19,13 +19,16 @@ WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion i
   5. AUDIENCE restriction CONTAINS the org's `sp_entity_id` (org-scoping — org A's assertion fails org B).
   6. RECIPIENT / DESTINATION == the org's `acs_url`.
   7. TIME WINDOWS — Conditions NotBefore/NotOnOrAfter and SubjectConfirmationData NotOnOrAfter, within the
-     configured clock skew. A missing NotOnOrAfter is refused (it bounds the replay window).
+     configured clock skew (itself BOUNDED: a config over `_MAX_CLOCK_SKEW_SECONDS` is refused). A missing
+     NotOnOrAfter is refused (it bounds the replay window).
   8. SP-INITIATED BINDING (when the caller passes `expected_in_response_to`, as the HTTP edge always does) — the
      SubjectConfirmationData `InResponseTo` (inside the SIGNED assertion) MUST equal the ID of the AuthnRequest
      this browser's login minted, and the Response's own `InResponseTo`, when present, must too. So an
      unsolicited (IdP-initiated) response, or a response to ANOTHER login, is refused — the unsigned Response
      attribute alone is never trusted for this, the signed one is.
-  9. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger; a second presentation refuses.
+  9. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger, kept until the window the time
+     guards accept it in (the earliest NotOnOrAfter PLUS the skew) has closed; a second presentation refuses at
+     any allowed skew.
 
 The SP-initiated request side lives here too: `new_request_id` + `build_authn_request` +
 `authn_request_redirect_url` produce the (unsigned) AuthnRequest for the SAML HTTP-Redirect binding — pure
@@ -78,6 +81,11 @@ _D = lambda local: f"{{{_NS_DS}}}{local}"          # noqa: E731
 
 # A SAML Response is a few KiB; cap the input so a hostile IdP/relay cannot stream an unbounded body.
 _MAX_SAML_BYTES = 4 * 1024 * 1024
+
+# The largest clock skew (seconds) the verifier honors — mirrors `governor.sso_config.MAX_CLOCK_SKEW_SECONDS` (which
+# refuses it at sign time and in the fold); a lockstep test keeps the two equal. Re-checked here so the time windows
+# and the replay ledger's retention stay bounded whatever config object reaches the verifier.
+_MAX_CLOCK_SKEW_SECONDS = 600
 
 # The signature-verifier backend contract: given the raw signed bytes and the owner-configured IdP certs (PEM),
 # return the set of element `ID`s whose enveloped signature validly verifies under one of those certs. An empty
@@ -205,11 +213,14 @@ def _parse_instant(value: Optional[str], what: str) -> float:
 # ---------------------------------------------------------------------------------------------------
 
 class SamlReplayLedger:
-    """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, not_on_or_after)`
+    """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, accept_until)`
     O_EXCL-creates a marker named `sha256(id)` (fixed hex, no traversal/newline injection); the exclusive create
     is the serialization point, so of N concurrent presentations exactly ONE wins and the rest are refused
-    (replay). A per-spend sweep + a hard cap bound the directory; a marker older than the assertion's
-    NotOnOrAfter (+ grace) is reaped (by then the temporal guard refuses the assertion anyway). Stdlib only."""
+    (replay). A per-spend sweep + a hard cap bound the directory. `accept_until` is the LAST instant the verifier
+    could still accept that assertion — its earliest NotOnOrAfter PLUS the configured clock skew — and a marker is
+    reaped only once that instant is more than a grace in the past, so by then the temporal guard refuses the
+    assertion at ANY skew (a marker reaped while the window is still open would let it verify twice). Stdlib
+    only."""
 
     _DEFAULT_MAX = 65536
     _GRACE = 300.0
@@ -247,9 +258,10 @@ class SamlReplayLedger:
         except OSError:
             pass
 
-    def try_spend(self, assertion_id: str, not_on_or_after: float, *, now: Optional[float] = None) -> bool:
+    def try_spend(self, assertion_id: str, accept_until: float, *, now: Optional[float] = None) -> bool:
         """True iff this assertion ID is spent for the FIRST time (accept); False if already spent (replay →
-        refuse). Fail-closed on a blank id. A real I/O error at the exclusive-create raises (the caller refuses)."""
+        refuse). The marker is kept until `accept_until` (+ grace). Fail-closed on a blank id. A real I/O error at
+        the exclusive-create raises (the caller refuses)."""
         aid = str(assertion_id or "").strip()
         if not aid:
             return False
@@ -258,7 +270,7 @@ class SamlReplayLedger:
         if self._sweep(t) >= self.max_outstanding:
             raise SamlError("SAML replay ledger at capacity")
         marker = self._marker(aid)
-        payload = json.dumps({"exp": float(not_on_or_after)}, ensure_ascii=False)
+        payload = json.dumps({"exp": float(accept_until)}, ensure_ascii=False)
         try:
             fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -345,6 +357,8 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
         raise SamlError("SAML config carries no IdP signing certificate (fail-closed)")
     verifier = sig_verifier or signxml_sig_verifier
     skew = int(getattr(config, "clock_skew_seconds", 60) or 0)
+    if skew > _MAX_CLOCK_SKEW_SECONDS:
+        raise SamlError(f"the configured clock skew exceeds {_MAX_CLOCK_SKEW_SECONDS} s (fail-closed)")
 
     root = _parse_hardened(xml_bytes)
     _collect_ids(root)                                                # fail-closed on duplicate ids (XSW defence)
@@ -427,9 +441,11 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
             if rirt is not None and str(rirt) != want:
                 raise SamlError("Response InResponseTo does not name this login's AuthnRequest")
 
-    # --- REPLAY: spend the assertion ID single-use, bounded by the earliest NotOnOrAfter.
-    window_end = min(cond_nooa, scd_nooa)
-    if not replay_ledger.try_spend(assertion_id, window_end, now=now):
+    # --- REPLAY: spend the assertion ID single-use. The time guards above accept it until the earliest NotOnOrAfter
+    # PLUS the skew, so its marker must be kept until exactly then — reaped any earlier (e.g. at NotOnOrAfter + a
+    # fixed grace smaller than the skew), the same assertion would verify a second time inside its open window.
+    accept_until = min(cond_nooa, scd_nooa) + skew
+    if not replay_ledger.try_spend(assertion_id, accept_until, now=now):
         raise SamlError("SAML assertion replay refused (ID already spent)")
 
     # --- IDENTITY (never a role): the NameID, plus attributes and the IdP-asserted groups (for role SELECTION).

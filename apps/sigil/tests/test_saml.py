@@ -386,6 +386,42 @@ def test_the_replay_ledger_is_bounded(tmp_path):
     assert led.try_spend("a3", NOW + 60, now=NOW + 60 + led._GRACE + 1)
 
 
+# the NotOnOrAfter `_assertion` stamps by default (2001-09-14T00:00:00Z), as epoch seconds
+NOOA = 1_000_425_600.0
+_GRACE = int(saml.SamlReplayLedger._GRACE)
+
+
+@pytest.mark.parametrize("skew", [0, 60, _GRACE, _GRACE + 1, saml._MAX_CLOCK_SKEW_SECONDS],
+                         ids=lambda v: f"skew-{v}")
+def test_one_assertion_never_verifies_twice_at_any_allowed_skew(skew):
+    # The time guards accept an assertion until NotOnOrAfter + skew, so its spent marker must outlive exactly that
+    # instant: a ledger that reaped it at NotOnOrAfter + a fixed grace would re-accept it once skew > grace.
+    cfg = dataclasses.replace(CFG, clock_skew_seconds=skew)
+    led = _led()
+    last = NOOA + skew - 0.5                                     # inside the window's final second (still accepted)
+    assert _verify(_response(), now=NOW, cfg=cfg, ledger=led).assertion_id == "a1"
+    for t in sorted({NOW + 1, NOOA - 1, NOOA, NOOA + skew // 2, NOOA + _GRACE + 1, last, NOOA + skew,
+                     NOOA + skew + _GRACE + 1}):
+        with pytest.raises(SamlError, match="replay refused" if t <= last else "NotOnOrAfter has passed"):
+            _verify(_response(), now=t, cfg=cfg, ledger=led)
+    # same-shape control: a FRESH assertion id still verifies at the last instant, so every refusal above inside the
+    # window was the replay ledger's
+    assert _verify(_response(aid="a2"), signed=("a2",), now=last, cfg=cfg, ledger=led).assertion_id == "a2"
+
+
+def test_the_verifier_refuses_a_clock_skew_over_its_bound():
+    over = dataclasses.replace(CFG, clock_skew_seconds=saml._MAX_CLOCK_SKEW_SECONDS + 1)
+    with pytest.raises(SamlError, match="clock skew exceeds"):
+        _verify(_response(), cfg=over)
+    at_bound = dataclasses.replace(CFG, clock_skew_seconds=saml._MAX_CLOCK_SKEW_SECONDS)
+    assert _verify(_response(), cfg=at_bound).name_id == "user@acme"     # control: the bound itself is allowed
+
+
+def test_the_skew_bound_is_in_lockstep_with_the_config():
+    from sigil.governor import sso_config
+    assert saml._MAX_CLOCK_SKEW_SECONDS == sso_config.MAX_CLOCK_SKEW_SECONDS
+
+
 # --- missing structure ------------------------------------------------------------------------------
 
 def test_missing_subject_refused():

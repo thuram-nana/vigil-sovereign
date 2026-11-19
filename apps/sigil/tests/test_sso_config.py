@@ -260,6 +260,35 @@ def test_tenant_re_matches_engine_paths_literal():
     assert f'r"{sc._TENANT_RE.pattern}"' in src, "sso_config._TENANT_RE drifted from the engine literal"
 
 
+@pytest.mark.parametrize("protocol", ["saml", "oidc"])
+def test_the_clock_skew_is_bounded_at_sign_time(protocol):
+    reg = _reg(_store())
+
+    def sign(skew: int) -> int:
+        if protocol == "saml":
+            return _saml(reg, clock_skew_seconds=skew)
+        return reg.set_oidc_config("acme", issuer="https://idp", client_id="cid", jwks_uri="https://idp/jwks",
+                                   authorize_endpoint="https://idp/a", token_endpoint="https://idp/t",
+                                   redirect_uri="https://app/cb", clock_skew_seconds=skew, issued_at=_issue())
+    with pytest.raises(SsoConfigError, match="clock_skew_seconds must be at most"):
+        sign(sc.MAX_CLOCK_SKEW_SECONDS + 1)
+    assert reg.config("acme") is None                                     # nothing was signed
+    sign(sc.MAX_CLOCK_SKEW_SECONDS)                                       # control: the bound itself is allowed
+    assert reg.config("acme").clock_skew_seconds == sc.MAX_CLOCK_SKEW_SECONDS
+
+
+def test_a_signed_record_over_the_skew_bound_is_inert_in_the_fold(monkeypatch):
+    s = _store()
+    reg = _reg(s)
+    _saml(reg, clock_skew_seconds=60)
+    cfg = reg.config("acme")
+    monkeypatch.setattr(SsoConfigRegistry, "_refuse_cross_org_clash", lambda self, core: None)  # a hand-made record
+    reg._append_active(sc._core_from_config(cfg, issued_at=_issue(), clock_skew_seconds=sc.MAX_CLOCK_SKEW_SECONDS + 1))
+    assert reg.config("acme").clock_skew_seconds == 60                    # the over-bound grant is never honored
+    reg._append_active(sc._core_from_config(cfg, issued_at=_issue(), clock_skew_seconds=sc.MAX_CLOCK_SKEW_SECONDS))
+    assert reg.config("acme").clock_skew_seconds == sc.MAX_CLOCK_SKEW_SECONDS   # control: at the bound it is
+
+
 def test_oidc_alg_set_matches_ui_oidc():
     from sigil.ui.oidc import KNOWN_ASYMMETRIC_ALGS
     assert sc._KNOWN_OIDC_ALGS == KNOWN_ASYMMETRIC_ALGS
