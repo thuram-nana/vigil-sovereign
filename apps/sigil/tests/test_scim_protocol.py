@@ -108,6 +108,19 @@ def test_okta_reconcile_flow_filter_create_read_back(env):
     assert got.status == 200 and got.body["name"]["givenName"] == "Alice" and got.body["emails"][0]["type"] == "work"
 
 
+def test_username_filter_and_uniqueness_compare_letter_case_only_never_a_look_alike(env):
+    import urllib.parse
+    uid = env.call("POST", "/Users", _okta_user("sam@acme.com", "00u-sam")).body["id"]
+    look = "\u017fam@acme.com"                    # LONG S: a DIFFERENT userName that merely casefolds to sam's
+    miss = env.call("GET", "/Users", query=urllib.parse.urlencode({"filter": f'userName eq "{look}"'}))
+    assert miss.status == 200 and miss.body["totalResults"] == 0         # "does it exist?" is never answered by sam
+    hit = env.call("GET", "/Users", query=urllib.parse.urlencode({"filter": 'userName eq "SAM@ACME.COM"'}))
+    assert hit.body["totalResults"] == 1 and hit.body["Resources"][0]["id"] == uid     # letter case alone matches
+    other = env.call("POST", "/Users", _okta_user(look, "00u-other"))
+    assert other.status == 201 and other.body["id"] != uid               # its own user, never a 409 against sam
+    assert env.call("POST", "/Users", _okta_user("SAM@acme.com", "00u-sam2")).status == 409   # a true duplicate
+
+
 def test_duplicate_username_is_409_uniqueness(env):
     assert env.call("POST", "/Users", _okta_user()).status == 201
     dup = env.call("POST", "/Users", _okta_user(ext="00u2other"))

@@ -36,10 +36,16 @@ directory is BOOKKEEPING — the authority is still the ceiling-capped owner-sig
 SIGN-IN SEMANTICS:
   * an org whose config has SCIM OFF provisions JUST-IN-TIME: a verified sign-in mints (or updates) the capped
     membership with the role the config resolves for the assertion's groups;
-  * an org whose config has SCIM ON is DIRECTORY-MANAGED: sign-in mints nothing — it links the verified subject to
-    the directory user whose `userName` (case-insensitive) or `externalId` matches it (the SAML NameID; the OIDC
-    `sub`, or Entra's immutable `oid`) and admits only an ACTIVE user with a live membership. A user the directory
-    deactivated or deleted can therefore never sign back in, even with a still-valid assertion.
+  * an org whose config has SCIM ON is DIRECTORY-MANAGED: sign-in links the verified subject to the directory user
+    whose `userName` (case-insensitively — by letter case only, never a case-folding look-alike) or `externalId`
+    matches it (the SAML NameID; the OIDC `sub`, or Entra's immutable `oid`) and admits only an ACTIVE user with a
+    live membership. A subject that matches no directory user is REFUSED — never resolved to a derived username,
+    which could name a different member. A user the directory deactivated or deleted can therefore never sign back
+    in, even with a still-valid assertion. Sign-in mints nothing in this mode except a CLAMP: when the current
+    owner-signed config resolves a LOWER role for the user than its membership holds (the owner tightened the cap
+    or removed a group mapping), the membership is brought down to it before the person is admitted — never
+    raised (a raise waits for the IdP's next SCIM write), and a role the owner set by hand outside the ceiling is
+    left as the owner set it.
 
 ORG-SCOPED EVERYWHERE: the org is resolved from the SCIM bearer's config / the SSO login's server-side state, and
 provisioning always targets `config.org_id`. A caller never supplies a target org as a free field.
@@ -68,6 +74,7 @@ from ..governor import scim as _scim  # noqa: E402
 from ..governor.orgs import Membership, OrgRegistry  # noqa: E402
 from ..governor.scim import BearerToken, ScimError, bearer_from_authorization_header  # noqa: E402
 from ..governor.scim_directory import DirectoryError, DirectoryUser, OrgDirectory, ScimDirectoryRegistry  # noqa: E402
+from ..governor.scim_directory import username_key  # noqa: E402
 from ..governor.sso_config import SsoConfig  # noqa: E402
 
 # The SCIM message / resource schema urns (RFC 7643 / 7644).
@@ -229,11 +236,23 @@ def _provision_from_identity(org_registry, config: SsoConfig, *, external_id: st
                            external_id=str(external_id), seq=seq)
 
 
+def _directory_role(config: SsoConfig, directory: OrgDirectory, u: DirectoryUser) -> Optional[str]:
+    """The role the owner-signed config resolves for directory user `u`: its role selectors + the names of the
+    directory groups it is in, through `resolve_role` (the config's map / default, clamped to its cap and the
+    ceiling; None ⇒ deny)."""
+    return _scim.resolve_role(config, list(u.selectors) + [g.display_name for g in directory.groups_of(u.id)])
+
+
 def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=(), groups, issued_at: float,
                      directory_registry=None, audit: Optional[AuditFn] = None) -> ProvisionResult:
     """Resolve a VERIFIED sign-in to the member it admits. SCIM off ⇒ JIT. SCIM on ⇒ directory-managed: link the
-    subject to the org's directory user (userName case-insensitively, or externalId exactly — also via the extra
-    immutable `link_ids`), and admit only an ACTIVE user holding a live membership. Mints nothing in that mode."""
+    subject to the org's directory user (userName by letter case only, or externalId exactly — also via the extra
+    immutable `link_ids`), and admit only an ACTIVE user holding a live membership. A subject no directory user
+    matches is REFUSED: a derived `sso_username(subject)` is never looked up instead, since a directory user's id is
+    derived from the userName / externalId it had when it was CREATED — after a rename that id belongs to a
+    DIFFERENT person than the one now carrying the old name. Mints nothing in that mode except the CLAMP: a
+    membership above the role the CURRENT owner-signed config resolves for the user is brought down to it first
+    (never raised; a role the owner set outside the ceiling is left as the owner set it)."""
     if not config.scim_enabled:
         return _provision_from_identity(org_registry, config, external_id=subject, groups=groups,
                                         issued_at=issued_at, audit=audit)
@@ -244,16 +263,30 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
             u = d.user_by_external_id(key)
             if u is not None:
                 break
-    username = u.id if u is not None else _scim.sso_username(config, subject)
-    if not username:
-        raise SsoLoginError("the verified identity carries no usable subject")
-    if u is not None and not u.active:
+    if u is None:
+        raise SsoLoginError("this organization adds members through its directory (SCIM) and this person is not in "
+                            "it; the organization's IT administrator must assign VIGIL to them")
+    if not u.active:
         raise SsoLoginError("this person is deactivated in the organization's directory")
-    role = org_registry.membership_role(username, config.org_id)
+    role = org_registry.membership_role(u.id, config.org_id)
     if role is None:
         raise SsoLoginError("this organization adds members through its directory (SCIM) and this person has no "
                             "active membership; the organization's IT administrator must assign VIGIL to them")
-    return ProvisionResult(org_id=config.org_id, username=username, role=role, external_id=str(subject))
+    if role in _scim.SCIM_PROVISIONABLE_ROLES:            # an owner-set role outside the ceiling stays the owner's
+        want = _directory_role(config, d, u)
+        if want is None:
+            raise SsoLoginError("no provisionable role resolves for this person (fail-closed)")
+        if _scim._provision_rank(want) < _scim._provision_rank(role):      # CLAMP down to the current config
+            if audit is not None:
+                audit("sso_role_clamp", u.id, f"role={want} was={role}")
+            try:
+                seq = _scim.provision_membership(org_registry, config, username=u.id, role=want,
+                                                 issued_at=issued_at)
+            except ScimError as e:                     # the ceiling gate / grant precondition refused
+                raise SsoLoginError(str(e)) from e
+            return ProvisionResult(org_id=config.org_id, username=u.id, role=want, external_id=str(subject),
+                                   seq=seq)
+    return ProvisionResult(org_id=config.org_id, username=u.id, role=role, external_id=str(subject))
 
 
 def sso_login_saml(xml_bytes: bytes, *, org_id: str, config_registry, org_registry, replay_ledger,
@@ -470,7 +503,7 @@ def _reconcile(req: _Req, uid: str, *, create: bool) -> None:
         return
     if current is None and not create:
         return
-    role = _scim.resolve_role(req.config, list(u.selectors) + [g.display_name for g in req.dir.groups_of(uid)])
+    role = _directory_role(req.config, req.dir, u)
     if role is None:
         raise _ScimFail(400, "no provisionable role resolves for this user (fail-closed)", "invalidValue")
     if role == current:
@@ -689,7 +722,7 @@ def _user_delete(req: _Req, uid: str) -> ScimResult:
 
 def _user_match(u: DirectoryUser, attr: str, value: str) -> bool:
     if attr == "username":
-        return u.user_name.casefold() == value.casefold()
+        return username_key(u.user_name) == username_key(value)       # letter case only, never a look-alike
     if attr == "externalid":
         return u.external_id == value
     if attr == "id":

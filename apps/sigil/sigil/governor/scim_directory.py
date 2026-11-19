@@ -90,6 +90,17 @@ def _id_ok(rtype: str, rid: str) -> bool:
     return False
 
 
+def username_key(user_name: str) -> "tuple[str, str]":
+    """What two SCIM `userName`s are compared by (userName is caseExact=false): the name under BOTH the full lower-
+    and the full upper-case mapping, so two names match iff they differ ONLY by letter case. Unlike `casefold()` (or
+    either mapping alone) it never equates a look-alike with the letter it resembles — KELVIN SIGN vs `K` (its
+    uppercase is itself), LONG S vs `s` (their lowercases differ), `ß` vs `ss`, a ligature vs its letters, dotted or
+    dotless `i` vs `i` — so a DIFFERENT IdP account whose name merely looks like a member's can neither be linked
+    to that member at sign-in nor collide with it in the directory."""
+    s = str(user_name or "")
+    return s.lower(), s.upper()
+
+
 def edge_id(group_id: str, user_id: str) -> str:
     """The record id of the edge "user `user_id` is a member of group `group_id`"."""
     return f"{group_id}|{user_id}"
@@ -219,11 +230,13 @@ class OrgDirectory:
         return self._users.get(str(user_id or ""))
 
     def user_by_name(self, user_name: str) -> Optional[DirectoryUser]:
-        """The user whose userName equals `user_name` CASE-INSENSITIVELY (SCIM userName is caseExact=false)."""
-        want = str(user_name or "").strip().casefold()
+        """The user whose userName equals `user_name` up to letter case ONLY (`username_key`: SCIM userName is
+        caseExact=false, but a case-folding look-alike is a different name)."""
+        want = str(user_name or "").strip()
         if not want:
             return None
-        return next((u for u in self.users() if u.user_name.casefold() == want), None)
+        key = username_key(want)
+        return next((u for u in self.users() if username_key(u.user_name) == key), None)
 
     def user_by_external_id(self, external_id: str) -> Optional[DirectoryUser]:
         """The user whose externalId equals `external_id` EXACTLY (externalId is caseExact)."""

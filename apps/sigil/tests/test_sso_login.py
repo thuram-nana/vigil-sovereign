@@ -353,3 +353,154 @@ def test_config_cap_bounds_provisioned_role(env):
         "Bearer CAP" + "c" * 37, org_id="capped", config_registry=cfgreg, org_registry=orgreg, now=NOW,
         issued_at=_issue())
     assert st == 201 and body["roles"] == [{"value": "analyst"}]     # the cap is the ceiling for this org
+
+
+# --- SCIM-managed sign-in: the link is the DIRECTORY's, never a derived username; the role follows the config -----
+
+_aid = itertools.count(1)
+
+
+def _saml_in(env, nameid, *, audit=None):
+    """A verified SAML sign-in to acme (SCIM on in `env`) asserting `nameid`; the IdP's groups claim is irrelevant
+    in a directory-managed org."""
+    orgreg, cfgreg = env
+    aid = f"sx{next(_aid)}"
+    return uiscim.sso_login_saml(_saml_response(aid=aid, nameid=nameid, groups=()), org_id="acme",
+                                 config_registry=cfgreg, org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
+                                 sig_verifier=lambda b, c: frozenset({aid}), issued_at=_issue(), audit=audit)
+
+
+GAMMA_AUTH = "Bearer GAMMA" + "g" * 36
+
+
+@pytest.mark.parametrize("protocol,renamed", [("saml", "userName"), ("saml", "externalId"), ("oidc", "externalId")])
+def test_scim_on_sign_in_refuses_a_subject_no_directory_user_carries(env, protocol, renamed):
+    """A directory user's id is derived from the userName / externalId it was CREATED with. Once the IdP renames that
+    attribute, the old value names a DIFFERENT person (the IdP cannot even provision them: their derived id is taken),
+    so a sign-in asserting it is refused as not-in-the-directory — never resolved to the derived id, i.e. admitted as
+    the renamed member with the renamed member's role."""
+    orgreg, cfgreg = env
+    org, auth = "acme", ACME_AUTH
+    if protocol == "oidc":
+        org, auth = "gamma", GAMMA_AUTH
+        orgreg.create_org("gamma", "Gamma", owner="owner", issued_at=_issue())
+        cfgreg.set_oidc_config("gamma", issuer="https://oidc", client_id="cid", jwks_uri="https://oidc/jwks",
+                               authorize_endpoint="https://oidc/a", token_endpoint="https://oidc/t",
+                               redirect_uri="https://app/cb", signing_algs=("RS256",), egress_hosts=("oidc",),
+                               group_role_map={"admins": "org_admin"}, scim_enabled=True,
+                               scim_token=GAMMA_AUTH[len("Bearer "):], issued_at=_issue())
+    k, jwk = _rsa_jwk_and_key()
+
+    def sign_in(subject: str):
+        if protocol == "saml":
+            return _saml_in(env, subject)
+        jwt = _signed_jwt(k, iss="https://oidc", aud="cid", sub=subject, nonce="N1", groups=[])
+        return uiscim.sso_login_oidc(jwt, org_id=org, config_registry=cfgreg, org_registry=orgreg,
+                                     jwks_keys=[jwk], expected_nonce="N1", now=NOW, issued_at=_issue())
+
+    old, new = (("alice@acme.test", "alice.smith@acme.test") if renamed == "userName"
+                else ("okta-00ua", "okta-00ua-v2"))
+    user = {"userName": "alice@acme.test", "groups": [{"value": "admins"}]}
+    if renamed == "externalId":
+        user["externalId"] = old
+    st, alice = _scim(env, "POST", "/scim/v2/Users", user, auth=auth, org=org)
+    assert st == 201 and alice["roles"] == [{"value": "org_admin"}]
+    st, _ = _scim(env, "PATCH", f"/scim/v2/Users/{alice['id']}",
+                  {"Operations": [{"op": "replace", "path": renamed, "value": new}]}, auth=auth, org=org)
+    assert st == 200
+    with pytest.raises(SsoLoginError, match="is not in it"):
+        sign_in(old)
+    assert orgreg.membership_role(alice["id"], org) == "org_admin"           # the renamed member is untouched
+    res = sign_in(new)                                                       # control: the CURRENT value links
+    assert res.username == alice["id"] and res.role == "org_admin" and res.seq is None
+
+
+def test_scim_on_sign_in_links_by_letter_case_only_never_a_case_folding_look_alike(env):
+    ids = {}
+    for name in ("sam@acme.test", "kate@acme.test"):
+        st, b = _scim(env, "POST", "/scim/v2/Users", {"userName": name, "groups": [{"value": "admins"}]})
+        assert st == 201
+        ids[name] = b["id"]
+    # a DIFFERENT IdP account whose NameID only casefolds to a member's userName: LONG S folds to s, KELVIN SIGN to k
+    for look_alike in ("\u017fam@acme.test", "\u212aate@acme.test"):
+        with pytest.raises(SsoLoginError, match="is not in it"):
+            _saml_in(env, look_alike)
+    assert _saml_in(env, "SAM@ACME.TEST").username == ids["sam@acme.test"]       # letter case alone still links
+    assert _saml_in(env, "Kate@Acme.Test").username == ids["kate@acme.test"]
+
+
+def _resign_acme(env, **kw) -> None:
+    """The owner re-signs acme's SAML config (SCIM stays on with the same bearer) with a new role policy."""
+    _, cfgreg = env
+    cfgreg.set_saml_config("acme", idp_entity_id="https://idp", idp_certs_pem=[CERT], sp_entity_id="https://sp/acme",
+                           acs_url="https://app/acs/acme", default_role="viewer", scim_enabled=True,
+                           scim_token=ACME_AUTH[len("Bearer "):], issued_at=_issue(), **kw)
+
+
+def test_scim_on_sign_in_clamps_a_role_above_the_current_config_and_never_raises_one(env):
+    orgreg, _ = env
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _, carl = _scim(env, "POST", "/scim/v2/Users", {"userName": "carl@acme.test", "groups": [{"value": "sec"}]})
+    assert orgreg.membership_role(bob["id"], "acme") == "org_admin"
+    assert orgreg.membership_role(carl["id"], "acme") == "analyst"
+    # (1) the owner TIGHTENS the cap: Admins now maps to analyst, nothing above it
+    _resign_acme(env, group_role_map={"admins": "analyst", "sec": "analyst"}, role_cap="analyst")
+
+    def boom(*_a):
+        raise OSError("audit store unavailable")
+    with pytest.raises(OSError):                                             # the clamp is audited FIRST: no row,
+        _saml_in(env, "bob@acme.test", audit=boom)                           # no grant and no admission
+    assert orgreg.membership_role(bob["id"], "acme") == "org_admin"
+    audits: list = []
+    res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
+    assert res.username == bob["id"] and res.role == "analyst" and res.seq is not None
+    assert orgreg.membership_role(bob["id"], "acme") == "analyst"             # brought down by an owner-signed grant
+    assert audits == [("sso_role_clamp", bob["id"], "role=analyst was=org_admin")]
+    res = _saml_in(env, "carl@acme.test", audit=lambda *a: audits.append(a))  # control: already within the policy
+    assert res.role == "analyst" and res.seq is None and len(audits) == 1
+    # (2) the owner REMOVES the Admins mapping: Bob now resolves to the config's default role
+    _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="analyst")
+    res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "viewer" and orgreg.membership_role(bob["id"], "acme") == "viewer"
+    assert audits[1:] == [("sso_role_clamp", bob["id"], "role=viewer was=analyst")]
+    # (3) the owner LOOSENS it again: sign-in never RAISES a role (that waits for the IdP's next SCIM write)
+    _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "analyst"}, role_cap="org_admin")
+    res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "viewer" and res.seq is None and len(audits) == 2
+    assert orgreg.membership_role(bob["id"], "acme") == "viewer"
+
+
+def test_scim_on_sign_in_leaves_a_role_the_owner_set_outside_the_ceiling(env):
+    orgreg, _ = env
+    _, dana = _scim(env, "POST", "/scim/v2/Users", {"userName": "dana@acme.test", "groups": [{"value": "sec"}]})
+    orgreg.grant_membership("acme", dana["id"], "founder", issued_at=_issue())  # the owner's own hand-set grant
+    audits: list = []
+    res = _saml_in(env, "dana@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "founder" and res.seq is None and audits == []        # never clamped to the config's analyst
+    assert orgreg.membership_role(dana["id"], "acme") == "founder"
+
+
+def test_scim_on_sign_in_refuses_when_the_config_resolves_no_role(env):
+    import dataclasses
+    orgreg, cfgreg = env
+    _scim(env, "POST", "/scim/v2/Users", {"userName": "eve@acme.test", "groups": [{"value": "sec"}]})
+    cfg = cfgreg.config("acme")
+    # a hand-built config no ceiling role resolves under (a signed one cannot exist: bind time refuses it)
+    broken = dataclasses.replace(cfg, default_role="founder", role_cap="founder")
+    with pytest.raises(SsoLoginError, match="no provisionable role"):
+        uiscim._login_principal(orgreg, broken, subject="eve@acme.test", groups=(), issued_at=_issue())
+    assert uiscim._login_principal(orgreg, cfg, subject="eve@acme.test", groups=(), issued_at=_issue()).role == "analyst"
+
+
+def test_a_refused_clamp_grant_is_a_clean_sign_in_refusal(env, monkeypatch):
+    from sigil.governor import scim as gscim
+    orgreg, _ = env
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="analyst")
+
+    def refuse(*_a, **_k):
+        raise gscim.ScimError("the mint refused")
+    monkeypatch.setattr(gscim, "provision_membership", refuse)
+    with pytest.raises(SsoLoginError, match="the mint refused"):              # the edge's uniform refusal, never a 500
+        _saml_in(env, "bob@acme.test")
+    assert orgreg.membership_role(bob["id"], "acme") == "org_admin"

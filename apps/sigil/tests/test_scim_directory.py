@@ -65,6 +65,23 @@ def test_users_groups_edges_roundtrip_through_a_fresh_fold():
     assert [g.id for g in fresh.groups_of(U1)] == [G1]
 
 
+def test_user_by_name_matches_by_letter_case_only_never_a_case_folding_look_alike():
+    d = _reg(_store()).directory("acme")
+    names = {"sam@acme.test": U1, "Kate@acme.test": U2, "strasse@acme.test": "sso_" + "c" * 24,
+             "fiona@acme.test": "sso_" + "d" * 24}
+    for name, uid in names.items():
+        d.put_user(uid, user_name=name, active=True, now=_now())
+    for twin, uid in (("SAM@ACME.TEST", U1), ("kATE@acme.TEST", U2), ("Strasse@Acme.Test", "sso_" + "c" * 24)):
+        assert d.user_by_name(twin).id == uid, twin                       # letter case alone: the same name
+    # each of these casefolds onto a stored name, yet is a DIFFERENT name an IdP may give a different person
+    for look_alike in ("\u017fam@acme.test",           # LONG S -> s
+                       "\u212aate@acme.test",          # KELVIN SIGN -> k
+                       "stra\u00dfe@acme.test",        # SHARP S -> ss
+                       "STRA\u1e9eE@acme.test",        # CAPITAL SHARP S -> ss
+                       "\ufb01ona@acme.test"):         # LATIN SMALL LIGATURE FI -> fi
+        assert d.user_by_name(look_alike) is None, ascii(look_alike)
+
+
 def test_an_unsigned_or_attacker_signed_record_is_inert():
     s = _store()
     _reg(s, owner=ATTACKER).directory("acme").put_user(U1, user_name="evil", active=True, now=_now())
