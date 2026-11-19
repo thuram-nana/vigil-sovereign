@@ -17,6 +17,9 @@ Load-bearing invariants:
     observation with the negative control DENIED records an owner-signed READ-ONLY grant; a role that admits any
     external id (the confused deputy), a wrong account, or a fetcher failure records nothing; the leg fails closed
     until the owner provisions VIGIL's connector identity, and is absent while its own flag is off;
+  * a half-finished cloud connection RESUMES (the same external id, no new challenge — a role already created keeps
+    working) and is listed as pending; cancelling it retires the id; a stale step-up is refused BEFORE the re-check
+    or the cloud verify spends a limiter slot or a fetch;
   * CROSS-TENANT isolation (org B cannot read or disconnect org A's grant) and CONNECT != OFFENSE (a cloud grant mints
     no EngagementAuthority, leaves the live-offense owner gate untouched, never unlocks a host launch).
 """
@@ -251,6 +254,25 @@ def test_the_recheck_needs_the_affirmation_and_never_fetches_without_it():
     assert fetcher.calls == []
 
 
+def test_a_stale_step_up_is_refused_before_the_recheck_spends_its_window(monkeypatch):
+    # with step-up enforcement on, target_verify demands a fresh second factor; the re-check must ask for it BEFORE it
+    # charges the per-host cadence (else the step-up's one retry would land inside the window and check nothing)
+    from sigil.ui.provision import ProvisionStepUpRequired
+    monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")
+    p, s, orgs = _prov(org_max=1)
+    fetcher = _StubOwnershipFetcher(s, "org_a")
+    fetcher.published = True
+    p.target_fetcher = fetcher
+    _seat(orgs, "org_a", "u_f", "operator")
+    p.target_challenge("u_f", "org_a", HOST)
+    t0 = time.time()
+    with pytest.raises(ProvisionStepUpRequired):
+        p.customer_ownership_poll("u_f", "org_a", HOST, recheck=True, authorized=True, mfa_at=0.0, now=t0)
+    assert fetcher.calls == []
+    r = p.customer_ownership_poll("u_f", "org_a", HOST, recheck=True, authorized=True, mfa_at=t0, now=t0 + 1)
+    assert r["status"] == "verified" and r["checked"]["ok"] is True and len(fetcher.calls) == 1
+
+
 def test_the_recheck_fails_closed_without_its_fetcher_or_limiters():
     p, s, orgs = _prov()                               # no ownership fetcher
     _seat(orgs, "org_a", "u_f", "operator")
@@ -328,6 +350,57 @@ def test_cloud_challenge_then_verify_records_a_read_only_grant():
     assert call["external_id"] == ch["external_id"] and call["control_external_id"] not in ("", ch["external_id"])
     ov = p.customer_connect_overview("u_f", "org_a")
     assert [(c["provider"], c["account_id"], c["status"]) for c in ov["cloud"]] == [("aws", ACCT, "connected")]
+
+
+def _challenge_records(s) -> int:
+    from sigil.governor.cloud_connect import CHALLENGE_SIGNAL
+    return sum(1 for r in s.iter_records() if isinstance(r.payload, dict) and r.payload.get("signal") == CHALLENGE_SIGNAL)
+
+
+def test_starting_again_resumes_so_a_role_already_created_keeps_working():
+    # the customer created the role with the first trust policy, then reloaded / came back later and pressed Connect
+    # again: they get the SAME external id (no new challenge), so the role they made verifies without an edit
+    f = _StubCloudFetcher()
+    p, s, orgs = _prov(cloud_fetcher=f)
+    _seat(orgs, "org_a", "u_f", "operator")
+    first = p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    assert first["resumed"] is False and _challenge_records(s) == 1
+    assert p.customer_connect_overview("u_f", "org_a")["cloud"] == [
+        {"provider": "aws", "account_id": ACCT, "access": "read-only", "status": "pending"}]   # Continue, not lost
+    again = p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    assert again["resumed"] is True and _challenge_records(s) == 1
+    assert (again["external_id"], again["trust_policy"]) == (first["external_id"], first["trust_policy"])
+    p.cloud_connect_verify("u_f", "org_a", "aws", ACCT, ROLE)
+    assert f.calls[-1]["external_id"] == first["external_id"]
+    assert [c["status"] for c in p.customer_connect_overview("u_f", "org_a")["cloud"]] == ["connected"]
+
+
+def test_cancelling_a_half_finished_connection_retires_its_external_id():
+    p, s, orgs = _prov(cloud_fetcher=_StubCloudFetcher())
+    _seat(orgs, "org_a", "u_f", "operator")
+    first = p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    assert p.cloud_disconnect("u_f", "org_a", "aws", ACCT) == {"provider": "aws", "account_id": ACCT,
+                                                               "disconnected": False, "cancelled": True}
+    assert p.customer_connect_overview("u_f", "org_a")["cloud"] == []
+    with pytest.raises(ProvisionDenied, match="no outstanding"):
+        p.cloud_connect_verify("u_f", "org_a", "aws", ACCT, ROLE)       # the old id can no longer connect anything
+    fresh = p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    assert fresh["resumed"] is False and fresh["external_id"] != first["external_id"]
+
+
+def test_cloud_verify_demands_a_fresh_step_up_before_any_fetch_or_ceiling(monkeypatch):
+    from sigil.ui.provision import ProvisionStepUpRequired
+    f = _StubCloudFetcher()
+    p, s, orgs = _prov(cloud_fetcher=f, cloud_max=1)
+    _seat(orgs, "org_a", "u_f", "operator")
+    p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    monkeypatch.setenv("VIGIL_CUSTOMER_STEPUP_REQUIRED", "1")
+    t0 = time.time()
+    with pytest.raises(ProvisionStepUpRequired):
+        p.cloud_connect_verify("u_f", "org_a", "aws", ACCT, ROLE, mfa_at=0.0, now=t0)
+    assert f.calls == []
+    # stepped up: the verify runs at once — the refused attempt spent none of the (one-per-window) ceiling
+    assert p.cloud_connect_verify("u_f", "org_a", "aws", ACCT, ROLE, mfa_at=t0, now=t0 + 1)["access"] == "read-only"
 
 
 def test_the_confused_deputy_role_is_refused_and_records_nothing():
@@ -415,8 +488,12 @@ def test_cross_tenant_org_b_cannot_read_or_disconnect_org_a_grant():
     _connect_cloud(p, "u_a", "org_a")
     assert p.customer_connect_overview("u_b", "org_b")["cloud"] == []
     out = p.cloud_disconnect("u_b", "org_b", "aws", ACCT)
-    assert out["disconnected"] is False
+    assert out["disconnected"] is False and out["cancelled"] is False
     assert CloudConnectRegistry(s, owner_key=None).grant("org_a", "aws", ACCT) is not None
+    assert CloudConnectRegistry(s, owner_key=None).challenge("org_a", "aws", ACCT) is not None   # A's id untouched
+    resumed = p.cloud_connect_challenge("u_b", "org_b", "aws", ACCT)    # B naming A's account gets ITS OWN id
+    assert resumed["resumed"] is False
+    assert resumed["external_id"] != CloudConnectRegistry(s, owner_key=None).challenge("org_a", "aws", ACCT).external_id
     with pytest.raises(ProvisionDenied):                 # and org B cannot even READ org A as org A
         p.customer_connect_overview("u_b", "org_a")
 

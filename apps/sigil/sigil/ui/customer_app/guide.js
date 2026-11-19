@@ -22,7 +22,9 @@
   // ---- the guide's content ---------------------------------------------------------------------------------------
   // Each chapter is a sequence the customer follows in order. A step names the screen it happens on (`where`: the
   // label shown, and `route`: the app's own hash when the screen exists in the top bar), the clicks, in order
-  // (`clicks`), and what VIGIL does meanwhile (`why`).
+  // (`clicks`), and what VIGIL does meanwhile (`why`). A step marked `onlyIfShown` describes a screen a deployment may
+  // not have: the Guide screen lists it only when the app says that screen is shown (`shown(route)`), so a deployment
+  // without it sees exactly the guide it always had.
   var CHAPTERS = [
     {
       id: "start", title: "Get started",
@@ -158,6 +160,12 @@
                    "Otherwise select Re-issue challenge and publish the new token.",
                    "A host whose proof has expired cannot be tested or monitored until it is verified again."],
           why: "Re-checking before the 90 days are up keeps your assessments and monitoring running without a gap." },
+        { id: "connect", title: "Or connect everything in one place", where: "Connect", route: "#/connect", onlyIfShown: true,
+          clicks: ["Select Connect in the top bar. It lists your workspace's websites, code repositories and cloud accounts, each with its proof state.",
+                   "Under Website, select Connect a website, or Continue on one you started earlier. VIGIL picks the proof that is usually quickest for that address; choose another if it suits you better, and use Copy to copy each value exactly.",
+                   "Tick I confirm I am authorized to test this asset, then select Check now. VIGIL checks again every few seconds and the site turns Verified by itself, with no reload.",
+                   "Under Code repository, Connect GitHub opens the same install as the Code screen. Under Cloud account, when it is offered, Connect an AWS account shows the exact read-only role to create in that account."],
+          why: "Connecting proves you own something; it never starts a test by itself. A cloud account is connected read-only, and VIGIL never changes anything in it." },
       ],
     },
     {
@@ -486,6 +494,11 @@
 
   // ---- the Guide screen ----------------------------------------------------------------------------------------------
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
+  // Whether the Guide screen lists a step: always, unless it is marked onlyIfShown — then only when the app says its
+  // screen is shown (no `shown`, or a hidden screen, leaves it out: the guide never describes a screen it cannot vouch for).
+  function stepListed(s, env) {
+    return !s.onlyIfShown || (!!s.route && typeof env.shown === "function" && !!env.shown(s.route));
+  }
 
   /**
    * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
@@ -514,7 +527,7 @@
         })));
         return;
       }
-      var cards = ch.steps.map(function (s, n) {
+      var cards = ch.steps.filter(function (s) { return stepListed(s, env); }).map(function (s, n) {
         var key = stepKey(env.username, ch.id, s.id);
         var isDone = !!safeGet(env.storage, key);
         var open = n === 0;

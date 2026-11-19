@@ -74,6 +74,42 @@ def test_sigv4_matches_botocore_for_the_exact_sts_requests():
                          "Signature=e8a33324b83dd277ee8ff4759ec74e0629a08cbd071364aa78ebc7dfabb68f44")
 
 
+@pytest.mark.parametrize("external_id, role, token", [
+    ("ext-ABC_123-xyz", ROLE, ""),                                       # the golden above, re-derived
+    ("a+b=c,d.e@f:g/h-i_j", "arn:aws:iam::123456789012:role/path/to/VigilSecurityAudit", ""),   # every AWS id char
+    ("Zm9vYmFy_-", "arn:aws:iam::123456789012:role/V+i=g,i.l@1", "tok/+=EXAMPLE"),               # a session token
+])
+def test_the_stdlib_signer_agrees_with_botocore(external_id, role, token):
+    """The harness behind the 'botocore golden' values: wherever botocore is installed (the offense venv carries it; the
+    sovereign venv does not, so this SKIPS there and the frozen goldens above stand in) every request shape this module
+    sends is signed by BOTH botocore's own SigV4Auth and the stdlib signer under one frozen clock, and must agree."""
+    pytest.importorskip("botocore")
+    import datetime
+
+    import botocore.auth as ba
+    from botocore.awsrequest import AWSRequest
+    from botocore.credentials import Credentials
+    if not hasattr(ba, "get_current_datetime"):                          # older botocore: no seam to freeze the clock
+        pytest.skip("this botocore has no get_current_datetime seam to freeze")
+    frozen = datetime.datetime(2026, 11, 19, 12, 0, 0)
+    body = cf._form([("Action", "AssumeRole"), ("Version", "2011-06-15"), ("RoleArn", role),
+                     ("RoleSessionName", "vigil-connect"), ("ExternalId", external_id), ("DurationSeconds", "900")])
+    req = AWSRequest(method="POST", url="https://sts.amazonaws.com/", data=body, headers={"Content-Type": CT})
+    saved = ba.get_current_datetime
+    try:
+        ba.get_current_datetime = lambda *a, **k: frozen
+        ba.SigV4Auth(Credentials(EXAMPLE_KEY_ID, EXAMPLE_SECRET, token or None), "sts", "us-east-1").add_auth(req)
+    finally:
+        ba.get_current_datetime = saved
+    signed = {"host": "sts.amazonaws.com", "x-amz-date": "20261119T120000Z", "content-type": CT}
+    if token:
+        signed["x-amz-security-token"] = token
+    mine = cf.sigv4_authorization(method="POST", host="sts.amazonaws.com", path="/", query="", headers=signed,
+                                  body=body, region="us-east-1", service="sts", access_key_id=EXAMPLE_KEY_ID,
+                                  secret_access_key=EXAMPLE_SECRET, amz_date="20261119T120000Z")
+    assert req.headers["X-Amz-Date"] == "20261119T120000Z" and req.headers["Authorization"] == mine
+
+
 def test_the_signer_refuses_to_sign_without_host_and_date():
     with pytest.raises(ValueError):
         cf.sigv4_authorization(method="GET", host="h", path="/", query="", headers={"host": "h"}, body=b"",

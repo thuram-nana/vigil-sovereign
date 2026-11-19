@@ -3612,6 +3612,9 @@ class Provisioner:
                 self._audit("customer_ownership_poll", requester=requester, org_id=requester_org_id, target=h,
                             outcome="denied")
                 raise ProvisionDenied("requester may not register assessment targets for this org")
+            # E3c: the step-up target_verify will demand, checked BEFORE either limiter is charged — a stale second
+            # factor must not spend this host's re-check window (or the org's ceiling) on a check that cannot run
+            self._require_stepup(mfa_at, now=t)
             if not authorized:
                 raise ProvisionDenied("confirm that you are authorized to test this asset before checking it")
             if self.target_fetcher is None:
@@ -3647,13 +3650,15 @@ class Provisioner:
 
     def cloud_connect_challenge(self, requester: str, requester_org_id: str, provider: str, account_id: str, *,
                                 ip: str = "", now: "Optional[float]" = None) -> dict:
-        """Issue an owner-signed READ-ONLY cloud-connect CHALLENGE for (org, provider, account) and return exactly what
-        the customer configures: a read-only role in THAT account whose trust policy (``trust_policy``, ready to paste)
-        trusts VIGIL's connector principal ONLY under the issued external id, with AWS's managed read-only
-        ``SecurityAudit`` policy attached. Behind BOTH flags; refused unless this deployment can really verify it
-        (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the testing axis, NOT billing), mirroring
-        ``target_challenge``. The requester + org are the SERVER-authenticated session principal (never body
-        fields). A challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
+        """Start (or RESUME) a READ-ONLY cloud connection for (org, provider, account) and return exactly what the
+        customer configures: a read-only role in THAT account whose trust policy (``trust_policy``, ready to paste)
+        trusts VIGIL's connector principal ONLY under the external id, with AWS's managed read-only ``SecurityAudit``
+        policy attached. When a connection for that account is already outstanding it is RESUMED (``resumed`` True:
+        the same external id, so a role the customer already created keeps working and nothing is written), else an
+        owner-signed challenge is issued (``CloudConnectRegistry.open_challenge``). Behind BOTH flags; refused unless
+        this deployment can really verify it (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the testing
+        axis, NOT billing), mirroring ``target_challenge``. The requester + org are the SERVER-authenticated session
+        principal (never body fields). A challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
         from ..governor.cloud_connect import AWS_READ_ONLY_POLICY_ARN, CloudConnectRegistry, aws_trust_policy
         with self._lock:
             self._connect_enabled_or_deny("cloud_connect_challenge", requester, requester_org_id,
@@ -3666,14 +3671,14 @@ class Provisioner:
                             target=f"{provider}:{account_id}", outcome="denied")
                 raise ProvisionDenied("requester may not register assets for this org")
             try:
-                ch = CloudConnectRegistry(self.store).issue_challenge(
+                ch, resumed = CloudConnectRegistry(self.store).open_challenge(
                     requester_org_id, provider, account_id, issued_at=self._next_issued())
             except ValueError as e:
                 raise ProvisionDenied(str(e)) from None
             self._audit("cloud_connect_challenge", requester=requester, org_id=requester_org_id,
-                        target=f"{ch.provider}:{ch.account_id}", outcome="issued")
+                        target=f"{ch.provider}:{ch.account_id}", outcome="resumed" if resumed else "issued")
         return {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id,
-                "principal_arn": self.cloud_principal_arn,
+                "resumed": resumed, "principal_arn": self.cloud_principal_arn,
                 "trust_policy": aws_trust_policy(self.cloud_principal_arn, ch.external_id),
                 "permissions_policy_arn": AWS_READ_ONLY_POLICY_ARN, "role_name_hint": "VigilSecurityAudit"}
 
@@ -3743,10 +3748,12 @@ class Provisioner:
 
     def cloud_disconnect(self, requester: str, requester_org_id: str, provider: str, account_id: str, *,
                          ip: str = "", now: "Optional[float]" = None) -> dict:
-        """Disconnect a cloud account — the SAFE direction (honored even unsigned, so it can never fail open).
-        Behind BOTH flags; ``run_engagement`` only, NO step-up (it only removes a record, like ``monitor_revoke``).
-        Idempotent; another org's account is untouched (the grant fold is keyed per org). The signing key is only
-        touched to latch the governed revoke."""
+        """Disconnect a cloud account, or cancel a half-finished connection — the SAFE direction (honored even
+        unsigned, so it can never fail open). Retires the grant AND the outstanding challenge
+        (``CloudConnectRegistry.disconnect``), so a reconnect starts with a fresh external id. Behind BOTH flags;
+        ``run_engagement`` only, NO step-up (it only removes records, like ``monitor_revoke``). Idempotent (nothing
+        active ⇒ nothing written); another org's account is untouched (the folds are keyed per org). The signing key
+        is only touched to latch the governed revoke."""
         from ..governor.cloud_connect import CloudConnectRegistry
         with self._lock:
             self._connect_enabled_or_deny("cloud_disconnect", requester, requester_org_id,
@@ -3758,11 +3765,14 @@ class Provisioner:
                 raise ProvisionDenied("requester may not manage assets for this org")
             reg = CloudConnectRegistry(self.store)
             was = reg.grant(requester_org_id, provider, account_id) is not None   # an active grant before we latch
-            if was:
+            started = reg.challenge(requester_org_id, provider, account_id) is not None   # or a half-finished one
+            if was or started:
                 reg.disconnect(requester_org_id, provider, account_id)
+            outcome = "disconnected" if was else ("cancelled" if started else "noop")
             self._audit("cloud_disconnect", requester=requester, org_id=requester_org_id,
-                        target=f"{provider}:{account_id}", outcome="disconnected" if was else "noop", critical=True)
-        return {"provider": str(provider or ""), "account_id": str(account_id or ""), "disconnected": was}
+                        target=f"{provider}:{account_id}", outcome=outcome, critical=True)
+        return {"provider": str(provider or ""), "account_id": str(account_id or ""), "disconnected": was,
+                "cancelled": started and not was}
 
     def customer_notifications(self, requester: str, requester_org_id: str, *, ip: str = "",
                                now: "Optional[float]" = None) -> dict:

@@ -34,9 +34,18 @@ connection as read-only INTENT; it does not claim to have verified the policy's 
 
 ASYMMETRIC AUTHENTICATION (mirrors ``asset_ownership`` / ``connected_repos``):
   * issue_challenge / record a verified grant = the DANGEROUS direction -> honored only if OWNER-SIGNED
-    (``verify_signed``) AND its ``issued_at`` STRICTLY exceeds the per-(org_id, provider, account_id) high-water.
+    (``verify_signed``) AND its ``issued_at`` STRICTLY exceeds the per-(org_id, provider, account_id) high-water. A
+    write that the fold would NOT honor (a stamp at or below the high-water, e.g. after a clock step back) is refused
+    with an error BEFORE it is appended, so a caller is never told "connected" about a record the fold ignores.
   * disconnect a grant = the SAFE direction -> ``state="revoked"`` honored even UNSIGNED, fixed ``issued_at`` 0.0
     (a replayed revoke merely re-revokes; gating the fail-safe direction would make it fail OPEN).
+
+RESUME + DISCONNECT SEMANTICS: the external id is STABLE per (org, provider, account) while its challenge is
+outstanding — ``open_challenge`` hands back the outstanding challenge instead of minting a new id, so a customer who
+reloads (or comes back after creating the role) is shown the SAME trust policy and the role they already created keeps
+working. A connected grant does not consume its challenge (re-verifying an expired grant needs no trust-policy edit).
+``disconnect`` retires BOTH the grant and the challenge: a disconnected account starts clean, a later reconnect gets a
+fresh external id, and VIGIL can never reconnect through the old trust policy without the customer editing it.
 
 ANTI-REPLAY: per-(org_id, provider, account_id) last-writer-wins high-water (the SAME resurrection guard
 accounts/orgs/asset_ownership carry). A captured owner-signed active grant cannot resurrect a revoked grant (its
@@ -352,6 +361,8 @@ class CloudConnectRegistry:
         ext = str(external_id) if external_id is not None else secrets.token_urlsafe(32)
         if not ext or any(ord(c) < 0x20 or ord(c) == 0x7f for c in ext):
             raise ValueError("external_id must be a non-empty control-char-free string")
+        if not (float(issued_at) > self._highwater(CHALLENGE_SIGNAL, _CHALLENGE_CORE, (oid, prov, acct))):
+            raise ValueError("a newer connection request already exists for this account — start again")
         core = {"signal": CHALLENGE_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct,
                 "external_id": ext, "state": "active", "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
@@ -360,6 +371,19 @@ class CloudConnectRegistry:
         self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
         return CloudConnectChallenge(org_id=oid, provider=prov, account_id=acct, external_id=ext,
                                      issued_at=float(issued_at))
+
+    def open_challenge(self, org_id: str, provider: str, account_id: str, *,
+                       issued_at: float) -> "tuple[CloudConnectChallenge, bool]":
+        """The challenge the customer configures for (org_id, provider, account_id): the OUTSTANDING one when there is
+        one (``resumed`` True — no record written, the external id and so the trust policy are unchanged), else a
+        freshly owner-signed one (:meth:`issue_challenge`). Returns ``(challenge, resumed)``. Refuses an unverifiable
+        provider / malformed account before any read or write. A challenge grants NOTHING either way."""
+        oid, prov = _check_org_id(org_id), _check_verifiable(provider)
+        acct = _check_account(account_id, prov)
+        ch = self.challenge(oid, prov, acct)
+        if ch is not None and ch.external_id:
+            return ch, True
+        return self.issue_challenge(oid, prov, acct, issued_at=issued_at), False
 
     def verify_and_connect(self, org_id: str, provider: str, account_id: str, *, role_ref: str,
                            observed, control_external_id: str, now: float,
@@ -391,6 +415,9 @@ class CloudConnectRegistry:
         if refusal is not None:
             raise ValueError(refusal)
         verified_at = float(now)
+        if not (verified_at > self._highwater(GRANT_SIGNAL, _GRANT_CORE, (oid, prov, acct))):
+            # the fold would ignore a grant stamped at/below the key's high-water: refuse rather than report success
+            raise ValueError("the connection could not be recorded just now — try again in a moment")
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": ref,
                 "external_id": ch.external_id, "verified_at": verified_at, "expires_at": verified_at + ttl,
                 "state": "active", "issued_at": verified_at}
@@ -403,30 +430,49 @@ class CloudConnectRegistry:
                           state="active")
 
     def disconnect(self, org_id: str, provider: str, account_id: str) -> int:
-        """Disconnect a cloud grant — the SAFE direction (honored even unsigned, fixed ``issued_at`` 0.0).
-        Idempotent + replay-safe: a replayed revoke merely re-revokes. Used on offboarding / tenant decommission
-        or when the customer removes the role. A grant with no active record authorizes nothing anywhere."""
+        """Disconnect a cloud account — the SAFE direction (honored even unsigned, fixed ``issued_at`` 0.0). Retires
+        BOTH the grant and the outstanding challenge (see RESUME + DISCONNECT SEMANTICS): a disconnected account
+        starts clean, and a reconnect gets a fresh external id. Idempotent + replay-safe: a replayed revoke merely
+        re-revokes. Used when the customer disconnects or cancels a half-finished connection, or on offboarding /
+        tenant decommission. A grant with no active record authorizes nothing anywhere. Returns the grant revoke's
+        seq."""
         oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": "",
                 "external_id": "", "verified_at": 0.0, "expires_at": 0.0, "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"cloud grant for {prov}:{acct} (org {oid}) DISCONNECTED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        ch_core = {"signal": CHALLENGE_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct,
+                   "external_id": "", "state": "revoked", "issued_at": 0.0}
+        ch_payload = {**signed_payload(ch_core, self.owner_key), "by": "owner", "requested_by": "owner",
+                      "tier": "A0", "decision": "auto",
+                      "reason": f"cloud-connect challenge for {prov}:{acct} (org {oid}) RETIRED with the disconnect"}
+        self.store.append(kind="event", source="governor", actor="WARDEN", payload=ch_payload)
+        return seq
 
     # -- reads (owner-key-succession-aware folds) ---------------------------------------------------
-    def _fold(self, signal: str, core_fields, row_of) -> dict:
-        """Fold the spine into {(org_id, provider, account_id): record_dict} whose latest state is active,
-        authenticating each ``active`` grant under the owner pubkey valid AT ITS SEQ and refusing any stale/
-        replayed re-append via the per-key high-water. Revokes (safe direction) are honored regardless of
-        signature. A genesis scan of the live window (no snapshot seed — the prune tripwire is the invariant)."""
+    def _fold_state(self, signal: str, core_fields, row_of) -> "tuple[dict, dict]":
+        """Fold the spine into ``({(org_id, provider, account_id): record_dict} whose latest state is active,
+        {key: anti-replay high-water})``, authenticating each ``active`` record under the owner pubkey valid AT ITS
+        SEQ and refusing any stale/replayed re-append via the per-key high-water. Revokes (safe direction) are honored
+        regardless of signature. A genesis scan of the live window (no snapshot seed — the prune tripwire is the
+        invariant)."""
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: dict[tuple, str] = {}
         issued: dict[tuple, float] = {}
         rows: dict[tuple, dict] = {}
         for r in self.store.iter_records():
             _apply_cloud_record(r, resolver, signal, core_fields, row_of, state, issued, rows)
-        return {k: row for k, row in rows.items() if state.get(k) == "active"}
+        return {k: row for k, row in rows.items() if state.get(k) == "active"}, issued
+
+    def _fold(self, signal: str, core_fields, row_of) -> dict:
+        return self._fold_state(signal, core_fields, row_of)[0]
+
+    def _highwater(self, signal: str, core_fields, key: tuple) -> float:
+        """The anti-replay high-water the fold holds for ``key`` under ``signal`` (``NO_HIGHWATER`` when none): a new
+        active record is honored only when its ``issued_at`` strictly exceeds this."""
+        return self._fold_state(signal, core_fields, _payload_row)[1].get(key, NO_HIGHWATER)
 
     def challenge(self, org_id: str, provider: str, account_id: str) -> Optional[CloudConnectChallenge]:
         """The current active challenge for the key, or None (fail-closed). The latest owner-signed,
@@ -512,9 +558,11 @@ class CloudConnectRegistry:
         """Per-account connection status for ALL of ``org_id``'s cloud grants, in (provider, account) order — the
         tenant-scoped read behind the connect screen's cloud leg. DEFAULT-DENY to this org (the fold is keyed per
         (org, provider, account); another tenant's accounts are STRUCTURALLY absent, never a client-chosen filter).
-        Each account is ``connected`` (active + unexpired) or ``expired`` (active grant past its owner-signed
-        expiry → re-connect). Read-only: no lock, no mint, no owner key. A fixed allowlist of fields — the external
-        id is NEVER projected; ``access`` is the recorded read-only intent."""
+        Each account is ``connected`` (active + unexpired), ``expired`` (active grant past its owner-signed expiry →
+        re-connect), or ``pending`` (a connection the customer STARTED — an outstanding challenge of a verifiable
+        provider — with no grant yet, so the screen can offer to finish it; it carries only provider + account).
+        Read-only: no lock, no mint, no owner key. A fixed allowlist of fields — the external id is NEVER projected;
+        ``access`` is the recorded read-only intent."""
         if not isinstance(org_id, str) or not org_id:
             return []
         try:
@@ -522,9 +570,15 @@ class CloudConnectRegistry:
         except ValueError:
             return []
         n = float(now)
+        grants = {k: row for k, row in self._fold(GRANT_SIGNAL, _GRANT_CORE, _grant_row).items() if k[0] == oid}
+        started = {k for k in self._fold(CHALLENGE_SIGNAL, _CHALLENGE_CORE, _payload_row)
+                   if k[0] == oid and k[1] in _VERIFIABLE_PROVIDERS}
         out: list[dict] = []
-        for (o, prov, acct), row in sorted(self._fold(GRANT_SIGNAL, _GRANT_CORE, _grant_row).items()):
-            if o != oid:
+        for key in sorted(set(grants) | started):
+            _o, prov, acct = key
+            row = grants.get(key)
+            if row is None:
+                out.append({"provider": prov, "account_id": acct, "access": "read-only", "status": "pending"})
                 continue
             exp = float(as_issued_at(row.get("expires_at")))
             out.append({"provider": prov, "account_id": acct, "role_ref": str(row.get("role_ref") or ""),

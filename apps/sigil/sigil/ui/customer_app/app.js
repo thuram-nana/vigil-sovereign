@@ -165,10 +165,7 @@
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) {
-    return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON)
-      && (route !== "#/connect" || CONNECT_ON);
-  }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -1992,7 +1989,9 @@
   //   * CODE REPOSITORY — Connect GitHub (the Code screen's own install flow, codeConnect) and the connected repositories.
   //   * CLOUD ACCOUNT (AWS) — the account id, then the exact trust policy to paste (VIGIL's principal + the external id),
   //     AWS's read-only SecurityAudit policy, the role's ARN, Verify. VIGIL records a READ-ONLY connection only when the
-  //     role lands in that account AND refuses any other external id; nothing here runs a test.
+  //     role lands in that account AND refuses any other external id; nothing here runs a test. A connection started
+  //     earlier is listed as "Not finished" with Continue (the server hands back the SAME external id, so a role already
+  //     created keeps working) and Cancel; an expired one offers Connect again.
   // Nothing here shows a price, an estimate or a model name. A sensitive request goes through the step-up when this
   // build has it (withStepUp).
   var CONNECT_ON = pageFlag("connect");
@@ -2171,7 +2170,7 @@
       how = [h("p", { text: "Add this tag inside the <head> of https://" + host + "/ (the page itself, not a redirect):" }),
         connectCopyRow("Tag", place.meta_tag)];
     }
-    var box = h("input", { type: "checkbox", id: "connect-authz" });
+    var box = h("input#connect-authz", { type: "checkbox" });
     var status = h("p.cust-connect-status", { role: "status" });
     var again = connectButton("Check again", function () { again.hidden = true; startConnectPoll(host, picked, status, again); });
     again.hidden = true;
@@ -2276,38 +2275,77 @@
     var body = [h("h3", { text: "Cloud account" }),
       h("p.cust-muted", { text: "Give VIGIL read-only access to an AWS account through a role you create. VIGIL never "
         + "changes anything in your account." })];
-    if (accts.length) body.push(h("div.cust-connect-list", {}, accts.map(connectCloudRow)));
-    else body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
+    if (accts.length) {
+      body.push(h("div.cust-connect-list", {}, accts.map(function (c) { return connectCloudRow(c, av); })));
+    } else {
+      body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
+    }
     body.push(av.cloud_connect
       ? h("div.cust-mon-actions", {}, connectButton("Connect an AWS account", connectCloudFlow, "primary"))
       : h("p.cust-muted", { text: "Connecting a cloud account is not available on this deployment yet. Contact VIGIL." }));
     return h("div.card.cust-connect-tile", {}, body);
   }
-  function connectCloudRow(c) {
-    var live = c.status === "connected";
+  // One account: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a connection started earlier
+  // and not finished (Continue + Cancel). Continue / Connect again ask the server for the connection's steps: it hands
+  // back the SAME external ID while the connection is outstanding, so a role already created keeps working.
+  function connectCloudRow(c, av) {
+    var st = c.status === "connected" || c.status === "expired" ? c.status : "pending";
     var foot = h("div.cust-mon-actions", {});
-    VUI.mount(foot, connectButton("Disconnect", function () { connectCloudConfirm(c, foot); }));
-    return h("div.cust-connect-acct", {}, [
-      h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
-        h("span.cust-badge.cust-badge-" + (live ? "verified" : "expired"),
-          { text: live ? "✓ Connected (read-only)" : "⚠ Expired — connect again" })]),
-      kv("Role", c.role_ref), kv(live ? "Valid until" : "Expired", fmtDate(c.expires_at)), foot]);
+    function idle() {
+      var acts = [];
+      if (st !== "connected" && av.cloud_connect) {
+        acts.push(connectButton(st === "pending" ? "Continue" : "Connect again",
+          function (b) { connectCloudResume(b, c); }, "primary"));
+      }
+      acts.push(connectButton(st === "pending" ? "Cancel" : "Disconnect",
+        function () { connectCloudConfirm(c, foot, st, idle); }));
+      VUI.mount(foot, acts);
+    }
+    idle();
+    var badge = { connected: ["verified", "✓ Connected (read-only)"], expired: ["expired", "⚠ Expired — connect again"],
+      pending: ["pending", "… Not finished"] }[st];
+    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
+      h("span.cust-badge.cust-badge-" + badge[0], { text: badge[1] })])];
+    if (st === "pending") {
+      rows.push(h("p.cust-muted", { text: "You started connecting this account. Continue to see the same steps again." }));
+    } else {
+      rows.push(kv("Role", c.role_ref), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
+    }
+    rows.push(foot);
+    return h("div.cust-connect-acct", {}, rows);
   }
-  function connectCloudConfirm(c, foot) {
-    VUI.mount(foot, [h("span.cust-muted", { text: "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; "
-      + "delete the role in AWS to remove the access entirely." }),
-      connectButton("Disconnect", async function (b) {
+  function connectCloudConfirm(c, foot, st, idle) {
+    var pending = st === "pending";
+    VUI.mount(foot, [h("span.cust-muted", { text: pending
+        ? "Cancel connecting AWS " + c.account_id + "? The external ID VIGIL gave you stops working; starting again "
+          + "gives you a new one."
+        : "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; delete the role in AWS to remove the "
+          + "access entirely." }),
+      connectButton(pending ? "Cancel connection" : "Disconnect", async function (b) {
         b.disabled = true;
         try {
           await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || "aws"),
             account_id: String(c.account_id) }, foot);
-        } catch (e) { b.disabled = false; return connectFailed(e, "The account was not disconnected"); }
-        VUI.toast("AWS account " + c.account_id + " disconnected");
+        } catch (e) { b.disabled = false; return connectFailed(e, pending ? "The connection was not cancelled"
+          : "The account was not disconnected"); }
+        VUI.toast("AWS account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
         if (here() === "#/connect") render();
       }, "danger"),
-      connectButton("Cancel", function () {
-        VUI.mount(foot, connectButton("Disconnect", function () { connectCloudConfirm(c, foot); }));
-      })]);
+      connectButton("Keep it", idle)]);
+  }
+  async function connectCloudResume(btn, c) {
+    clearErr();
+    stopConnectPoll();
+    btn.disabled = true;
+    var r;
+    try {
+      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || "aws"),
+        account_id: String(c.account_id) }, btn.parentNode);
+    } catch (e) { btn.disabled = false; return connectFailed(e, "The connection could not be continued"); }
+    btn.disabled = false;
+    var box = connectFlowBox();
+    if (!box || here() !== "#/connect") return;
+    VUI.mount(box, connectCloudSteps(r || {}));
   }
   function connectCloudFlow() {
     stopConnectPoll();
@@ -2335,8 +2373,12 @@
     var hint = String(r.role_name_hint || "VigilSecurityAudit");
     var role = h("input#connect-aws-role", { type: "text", autocomplete: "off", spellcheck: "false",
       placeholder: "arn:aws:iam::" + String(r.account_id || "") + ":role/" + hint });
-    return h("div.card.cust-connect-proof", {}, [
-      h("h3", { text: "Connect AWS account " + String(r.account_id || "") }),
+    var lead = [h("h3", { text: "Connect AWS account " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the trust policy and external ID are "
+        + "unchanged. If you already created the role, just paste its ARN below." }));
+    }
+    return h("div.card.cust-connect-proof", {}, lead.concat([
       h("ol.cust-connect-steps", {}, [
         h("li", {}, [h("p", { text: "In that account's IAM, create a role (for example " + hint + ") with this trust "
           + "policy. It lets only VIGIL assume the role, and only with your external ID:" }),
@@ -2348,7 +2390,8 @@
             function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
       ]),
       h("p.cust-muted", { text: "VIGIL connects the account only if the role is in account " + String(r.account_id || "")
-        + " and refuses any other external ID. The connection is read-only and never runs a test by itself." })]);
+        + " and refuses any other external ID — to check that, it makes one attempt with a random external ID, which "
+        + "your CloudTrail shows as denied. The connection is read-only and never runs a test by itself." })]));
   }
   async function connectCloudVerify(btn, r, input) {
     clearErr();

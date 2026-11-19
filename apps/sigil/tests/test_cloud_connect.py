@@ -12,6 +12,10 @@ Invariants pinned here:
   * a captured active grant cannot resurrect a disconnected account; an owner-signed ``expires_at`` bounds every
     grant; the grant carries the external id it was PROVEN under, so ``assume_target`` (the one read a later gated
     posture run consumes) stays correct after a new challenge supersedes the old one — and refuses everything else;
+  * a write the fold would IGNORE (a stamp at/below the key's high-water) is refused up front, never reported done;
+  * RESUME: the external id is stable while its connection is outstanding (``open_challenge`` hands it back and writes
+    nothing; another org never gets it); ``disconnect`` retires BOTH grant and challenge (a reconnect starts clean);
+    the overview lists a started-but-unfinished connection as ``pending`` without its id;
   * the hard-prune TRIPWIRE refuses a prune that would strand an active grant's only record (real sealed segments);
   * CONNECT != OFFENSE: a cloud grant is NEVER an EngagementAuthority (proven end-to-end in test_connect_provision.py).
 """
@@ -230,19 +234,64 @@ def test_disconnect_is_the_safe_direction_honored_even_unsigned():
     _verify(r)
     CloudConnectRegistry(s, owner_key=None, trusted_pubkey=OP).disconnect("acme", "aws", ACCT)
     assert r.grant("acme", "aws", ACCT) is None
+    assert r.challenge("acme", "aws", ACCT) is None              # the challenge is retired too, even unsigned
 
 
 def test_a_captured_active_grant_cannot_resurrect_a_disconnected_account():
+    # the REAL replay: someone holding a copy of the owner-signed ACTIVE grant record re-appends it verbatim after the
+    # customer disconnected. Its issued_at sits at the key's high-water, so the fold ignores it.
+    s = _store()
+    r = _reg(s)
+    r.issue_challenge("acme", "aws", ACCT, issued_at=5.0, external_id="EXT1")
+    _verify(r, now=10.0)
+    captured = [rec.payload for rec in s.iter_records() if rec.payload.get("signal") == cc.GRANT_SIGNAL][-1]
+    r.disconnect("acme", "aws", ACCT)
+    s.append(kind="event", source="governor", actor="WARDEN", payload=dict(captured))
+    assert r.grant("acme", "aws", ACCT) is None and r.assume_target("acme", "aws", ACCT, now=11.0) is None
+    r.issue_challenge("acme", "aws", ACCT, issued_at=20.0, external_id="EXT2")
+    _verify(r, "EXT2", now=30.0)                                 # a FRESH connect re-activates (intended)
+    assert r.grant("acme", "aws", ACCT).external_id == "EXT2"
+
+
+def test_a_write_the_fold_would_ignore_is_refused_not_reported_as_done():
+    # a stamp at/below the key's high-water (e.g. the clock stepped back after a disconnect) would be silently IGNORED
+    # by the fold — so the registry refuses it up front, and no caller is ever told "issued" / "connected" for nothing
     s = _store()
     r = _reg(s)
     r.issue_challenge("acme", "aws", ACCT, issued_at=5.0, external_id="EXT1")
     _verify(r, now=10.0)
     r.disconnect("acme", "aws", ACCT)
-    r.issue_challenge("acme", "aws", ACCT, issued_at=20.0, external_id="EXT1")
-    _verify(r, now=10.0)                                         # same issued_at => not fresh => ignored
-    assert r.grant("acme", "aws", ACCT) is None
-    _verify(r, now=30.0)                                         # a FRESH verify re-activates (intended)
-    assert r.grant("acme", "aws", ACCT) is not None
+    before = s.next_seq
+    with pytest.raises(ValueError, match="newer connection request"):
+        r.issue_challenge("acme", "aws", ACCT, issued_at=5.0, external_id="EXT2")   # not above the challenge high-water
+    assert s.next_seq == before and r.challenge("acme", "aws", ACCT) is None
+    r.issue_challenge("acme", "aws", ACCT, issued_at=6.0, external_id="EXT2")
+    before = s.next_seq
+    with pytest.raises(ValueError, match="could not be recorded"):
+        _verify(r, "EXT2", now=10.0)                                                  # not above the grant high-water
+    assert s.next_seq == before and r.grant("acme", "aws", ACCT) is None
+    assert _verify(r, "EXT2", now=11.0).external_id == "EXT2"                       # a fresh stamp is honored
+
+
+# ---- resume: the external id is stable while its connection is outstanding --------------------------------------
+def test_open_challenge_resumes_the_outstanding_id_and_writes_nothing():
+    s = _store()
+    r = _reg(s)
+    ch, resumed = r.open_challenge("acme", "aws", ACCT, issued_at=_t())
+    assert resumed is False and len(ch.external_id) >= 32
+    before = s.next_seq
+    again, resumed = r.open_challenge("acme", "aws", ACCT, issued_at=_t())
+    assert resumed is True and again.external_id == ch.external_id and s.next_seq == before   # same id, no record
+    other, _ = r.open_challenge("evil", "aws", ACCT, issued_at=_t())
+    assert other.external_id != ch.external_id                   # another org NEVER gets this org's id
+    _verify(r, ch.external_id, now=_t())
+    # connected: still the same id, so re-verifying an expiring grant needs no trust-policy edit
+    assert r.open_challenge("acme", "aws", ACCT, issued_at=_t()) == (ch, True)
+    r.disconnect("acme", "aws", ACCT)
+    fresh, resumed = r.open_challenge("acme", "aws", ACCT, issued_at=_t())
+    assert resumed is False and fresh.external_id != ch.external_id          # a reconnect starts clean
+    with pytest.raises(ValueError, match="only AWS"):
+        r.open_challenge("acme", "gcp", "proj-1", issued_at=_t())
 
 
 def test_has_current_grant_respects_the_owner_signed_expiry():
@@ -320,6 +369,20 @@ def test_cloud_overview_marks_connected_vs_expired_and_hides_the_secret():
     assert "SECRET" not in json.dumps(live)                      # the external id is never projected
 
 
+def test_cloud_overview_lists_a_started_connection_as_pending_without_its_id():
+    s = _store()
+    r = _reg(s)
+    r.issue_challenge("acme", "aws", ACCT, issued_at=_t(), external_id="SECRET-PENDING")
+    out = r.cloud_overview("acme", now=1.0)
+    assert out == [{"provider": "aws", "account_id": ACCT, "access": "read-only", "status": "pending"}]
+    assert "SECRET-PENDING" not in json.dumps(out)
+    assert r.cloud_overview("evil", now=1.0) == []                                   # another tenant: nothing
+    _verify(r, "SECRET-PENDING", now=100.0, ttl=1000.0)
+    assert [c["status"] for c in r.cloud_overview("acme", now=500.0)] == ["connected"]   # finished, not pending
+    r.disconnect("acme", "aws", ACCT)
+    assert r.cloud_overview("acme", now=500.0) == []             # disconnected: neither connected nor pending
+
+
 def test_owner_key_succession_each_grant_verified_under_the_pubkey_at_its_seq():
     s = _store()
     _reg(s).issue_challenge("acme", "aws", ACCT, issued_at=_t(), external_id="EXT1")
@@ -330,6 +393,27 @@ def test_owner_key_succession_each_grant_verified_under_the_pubkey_at_its_seq():
 
 
 # ---- hard-prune durability (real sealed segments; mirrors the connected-repo / Red-Pen schedule tripwires) -----
+@pytest.fixture
+def owner_is_test_key(monkeypatch):
+    """Point ``identity.owner_pubkey`` at this file's test owner for the prune tripwires — and, at teardown, re-bind the
+    REAL function in every module that imported the fake BY NAME while the patch was live. ``check_prune_safe`` is the
+    first importer of many governor modules (orgs, customers, wallet, monitoring_authority, …), each of which binds
+    ``from .identity import owner_pubkey`` at import time; without this the fake key would outlive the test and every
+    later owner-signature check in the same process (a membership, an ownership proof) would silently fail."""
+    import sys
+
+    from sigil.governor import identity
+    real = identity.owner_pubkey
+
+    def fake():
+        return OP
+    monkeypatch.setattr(identity, "owner_pubkey", fake)
+    yield
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "owner_pubkey", None) is fake:
+            mod.owner_pubkey = real
+
+
 def _archived_below(store, K):
     return [seg for seg in read_manifest(store._layout).sealed_in_order()
             if seg.last_seq is not None and seg.last_seq < K]
@@ -354,8 +438,7 @@ def _segmented(tmp_path, *, disconnect=False):
     return s
 
 
-def test_the_prune_tripwire_refuses_stranding_an_active_grant(tmp_path, monkeypatch):
-    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+def test_the_prune_tripwire_refuses_stranding_an_active_grant(tmp_path, owner_is_test_key):
     s = _segmented(tmp_path)
     assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == [f"aws:{ACCT}@acme"]
     with pytest.raises(prune.PruneUnsafe) as e:
@@ -363,8 +446,16 @@ def test_the_prune_tripwire_refuses_stranding_an_active_grant(tmp_path, monkeypa
     assert f"aws:{ACCT}@acme" in str(e.value) and "cloud grant" in str(e.value)
 
 
-def test_the_prune_tripwire_allows_a_grant_reconnected_live(tmp_path, monkeypatch):
-    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+def test_the_prune_tripwire_test_leaves_no_fake_owner_key_behind():
+    # runs right after the tripwire test above (file order, one process — as CI runs it): the fixture's teardown must
+    # have re-bound the REAL owner_pubkey in every module that imported the fake while it was live
+    import sys
+    leaked = sorted(name for name, mod in list(sys.modules.items())
+                    if "owner_is_test_key" in getattr(getattr(mod, "owner_pubkey", None), "__qualname__", ""))
+    assert leaked == []
+
+
+def test_the_prune_tripwire_allows_a_grant_reconnected_live(tmp_path, owner_is_test_key):
     s = _segmented(tmp_path)
     r = _reg(s)
     r.issue_challenge("acme", "aws", ACCT, issued_at=90.0, external_id="EXT9")  # reconnected LIVE (seq >= 5)
@@ -372,16 +463,14 @@ def test_the_prune_tripwire_allows_a_grant_reconnected_live(tmp_path, monkeypatc
     assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == []
 
 
-def test_a_below_k_grant_blocks_the_prune_even_after_it_was_disconnected(tmp_path, monkeypatch):
+def test_a_below_k_grant_blocks_the_prune_even_after_it_was_disconnected(tmp_path, owner_is_test_key):
     # grant + disconnect BOTH below K would reset the high-water, so a CAPTURED copy of the grant could be replayed above
     # K to RESURRECT a disconnected account — the tripwire is fail-closed and blocks it.
-    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
     s = _segmented(tmp_path, disconnect=True)
     assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == [f"aws:{ACCT}@acme"]
 
 
-def test_a_forged_below_k_grant_never_blocks_a_prune(tmp_path, monkeypatch):
-    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OP)
+def test_a_forged_below_k_grant_never_blocks_a_prune(tmp_path, owner_is_test_key):
     s = SpineStore(str(tmp_path / "spine.jsonl"))
     s.migrate()
     forged = signed_payload({"signal": cc.GRANT_SIGNAL, "org_id": "acme", "provider": "aws", "account_id": ACCT,
