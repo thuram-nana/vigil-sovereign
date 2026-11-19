@@ -2648,6 +2648,86 @@
     if (w) { host.parentNode.replaceChild(w, host); } else { host.remove(); }
   }
 
+  // ---- Settings (VIGIL_CUSTOMER_SETTINGS): the settings shell + the General preferences tab ------------------------
+  // Shown only while the edge writes data-settings="1"; off, #/settings is the home screen exactly as any unknown route
+  // and no preferences call is made. The hub is navigation plus a General tab that captures the workspace's legal-entity
+  // / contact profile (GET/POST api/customer/preferences for the SESSION's account only — a UI preference, never money,
+  // never authority, never on the signed spine; the SERVER enforces the closed key allowlist and the account). It LINKS
+  // the screens that already exist — Account security & sign-in (#/security), Authorized administrators (#/team, the
+  // existing member/role controls) and Billing (#/billing) — and adds NO new authority or money control of its own:
+  // roles are still changed on #/team over the existing routes, and credits are still bought on #/billing.
+  var SETTINGS_ON = pageFlag("settings");
+  // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
+  // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
+  var PREF_FIELDS = [
+    ["legal_entity_name", "Legal entity name", "text"],
+    ["registered_address", "Registered / operating address", "text"],
+    ["contractual_contact_email", "Primary contractual contact email", "email"],
+    ["emergency_contact_name", "Emergency operational contact — name", "text"],
+    ["emergency_contact_phone", "Emergency operational contact — phone", "tel"],
+    ["emergency_contact_email", "Emergency operational contact — email", "email"],
+  ];
+  function settingsLink(label, hash) {
+    return h("div.row", {}, [h("button.btn.cust-settings-link",
+      { type: "button", text: label, dataset: { route: hash }, onClick: function () { nav(hash); } })]);
+  }
+  // The hub's navigation card: it only LINKS the existing screens, it never forks their authority/money controls.
+  function settingsLinks() {
+    return h("div.card.cust-settings-links", {}, [
+      h("h3", { text: "Your organization" }),
+      h("p.cust-muted", { text: "Manage the rest of your workspace on its own screens." }),
+      settingsLink("Account security & sign-in", "#/security"),
+      settingsLink("Authorized administrators", "#/team"),
+      settingsLink("Billing", "#/billing"),
+    ]);
+  }
+  // The General tab: the profile fields, pre-filled from what the server stored, with one Save. Saving posts the whole
+  // tab to api/customer/preferences (a UI preference), then re-renders from what the server stored (its merged answer).
+  function generalForm(prefs) {
+    var p = prefs || {};
+    var rows = [h("h3", { text: "General" }),
+      h("p.cust-muted", { text: "Who this workspace is on paper — used for your records and contracts." })];
+    PREF_FIELDS.forEach(function (f) {
+      var pair = field("pref-" + f[0], f[1], f[2]);
+      pair[1].value = String(p[f[0]] || "");
+      rows.push(h("div.cust-field", {}, pair));
+    });
+    rows.push(h("div.row", {}, [h("button.btn.cust-pref-save",
+      { type: "button", text: "Save", onClick: saveGeneral })]));
+    return h("div.card.cust-settings-general-form", {}, rows);
+  }
+  async function saveGeneral() {
+    var btn = VUI.$(".cust-pref-save"); if (btn) { btn.disabled = true; }
+    var out = {};
+    PREF_FIELDS.forEach(function (f) { out[f[0]] = val("pref-" + f[0]); });
+    try {
+      var r = await VUI.postJSON(API + "/preferences", { preferences: out });
+      if (here() !== "#/settings") { return; }
+      VUI.toast("Saved");
+      var holder = VUI.$("#cust-settings-general");
+      if (holder) { VUI.mount(holder, generalForm(r && r.preferences)); }  // the server is the authority on the merge
+    } catch (e) {
+      if (btn) { btn.disabled = false; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      err("Your settings could not be saved. Please try again.");
+    }
+  }
+  function viewSettings() {
+    var holder = h("div#cust-settings-general", {}, loadingHolder("Loading…"));
+    (async function () {
+      var prefs = {};
+      try { var r = await VUI.getJSON(API + "/preferences"); prefs = (r && r.preferences) || {}; }
+      catch (e) {
+        if (here() !== "#/settings") { return; }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        prefs = {};                                          // a failed read shows the empty profile (the safe direction)
+      }
+      if (here() !== "#/settings") { return; }
+      VUI.mount(holder, generalForm(prefs));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Settings" }), holder, settingsLinks()]), "#/settings");
+  }
+
   // ---- shell --------------------------------------------------------------------------------------
   function navLink(label, hash) {
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
@@ -2664,6 +2744,7 @@
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
+        .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -2743,6 +2824,8 @@
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is
     "#/security": function () { return authed() ? (SECURITY_ON ? viewSecurityScreen() : viewDashboard()) : viewLogin(); },
+    // the settings shell off: #/settings is the home screen, exactly as any unknown route is
+    "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

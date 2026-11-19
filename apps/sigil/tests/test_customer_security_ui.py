@@ -1058,7 +1058,7 @@ function doLogout() {} function doLogin() {} function ntfWidget() { return null;
 function clearErr() {} function err(m) { trace.push(["err", m]); }
 function refreshWho() { trace.push(["refreshWho"]); return Promise.resolve(); }
 const API = "api/customer";
-const GUIDE = null; const GUIDE_ON = false; const MONITORING_ON = false; const TEAM_ON = false; const LAUNCH_ON = false; const CODE_ON = false;
+const GUIDE = null; const GUIDE_ON = false; const MONITORING_ON = false; const TEAM_ON = false; const LAUNCH_ON = false; const CODE_ON = false; const SETTINGS_ON = false;
 globalThis.location = { hash: "#/" };
 function viewDashboard() { return "dashboard"; } function viewSecurityScreen() { return "security"; }
 function viewGuideScreen() { return "guide"; } function viewSignup() {} function viewRecover() {} function viewGoogleCode() {}
