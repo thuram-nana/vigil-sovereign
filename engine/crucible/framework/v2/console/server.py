@@ -570,6 +570,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 self._json(_SCOPED_ROUTES[path]((q.get("slug") or [""])[0]))
                 return
+            if path == "/api/folders" and sessions.folders_enabled():
+                # Session FOLDERS (default-OFF, VIGIL_SESSION_FOLDERS): read-only folder index. Off ⇒ falls
+                # through to the unknown-endpoint 404 below, exactly as if the route did not exist.
+                self._json(sessions.list_folders())
+                return
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
                 return
@@ -1165,6 +1170,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/session/disconnect":
                 self._json(sessions.disconnect_session(str(body.get("id", "")), str(body.get("other", ""))))
+                return
+            if path in ("/api/folder/create", "/api/folder/rename", "/api/folder/delete",
+                        "/api/session/folder") and sessions.folders_enabled():
+                # Session FOLDERS (default-OFF, VIGIL_SESSION_FOLDERS): organisation only — a folder is a name
+                # and a session's `folder_id`; it mints no fact and authorizes nothing (CSRF/rebind-gated
+                # above). Off ⇒ these paths fall through to the unknown-route response, exactly as if absent.
+                if path == "/api/folder/create":
+                    self._json(sessions.create_folder(str(body.get("name", ""))))
+                elif path == "/api/folder/rename":
+                    self._json(sessions.rename_folder(str(body.get("id", "")), str(body.get("name", ""))))
+                elif path == "/api/folder/delete":
+                    # Never deletes a session: members are unfiled first (see sessions.delete_folder).
+                    self._json(sessions.delete_folder(str(body.get("id", ""))))
+                else:
+                    # /api/session/folder — file, move, or unfile (an empty folder_id unfiles).
+                    self._json(sessions.set_session_folder(str(body.get("id", "")),
+                                                           str(body.get("folder_id", ""))))
                 return
             if path == "/api/chat/stream":
                 # F1: a STREAMED question turn. chat_stream emits SSE token events; the FIRST emit lazily
