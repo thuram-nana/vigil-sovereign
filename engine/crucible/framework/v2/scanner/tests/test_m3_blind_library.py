@@ -121,9 +121,9 @@ def test_m3_blind_only_oob_oracle_kind() -> None:
 
 
 def test_m3_blind_severity_rules() -> None:
-    # Critical for rce/deserialization/command_injection; High for ssrf/blind_xxe
+    # Critical for rce/deserialization/command_injection/blind_ssti; High for ssrf/blind_xxe
     for e in _m3_entries():
-        if e.bug_class in ("command_injection", "deserialization", "rce"):
+        if e.bug_class in ("command_injection", "deserialization", "rce", "blind_ssti"):
             assert e.severity == "Critical", f"{e.id} ({e.bug_class}) must be Critical"
         elif e.bug_class in ("ssrf", "blind_xxe"):
             assert e.severity == "High", f"{e.id} ({e.bug_class}) must be High"
@@ -136,6 +136,7 @@ def test_m3_blind_cwe_matches_class() -> None:
         "ssrf": "CWE-918",
         "blind_xxe": "CWE-611",
         "command_injection": "CWE-78",
+        "blind_ssti": "CWE-1336",  # template-injection CWE carried by the m3-blind-ssti-* entries
     }
     for e in _m3_entries():
         want = expected.get(e.bug_class)

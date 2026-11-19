@@ -274,25 +274,26 @@ _BOOLEAN_BASELINE_SAMPLES = 8
 
 # --- B2: governed-engage re-drive for the non-SQL injection classes (nosqli / ldap / xpath) -----------
 # Through governed engage these three were structurally LEAD-only (no dedicated branch → the LLM-provenanced
-# LEAD fallback). This arm DRIVES them end-to-end — a runner-owned, DNS-pinned gated re-drive of a
-# class-specific error-provoking probe + a benign CONTROL twin, judged by the deterministic
-# ``error_signature_oracle`` over VIGIL's FRESH bytes — so the operator's lead has a VIGIL-owned capture
-# behind it rather than the model's assertion (the same reason path_traversal is DRIVEN though LEAD-only).
+# LEAD fallback). This arm DRIVES them end-to-end — a runner-owned, DNS-pinned gated THREE-leg re-drive
+# (CONTROL / BREAK / BALANCED) — and mints a signed FACT, judged by the deterministic
+# ``parser_state_toggle_oracle`` over VIGIL's FRESH bytes + the retained payloads.
 #
-# BOTH registered branches for these classes are LEAD-ONLY; this arm mints NO FACT (``admit`` demotes the
-# fired oracle because the branch is ``fact_capable: false``):
-#   * ``<class>.datastore_error`` — LEAD-only. RED-PEN BLOCK (fixed here): ``error_signature_oracle`` is a
-#     STRING MATCH and re-verifies only CONDITIONAL EMISSION, which is necessary but NOT sufficient for a
-#     query break. The benign control twin rules out only UNCONDITIONAL emission; a datastore-error-shaped
-#     string emitted CONDITIONALLY on the metacharacter by a NON-datastore source — a WAF/security-filter
-#     block page that names the engine, a validator rejection, or an unrelated 500 whose stack trace merely
-#     names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) — passes the guard (four such
-#     false FACTs were reproduced at rate 1.0). The sound FACT path is a break-vs-repair PARSER-STATE-TOGGLE
-#     causation oracle re-executed OFFLINE (a new OracleKind, out of this reuse-only slice's scope) — see the
-#     branch ``blocking_work``.
-#   * ``<class>.sprt_inference``  — the boolean_inference SPRT truth-value channel, LEAD-only: the shipped SQL
-#     clause families cannot soundly ATTRIBUTE a non-SQL class (a SQL clause that partitions proves SQL
-#     boolean injection), so a class-specific truth-correct clause set is that branch's blocking_work.
+# ``<class>.datastore_error`` is now FACT-capable. The earlier ``error_signature`` form was a RED-PEN BLOCK:
+# a STRING MATCH that re-verified only CONDITIONAL EMISSION, necessary but NOT sufficient for a query break —
+# a WAF/security-filter block page that names the engine, a validator rejection, or an unrelated 500 whose
+# stack trace merely names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) all emit one
+# conditionally on the metacharacter and passed the benign-control twin (four false FACTs at rate 1.0). The
+# parser-state toggle closes this: the datastore parser must error on the UNBALANCED BREAK leg ALONE while the
+# RE-BALANCED leg (SAME metacharacter SET, re-derived offline from the retained payloads) and the benign
+# control do not; the matched signature must be a genuine parser-break MESSAGE (never a bare package name) and
+# a block/rejection response is refused. A presence-keying WAF/validator errors on both break and balanced and
+# so cannot fire; a static banner fires on all three. ``parser_state_toggle_oracle`` REUSES the frozen
+# ERROR_SIGNATURE kind (as smuggling_desync reuses DIFFERENTIAL_RESPONSE) via the fresh ``parser_state_toggle``
+# ctx key, so ``make gate`` is byte-identical and oracle_version(ERROR_SIGNATURE) is untouched.
+#
+# ``<class>.sprt_inference`` stays LEAD-only: the shipped SQL boolean clause families cannot soundly ATTRIBUTE
+# a non-SQL class, and no offline NoSQL/LDAP/XPath injection engine ships to MACHINE-VERIFY a truth-correct
+# class-specific clause family — see the branch ``blocking_work``.
 #
 # It is a governed-engage sibling of ``proof.run._strix_errsig_redrive`` built on the runtime_redrive
 # discipline so the engage seam reads ``family_verdict``/``facts`` like the other seams. NOT in
@@ -306,20 +307,24 @@ _INJECTION_ERRSIG_BRANCH = {
 # The engage seam's dispatch set (an import-clean tuple, FATAL-2). Deliberately SEPARATE from
 # RUNTIME_REDRIVE_CLASSES so this slice adds arms without restructuring the runtime/web/sqli wiring.
 INJECTION_REDRIVE_CLASSES = tuple(_INJECTION_ERRSIG_BRANCH)
-# RUNNER-crafted, class-specific error-provoking probe payloads (kept in lockstep with
-# ``proof.run._ERRSIG_PROBE_PAYLOADS``). The RUNNER owns these — never a Strix/LLM value — so the observed
-# evidence rests on VIGIL's OWN injected metacharacters. The oracle (not the payload) decides whether an
-# engine error string appeared; the class stays a LEAD (see the branch note above).
-_INJECTION_ERRSIG_PAYLOAD = {
-    "nosqli": "'\"{[",              # break a JSON/BSON query document / operator parse
-    "ldap_injection": "*)(|&",     # unbalanced LDAP filter parens/operators
-    "xpath_injection": "']|//*[",  # break an XPath string/predicate
-}
-# The datastore/parser ENGINE the ``error_signature_oracle`` must match for the observed error to be
+# The datastore/parser ENGINE the ``parser_state_toggle_oracle`` must match for the observed break to be
 # attributed to the claimed class (the engine label side of ``proof.run._ERRSIG_ENGINE_TO_CLASS``, class-
 # scoped). A nosqli probe that provokes a SQL error is SQLi, not nosqli — a mismatched (or unmapped) engine
 # is not admitted for this class, so even the LEAD stays class-appropriate.
 _INJECTION_ENGINE_FOR = {"nosqli": {"mongodb"}, "ldap_injection": {"ldap"}, "xpath_injection": {"xpath"}}
+# RUNNER-crafted (BREAK, BALANCED) payload PAIRS for the parser-state-toggle causation oracle. Both members
+# carry the SAME metacharacter SET (so a presence-keying WAF/validator reacts to BOTH and cannot pass the
+# toggle); the BREAK is grammar-UNBALANCED (a genuine datastore parser errors on it) and the BALANCED is
+# RE-BALANCED with the same characters (it parses, so a genuine parser does NOT error). The oracle re-derives
+# the same-SET property OFFLINE from these retained payloads. The RUNNER owns these — never a Strix/LLM value.
+#   * nosqli : odd quotes break a JSON/BSON string literal; doubled quotes re-balance it.
+#   * ldap   : a dangling ``(|`` empty-OR filter; completed with two sub-filters it is a valid OR.
+#   * xpath  : an unclosed predicate/string; closed into a valid node-set union.
+_INJECTION_TOGGLE_PAYLOAD = {
+    "nosqli":          ("'\"{}", "''\"\"{}"),
+    "ldap_injection":  ("*)(|", "*)(|(cn=a)(sn=b)"),
+    "xpath_injection": ("'] | //*[", "'] | //*[1] | //x[name='"),
+}
 # Candidate parameter names for the injection arm (mirrors the other point-check sets); the set only bounds
 # where the arm PROBES, never a claim of absence (the branches are not clean-capable).
 _INJECTION_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "filter", "category",
@@ -1901,36 +1906,36 @@ def _cmdi_timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: 
 def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                       claimed_class: str, param: "str | None" = None, timeout: float = 8.0
                       ) -> "RuntimeRedriveResult":
-    """Governed-engage re-drive for ``nosqli`` / ``ldap_injection`` / ``xpath_injection``. It DRIVES VIGIL's
-    OWN gated probe end-to-end and records an admitted LEAD; it mints **NO FACT** — both registered branches
-    for these classes are ``fact_capable: false``, so ``admit`` demotes even a fired oracle to a LEAD.
+    """Governed-engage re-drive for ``nosqli`` / ``ldap_injection`` / ``xpath_injection`` that mints a signed
+    FACT ONLY when the deterministic ``parser_state_toggle_oracle`` confirms a GENUINE datastore QUERY BREAK
+    over VIGIL's OWN gated re-drive, re-executed OFFLINE from the retained capture.
 
-    WHY LEAD-ONLY (red-pen BLOCK, fixed here). ``error_signature_oracle`` is a STRING MATCH; a fire over
-    VIGIL's fresh bytes proves only that a datastore-error-shaped string was emitted CONDITIONALLY on the
-    payload (present on the probe, absent from the benign control). That is NECESSARY but NOT SUFFICIENT for a
-    query break: the benign control twin rules out only UNCONDITIONAL emission, so a signature emitted
-    conditionally by a NON-datastore source — a WAF/security-filter block page that names the engine, an
-    input-validator rejection, or an unrelated 500 whose stack trace merely names the driver package — passes
-    the guard (four such false FACTs were reproduced at rate 1.0, one of them a high-frequency real-world case).
-    The SOUND FACT path is a break-vs-repair PARSER-STATE-TOGGLE causation oracle re-executed OFFLINE (a new
-    OracleKind, out of this reuse-only slice's scope) — see the branches' ``blocking_work``.
+    WHY A FACT NOW (the red-pen BLOCK is closed). The earlier ``error_signature`` form was a STRING MATCH that
+    proved only CONDITIONAL EMISSION of a datastore-error-shaped string (present on the probe, absent from a
+    benign control). That is NECESSARY but NOT SUFFICIENT for a query break: a WAF/security-filter block page
+    naming the engine, an input-validator rejection, or an unrelated 500 whose stack trace merely names the
+    driver PACKAGE all emit one conditionally on the metacharacter and pass the benign-control twin (four such
+    false FACTs reproduced at rate 1.0). This arm instead drives a BREAK-vs-REPAIR PARSER-STATE TOGGLE and lets
+    ``parser_state_toggle_oracle`` adjudicate it OFFLINE:
+      * CONTROL  — a benign, metacharacter-free value (``vfctl…``) → no error.
+      * BREAK    — VIGIL's runner-crafted UNBALANCED metacharacter payload → a genuine parser error.
+      * BALANCED — the SAME metacharacter SET, RE-BALANCED (``_INJECTION_TOGGLE_PAYLOAD``) → no error.
+    A presence-keying WAF/validator reacts to BOTH break AND balanced (same metacharacters), a static banner
+    fires on all three — neither produces the toggle; ONLY a real query parser, which cares about the balance
+    of the metacharacters, errors on the unbalanced payload alone. The oracle re-derives the same-metacharacter-
+    SET property from the three retained payloads, requires a GENUINE parser-break MESSAGE (never a bare package
+    name), and REFUSES a block/rejection response — so the FACT is a query break, decided by the wire bytes.
 
-    WHAT IT STILL DOES (real evidence for a human, same rationale as the DRIVEN-but-LEAD path_traversal arm):
-      * the RUNNER sends its OWN class-specific error-provoking probe (``_INJECTION_ERRSIG_PAYLOAD``) — the
-        Strix/LLM payload is never trusted — plus a benign CONTROL twin fetched FIRST;
-      * the oracle observes whether the matched engine string appeared conditionally, and the LEAD is admitted
-        only under the ENGINE that NAMES the claimed class (``_INJECTION_ENGINE_FOR``); a mismatched/unmapped
-        engine is not admitted for this class, so even the LEAD stays class-appropriate.
-
-    A gate refusal / no channel / an unreadable-or-empty body / an oracle non-fire / the same error in the
-    control / a mismatched engine all leave the finding a LEAD. Not CLEAN-capable either (a non-firing is
-    uninformative). Runs ONLY the claimed class. Never raises.
+    The RUNNER owns the payloads (``_INJECTION_TOGGLE_PAYLOAD``) — the Strix/LLM value is never trusted — and
+    the FACT is admitted only under the ENGINE that NAMES the claimed class (``_INJECTION_ENGINE_FOR``); a
+    mismatched/unmapped engine proves a DIFFERENT class and is refused (fail-closed). A gate refusal / no
+    channel / an unreadable-or-empty leg / a non-firing toggle / a mismatched engine all leave the finding a
+    LEAD or INCONCLUSIVE. Not CLEAN-capable (a non-firing toggle is uninformative). Runs ONLY the claimed
+    class. Never raises.
 
     FATAL-2: every framework-touching import is function-local (offense-side re-drive path)."""
-    from framework.v2.evidence.poc import CapturedExchange  # noqa: PLC0415 (FATAL-2: offense plane)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
-    from framework.v2.verify.oracles import error_signature_oracle  # noqa: PLC0415
-    from framework.v2.verify.poc_translate import context_from_exchanges  # noqa: PLC0415
+    from framework.v2.verify.oracles import parser_state_toggle_oracle  # noqa: PLC0415
     from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
 
     bug_class = normalize_bug_class(claimed_class)
@@ -1939,12 +1944,13 @@ def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "li
         res.notes.append(f"{bug_class!r} is not an injection-redrive class")
         return res
     branch = _INJECTION_ERRSIG_BRANCH[bug_class]
-    payload = _INJECTION_ERRSIG_PAYLOAD[bug_class]
+    break_payload, balanced_payload = _INJECTION_TOGGLE_PAYLOAD[bug_class]
     expected_engines = _INJECTION_ENGINE_FOR[bug_class]
     res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
     if send is None:
         return res
     nonce = _sha(f"{url}:{bug_class}")
+    control_payload = f"vfctl{nonce}"
     try:
         for name in _candidate_names_hint(url, _INJECTION_PARAMS, param, _MAX_CANDIDATE_NAMES):
             probe_url = _url_with_param(url, name)
@@ -1953,68 +1959,60 @@ def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "li
                           if p.name.lower() == name.lower()), None)
             if point is None:
                 continue
-            # CONTROL FIRST — a benign, metacharacter-free value on the SAME endpoint+param, so any datastore
-            # error is attributable to the PAYLOAD, not to the parameter's mere presence.
-            before_c = state["channels"]
-            try:
-                control = send(tmpl.render(point, f"vfctl{nonce}"))
-            except Exception as e:  # noqa: BLE001
-                res.notes.append(f"injection control error [{name}]: {type(e).__name__}: {e}")
+            # THREE legs on the SAME endpoint+param — CONTROL FIRST, then BREAK, then BALANCED. The oracle
+            # re-derives the break-vs-repair causation OFFLINE over the three retained responses + payloads.
+            legs: dict = {}
+            incomplete = False
+            for role, pay in (("control", control_payload), ("break", break_payload),
+                              ("balanced", balanced_payload)):
+                before = state["channels"]
+                try:
+                    resp = send(tmpl.render(point, pay))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"injection {role} error [{name}]: {type(e).__name__}: {e}")
+                    incomplete = True
+                    break
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{role}"))
+                    incomplete = True
+                    break
+                body = _body_text(resp)
+                if not body:
+                    # a real channel but no readable body → the oracle cannot adjudicate → INCONCLUSIVE
+                    res.inconclusive.append((bug_class, f"{probe_url}#{role}"))
+                    incomplete = True
+                    break
+                legs[role] = {"body": body, "status": resp.get("status")}
+            if incomplete:
                 continue
-            if state["channels"] <= before_c:
-                res.inconclusive.append((bug_class, f"{probe_url}#control"))
-                continue
-            control_bytes = _body_text(control).encode("utf-8", errors="replace")
-            # TREATMENT — VIGIL's OWN runner-crafted metacharacter payload.
-            before_t = state["channels"]
-            try:
-                probe = send(tmpl.render(point, payload))
-            except Exception as e:  # noqa: BLE001
-                res.notes.append(f"injection probe error [{name}]: {type(e).__name__}: {e}")
-                continue
-            if state["channels"] <= before_t:
-                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
-                continue
-            observed_text = _body_text(probe)
-            if not observed_text:
-                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
-                continue     # a real channel but no readable body → the oracle cannot fire → INCONCLUSIVE
-            observed_bytes = observed_text.encode("utf-8", errors="replace")
-            # the oracle over VIGIL's FRESH bytes, WITH the control twin. The control rules out only
-            # UNCONDITIONAL emission; a fire here is CONDITIONAL emission of an error-shaped string — necessary
-            # but NOT sufficient for a query break (a WAF/validator/unrelated-500 passes it), so it is a LEAD.
-            sig = error_signature_oracle(observed_bytes, control_bytes)
+            # The parser-state-toggle context: the three retained legs + the three payloads the oracle
+            # re-derives the same-metacharacter-SET property from. bug_class is embedded so the MINT re-drive
+            # (certify_admitted → adjudicate_finding) adjudicates THIS class over THIS retained context.
+            toggle = {"engine": next(iter(sorted(expected_engines))),
+                      "break": legs["break"], "balanced": legs["balanced"], "control": legs["control"],
+                      "break_payload": break_payload, "balanced_payload": balanced_payload,
+                      "control_payload": control_payload}
+            sig = parser_state_toggle_oracle(toggle)
             if not getattr(sig, "fired", False):
-                # no engine error string, or the SAME string rides the benign control → nothing to admit.
-                _note(res, f"error_signature did not fire for {bug_class} → LEAD")
+                # no genuine query break on this surface (presence filter / static banner / block / no
+                # parser-break message / balanced errored too) → nothing to mint here.
+                _note(res, f"parser_state_toggle did not fire for {bug_class} → LEAD ({str(sig.evidence)[:140]})")
                 continue
             engine = str((getattr(sig, "observed", None) or {}).get("engine", ""))
             if engine not in expected_engines:
-                # a real datastore error, but NOT the engine that names this class — the evidence proves a
+                # a real query break, but NOT the engine that names this class — the evidence proves a
                 # DIFFERENT class; refuse rather than mislabel (fail-closed, mirrors the Strix rail).
-                _note(res, f"error_signature matched engine {engine!r}, not {sorted(expected_engines)} for "
+                _note(res, f"parser_state_toggle matched engine {engine!r}, not {sorted(expected_engines)} for "
                            f"{bug_class} → LEAD (the evidence proves a different class, not this one)")
                 continue
-            # Build the error_signature context (observed + control) and admit it. admit() DEMOTES this to a
-            # LEAD because the branch is fact_capable:false — no FACT is minted (the re-driven capture is
-            # retained on the result as real, class-appropriate evidence for the operator). Same context shape
-            # as the Strix rail (``context_from_exchanges`` + ``model_dump``).
-            blobs = {"inj_obs": observed_bytes, "inj_ctrl": control_bytes}
-            exchanges = [
-                CapturedExchange(channel="error_signature", role="mutated",
-                                 response_bytes_ref="inj_obs", status=probe.get("status")),
-                CapturedExchange(channel="error_signature", role="control",
-                                 response_bytes_ref="inj_ctrl", status=control.get("status")),
-            ]
-            ctx = context_from_exchanges(exchanges, bug_class=bug_class, resolve=blobs.get)
-            if ctx is None:
-                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
-                continue
-            context = ctx.model_dump(mode="json")
+            # Admit over the now-fact_capable branch. admit() mints a FACT verdict; certify_admitted re-fires
+            # the SAME oracle over this retained context (provenance=live_redrive) and signs an
+            # offline-re-verifiable certificate — the FACT is a genuine query break, not a mere error string.
+            context = {"bug_class": bug_class, "parser_state_toggle": toggle}
             _admit_one(res, branch=branch, bug_class=bug_class, engagement_slug=engagement_slug,
                        signers=signers, context=context, item=f"{probe_url}#{point.id}",
                        surface=f"query:{name}", fired=True, conclusive=True, body_unreadable=False)
-            break     # one admitted (class-appropriate) capture is enough for a re-drive — stop (bounded work)
+            break     # one admitted capture is enough for a re-drive — stop (bounded work)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"injection_redrive error: {type(e).__name__}: {e}")
     return res
