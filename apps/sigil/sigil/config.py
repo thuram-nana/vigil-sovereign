@@ -298,6 +298,23 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def presentation_enabled() -> bool:
+    """True iff the APEX PR-A presentation spine is ON (`VIGIL_APEX_PRESENTATION` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off the customer Posture read (``/api/customer/assessments/posture`` →
+    the ``assessment_posture`` cockpit action → ``finding_presentation.assessment_posture``) is absent (404 exactly
+    as an unknown route), the findings projection NEVER carries the ``presentation`` cert field, and the page's
+    ``__VIGIL_PRESENTATION__`` switch is "0" — so the server is byte-identical to a build without the feature.
+
+    This is the SOVEREIGN-side master flag over the consumer surface (the Posture screen + the per-finding
+    plain-language/standards/remediation projection). The ENGINE reads the SAME env var at FACT-mint
+    (``evidence.certify``) to decide whether to embed the additive SIGNED ``presentation`` block into a
+    certificate; both planes read ``VIGIL_APEX_PRESENTATION`` independently (no cross-env import — the engine
+    reads ``os.environ`` directly, the sovereign plane reads it here), so one value turns the whole feature on.
+    The ``presentation`` block is ADDITIVE SIGNED DATA that never changes a FACT/oracle verdict, and posture +
+    triage are derived SOVEREIGN-side ONLY from the org's own proven findings. Read at call time."""
+    return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_assistant_enabled() -> bool:
     """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
     (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the

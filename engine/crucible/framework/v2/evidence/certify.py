@@ -150,6 +150,10 @@ def build_certificate(
         # S4 (Lane S): bind the oracle-context provenance into the signed cert. Dropped from the canonical
         # form for a reproduced value (serializer) → byte-identical for every FACT; see EvidenceCertificate.
         provenance=str(provenance or finding.get("provenance", "") or "reproduced"),
+        # APEX PR-A: the additive SIGNED presentation block (plain-language impact + standards chips + exact
+        # remediation). None when VIGIL_APEX_PRESENTATION is off (default) OR on any derivation failure →
+        # dropped from the canonical form → byte-identical mint. Purely descriptive; never gates the verdict.
+        presentation=_cert_presentation(finding),
     )
 
 
@@ -177,6 +181,99 @@ def _cert_how_to_verify(finding: dict) -> str:
         )
     except Exception:  # noqa: BLE001 — a malformed finding ⇒ no note (fail-open to byte-identical)
         return ""
+
+
+# APEX PR-A: the env flag that arms the additive SIGNED presentation block at mint. Read HERE (os.environ,
+# never a sovereign import — the engine must not reach across the two-env boundary) with the SAME affirmative
+# vocabulary as the sovereign ``config.presentation_enabled`` (``VIGIL_APEX_PRESENTATION``), so one env value
+# turns the whole feature on across both planes. OFF by default ⇒ ``_cert_presentation`` returns None ⇒ the
+# field is dropped from the canonical form ⇒ every mint is byte-identical to before this feature existed.
+_PRESENTATION_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+_PRESENTATION_SCHEMA = 1
+
+
+def _presentation_enabled() -> bool:
+    """True iff ``VIGIL_APEX_PRESENTATION`` is affirmative (default OFF). The single arming point for the
+    additive presentation block; mirrors the sovereign ``config.presentation_enabled``."""
+    import os
+    return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _PRESENTATION_AFFIRMATIVE
+
+
+def _build_presentation(finding: dict) -> "dict | None":
+    """Derive the DETERMINISTIC, purely-descriptive presentation block for a finding — plain-language impact,
+    the standards controls the class implicates (DATA, never a coverage assertion), the finding-specific
+    remediation, and the deterministic impact×effort priority — from the EXISTING report primitives
+    (``report.plainspeak`` / ``report.standards`` / ``report.howto`` / ``report.priority``), so the cert and
+    the human report describe a finding identically. PURE + deterministic (no wallclock/RNG; sorted lists):
+    the same finding yields byte-identical bytes. ``None`` on ANY failure or when nothing could be derived, so
+    the field drops from the canonical form (byte-identical) and a malformed finding is never fatal to the mint.
+
+    IMPORTANT soundness property: this is computed from the finding's ALREADY-DECIDED fields and is NEVER an
+    input to the verdict — ``oracle_confirms_class`` (mint), ``reverify_context`` and ``verify_certificate``
+    never read it — so no presentation value can change whether a finding is a FACT. Lazy import avoids a
+    report<->evidence module cycle."""
+    try:
+        from types import SimpleNamespace
+
+        from ..report.howto import finding_specific_remediation
+        from ..report.plainspeak import oracle_establishes, plain_for
+        from ..report.priority import SEVERITY_RANK, effort_size, impact_weight, priority_score
+        from ..report.standards import controls_for
+    except Exception:  # noqa: BLE001 — primitives unavailable ⇒ no block (byte-identical, never fatal)
+        return None
+    try:
+        bug_class = str(finding.get("bug_class", "") or "").strip()
+        title = str(finding.get("title", "") or "").strip()
+        surface = str(finding.get("insertion_point") or finding.get("param")
+                      or finding.get("surface") or "").strip()
+        confirmed_by = str(finding.get("confirmed_by", "") or "").strip()
+        what, consequence, missing = plain_for(bug_class, title)
+        controls = controls_for(bug_class)
+        remediation = finding_specific_remediation(
+            SimpleNamespace(bug_class=bug_class, surface=surface))
+        priority: dict = {"effort": effort_size(bug_class)}
+        # score/tier need a severity; the certify path's finding dict carries one only for a FindingPayload-
+        # derived mint (a static-fact mint does not). Include the impact×effort score ONLY when a known
+        # severity is present, so the number is never fabricated from a missing rating.
+        severity = str(finding.get("severity", "") or "").strip()
+        if severity in SEVERITY_RANK:
+            priority.update(
+                severity=severity,
+                score=priority_score(severity, bug_class),
+                impact=impact_weight(severity),
+                severity_rank=SEVERITY_RANK[severity],
+            )
+        block: dict = {
+            "schema": _PRESENTATION_SCHEMA,
+            "plain_impact": {
+                # what this KIND of weakness is, and what the CATEGORY can lead to in general — kept distinct
+                # from ``established`` (what THIS proof settled), so a reader never mistakes the category's
+                # worst case for their own system (the plainspeak contract).
+                "what": what,
+                "category_consequence": consequence,
+                "established": oracle_establishes(confirmed_by),
+                "description_on_file": not missing,
+            },
+            "remediation": remediation,
+            "priority": priority,
+        }
+        if controls is not None:
+            block["standards"] = {
+                "controls": controls,
+                "note": ("indicative control mapping for this weakness class (DATA) — not an assertion that "
+                         "the control is covered"),
+            }
+        return block
+    except Exception:  # noqa: BLE001 — a malformed finding ⇒ no block (fail-open to byte-identical)
+        return None
+
+
+def _cert_presentation(finding: dict) -> "dict | None":
+    """The presentation block to embed at mint, or ``None`` when the feature is OFF (``VIGIL_APEX_PRESENTATION``
+    unset) — in which case the field drops from the canonical form and the mint is byte-identical to before."""
+    if not _presentation_enabled():
+        return None
+    return _build_presentation(finding)
 
 
 def build_path_certificate(attack_path, *, backing_cert_digests: list[str],

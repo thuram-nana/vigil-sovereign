@@ -43,7 +43,14 @@ RETEST_SOURCE = "provision"
 # The stable, inert cert fields a customer may read for one finding. An allowlist (never a raw cert dump) so a
 # future internal cert field can never leak and the API shape is fixed. Values are read fail-closed via .get.
 _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity", "title", "summary",
-                "how_to_verify", "report_claims", "oracle_context_digest", "artifact_manifest")
+                "how_to_verify", "report_claims", "oracle_context_digest", "artifact_manifest",
+                # APEX PR-A — the SIGNED presentation block (plain-language impact + standards chips + exact
+                # remediation). Projected through this SAME allowlist, but ONLY while VIGIL_APEX_PRESENTATION is
+                # on (see ``_finding_json``), so the flag-off findings read is byte-identical (a presentation-
+                # bearing cert is never surfaced). It is additive SIGNED data that rides the per-finding tenant-
+                # scoped projection, so a cross-tenant presentation can never leak, and is purely descriptive —
+                # never read for any verdict.
+                "presentation")
 
 # NTF-3: the settle-drain's tenant-scoped assessment-outcome projection (``sigil.inbound.completion_spool``).
 _OUTCOME_KIND = "assessment_outcome"
@@ -72,14 +79,26 @@ def _org_slug_set(store, org_id: str, *, now: float) -> set[str]:
     return {_customer_slug(org_id, h) for h in hosts}
 
 
+def _presentation_on() -> bool:
+    """True iff the APEX PR-A presentation spine is armed (``config.presentation_enabled``). Read at projection
+    time; process-static in practice (a deploy-time env flag), so the fold index + the scan path agree."""
+    from .. import config
+    return config.presentation_enabled()
+
+
 def _finding_json(payload: dict, cert: dict) -> dict[str, Any]:
     out: dict[str, Any] = {"engagement_slug": cert.get("engagement_slug")}
     # finding_ref/oracle_context_digest live at the spine payload top level too (receiver mirrors them); prefer
     # the cert value, fall back to the payload, so the projection is robust to either carrier.
+    present = _presentation_on()
     for f in _CERT_FIELDS:
+        if f == "presentation" and not present:
+            continue                 # flag OFF -> presentation is never surfaced (the read stays byte-identical)
         v = cert.get(f, payload.get(f))
         if v is not None:
-            out[f] = v
+            # deep-copy the presentation block: it is a nested dict read by reference from the spine record, and
+            # the scan path returns these rows directly (no later copy), so a caller must never alias the record.
+            out[f] = copy.deepcopy(v) if f == "presentation" else v
     return out
 
 
@@ -160,6 +179,22 @@ def _all_finding_rows(store, slug_set) -> "list[tuple[int, dict]]":
             continue
         rows.append((int(getattr(r, "seq", 0)), _finding_json(p, cert)))
     return rows
+
+
+def all_findings_for_org(store, org_id: str, *, now: float) -> "list[dict[str, Any]]":
+    """Every oracle-confirmed finding (projected, newest-first) for ONE org's authorized assessments — the
+    COMPLETE tenant-scoped set, UNPAGINATED, for a whole-tenant aggregate such as the APEX PR-A posture score.
+    Tenant-scoped identically to :func:`assessment_findings` (the IDOR class — another tenant's finding is
+    STRUCTURALLY never returned, because the slug set is the org's OWN server-derived set from its current
+    ownership proofs, and ``_customer_slug`` is a one-way hash of ``org_id\\x00host``). Every row is a proven
+    finding (it carries a certificate with an engagement slug in the org's set). PURE read; assumes the caller
+    already authorized ``org_id`` for ``view_assessments``."""
+    slug_set = _org_slug_set(store, org_id, now=now)
+    if not slug_set:                                    # no proven hosts -> no slugs -> no findings (fail-closed)
+        return []
+    rows = _all_finding_rows(store, slug_set)
+    rows.sort(key=lambda t: t[0], reverse=True)         # newest-first by spine seq
+    return [j for _s, j in rows]
 
 
 def _preview_findings(store, org_id: str, *, now: float, limit: int, can_buy: bool) -> dict[str, Any]:
