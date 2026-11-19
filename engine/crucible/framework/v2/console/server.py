@@ -1183,7 +1183,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 elif path == "/api/folder/delete":
                     # Never deletes a session: members are unfiled first (see sessions.delete_folder).
                     self._json(sessions.delete_folder(str(body.get("id", ""))))
-                else:
+                elif path == "/api/session/folder":
                     # /api/session/folder — file, move, or unfile (an empty folder_id unfiles).
                     self._json(sessions.set_session_folder(str(body.get("id", "")),
                                                            str(body.get("folder_id", ""))))

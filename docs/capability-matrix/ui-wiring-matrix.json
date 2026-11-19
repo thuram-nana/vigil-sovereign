@@ -307,14 +307,14 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 201,
+    "routes": 206,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 29,
       "pending": 0,
-      "ui-driven": 172
+      "ui-driven": 177
     },
-    "ui_calls": 166
+    "ui_calls": 171
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -1247,6 +1247,38 @@
     },
     {
       "kind": "exact",
+      "method": "POST",
+      "path": "/api/folder/create",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/folder/delete",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/folder/rename",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/folders",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
       "method": "GET",
       "path": "/api/governance",
       "plane": "offense-console",
@@ -1609,6 +1641,14 @@
       "kind": "exact",
       "method": "POST",
       "path": "/api/session/disconnect",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/session/folder",
       "plane": "offense-console",
       "reason": "",
       "status": "ui-driven"
@@ -2251,6 +2291,26 @@
       "plane": "offense-console"
     },
     {
+      "method": "POST",
+      "path": "/api/folder/create",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/folder/delete",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/folder/rename",
+      "plane": "offense-console"
+    },
+    {
+      "method": "GET",
+      "path": "/api/folders",
+      "plane": "offense-console"
+    },
+    {
       "method": "GET",
       "path": "/api/governance",
       "plane": "offense-console"
@@ -2468,6 +2528,11 @@
     {
       "method": "POST",
       "path": "/api/session/disconnect",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/session/folder",
       "plane": "offense-console"
     },
     {
