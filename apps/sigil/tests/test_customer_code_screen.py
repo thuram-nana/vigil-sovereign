@@ -96,7 +96,8 @@ _STEP_UP_SAID = ("For your security, this change needs a fresh second-factor che
 @pytest.fixture(autouse=True)
 def _no_flags(monkeypatch):
     for var in (FLAG, SLUG, "VIGIL_CUSTOMER_STEPUP_REQUIRED", "VIGIL_GITHUB_APP_ID", "VIGIL_GITHUB_APP_PRIVATE_KEY",
-                "VIGIL_GITHUB_APP_PRIVATE_KEY_SSM", "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "VIGIL_TRIAL_PREVIEW_ENABLED"):
+                "VIGIL_GITHUB_APP_PRIVATE_KEY_SSM", "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "VIGIL_TRIAL_PREVIEW_ENABLED",
+                "VIGIL_CUSTOMER_FIX_IT"):   # PR-K dispatch is default-off; keep these tests on the inert "coming" path
         monkeypatch.delenv(var, raising=False)
 
 
