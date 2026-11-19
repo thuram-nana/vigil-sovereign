@@ -2,8 +2,8 @@
 W16-4 — the run tells the truth about its OWN check-corpus coverage.
 
 The default scan/engage exercises only the built-in seed roster (``DEFAULT_CHECKS``,
-11 point checks); the far larger declarative library (``scanner.library``, ~172 checks
-across 23 bug classes) runs ONLY under ``--library`` (``use_library=True``), and the
+11 point checks); the far larger declarative library (``scanner.library``, ~181 checks
+across 24 bug classes) runs ONLY under ``--library`` (``use_library=True``), and the
 TIMING oracle fires only there. Before this slice a run said NOTHING about that gap — a
 claim-honesty hole where a default scan could be mistaken for comprehensive.
 
