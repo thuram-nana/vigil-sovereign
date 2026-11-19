@@ -576,17 +576,18 @@
       "w16_issue": null
     },
     {
-      "id": "LIMIT-sso-scim-http-edge-unwired",
-      "title": "The SSO/SCIM public HTTP edge is a documented owner-deploy seam, not wired in this slice",
-      "summary": "PR-H ships the complete, tested SSO/SCIM provisioning logic — SAML/OIDC identity verification, SCIM membership provisioning, the absolute owner-signed role ceiling (SCIM/SAML can only provision viewer/analyst/org_admin, never founder/owner), and org-scoping. The public IdP-callable HTTP edge (a SAML ACS POST, an enterprise-OIDC callback, a bearer-authenticated SCIM endpoint), the provisioner dispatch, and the vetted XML-DSig backend are a deliberately specified owner-deploy seam, not wired in this slice. SSO is therefore not end-to-end usable until the edge is wired (Wave-2) and the backend provisioned; the security-bearing logic is complete and fails closed without them.",
+      "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
+      "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
+      "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
       "classification": "real-unfinished-code",
       "severity": "info",
       "anchor": {
-        "file": "apps/sigil/sigil/ui/scim.py"
+        "file": "apps/sigil/sigil/ui/saml.py",
+        "symbol": "signxml_sig_verifier"
       },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "apps/sigil/sigil/ui/scim.py",
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/ui/saml.py",
       "disposition": "file-into-w16",
       "w16_issue": null
     }
@@ -825,20 +826,6 @@
       "snippet": "Not wired by the factory yet",
       "kind": "non-debt",
       "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
-    },
-    {
-      "file": "apps/sigil/sigil/ui/scim.py",
-      "snippet": "intentionally NOT wired in this slice",
-      "kind": "debt",
-      "limit_id": "LIMIT-sso-scim-http-edge-unwired",
-      "note": "INTEGRATION SEAM docstring: the SSO/SCIM public HTTP transport is a deliberate owner-deploy seam; the provisioner-callable composition API is complete and tested."
-    },
-    {
-      "file": "apps/sigil/sigil/ui/scim.py",
-      "snippet": "an honest, specified seam rather than wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-sso-scim-http-edge-unwired",
-      "note": "Closing line of the same INTEGRATION SEAM docstring: the edge is deliberately left as a specified seam; the security-bearing logic (verification, role ceiling, org-scoping) is complete here."
     }
   ]
 }

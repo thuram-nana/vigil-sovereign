@@ -324,8 +324,19 @@ def customer_sso_enabled() -> bool:
     SCIM/SAML/OIDC can provision ONLY `viewer`/`analyst`/`org_admin` — never `operator`/`founder`/`owner` or any
     money/offense authority, which stay owner-signed. SAML signature verification additionally requires a vetted
     XML-DSig backend (`ui.saml.signxml_sig_verifier`); absent it, SAML login fails closed (enterprise-OIDC does
-    not need it)."""
+    not need it). Set the SAME value in customer.env and cockpit.env: the edge serves the routes, the cockpit
+    dispatches the actions (a value on one side only fails closed)."""
     return (os.environ.get("VIGIL_CUSTOMER_SSO") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-H — the provisioner-side SSO/SCIM ledgers (written only while VIGIL_CUSTOMER_SSO is on): the durable
+# single-use SAML assertion-ID ledger (replay guard), the per-(org, client IP) failed-SCIM-authentication limiter
+# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN authenticated writes per org per minute — bounds how
+# fast even a valid token can grow the spine).
+CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
+SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
+SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
+SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 600)
 
 
 # A GitHub App slug is the App's URL name (lower alnum + single hyphens): the ONLY form the public install URL

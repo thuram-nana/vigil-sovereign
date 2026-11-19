@@ -20,9 +20,19 @@ WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion i
   6. RECIPIENT / DESTINATION == the org's `acs_url`.
   7. TIME WINDOWS — Conditions NotBefore/NotOnOrAfter and SubjectConfirmationData NotOnOrAfter, within the
      configured clock skew. A missing NotOnOrAfter is refused (it bounds the replay window).
-  8. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger; a second presentation refuses.
+  8. SP-INITIATED BINDING (when the caller passes `expected_in_response_to`, as the HTTP edge always does) — the
+     SubjectConfirmationData `InResponseTo` (inside the SIGNED assertion) MUST equal the ID of the AuthnRequest
+     this browser's login minted, and the Response's own `InResponseTo`, when present, must too. So an
+     unsolicited (IdP-initiated) response, or a response to ANOTHER login, is refused — the unsigned Response
+     attribute alone is never trusted for this, the signed one is.
+  9. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger; a second presentation refuses.
 
-THE SIGNATURE CRYPTO BACKEND (honest boundary — see module `honest_todo`). Byte-correct XML-DSig verification
+The SP-initiated request side lives here too: `new_request_id` + `build_authn_request` +
+`authn_request_redirect_url` produce the (unsigned) AuthnRequest for the SAML HTTP-Redirect binding — pure
+stdlib (zlib raw DEFLATE + base64), so the keyless edge can mint it without any key.
+
+THE SIGNATURE CRYPTO BACKEND (honest boundary, VIGIL-LIMIT:LIMIT-sso-saml-xmldsig-backend-unprovisioned — an
+owner provisioning step: install a vetted XML-DSig library in the sovereign venv). Byte-correct XML-DSig verification
 needs EXCLUSIVE XML canonicalisation (`xml-exc-c14n#`); Python's stdlib `ElementTree.canonicalize` implements
 only C14N 2.0, and no vetted XML-DSig library (`signxml` / `xmlsec`) is vendored in this environment. Rolling an
 exclusive-c14n by hand — with no trusted conformance vectors to test it against — is exactly the unprovable
@@ -39,14 +49,19 @@ FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix`. Stdlib + `sigil.confi
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import secrets
 import time
+import urllib.parse
 import xml.etree.ElementTree as ET
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
+from xml.sax.saxutils import escape, quoteattr
 
 from ..reuse import assert_no_offense
 
@@ -315,11 +330,13 @@ def _extract_attributes(assertion: ET.Element) -> "tuple[dict, tuple]":
 
 
 def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger: SamlReplayLedger,
-                         sig_verifier: Optional[SigVerifier] = None) -> SamlIdentity:
+                         sig_verifier: Optional[SigVerifier] = None,
+                         expected_in_response_to: Optional[str] = None) -> SamlIdentity:
     """Verify a SAML Response/Assertion against the OWNER-SIGNED `config` (a `governor.sso_config.SsoConfig`,
     protocol=="saml"), returning the verified `SamlIdentity` or raising `SamlError`. Checks run in a
     fail-closed order: harden+parse, structural XSW (single assertion, unique ids), SIGNATURE BINDING, issuer,
-    audience, recipient/destination, time windows, and single-use replay. `sig_verifier` defaults to
+    audience, recipient/destination, time windows, the SP-initiated InResponseTo binding (when
+    `expected_in_response_to` is given), and single-use replay. `sig_verifier` defaults to
     `signxml_sig_verifier` (fail-closed without a vetted backend); tests inject a stub that attests signed ids."""
     if config is None or getattr(config, "protocol", None) != "saml":
         raise SamlError("no active SAML config for this org")
@@ -395,6 +412,21 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
         if dest is not None and str(dest) != str(getattr(config, "acs_url", "")):
             raise SamlError("Response Destination does not match our ACS url")
 
+    # --- SP-INITIATED BINDING: the SIGNED SubjectConfirmationData InResponseTo must name OUR AuthnRequest (an
+    # unsolicited / IdP-initiated response, or one answering another login, is refused). The Response attribute
+    # may sit outside the signature, so it is only cross-checked, never relied on.
+    if expected_in_response_to is not None:
+        want = str(expected_in_response_to)
+        if not want:
+            raise SamlError("no AuthnRequest ID to bind this response to (fail-closed)")
+        if str(scd.get("InResponseTo") or "") != want:
+            raise SamlError("assertion InResponseTo does not name this login's AuthnRequest (unsolicited / "
+                            "answers another login)")
+        if root_is_response:
+            rirt = root.get("InResponseTo")
+            if rirt is not None and str(rirt) != want:
+                raise SamlError("Response InResponseTo does not name this login's AuthnRequest")
+
     # --- REPLAY: spend the assertion ID single-use, bounded by the earliest NotOnOrAfter.
     window_end = min(cond_nooa, scd_nooa)
     if not replay_ledger.try_spend(assertion_id, window_end, now=now):
@@ -409,3 +441,57 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
     session_index = (authn.get("SessionIndex") if authn is not None else "") or ""
     return SamlIdentity(name_id=name_id, assertion_id=assertion_id, attributes=attrs, groups=groups,
                         session_index=str(session_index))
+
+
+# ---------------------------------------------------------------------------------------------------
+# SP-initiated login — the AuthnRequest (HTTP-Redirect binding). Keyless: the request is UNSIGNED (the IdP
+# authenticates the person; what binds the answer to this login is the signed InResponseTo checked above).
+# ---------------------------------------------------------------------------------------------------
+
+_BINDING_POST = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
+
+
+def new_request_id() -> str:
+    """A fresh AuthnRequest ID: an xsd:ID (an NCName, so it must not start with a digit — hence the leading
+    underscore) carrying 160 random bits. Single-use: the edge binds it to one login and spends it at the ACS."""
+    return "_" + secrets.token_hex(20)
+
+
+def _instant(epoch: float) -> str:
+    return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def build_authn_request(request_id: str, *, sp_entity_id: str, acs_url: str, idp_sso_url: str,
+                        issue_instant: float) -> bytes:
+    """The SAML 2.0 `<samlp:AuthnRequest>` for one SP-initiated login: our SP entity id as Issuer, our ACS as the
+    response target (HTTP-POST binding), the IdP endpoint as Destination. Every value is attribute-QUOTED /
+    text-escaped, so a config value can never break out of the XML. Fail-closed on a blank field."""
+    for what, v in (("request_id", request_id), ("sp_entity_id", sp_entity_id), ("acs_url", acs_url),
+                    ("idp_sso_url", idp_sso_url)):
+        if not isinstance(v, str) or not v.strip():
+            raise SamlError(f"cannot build an AuthnRequest without {what}")
+    issuer = escape(sp_entity_id)
+    xml = (f'<samlp:AuthnRequest xmlns:samlp="{_NS_PROTO}" xmlns:saml="{_NS_ASSERT}" '
+           f'ID={quoteattr(request_id)} Version="2.0" IssueInstant={quoteattr(_instant(issue_instant))} '
+           f'Destination={quoteattr(idp_sso_url)} AssertionConsumerServiceURL={quoteattr(acs_url)} '
+           f'ProtocolBinding="{_BINDING_POST}">'
+           f'<saml:Issuer>{issuer}</saml:Issuer>'
+           f'<samlp:NameIDPolicy AllowCreate="true"/>'
+           f'</samlp:AuthnRequest>')
+    return xml.encode("utf-8")
+
+
+def authn_request_redirect_url(idp_sso_url: str, authn_request_xml: bytes, relay_state: str) -> str:
+    """The HTTP-Redirect binding URL (SAML Bindings §3.4): `SAMLRequest` = base64(raw DEFLATE(request)) and the
+    opaque `RelayState`, appended to the IdP's sign-in URL. Refuses a non-https IdP URL (the owner-signed config
+    is https-only; this is the keyless edge's own last check before redirecting a browser)."""
+    parts = urllib.parse.urlparse(str(idp_sso_url or ""))
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        raise SamlError("the IdP sign-in URL must be an absolute https URL")
+    if not isinstance(relay_state, str) or not relay_state:
+        raise SamlError("a RelayState is required")
+    comp = zlib.compressobj(9, zlib.DEFLATED, -15)          # raw DEFLATE (no zlib header / adler32), per §3.4.4.1
+    deflated = comp.compress(bytes(authn_request_xml)) + comp.flush()
+    query = urllib.parse.urlencode({"SAMLRequest": base64.b64encode(deflated).decode("ascii"),
+                                    "RelayState": relay_state})
+    return idp_sso_url + ("&" if parts.query else "?") + query

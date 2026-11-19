@@ -141,8 +141,12 @@ def test_scim_get_reconcile(env):
 
 
 def test_scim_unknown_endpoint_404(env):
-    st, _ = _scim(env, "GET", "/scim/v2/Groups", None)
+    st, _ = _scim(env, "GET", "/scim/v2/Bogus", None)
     assert st == 404
+    st, _ = _scim(env, "GET", "/scim/v2/Users/a/b", None)          # a deeper path is no resource either
+    assert st == 404
+    st, body = _scim(env, "GET", "/scim/v2/Groups", None)          # Groups is served (the HTTP-edge slice)
+    assert st == 200 and body["totalResults"] == 0
 
 
 # --- SELF-RED-PEN #1: SCIM-provision a founder / owner ---------------------------------------------
@@ -205,11 +209,37 @@ def _saml_response(aid="s1", aud="https://sp/acme", rcpt="https://app/acs/acme",
 
 def test_sso_login_saml_mints_capped_membership(env):
     orgreg, cfgreg = env
+    cfgreg.disable_scim("acme", issued_at=_issue())         # SCIM off ⇒ just-in-time provisioning at sign-in
     res = uiscim.sso_login_saml(_saml_response(groups=("sec",)), org_id="acme", config_registry=cfgreg,
                                 org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
                                 sig_verifier=lambda b, c: frozenset({"s1"}), issued_at=_issue())
-    assert res.role == "analyst"
+    assert res.role == "analyst" and res.seq is not None
     assert orgreg.membership_role(res.username, "acme") == "analyst"
+
+
+def test_sso_login_saml_scim_managed_org_links_to_the_directory_and_never_jit_provisions(env):
+    orgreg, cfgreg = env                                     # acme's config has SCIM ON ⇒ directory-managed
+    with pytest.raises(SsoLoginError):                       # not pushed by SCIM ⇒ refused, nothing minted
+        uiscim.sso_login_saml(_saml_response(aid="s0", nameid="saml-user"), org_id="acme", config_registry=cfgreg,
+                              org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
+                              sig_verifier=lambda b, c: frozenset({"s0"}), issued_at=_issue())
+    assert [m for m in orgreg.memberships("acme")] == []
+    # the IdP pushes the person (userName == the NameID it asserts) ⇒ sign-in links to that SCIM member
+    st, body = _scim(env, "POST", "/scim/v2/Users",
+                     {"userName": "saml-user", "externalId": "okta-00u1", "groups": [{"value": "sec"}]})
+    assert st == 201
+    res = uiscim.sso_login_saml(_saml_response(aid="s2", nameid="SAML-USER"), org_id="acme", config_registry=cfgreg,
+                                org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
+                                sig_verifier=lambda b, c: frozenset({"s2"}), issued_at=_issue())
+    assert res.username == body["id"] and res.role == "analyst" and res.seq is None   # linked, nothing minted
+    # deactivated in the directory ⇒ a still-valid assertion can never sign them back in
+    _scim(env, "PATCH", f"/scim/v2/Users/{body['id']}", {"Operations": [{"op": "replace", "path": "active",
+                                                                        "value": "False"}]})
+    with pytest.raises(SsoLoginError):
+        uiscim.sso_login_saml(_saml_response(aid="s3", nameid="saml-user"), org_id="acme", config_registry=cfgreg,
+                              org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
+                              sig_verifier=lambda b, c: frozenset({"s3"}), issued_at=_issue())
+    assert orgreg.membership_role(body["id"], "acme") is None
 
 
 def test_redpen_forged_saml_assertion_refused(env):

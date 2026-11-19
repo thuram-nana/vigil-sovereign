@@ -28,6 +28,13 @@ fingerprint it carries are THIS org's. So one org's SSO can never authenticate i
 audience is org A's SP entity-id fails org B's audience check; a SCIM token's fingerprint is in exactly one
 org's config; and provisioning always targets `config.org_id`, never a client-supplied org.
 
+CROSS-ORG EXCLUSIVITY (what makes "exactly one org" true rather than assumed): the identifiers that scope a proof
+to ONE org — the SAML audience (`sp_entity_id`), the enterprise-OIDC client (`oidc_issuer` + `oidc_client_id`)
+and the SCIM bearer fingerprint — are EXCLUSIVE across active configs, enforced twice: an owner signing a config
+that would share one with ANOTHER org's active config is refused (`_refuse_cross_org_clash`), and the fold makes
+EVERY config that shares one inert (`_drop_ambiguous`), so a hand-crafted or legacy collision fails CLOSED for
+both orgs instead of letting one org's assertion / id_token / bearer provision into the other.
+
 TRUST CONSTRUCTION (mirrors `governor.orgs` / `accounts` EXACTLY — this is NOT a new key custody):
   * `set_config` = the DANGEROUS direction — honored only if OWNER-SIGNED (`verify_signed`) AND its `issued_at`
     STRICTLY exceeds the per-org high-water (anti-replay / anti-rollback of a rotated cert/token/map).
@@ -49,7 +56,9 @@ money/offense authority is never at risk from it. The SSO/SCIM flag is OFF by de
 """
 from __future__ import annotations
 
+import math
 import re
+import secrets
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -115,11 +124,13 @@ _KNOWN_OIDC_ALGS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS51
 
 # The authenticated CORE of a config grant — EVERY security-bearing field is inside it, so an owner-signed
 # config can never be re-aimed (org_id), re-protocoled, re-pointed at another IdP (idp_entity_id / certs /
-# issuer / jwks_uri), re-audienced (sp_entity_id / acs_url), re-mapped (default_role / group_role_map /
-# role_cap) or have its SCIM token swapped (scim_token_fp) without breaking the signature. `issued_at` is inside
-# it (else a captured grant's freshness could be re-stamped past the high-water without breaking the sig).
+# idp_sso_url / issuer / jwks_uri), re-audienced (sp_entity_id / acs_url), re-mapped (default_role /
+# group_role_map / role_cap) or have its SCIM token swapped (scim_token_fp) without breaking the signature.
+# `issued_at` is inside it (else a captured grant's freshness could be re-stamped past the high-water without
+# breaking the sig). `idp_sso_url` is where the SP-initiated login sends the person's browser — signed so it can
+# never be re-pointed at a look-alike sign-in page.
 _CONFIG_CORE = ("signal", "org_id", "protocol", "state", "issued_at", "idp_entity_id", "idp_certs_pem",
-                "sp_entity_id", "acs_url", "oidc_issuer", "oidc_client_id", "oidc_jwks_uri",
+                "idp_sso_url", "sp_entity_id", "acs_url", "oidc_issuer", "oidc_client_id", "oidc_jwks_uri",
                 "oidc_authorize_endpoint", "oidc_token_endpoint", "oidc_redirect_uri", "oidc_signing_algs",
                 "oidc_egress_hosts", "default_role", "group_role_map", "role_cap", "scim_enabled",
                 "scim_token_fp", "clock_skew_seconds")
@@ -247,6 +258,61 @@ def token_fingerprint(token: str) -> str:
     return sha256_hex(str(token or "").encode("utf-8"))
 
 
+def _after(highwater: float, issued_at: float) -> float:
+    """`issued_at`, bumped just past `highwater` when it is not already above it — a re-signed config must
+    STRICTLY exceed the org's high-water or the fold ignores it (a silently inert rotation is the failure here)."""
+    at = float(issued_at)
+    return at if at > float(highwater) else math.nextafter(float(highwater), math.inf)
+
+
+def _core_from_config(cfg: "SsoConfig", *, issued_at: float, **overrides) -> dict:
+    """The full authenticated core of an ACTIVE config rebuilt from a folded (already re-validated) `SsoConfig`,
+    with `overrides` applied — used to re-sign the same config with a rotated / removed SCIM token. A lockstep
+    test asserts its keys are exactly `_CONFIG_CORE`, so a new core field cannot be silently dropped here."""
+    core = {
+        "signal": SSO_CONFIG_SIGNAL, "org_id": cfg.org_id, "protocol": cfg.protocol, "state": "active",
+        "issued_at": float(issued_at), "idp_entity_id": cfg.idp_entity_id, "idp_certs_pem": list(cfg.idp_certs_pem),
+        "idp_sso_url": cfg.idp_sso_url, "sp_entity_id": cfg.sp_entity_id, "acs_url": cfg.acs_url,
+        "oidc_issuer": cfg.oidc_issuer, "oidc_client_id": cfg.oidc_client_id, "oidc_jwks_uri": cfg.oidc_jwks_uri,
+        "oidc_authorize_endpoint": cfg.oidc_authorize_endpoint, "oidc_token_endpoint": cfg.oidc_token_endpoint,
+        "oidc_redirect_uri": cfg.oidc_redirect_uri, "oidc_signing_algs": list(cfg.oidc_signing_algs),
+        "oidc_egress_hosts": list(cfg.oidc_egress_hosts), "default_role": cfg.default_role,
+        "group_role_map": dict(cfg.group_role_map), "role_cap": cfg.role_cap,
+        "clock_skew_seconds": int(cfg.clock_skew_seconds), "scim_enabled": bool(cfg.scim_enabled),
+        "scim_token_fp": cfg.scim_token_fp,
+    }
+    unknown = set(overrides) - set(_CONFIG_CORE)
+    if unknown:
+        raise SsoConfigError(f"unknown config field(s) {sorted(unknown)}")
+    core.update(overrides)
+    return core
+
+
+def _exclusive_keys(cfg: "SsoConfig") -> "set[tuple]":
+    """The identifiers that scope a proof to ONE org, which no two orgs' active configs may share: the SAML
+    audience (`sp_entity_id`), the enterprise-OIDC client (issuer + client id — the id_token `aud`) and the SCIM
+    bearer fingerprint (whenever one is stored, SCIM on or off)."""
+    keys: "set[tuple]" = set()
+    if cfg.protocol == "saml" and cfg.sp_entity_id:
+        keys.add(("saml-audience", cfg.sp_entity_id))
+    if cfg.protocol == "oidc" and cfg.oidc_client_id:
+        keys.add(("oidc-client", cfg.oidc_issuer, cfg.oidc_client_id))
+    if cfg.scim_token_fp:
+        keys.add(("scim-token", cfg.scim_token_fp))
+    return keys
+
+
+def _drop_ambiguous(active: "dict[str, SsoConfig]") -> "dict[str, SsoConfig]":
+    """The active configs minus EVERY one that shares an exclusive identifier with another org's (fail-closed for
+    all of them: an ambiguous audience / client / bearer authenticates into NO org rather than the wrong one)."""
+    holders: "dict[tuple, set[str]]" = {}
+    for oid, cfg in active.items():
+        for key in _exclusive_keys(cfg):
+            holders.setdefault(key, set()).add(oid)
+    shared = {oid for orgs in holders.values() if len(orgs) > 1 for oid in orgs}
+    return {oid: cfg for oid, cfg in active.items() if oid not in shared}
+
+
 # ---------------------------------------------------------------------------------------------------
 # Entity
 # ---------------------------------------------------------------------------------------------------
@@ -260,6 +326,7 @@ class SsoConfig:
     # --- SAML ---
     idp_entity_id: str = ""           # the expected <Issuer> of an assertion
     idp_certs_pem: tuple = ()         # the IdP's X.509 signing cert(s) (PEM), rotation overlap allowed
+    idp_sso_url: str = ""             # the IdP SingleSignOnService (HTTP-Redirect) URL the SP-initiated login uses
     sp_entity_id: str = ""            # our SP entity-id == the required <Audience> (org-scoping)
     acs_url: str = ""                 # our ACS URL == the required Recipient / Destination
     # --- OIDC (enterprise; PKCE public client — no client secret in the signed config) ---
@@ -330,9 +397,12 @@ def _config_from_payload(p: dict, issued_at: float) -> Optional[SsoConfig]:
         group_map = _check_group_role_map(p.get("group_role_map"), role_cap)
         algs = tuple(a for a in (str(x).strip().upper() for x in _as_tuple(p.get("oidc_signing_algs")))
                      if a in _KNOWN_OIDC_ALGS)
+        # re-validated (defence in depth): the browser is redirected here, so a hand-crafted signed record
+        # carrying a non-https / malformed sign-in URL is inert rather than followed.
+        idp_sso_url = _check_https_or_http_url(p.get("idp_sso_url"), "idp_sso_url", required=False)
         return SsoConfig(
             org_id=str(p["org_id"]), protocol=protocol, issued_at=issued_at, state="active",
-            idp_entity_id=str(p.get("idp_entity_id") or ""), idp_certs_pem=certs,
+            idp_entity_id=str(p.get("idp_entity_id") or ""), idp_certs_pem=certs, idp_sso_url=idp_sso_url,
             sp_entity_id=str(p.get("sp_entity_id") or ""), acs_url=str(p.get("acs_url") or ""),
             oidc_issuer=str(p.get("oidc_issuer") or ""), oidc_client_id=str(p.get("oidc_client_id") or ""),
             oidc_jwks_uri=str(p.get("oidc_jwks_uri") or ""),
@@ -376,12 +446,14 @@ class SsoConfigRegistry:
 
     # -- owner mutations --------------------------------------------------------------------------------
     def set_saml_config(self, org_id: str, *, idp_entity_id: str, idp_certs_pem, sp_entity_id: str, acs_url: str,
-                        default_role: str = "viewer", group_role_map: Optional[dict] = None,
+                        idp_sso_url: str = "", default_role: str = "viewer", group_role_map: Optional[dict] = None,
                         role_cap: str = "org_admin", clock_skew_seconds: int = 60, scim_enabled: bool = False,
                         scim_token: str = "", issued_at: float) -> int:
         """Owner-sign an active SAML SSO config for `org_id` — the DANGEROUS direction (verifies + fresh). Every
         role (default_role, role_cap, each group_role_map value) passes the CEILING gate; each cert must parse as
-        X.509. If `scim_token` is given its FINGERPRINT (never the token) is stored. Returns the record seq."""
+        X.509. If `scim_token` is given its FINGERPRINT (never the token) is stored. `idp_sso_url` (https) is the
+        IdP sign-in endpoint the SP-initiated login redirects to; without it SAML sign-in fails closed (no
+        AuthnRequest can be issued, and the ACS accepts only responses to one). Returns the record seq."""
         if self.owner_key is None:
             raise SsoConfigError("SSO config requires the owner signing key")
         oid = _check_org_id(org_id)
@@ -399,6 +471,7 @@ class SsoConfigRegistry:
             "issued_at": float(issued_at),
             "idp_entity_id": _check_str(idp_entity_id, "idp_entity_id", required=True),
             "idp_certs_pem": list(certs),
+            "idp_sso_url": _check_https_or_http_url(idp_sso_url, "idp_sso_url", required=False),
             "sp_entity_id": _check_str(sp_entity_id, "sp_entity_id", required=True),
             "acs_url": _check_https_or_http_url(acs_url, "acs_url", required=True, allow_http=True),
             "oidc_issuer": "", "oidc_client_id": "", "oidc_jwks_uri": "", "oidc_authorize_endpoint": "",
@@ -437,7 +510,7 @@ class SsoConfigRegistry:
         core = {
             "signal": SSO_CONFIG_SIGNAL, "org_id": oid, "protocol": "oidc", "state": "active",
             "issued_at": float(issued_at),
-            "idp_entity_id": "", "idp_certs_pem": [], "sp_entity_id": "", "acs_url": "",
+            "idp_entity_id": "", "idp_certs_pem": [], "idp_sso_url": "", "sp_entity_id": "", "acs_url": "",
             "oidc_issuer": _check_str(issuer, "oidc issuer", required=True),
             "oidc_client_id": _check_str(client_id, "oidc client_id", required=True),
             "oidc_jwks_uri": _check_https_or_http_url(jwks_uri, "oidc jwks_uri", required=True),
@@ -469,14 +542,67 @@ class SsoConfigRegistry:
                    "tier": "A0", "decision": "auto", "reason": f"SSO config for org {oid} REVOKED (governed latch)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def rotate_scim_token(self, org_id: str, *, issued_at: float,
+                          token: Optional[str] = None) -> "tuple[int, str]":
+        """Owner-sign a FRESH SCIM bearer for `org_id`'s ACTIVE config — the per-org ROTATABLE bearer. The current
+        config is re-signed unchanged except `scim_enabled=True` and the new token's FINGERPRINT (the plaintext is
+        never stored; it is returned ONCE for the owner to hand to the IdP). The previous token stops
+        authenticating the moment this record lands (the config is LWW; only the latest fingerprint matches).
+        `token` defaults to 256 random bits (`secrets.token_urlsafe(32)`); a supplied one must be >= 32 chars.
+        Fail-closed: no owner key / no active config refuses. Returns (seq, token)."""
+        if self.owner_key is None:
+            raise SsoConfigError("SCIM token rotation requires the owner signing key")
+        cfg = self.config(_check_org_id(org_id))
+        if cfg is None:
+            raise SsoConfigError(f"no active SSO config for org {org_id!r} (owner-sign one first)")
+        tok = str(token) if token is not None else secrets.token_urlsafe(32)
+        if len(tok) < 32 or any(ord(c) <= 0x20 or ord(c) == 0x7f for c in tok):
+            raise SsoConfigError("a SCIM bearer token must be at least 32 printable, non-space characters")
+        core = _core_from_config(cfg, issued_at=_after(cfg.issued_at, issued_at), scim_enabled=True,
+                                 scim_token_fp=token_fingerprint(tok))
+        return self._append_active(core), tok
+
+    def disable_scim(self, org_id: str, *, issued_at: float) -> int:
+        """Owner-sign `org_id`'s ACTIVE config with SCIM OFF (`scim_enabled=False`, no token fingerprint) — every
+        SCIM request for the org then fails closed (401) while SSO sign-in keeps working. Returns the seq."""
+        if self.owner_key is None:
+            raise SsoConfigError("disabling SCIM requires the owner signing key")
+        cfg = self.config(_check_org_id(org_id))
+        if cfg is None:
+            raise SsoConfigError(f"no active SSO config for org {org_id!r}")
+        core = _core_from_config(cfg, issued_at=_after(cfg.issued_at, issued_at), scim_enabled=False,
+                                 scim_token_fp="")
+        return self._append_active(core)
+
     def _append_active(self, core: dict) -> int:
+        self._refuse_cross_org_clash(core)
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"SSO config for org {core['org_id']} set ({core['protocol']}, owner-signed grant)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def _refuse_cross_org_clash(self, core: dict) -> None:
+        """Refuse to sign a config that would SHARE an exclusive identifier (SAML audience, OIDC issuer + client,
+        SCIM bearer fingerprint) with ANOTHER org's active config — the sign-time half of cross-org exclusivity (the
+        fold's `_drop_ambiguous` is the other). The message names the clashing org, never a fingerprint."""
+        new = _config_from_payload(core, float(core.get("issued_at") or 0.0))
+        if new is None:
+            raise SsoConfigError("the SSO config does not validate")
+        mine = _exclusive_keys(new)
+        for other in self._fold_active().values():
+            if other.org_id == new.org_id:
+                continue
+            clash = sorted(mine & _exclusive_keys(other))
+            if clash:
+                what = {"saml-audience": "this SAML SP entity id (the audience)",
+                        "oidc-client": "this OIDC issuer + client id",
+                        "scim-token": "this SCIM bearer token"}[clash[0][0]]
+                raise SsoConfigError(f"{what} already belongs to org {other.org_id!r}; every organization needs "
+                                     f"its own (else one org's sign-in or SCIM token could reach the other)")
+
     # -- reads (owner-key-succession-aware full genesis fold; see HARD-PRUNE RESIDUAL note) -------------
-    def _fold(self) -> dict[str, SsoConfig]:
+    def _fold_active(self) -> dict[str, SsoConfig]:
+        """Every org's current ACTIVE config, BEFORE the cross-org exclusivity filter (`_fold`)."""
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: dict[str, str] = {}
         issued: dict[str, float] = {}
@@ -484,6 +610,9 @@ class SsoConfigRegistry:
         for r in self.store.iter_records():
             _apply_config_record(r, resolver, state, issued, configs)
         return {o: c for o, c in configs.items() if state.get(o) == "active"}
+
+    def _fold(self) -> dict[str, SsoConfig]:
+        return _drop_ambiguous(self._fold_active())
 
     def config(self, org_id: str) -> Optional[SsoConfig]:
         """The current active `SsoConfig` for `org_id`, or None (fail-closed — unknown/revoked treated as

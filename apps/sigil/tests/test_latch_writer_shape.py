@@ -233,6 +233,8 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "seam_migrate.py",                # the owner-signed seam-migration audit record (its own signal, no latch)
     "governor/sso_config.py",         # PR-H: owner-signed per-org SSO/SCIM config registry (its own literal signal
     #                                   governor.sso_config; mirrors orgs/accounts key custody, re-enforced at mint)
+    "governor/scim_directory.py",     # PR-H edge: owner-signed per-org SCIM directory (users/groups/edges; its own
+    #                                   literal signal governor.scim_directory; bookkeeping only — no latch, no grant)
 })
 
 # Appends whose kind or source is not a literal: each is reviewed — none can write `kind="event"` with

@@ -33,6 +33,7 @@ FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix` (`assert_no_offense()`
 from __future__ import annotations
 
 import hmac
+import math
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -205,13 +206,21 @@ def provision_membership(org_reg: OrgRegistry, config: SsoConfig, *, username: s
 
     This is the ONLY path SSO/SCIM mints a membership, and it is structurally incapable of granting a non-ceiling
     role (refusal #3). `org_reg` holds the owner key (the single owner-key custody is unchanged — this adds no new
-    signer)."""
+    signer).
+
+    FRESHNESS: the membership fold honors a grant only if its `issued_at` STRICTLY exceeds the member's current
+    grant, so a stale `issued_at` would append a record the fold silently ignores (a "successful" provisioning
+    that grants nothing). The issued_at is therefore bumped just past the member's current grant when needed."""
     role = _assert_ceiling(role)                          # refusal #2 — never passes a non-ceiling role onward
     u = str(username or "").strip()
     if not u:
         raise ScimError("provision_membership requires a username")
+    at = float(issued_at)
+    cur = next((m.issued_at for m in org_reg.memberships(config.org_id) if m.username == u), None)
+    if cur is not None and at <= float(cur):
+        at = math.nextafter(float(cur), math.inf)
     try:
-        return org_reg.grant_membership(config.org_id, u, role, issued_at=float(issued_at))
+        return org_reg.grant_membership(config.org_id, u, role, issued_at=at)
     except ValueError as e:
         # grant_membership fails closed on an absent/revoked org or a bad username (e.g. an SSO config outlived
         # its org). Surface it as a clean ScimError so the SCIM/SSO caller returns a 4xx, never a 500.
