@@ -55,6 +55,7 @@ page, and no dead button.
 | Assessments | `#/assessments` | Launch (Quick / Deep, no number), Pause on a running assessment, View findings | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` a real run |
 | Team | `#/team` | Add member, Change role, Remove; the founder's row read-only | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
 | Monitoring (AEGIS) | `#/monitoring` | Turn on Observe / Respond, Switch to Respond, Turn off | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` real traffic through the gateway |
+| Attack path | `#/attack-path` | the SVG narrative of how proven findings chain into impact, each node a confirmed step; View findings (Area 11, behind `VIGIL_CUSTOMER_ATTACK_PATH`) | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
 | Guide | `#/guide` | the whole-app guide; Replay the welcome tour | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
 | Top bar | every tab | each tab, clicked, lands on a real route showing that route's screen | `AUTOMATED` `test_every_top_bar_tab_clicked_lands_on_its_own_screen` |
 

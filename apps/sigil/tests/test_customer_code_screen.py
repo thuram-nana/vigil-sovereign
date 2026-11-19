@@ -130,7 +130,7 @@ _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogle
           "viewSecurityScreen")
 # Every page flag the extracted code may reference, off. CODE_ON is then re-read from the page by app.js's own line.
 _FLAGS_OFF = ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-              "LAUNCH_ON = false, CODE_ON = false;")
+              "LAUNCH_ON = false, CODE_ON = false, ATTACK_PATH_ON = false, BLIND_VULN_ON = false;")
 
 
 def _wiring(flag: str, script: str) -> dict:

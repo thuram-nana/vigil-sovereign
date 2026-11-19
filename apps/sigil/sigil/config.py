@@ -315,6 +315,35 @@ def presentation_enabled() -> bool:
     return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_attack_path_enabled() -> bool:
+    """True iff the customer Attack-path storytelling screen is ON (`VIGIL_CUSTOMER_ATTACK_PATH` affirmative). OFF
+    by default (Area 11 UI): with it off the ``#/attack-path`` SPA route is the home screen (exactly as an unknown
+    route), no nav link is shown, the page's ``__VIGIL_ATTACK_PATH__`` switch is "0", and the sovereign findings
+    projection NEVER surfaces the inert ``attack_path`` cert field — so the server is byte-identical to a build
+    without the feature.
+
+    PURE PRESENTATION: ``attack_path`` is additive, purely-descriptive signed DATA that rides the EXISTING
+    tenant-scoped finding projection (``assessments._finding_json``); it restates oracles that already fired for
+    the org's OWN proven findings, is NEVER read for any verdict, and can promote nothing. The screen only draws
+    a chain the signed data already established — it invents no finding and asserts no impact the cert did not.
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ATTACK_PATH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_blind_vuln_enabled() -> bool:
+    """True iff the customer blind-vulnerability (out-of-band) confirmation badge is ON (`VIGIL_CUSTOMER_BLIND_VULN`
+    affirmative). OFF by default (Area 11 UI): with it off the finding card renders byte-identically (no badge),
+    the page's ``__VIGIL_BLIND_VULN__`` switch is "0", and the sovereign findings projection NEVER surfaces the
+    inert ``oob_attestation`` cert field — so the server is byte-identical to a build without the feature.
+
+    PURE PRESENTATION: ``oob_attestation`` is the EXISTING signed, independent out-of-band callback receipt
+    (pinned-collector-key attested) carried on the finding cert as inert DATA. The badge only SURFACES that a
+    proven finding was confirmed out of band (a vuln with no visible response); it re-verifies nothing, promotes
+    nothing, and is shown ONLY when the signed attestation is present — absence is never rendered as "clean".
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_BLIND_VULN") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_assistant_enabled() -> bool:
     """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
     (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
