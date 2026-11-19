@@ -22,16 +22,25 @@ framework-specific and requires the VIGIL verifier
 (``python -m framework.v2 evidence verify`` / ``pcf-verify``). Authenticity, binding, integrity, and
 chain are fully checkable here; reproduction is the one layer that needs VIGIL. See README.md.
 
+The ``finding`` mode (SPEC §8) checks ONE signed finding record — the single-finding bundle a VIGIL
+customer downloads for one finding: the fingerprint pin, the m-of-n authenticity of that one
+certificate, the no-lying-wrapper fields of the bundle, and the certificate's own FACT provenance. Its
+binding and artifact layers are checked only when their inputs are supplied (``--oracle-context`` /
+``--evidence-root``), and it says so, layer by layer, in its output; a single-finding bundle carries no
+engagement chain, so the chain layer is the ``bundle`` mode's.
+
 Verification only — this file contains no offensive capability. It never writes (except an optional
 anti-rollback high-water file), never phones home, and is deterministic.
 
 Usage:
-    verify_pcf.py bundle --bundle DIR --trust-root-fingerprint sha256:<hex>
+    verify_pcf.py bundle  --bundle DIR --trust-root-fingerprint sha256:<hex>
                   [--report reverifiable.json] [--evidence-root evidence] [--highwater FILE]
-    verify_pcf.py pcf    --pcf pcf.json --trust-root trust-root.json
+    verify_pcf.py pcf     --pcf pcf.json --trust-root trust-root.json
                   [--trust-root-fingerprint sha256:<hex>] [--evidence-root DIR]
+    verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint sha256:<hex>
+                  [--oracle-context oracle-context.json] [--evidence-root DIR]
 
-Exit 0 iff SOUND; 2 if NOT SOUND; 3 on a usage / I/O error.
+Exit 0 iff SOUND (``finding``: VERIFIED); 2 if NOT SOUND / NOT VERIFIED; 3 on a usage / I/O error.
 """
 
 from __future__ import annotations
@@ -489,7 +498,155 @@ def verify_pcf_cert(pcf: dict, trust_root: dict, *, pin: str = "",
 
 
 # ---------------------------------------------------------------------------
-# 7. CLI
+# 7. Single signed-finding bundle (SPEC §8): ONE SignedEvidence + its trust root
+# ---------------------------------------------------------------------------
+FINDING_BUNDLE_FORMAT = "vigil.pcf-finding-bundle/1"
+# The oracle_context provenance values that may back a FACT (SPEC §8.3). A certificate whose SIGNED
+# ``provenance`` member is present and outside this set declares a non-FACT context (e.g. "llm").
+_FACT_PROVENANCE = ("reproduced", "live_redrive")
+_HEX64 = "0123456789abcdef"
+
+
+def _is_hex64(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(ch in _HEX64 for ch in value)
+
+
+def verify_finding_bundle(bundle: Any, *, pin: str = "", oracle_context: Any = None,
+                          evidence_root: Path | None = None) -> tuple[bool, list[str]]:
+    """Verify ONE signed finding record (a ``vigil.pcf-finding-bundle/1`` document, SPEC §8).
+
+    Always checked (each one fails the bundle closed):
+      * shape        — the format tag, a certificate object, a non-empty signature list, a trust root;
+      * fingerprint  — the trust root matches the out-of-band pin (and the bundle's own convenience copy
+                       of the fingerprint, when present, matches the computed one);
+      * faithful     — the bundle's ``cert_digest`` / ``finding_ref`` (when present) equal the signed
+                       certificate's own values (no lying wrapper);
+      * authentic    — m-of-n Ed25519 over ``crucible-evidence-v1\\0`` + the canonical certificate;
+      * provenance   — the certificate does not declare a non-FACT oracle_context provenance.
+    Checked only when the input is supplied (and reported NOT CHECKED otherwise):
+      * bound        — ``oracle_context`` re-hashes to the signed ``oracle_context_digest``;
+      * artifacts    — each declared raw file re-hashes under ``evidence_root``.
+    Never checked here: reproduction (needs the VIGIL verifier) and the engagement chain (a
+    single-finding bundle carries none — that is the ``bundle`` mode's layer).
+
+    Returns ``(verified, log)``; ``verified`` is True iff every always-checked layer and every supplied
+    optional layer passed. A hostile shape no layer anticipates (an unhashable key id, a non-numeric
+    threshold, ...) is a refusal like any other — ``False`` and ``finding NOT VERIFIED`` — never a crash."""
+    log: list[str] = []
+    try:
+        return _verify_finding_bundle(bundle, log, pin=pin, oracle_context=oracle_context,
+                                      evidence_root=evidence_root)
+    except Exception as e:  # noqa: BLE001 — fail closed: an unanticipated shape refuses, it never verifies
+        log.append(f"  [BAD] malformed bundle: {type(e).__name__}: {str(e)[:200]}")
+        log.append("finding NOT VERIFIED")
+        return False, log
+
+
+def _verify_finding_bundle(bundle: Any, log: list[str], *, pin: str, oracle_context: Any,
+                           evidence_root: Path | None) -> tuple[bool, list[str]]:
+    def refuse(reason: str) -> tuple[bool, list[str]]:
+        log.append(f"  [BAD] {reason}")
+        log.append("finding NOT VERIFIED")
+        return False, log
+
+    if not isinstance(bundle, dict):
+        return refuse("the bundle is not a JSON object")
+    if bundle.get("format") != FINDING_BUNDLE_FORMAT:
+        return refuse(f"unsupported bundle format {bundle.get('format')!r} (expected {FINDING_BUNDLE_FORMAT!r})")
+    se = bundle.get("signed_evidence")
+    if not isinstance(se, dict):
+        return refuse("signed_evidence must be an object")
+    cert = se.get("certificate")
+    sigs = se.get("signatures")
+    if not isinstance(cert, dict):
+        return refuse("signed_evidence.certificate must be an object")
+    if not isinstance(sigs, list) or not sigs:
+        return refuse("signed_evidence.signatures must be a non-empty list")
+    trust_root = bundle.get("trust_root")
+    if not isinstance(trust_root, dict):
+        return refuse("trust_root must be an object")
+
+    # --- fingerprint pin (the out-of-band anchor), before any crypto ---
+    pin_ok, fp, pin_note = _check_pin(trust_root, pin)
+    log.append(f"  trust-root fingerprint: {fp}  ({pin_note})")
+    if not pin_ok:
+        return refuse("trust root is not the pinned governance key set")
+    shipped = bundle.get("trust_root_fingerprint")
+    if shipped is not None and shipped != fp:
+        return refuse(f"the bundle's trust_root_fingerprint ({shipped}) != computed ({fp})")
+
+    # --- faithful wrapper: the convenience fields restate the SIGNED certificate exactly ---
+    cert_bytes = canonical_json(cert)
+    cert_digest = sha256_hex(cert_bytes)
+    declared = bundle.get("cert_digest")
+    if declared is not None and declared != cert_digest:
+        return refuse(f"the bundle's cert_digest ({declared}) != the signed certificate's ({cert_digest}) "
+                      f"— lying wrapper")
+    ref = bundle.get("finding_ref")
+    if ref is not None and ref != cert.get("finding_ref"):
+        return refuse(f"the bundle's finding_ref ({ref!r}) != the signed certificate's "
+                      f"({cert.get('finding_ref')!r}) — lying wrapper")
+    log.append(f"  certificate: finding_ref={cert.get('finding_ref')!r} bug_class={cert.get('bug_class')!r} "
+               f"cert_digest={cert_digest}")
+
+    # --- authenticity: m-of-n over the canonical certificate under the evidence domain ---
+    authentic, valid, thr_reason = verify_threshold(_EVIDENCE_DOMAIN + cert_bytes, sigs, trust_root)
+    log.append(f"  [{'OK ' if authentic else 'BAD'}] authentic: {thr_reason}"
+               + (f" (valid key_ids: {', '.join(valid)})" if valid else ""))
+
+    # --- provenance: an LLM-authored (non-FACT) context declared in the signed bytes is refused ---
+    prov = cert.get("provenance")
+    prov_ok = prov is None or prov in _FACT_PROVENANCE
+    log.append(f"  [{'OK ' if prov_ok else 'BAD'}] provenance: "
+               + ("reproduced (a FACT-eligible oracle_context channel)" if prov is None
+                  else f"{prov!r}" + ("" if prov_ok else " — a NON-FACT context; this is not a FACT")))
+
+    # --- binding (optional input) ---
+    bound: bool | None = None
+    if oracle_context is not None:
+        want = cert.get("oracle_context_digest")
+        bound = _is_hex64(want) and digest_payload(oracle_context) == want
+        log.append(f"  [{'OK ' if bound else 'BAD'}] bound: the supplied oracle_context "
+                   + ("re-hashes to the signed oracle_context_digest" if bound
+                      else "does NOT re-hash to the signed oracle_context_digest (evidence altered or wrong file)"))
+    else:
+        log.append("  [-- ] bound: NOT CHECKED — the retained oracle_context is not part of this bundle "
+                   "(pass --oracle-context FILE to check it)")
+
+    # --- artifacts (optional input) ---
+    artifacts_ok: bool | None = None
+    arts = cert.get("artifacts") or []
+    if not isinstance(arts, list):
+        return refuse("certificate.artifacts must be a list")
+    if not arts:
+        log.append("  [-- ] artifacts: none declared by the certificate")
+    elif evidence_root is None:
+        log.append(f"  [-- ] artifacts: {len(arts)} declared, NOT CHECKED — the raw evidence is not part of "
+                   f"this bundle (pass --evidence-root DIR to re-hash it)")
+    else:
+        res = verify_manifest([a if isinstance(a, dict) else {} for a in arts], evidence_root)
+        bad = [f"{p}: {n}" for p, ok, n in res if not ok]
+        artifacts_ok = not bad
+        log.append(f"  [{'OK ' if artifacts_ok else 'BAD'}] artifacts: "
+                   + (f"{len(res)} file(s) re-hash" if artifacts_ok else "FAILED: " + ", ".join(bad)))
+
+    log.append("  [-- ] reproduced / chained: NOT CHECKED standalone — re-running the oracle needs the retained "
+               "oracle_context and the VIGIL verifier; a single-finding bundle carries no engagement chain")
+    pinned = bool((pin or "").strip())
+    checked = (["fingerprint"] if pinned else []) + ["authenticity", "provenance"]
+    if bound is not None:
+        checked.append("binding")
+    if artifacts_ok is not None:
+        checked.append("artifacts")
+    ok = authentic and prov_ok and bound is not False and artifacts_ok is not False
+    log.append(f"finding {'VERIFIED' if ok else 'NOT VERIFIED'} (standalone: {' + '.join(checked)}; "
+               f"reproduction needs the VIGIL verifier"
+               + ("" if pinned else "; UNPINNED — pass --trust-root-fingerprint to anchor authenticity") + ")")
+    return ok, log
+
+
+# ---------------------------------------------------------------------------
+# 8. CLI
 # ---------------------------------------------------------------------------
 def _cmd_bundle(args: argparse.Namespace) -> int:
     if args.prove_standalone:
@@ -536,6 +693,24 @@ def _cmd_pcf(args: argparse.Namespace) -> int:
     return 0 if certs and ok_n == len(certs) else 2
 
 
+def _cmd_finding(args: argparse.Namespace) -> int:
+    if args.prove_standalone:
+        _assert_vigil_free()
+    try:
+        bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
+        oracle_context = (json.loads(Path(args.oracle_context).read_text(encoding="utf-8"))
+                          if args.oracle_context else None)
+    except (OSError, ValueError, RecursionError) as e:    # unreadable / not UTF-8 / not JSON / nested too deep
+        print(f"[ERROR] {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
+        return 3
+    verified, log = verify_finding_bundle(
+        bundle, pin=args.trust_root_fingerprint, oracle_context=oracle_context,
+        evidence_root=Path(args.evidence_root) if args.evidence_root else None)
+    for line in log:
+        print(line)
+    return 0 if verified else 2
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="verify_pcf.py",
@@ -563,6 +738,18 @@ def main(argv: list[str]) -> int:
     c.add_argument("--prove-standalone", action="store_true",
                    help="first assert no VIGIL module is imported or importable, else exit non-zero")
     c.set_defaults(fn=_cmd_pcf)
+
+    f = sub.add_parser("finding", help="verify ONE signed finding record (a single-finding bundle, SPEC §8)")
+    f.add_argument("--bundle", required=True, help="the single-finding bundle JSON (e.g. proof-bundle.json)")
+    f.add_argument("--trust-root-fingerprint", default="", dest="trust_root_fingerprint",
+                   help="the out-of-band fingerprint pin (sha256:… or bare hex); a mismatch refuses the bundle")
+    f.add_argument("--oracle-context", default="", dest="oracle_context",
+                   help="OPTIONAL: the finding's retained oracle_context JSON, to also check binding")
+    f.add_argument("--evidence-root", default="", dest="evidence_root",
+                   help="OPTIONAL: the raw evidence tree, to re-hash the artifacts the certificate declares")
+    f.add_argument("--prove-standalone", action="store_true",
+                   help="first assert no VIGIL module is imported or importable, else exit non-zero")
+    f.set_defaults(fn=_cmd_finding)
 
     args = p.parse_args(argv)
     return args.fn(args)

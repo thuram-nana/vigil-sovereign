@@ -668,6 +668,10 @@ function ser(e) {
 
 _RETEST_START = '  var RETEST_ON = pageFlag("retest");'
 _RETEST_END = "  // ---- end of retest (C1b)"
+# findingsBlock also calls the PR-I proof block (proofBadge); it is extracted verbatim too, and stays off here (the page
+# writes no data-proof-badge), so every card below is exactly the retest card.
+_PROOF_START = '  var PROOF_ON = pageFlag("proofBadge");'
+_PROOF_END = "  // ---- end of proof badge (PR-I)"
 
 _PRELUDE = r"""
 document.body.dataset.retest = %(flag)s;
@@ -697,7 +701,7 @@ def _harness(flag="1", *, server="{}"):
     env = _PRELUDE % {"flag": json.dumps(flag), "server": server}
     return (_dom() + f"\nrequire({json.dumps(str(UI_JS))});\nconst out = {{}};\n" + env + "\n"
             + _fn(src, "kv") + "\n" + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
-            + _ser())
+            + _slice(src, _PROOF_START, _PROOF_END) + _ser())
 
 
 def _run(script: str, *, flag="1", server="{}") -> dict:
@@ -891,7 +895,8 @@ console.log(JSON.stringify(cases.map(function (c) { return ser(findingsBlock(c.h
     head = (_dom() + f"\nrequire({json.dumps(str(UI_JS))});\n" + _PRELUDE % {"flag": json.dumps("0"), "server": "{}"}
             + _ser() + _fn(src, "kv") + "\n")
     prog_base = head + _BASE_FINDINGSBLOCK + inputs
-    prog_cur = head + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END) + inputs
+    prog_cur = (head + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
+                + _slice(src, _PROOF_START, _PROOF_END) + inputs)     # PR-I's proof hook, off too: still identical
     rb = subprocess.run([_need_node(), "-e", prog_base], capture_output=True, text=True, timeout=60)
     rc = subprocess.run([_need_node(), "-e", prog_cur], capture_output=True, text=True, timeout=60)
     assert rb.returncode == 0, rb.stderr

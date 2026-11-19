@@ -221,6 +221,10 @@ assert "strix" not in _m, "remediation.apex_pcr must not import strix at module 
 import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
 assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
 assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
+import sigil.ui.proof_export                  # PR-I: the per-finding PCF export + proof badge (sovereign; re-states signed bytes)
+assert "framework" not in _m, "proof_export must not import framework at module scope"
+assert "strix" not in _m, "proof_export must not import strix at module scope"
+assert "_vigil_shipped_verify_pcf" not in _m, "proof_export must load the shipped verifier lazily, never at import"
 import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
 assert "framework" not in _m, "notify_channels must not import framework at module scope"
 assert "strix" not in _m, "notify_channels must not import strix at module scope"
