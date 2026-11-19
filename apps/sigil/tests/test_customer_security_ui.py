@@ -1059,6 +1059,7 @@ function clearErr() {} function err(m) { trace.push(["err", m]); }
 function refreshWho() { trace.push(["refreshWho"]); return Promise.resolve(); }
 const API = "api/customer";
 const GUIDE = null; const GUIDE_ON = false; const MONITORING_ON = false; const TEAM_ON = false; const LAUNCH_ON = false; const CODE_ON = false;
+const ATTACK_PATH_ON = false; const BLIND_VULN_ON = false;   // PR-L (Area 11): off here (shell reads ATTACK_PATH_ON)
 globalThis.location = { hash: "#/" };
 function viewDashboard() { return "dashboard"; } function viewSecurityScreen() { return "security"; }
 function viewGuideScreen() { return "guide"; } function viewSignup() {} function viewRecover() {} function viewGoogleCode() {}
