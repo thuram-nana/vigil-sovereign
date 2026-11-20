@@ -236,6 +236,10 @@ assert "strix" not in _m, "remediation.apex_pcr must not import strix at module 
 import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
 assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
 assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
+import sigil.ui.proof_export                  # PR-I: the per-finding PCF export + proof badge (sovereign; re-states signed bytes)
+assert "framework" not in _m, "proof_export must not import framework at module scope"
+assert "strix" not in _m, "proof_export must not import strix at module scope"
+assert "_vigil_shipped_verify_pcf" not in _m, "proof_export must load the shipped verifier lazily, never at import"
 import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
 assert "framework" not in _m, "notify_channels must not import framework at module scope"
 assert "strix" not in _m, "notify_channels must not import strix at module scope"
@@ -245,6 +249,9 @@ assert "strix" not in _m, "issue_sync must not import strix at module scope"
 import vigil_integration.jobs.notify_drain  # PR-D: the notify orchestrator — STDLIB ONLY, ALL sovereign logic injected
 assert "framework" not in _m, "jobs.notify_drain must not import framework at module scope"
 assert "strix" not in _m, "jobs.notify_drain must not import strix at module scope"
+import sigil.ui.customer_posture       # PR-B: the customer Fix-first read + posture trend (SOVEREIGN; read-only spine)
+assert "framework" not in _m, "ui.customer_posture must not import framework at module scope"
+assert "strix" not in _m, "ui.customer_posture must not import strix at module scope"
 import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
 assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
 assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"

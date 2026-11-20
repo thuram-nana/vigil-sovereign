@@ -51,6 +51,13 @@
  * re-runs that finding's proof against the host and marks it fixed only when the proof stops working, else still
  * vulnerable — no price, no new scan. Off, retestBadge / retestControls return null and a finding card is exactly as
  * before (the kit drops the null children).
+ * FIX FIRST. When the edge has the Fix-first screen on (data-posture="1", VIGIL_CUSTOMER_POSTURE together with its
+ * master switch VIGIL_APEX_PRESENTATION — the switch that also serves api/customer/posture and its trend), the top bar
+ * has Fix first (#/fix-first): the workspace's 0-100 security posture over its OPEN oracle-confirmed findings, its
+ * trend over twelve weeks (a sparkline with a table view), and every open finding worst first — what it is, what
+ * VIGIL's check proved, what that kind of weakness can lead to, the standards it touches and exactly how to fix it,
+ * each shown only when the server sent it — with Retest where the workspace may retest; the Overview gets a Posture
+ * card. Off, there is no tab, #/fix-first is the home screen exactly as any unknown route, and no posture read is made.
  * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
  * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
  * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
@@ -165,7 +172,7 @@
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -636,6 +643,8 @@
       overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
       overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
     ];
+    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does).
+    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
     // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
     if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
     cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
@@ -1299,6 +1308,7 @@
         f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
         retestBadge(f.retest),                         // C1b: the persisted verdict (null, so dropped, when off/none)
         retestControls(f),                             // C1b: the Retest button + its result (null when off)
+        proofBadge(f),                                 // PR-I: "Independently verifiable" (null when off/unverified)
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
@@ -1566,6 +1576,72 @@
     return msg("Retest could not run. Nothing changed.");
   }
   // ---- end of retest (C1b) --------------------------------------------------------------------------------------
+
+  // ---- Assessments: the proof badge + "verify it yourself" (PR-I) -----------------------------------------------
+  // Shown only while the edge writes data-proof-badge="1" (VIGIL_CUSTOMER_PROOF_BADGE). A finding card shows the
+  // "Independently verifiable" badge ONLY when the server's findings read says that finding's OWN signed certificate
+  // verified (f.proof.verifiable === true: two independent verifiers, against VIGIL's owner-delegated governance keys);
+  // anything else — no proof field, false, a malformed digest — shows no badge at all, never a softer one. The badge
+  // opens a panel: what is signed (the two anchors, in plain words), the evidence and certificate digests, a Download
+  // proof bundle link (a ZIP the customer checks OFFLINE with the shipped verifier) and the exact command. The page
+  // asserts nothing itself: every value shown is the server's, and the download is the server's verified bytes. Off:
+  // proofBadge returns null, so the kit drops it and findingsBlock renders exactly the card it always did.
+  var PROOF_ON = pageFlag("proofBadge");
+  function proofHex64(v) { return typeof v === "string" && /^[0-9a-f]{64}$/.test(v); }
+  function proofFingerprint(v) { return typeof v === "string" && /^sha256:[0-9a-f]{64}$/.test(v); }
+  function proofBadge(f) {
+    var p = f && f.proof;
+    if (!PROOF_ON || !p || p.verifiable !== true || !f.engagement_slug || !proofHex64(p.cert_digest)
+        || !proofFingerprint(p.trust_root_fingerprint)) return null;
+    var panel = h("div.cust-proof-panel", { role: "region", "aria-label": "Verify this finding yourself" });
+    panel.hidden = true;
+    var btn = h("button.cust-badge.cust-badge-verified.cust-proof-badge", { type: "button", "aria-expanded": "false",
+      text: "✓ Independently verifiable", onClick: function () {
+        var opening = panel.hidden;
+        if (opening && !panel.firstChild) VUI.mount(panel, proofPanel(f, p));
+        panel.hidden = !opening;
+        btn.setAttribute("aria-expanded", opening ? "true" : "false");
+      } });
+    return h("div.cust-proof", {}, [btn, panel]);
+  }
+  function proofDownloadHref(f, p) {
+    // the finding's identity exactly as the read gave it (never an org or a user: the server takes those from the session)
+    return API + "/assessments/proof?engagement_slug=" + encodeURIComponent(f.engagement_slug)
+      + "&cert_digest=" + encodeURIComponent(p.cert_digest);
+  }
+  function proofPanel(f, p) {
+    var need = Number(p.threshold) > 0 ? Number(p.threshold) : 1;
+    var cmd = "python3 verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint " + p.trust_root_fingerprint;
+    return h("div", {}, [
+      h("h4", { text: "Verify this finding yourself" }),
+      h("p", { text: "Don't take our word for it: this finding carries a cryptographic proof you can check yourself, "
+        + "offline, without a VIGIL account." }),
+      h("p.cust-muted", { text: "What is signed:" }),
+      h("ul.cust-proof-anchors", {}, [
+        h("li", { text: "VIGIL's governance keys signed this exact finding — at least " + need + " key"
+          + (need === 1 ? "" : "s") + " had to agree. Anyone can check this with the proof bundle below." }),
+        h("li", { text: "It is recorded in your account's tamper-evident ledger, chained under a ledger head the owner "
+          + "key signs. VIGIL checks this side on its servers; it is not part of the download." }),
+      ]),
+      f.oracle_context_digest ? kv("Evidence fingerprint", f.oracle_context_digest) : null,
+      kv("Certificate", p.cert_digest),
+      kv("Trust-root fingerprint", p.trust_root_fingerprint),
+      h("p.cust-muted", { text: "Pin the trust-root fingerprint from VIGIL's public verify page (/verify), not from this "
+        + "screen: the fingerprint is what makes the check independent of VIGIL." }),
+      h("div.row", {}, [h("a.btn.cust-proof-download", { href: proofDownloadHref(f, p), download: true,
+        text: "Download proof bundle" })]),
+      h("p.cust-muted", { text: "Unzip it, then run the verifier inside it (it needs only Python 3 and the "
+        + "cryptography package):" }),
+      h("pre.cust-proof-cmd", {}, [h("code", { text: cmd })]),
+      h("p.cust-muted", { text: "A verified result proves the signed certificate is authentic and unchanged since VIGIL "
+        + "signed it. It does not re-run the test against your host." }),
+      // a retest's "fixed" is the retest's own verdict: the bundle proves the finding, never the fix
+      f.retest && f.retest.status === "fixed" ? h("p.cust-muted", { text: "Your retest shows this finding fixed. That "
+        + "is the retest's own result and is not part of this bundle, which proves the finding as VIGIL first proved "
+        + "it." }) : null,
+    ]);
+  }
+  // ---- end of proof badge (PR-I) --------------------------------------------------------------------------------
 
   // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
   // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:
@@ -1930,6 +2006,325 @@
     return msg("That did not go through. Nothing changed. Try again in a moment.");
   }
   // ---- end of launching and controlling assessments (C1a) -------------------------------------------------------
+
+  // ---- Fix first: the posture, its trend and what to fix first (APEX consumer PR-B) ---------------------------------
+  // #/fix-first, only while the edge writes data-posture="1" (VIGIL_CUSTOMER_POSTURE, on only together with its master
+  // switch VIGIL_APEX_PRESENTATION — the switch that also serves api/customer/posture and api/customer/posture/trend).
+  // It renders ONLY what the server sent for the SESSION workspace (this page never sends an org id): the 0-100 posture
+  // over its OPEN oracle-confirmed findings, the trend over twelve weeks, and the open findings worst first — what each
+  // is, what VIGIL's check proved and what that kind of weakness can lead to (each only when the certificate signed it,
+  // the first and last only when a plain-language description is on file), the standards it touches, and exactly how
+  // to fix it (likewise signed) — with C1b's own Retest controls where the workspace may retest. A trial whose report
+  // is locked sees the one finding the trial reveals in full and the others without their proof or fix, as Assessments
+  // shows them. A role that may not read findings, a failed read and an ended session are told in fixed words, never
+  // the server's own, and nothing is mounted into a screen the customer has left. No estimate, price or engine name is
+  // ever shown, and the score says plainly that it is a way to decide what to fix first, not a certified rating. The
+  // top bar and the Overview read the page flag through pageFlag("posture"), so the shared code they run needs no new
+  // name.
+  var POSTURE_ON = pageFlag("posture");
+  var FIX_PAGE = 20;                                   // findings drawn at a time; "Show more" draws the next ones
+  var FIX_SEVERITY = { critical: "Critical", high: "High", unrated: "Unrated", medium: "Medium", low: "Low",
+                       info: "Info" };
+  var FIX_TIER = ["Fix now: a quick win on a serious finding", "Fix next", "Harden", "When convenient"];
+  var FIX_EFFORT = { S: "Small fix", M: "Moderate fix", L: "Larger fix", XL: "Major change" };
+  // The standards each finding shows as chips; every mapped framework is one tap away under "All standards".
+  var FIX_CHIPS = ["owasp", "pci_dss", "soc2", "iso27001", "cwe"];
+  var POSTURE_SVG = "http://www.w3.org/2000/svg";
+  var POSTURE_BOX = { w: 288, h: 64, pad: 8 };         // the sparkline: 24px of width per weekly point
+
+  function viewFixFirst() {
+    var at = "#/fix-first";
+    var holder = h("div.cust-fix", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/posture"); }
+      catch (e) {
+        if (here() !== at) { return; }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403)
+          ? "Your role does not have access to findings. The founder can see them, and so can a teammate VIGIL has "
+            + "made an Operator."
+          : "Could not load your posture right now." }));
+        return;
+      }
+      if (here() !== at) { return; }                 // the customer left before the read came back
+      VUI.mount(holder, fixFirstBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Fix first" }),
+      h("p.cust-muted", { text: "Your security posture and what to fix first, from the findings VIGIL proved on your "
+        + "verified hosts: worst first, each with what it means, the standards it touches and exactly how to fix it." }),
+      holder]), at);
+  }
+  function fixFirstBody(d) {
+    if (!d.measured) {                               // never a score before VIGIL has tested anything
+      var hosts = parseInt(d.hosts_total, 10) || 0;
+      return h("div.card.cust-soon", {}, [
+        h("p", { text: hosts ? "No results yet. Your posture appears here once VIGIL has tested one of your verified hosts."
+                             : "No results yet. Prove you control a host in Assets, then test it: your posture appears here." }),
+        h("div.row", {}, [h("button.btn", { type: "button", text: hosts ? "Go to Assessments" : "Go to Assets",
+          onClick: function () { nav(hosts ? "#/assessments" : "#/assets"); } })]),
+      ]);
+    }
+    var locked = !!(d.preview && d.preview.locked);
+    var open = Array.isArray(d.fix_first) ? d.fix_first : [];
+    var fixed = Array.isArray(d.fixed) ? d.fixed : [];
+    return h("div.cust-fix-body", {}, [
+      postureTile(d),
+      locked ? fixPreviewNote(d.preview) : null,
+      h("h3", { text: "What to fix first" }),
+      open.length ? fixList(open, d.open_total, locked)
+        : h("div.card.cust-soon", { text: "Nothing to fix right now: no open oracle-confirmed findings on your verified "
+          + "hosts." }),
+      fixed.length ? fixFixed(fixed, d.fixed_total) : null,
+    ]);
+  }
+  // The posture tile: the score (the one hero figure of the screen), its change over the window, the sparkline with
+  // its readout, what it is made of, how it is worked out, and the trend's table view.
+  function postureTile(d) {
+    var trend = d.trend || {};
+    var points = Array.isArray(trend.points) ? trend.points : [];
+    var score = typeof d.posture_score === "number" ? d.posture_score : null;
+    return VUI.card("Security posture", null, h("div.cust-posture", {}, [
+      h("div.cust-posture-figure", {}, [
+        h("span.cust-posture-score", { text: score === null ? "—" : String(score) }),
+        h("span.cust-posture-max", { text: "/100" }),
+      ]),
+      postureDelta(trend),
+      postureTrend(points),
+      h("p.cust-muted", { text: postureCounts(d) }),
+      postureHow(d.basis),
+      postureTable(points),
+    ]));
+  }
+  // The change since the first scored point of the window, signed and named ("Up 7 since 2026-08-26"). The arrow carries
+  // the direction in color (up is good for a posture); the words carry it for everyone.
+  function postureDelta(trend) {
+    var c = trend && trend.change;
+    if (typeof c !== "number" || !trend.since) { return null; }
+    var since = " since " + fmtDate(trend.since);
+    if (c === 0) { return h("p.cust-posture-delta", { text: "No change" + since }); }
+    var up = c > 0;
+    return h("p.cust-posture-delta." + (up ? "up" : "down"), {}, [
+      h("span.cust-posture-arrow", { text: up ? "▲" : "▼", "aria-hidden": "true" }),
+      h("span", { text: (up ? "Up " : "Down ") + Math.abs(c) + since }),
+    ]);
+  }
+  function postureTrend(points) {
+    var readout = h("p.cust-posture-readout", { "aria-live": "polite" });
+    var spark = postureSpark(points, readout);
+    return spark ? h("div.cust-posture-trend", {}, [spark, readout]) : null;
+  }
+  function postureSvg(tag, attrs) {
+    var el = document.createElementNS(POSTURE_SVG, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, String(attrs[k])); });
+    return el;
+  }
+  // What one point says, in words: the readout on hover or focus, and each week's accessible name.
+  function posturePointText(p, isNow) {
+    var when = isNow ? "Now" : "On " + fmtDate(p.at);
+    if (typeof p.posture_score !== "number") { return when + ": not measured yet"; }
+    return when + ": " + p.posture_score + "/100 · " + (parseInt(p.open, 10) || 0) + " open · "
+      + (parseInt(p.fixed, 10) || 0) + " fixed";
+  }
+  // The twelve-week sparkline, built node by node (no markup string): one 2px line in the recessive ink, the current
+  // point as an accent dot ringed in the card's surface, and a hairline baseline across the whole window, so weeks before
+  // the first measurement read as no data, never as a score. The y range is the scores' own, padded and at least 20
+  // points tall, so a change shows without a small one being blown up; the exact numbers are in the readout and the
+  // table. Each week is a 24px-wide focusable target: a pointer over it or keyboard focus on it shows a crosshair at that
+  // week and its numbers in the readout.
+  function postureSpark(points, readout) {
+    var n = points.length, B = POSTURE_BOX, scored = [];
+    points.forEach(function (p, i) { if (p && typeof p.posture_score === "number") { scored.push([i, p.posture_score]); } });
+    if (!n || !scored.length) { return null; }
+    var vals = scored.map(function (s) { return s[1]; });
+    var lo = Math.max(0, Math.floor((Math.min.apply(null, vals) - 5) / 10) * 10);
+    var hi = Math.min(100, Math.ceil((Math.max.apply(null, vals) + 5) / 10) * 10);
+    if (hi - lo < 20) { if (hi >= 100) { lo = 80; } else { hi = lo + 20; } }
+    var colW = B.w / n;
+    var x = function (i) { return (colW * i + colW / 2).toFixed(1); };
+    var y = function (v) { return (B.pad + (hi - v) / (hi - lo) * (B.h - 2 * B.pad)).toFixed(1); };
+    var box = postureSvg("svg", { viewBox: "0 0 " + B.w + " " + B.h, width: B.w, height: B.h, "class": "cust-posture-spark",
+      role: "group", "aria-label": "Your posture over the last " + n + " weeks" });
+    box.appendChild(postureSvg("line", { x1: 0, y1: B.h - 0.5, x2: B.w, y2: B.h - 0.5, "class": "cust-posture-base" }));
+    box.appendChild(postureSvg("polyline", { "class": "cust-posture-line",
+      points: scored.map(function (s) { return x(s[0]) + "," + y(s[1]); }).join(" ") }));
+    var cross = postureSvg("line", { x1: 0, y1: 0, x2: 0, y2: B.h, "class": "cust-posture-cross", visibility: "hidden" });
+    var dot = postureSvg("circle", { cx: 0, cy: 0, r: 4, "class": "cust-posture-hover", visibility: "hidden" });
+    var now = scored[scored.length - 1];
+    box.appendChild(cross);
+    box.appendChild(postureSvg("circle", { cx: x(now[0]), cy: y(now[1]), r: 4, "class": "cust-posture-now" }));
+    box.appendChild(dot);
+    points.forEach(function (p, i) {
+      var label = posturePointText(p, i === n - 1);
+      var hit = postureSvg("rect", { x: (colW * i).toFixed(1), y: 0, width: colW.toFixed(1), height: B.h,
+        "class": "cust-posture-hit", tabindex: 0, role: "img", "aria-label": label });
+      var show = function () {
+        cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+        var scoredHere = typeof p.posture_score === "number";
+        if (scoredHere) { dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(p.posture_score)); }
+        dot.setAttribute("visibility", scoredHere ? "visible" : "hidden");
+        readout.textContent = label;
+      };
+      var hide = function () {
+        cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); readout.textContent = "";
+      };
+      ["pointerenter", "focus"].forEach(function (t) { hit.addEventListener(t, show); });
+      ["pointerleave", "blur"].forEach(function (t) { hit.addEventListener(t, hide); });
+      box.appendChild(hit);
+    });
+    return box;
+  }
+  function postureCounts(d) {
+    var open = parseInt(d.open_total, 10) || 0, hosts = parseInt(d.hosts_total, 10) || 0;
+    var fixed = parseInt(d.fixed_total, 10) || 0;
+    return "From " + open + " open finding" + (open === 1 ? "" : "s") + " on " + hosts + " verified host"
+      + (hosts === 1 ? "" : "s") + (fixed ? " · " + fixed + " fixed by a retest" : "") + ".";
+  }
+  // How the score is worked out, in plain words, from the weights the server used (nothing is recomputed here).
+  function postureHow(basis) {
+    var w = (basis && basis.weights) || {};
+    var parts = ["critical", "high", "unrated", "medium", "low", "info"].filter(function (s) {
+      return typeof w[s] === "number";
+    }).map(function (s) { return FIX_SEVERITY[s] + " " + w[s]; });
+    return h("details.cust-posture-how", {}, [h("summary", { text: "How the score works" }),
+      h("p", { text: "Each open finding lowers the score by its severity" + (parts.length ? " (" + parts.join(", ") + ")" : "")
+        + ". The score is 100 × 100 ÷ (100 + those amounts added up), so 100 means nothing is open." }),
+      h("p", { text: (basis && basis.counts_fixes)
+        ? "A finding stops counting once a retest shows its proof no longer works."
+        : "Retests are not part of this workspace's score: every proven finding counts." }),
+      h("p", { text: "It is a way to decide what to fix first, not a certified rating." }),
+    ]);
+  }
+  // The trend's table view: the sparkline's numbers for anyone who cannot, or would rather not, read a chart.
+  function postureTable(points) {
+    if (!points.length) { return null; }
+    return h("details.cust-posture-table", {}, [h("summary", { text: "Show the numbers" }),
+      h("table.cust-table", {}, [
+        h("thead", {}, h("tr", {}, ["Date", "Posture", "Open", "Fixed"].map(function (t) { return h("th", { text: t }); }))),
+        h("tbody", {}, points.map(function (p, i) {
+          var scored = typeof p.posture_score === "number";
+          return h("tr", {}, [h("td", { text: i === points.length - 1 ? "Now" : fmtDate(p.at) }),
+            h("td", { text: scored ? p.posture_score + "/100" : "Not measured yet" }),
+            h("td", { text: scored ? String(parseInt(p.open, 10) || 0) : "—" }),
+            h("td", { text: scored ? String(parseInt(p.fixed, 10) || 0) : "—" })]);
+        })),
+      ])]);
+  }
+  function fixPreviewNote(p) {
+    return h("div.card.cust-fix-preview", {}, [
+      h("p", { text: "During your trial you see every finding, and one of them in full. Your first purchase unlocks the "
+        + "proof and the fix of every finding." }),
+      (p && p.can_buy)
+        ? h("div.row", {}, [h("button.btn", { type: "button", text: "Go to Billing", onClick: function () { nav("#/billing"); } })])
+        : h("p.cust-muted", { text: "Someone who manages billing for this workspace can buy credits in Billing." }),
+    ]);
+  }
+  // The open findings, worst first as the server ordered them, FIX_PAGE at a time.
+  function fixList(entries, total, reportLocked) {
+    var list = h("div.cust-fix-list", {}), more = h("div.row", {}), shown = 0;
+    function draw() {
+      entries.slice(shown, shown + FIX_PAGE).forEach(function (e) { list.appendChild(fixEntry(e, reportLocked)); });
+      shown = Math.min(entries.length, shown + FIX_PAGE);
+      var left = entries.length - shown;
+      VUI.mount(more, left > 0 ? h("button.btn", { type: "button", text: "Show " + Math.min(left, FIX_PAGE) + " more",
+        onClick: draw }) : null);
+    }
+    draw();
+    var all = parseInt(total, 10) || 0;
+    return h("div", {}, [list, more, all > entries.length
+      ? h("p.cust-muted", { text: "Showing the " + entries.length + " most urgent of " + all + " open findings." }) : null]);
+  }
+  // One open finding. The plain-language parts and the fix appear only when the server sent them (signed on the
+  // certificate); a finding the trial keeps locked says its proof and fix unlock with the full report.
+  function fixEntry(e, reportLocked) {
+    var sev = FIX_SEVERITY[e.severity] ? e.severity : "unrated";
+    var pi = (e.plain_impact && typeof e.plain_impact === "object") ? e.plain_impact : {};
+    var described = pi.description_on_file === true;
+    var where = [e.host, e.surface].filter(Boolean).map(String).join(" · ");
+    // a severity the certificate did not carry is rated from the class of weakness (finding_preview's table): say so
+    var meta = [FIX_TIER[e.tier] || null, FIX_EFFORT[e.effort] || null,
+                e.severity_basis && e.severity_basis !== "certificate" ? "severity rated from the kind of weakness" : null]
+      .filter(Boolean);
+    return h("div.card.cust-fix-entry", {}, [
+      h("div.cust-fix-head", {}, [
+        h("span.sev.sev-" + sev, { text: FIX_SEVERITY[sev] }),
+        h("strong.cust-fix-title", { text: String(e.title || e.bug_class || "Finding") }),
+        e.status === "still_vulnerable" ? h("span.cust-badge.cust-badge-expired", { text: "⚠ Still vulnerable after a retest" })
+                                        : null,
+      ]),
+      where ? h("p.cust-fix-where", { text: where }) : null,
+      meta.length ? h("p.cust-fix-meta", { text: meta.join(" · ") }) : null,
+      described && pi.what ? fixSection("What it is", pi.what) : null,
+      pi.established ? fixSection("What VIGIL's check proved", pi.established) : null,
+      described && pi.category_consequence ? fixSection("What this kind of weakness can lead to", pi.category_consequence)
+                                           : null,
+      fixStandards(e.standards_chips),
+      e.remediation ? fixSection("How to fix it", e.remediation) : null,
+      e.locked ? h("p.cust-muted", { text: "Its proof and fix unlock with the full report." }) : null,
+      e.locked && e.class_guidance ? h("p.cust-muted", { text: String(e.class_guidance) }) : null,
+      !e.locked && !e.remediation ? h("p.cust-muted", { text: "Its proof and how to verify it are on Assessments." }) : null,
+      // C1b's own Retest button + verdict (null while retest is off); a locked trial cannot retest, so none is offered
+      (!reportLocked && !e.locked) ? retestControls({ finding_ref: e.finding_ref, engagement_slug: e.engagement_slug,
+                                                      oracle_context_digest: e.oracle_context_digest || "" }) : null,
+    ]);
+  }
+  function fixSection(label, text) {
+    return h("div.cust-fix-sec", {}, [h("span.k", { text: label }), h("p", {}, fixRich(text))]);
+  }
+  // Text exactly as the server sent it, with its `quoted` spans shown as code — every piece a text node, never markup.
+  function fixRich(s) {
+    return String(s).split("`").map(function (part, i) { return i % 2 ? h("code", { text: part }) : part; });
+  }
+  function fixStandards(chips) {
+    var all = (Array.isArray(chips) ? chips : []).filter(function (c) {
+      return c && c.framework && Array.isArray(c.ids) && c.ids.length;
+    });
+    if (!all.length) { return null; }
+    var shown = all.filter(function (c) { return FIX_CHIPS.indexOf(c.framework) >= 0; });
+    return h("div.cust-fix-sec", {}, [h("span.k", { text: "Standards it touches" }),
+      shown.length ? h("div.cust-fix-chips", {}, shown.map(fixChip)) : null,
+      h("details.cust-fix-all", {}, [h("summary", { text: "All standards (" + all.length + ")" }),
+        h("p.cust-muted", { text: "The controls this kind of weakness relates to — a guide to why it matters, not an "
+          + "audit result." }),
+        // each line's full citation (the standard and its version) rides in its tooltip, not in the line itself
+        h("ul", {}, all.map(function (c) {
+          return h("li", { title: c.version ? String(c.version) : null },
+            [h("strong", { text: String(c.label || c.framework) }), " " + c.ids.map(String).join(", ")]);
+        })),
+      ]),
+    ]);
+  }
+  function fixChip(c) {
+    var ids = c.ids.map(String).join(", ");
+    return h("span.chip.cust-fix-chip", { text: c.framework === "cwe" ? ids : String(c.label || c.framework) + " " + ids,
+      title: c.version ? String(c.version) : null });
+  }
+  // What a retest proved fixed, newest first, folded away under its count.
+  function fixFixed(entries, total) {
+    return h("details.card.cust-fix-fixed", {}, [
+      h("summary", { text: "Fixed (" + (parseInt(total, 10) || entries.length) + ")" }),
+      h("p.cust-muted", { text: "A retest showed each proof no longer works, so these no longer count against your "
+        + "posture." }),
+      h("ul.cust-fix-fixedlist", {}, entries.map(function (e) {
+        var meta = [e.host, e.status_at ? "fixed " + fmtDate(e.status_at) : null].filter(Boolean).map(String).join(" · ");
+        return h("li", {}, [h("span.cust-badge.cust-badge-verified", { text: "✓ Fixed" }),
+          h("strong", { text: " " + String(e.title || e.bug_class || "Finding") }),
+          meta ? h("span.cust-muted", { text: " · " + meta }) : null]);
+      })),
+    ]);
+  }
+  // The Overview's Posture card, from the trend read: the current score, what is open now and the change, with the way
+  // to Fix first. Before the first measurement it says so — never a score.
+  function postureFill(d) {
+    var points = (d && Array.isArray(d.points)) ? d.points : [];
+    var last = points.length ? points[points.length - 1] : null;
+    var rows = (d && typeof d.current === "number")
+      ? [kv("Posture", d.current + "/100"), kv("Open findings", last ? (parseInt(last.open, 10) || 0) : null), postureDelta(d)]
+      : [h("p.cust-muted", { text: "No results yet." })];
+    rows.push(overviewLink("Fix first", "#/fix-first"));
+    return h("div", {}, rows);
+  }
+  // ---- end of Fix first (PR-B) -----------------------------------------------------------------------------------
 
   // ---- Monitoring (AEGIS) -------------------------------------------------------------------------------------------
   // #/monitoring, only while the edge has customer monitoring on. GET api/customer/monitoring answers for the SESSION
@@ -3300,6 +3695,7 @@
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(pageFlag("posture") ? [navLink("Fix first", "#/fix-first")] : [])      // PR-B: the Fix-first screen
         .concat(ATTACK_PATH_ON ? [navLink("Attack path", "#/attack-path")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
@@ -3372,6 +3768,8 @@
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
+    // the Fix-first screen off: #/fix-first is the home screen, exactly as any unknown route is
+    "#/fix-first": function () { return authed() ? (POSTURE_ON ? viewFixFirst() : viewDashboard()) : viewLogin(); },
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },

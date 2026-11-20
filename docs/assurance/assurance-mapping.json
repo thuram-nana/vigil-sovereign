@@ -3625,6 +3625,7 @@
         "LIMIT-llm-redteam-tools-deferred",
         "LIMIT-posture-no-structured-findings",
         "LIMIT-profile-packs-incremental",
+        "LIMIT-proofbadge-clearance-cert-unsurfaced",
         "LIMIT-sanitizer-output-synthesis",
         "LIMIT-spine-seal-at-capture",
         "LIMIT-symbolic-crash-repair",
