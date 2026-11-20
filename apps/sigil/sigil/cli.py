@@ -2864,6 +2864,159 @@ def cmd_org_roles(a) -> None:
         sys.exit(2)
 
 
+def _write_owner_secret_file(dest: str, secret: str, *, overwrite: bool) -> None:
+    """Write `secret` to `dest` 0600, atomically (temp + replace), refusing a symlink / non-regular target and an
+    existing file unless `overwrite`. The secret is never printed — the owner hands the FILE to the IdP admin."""
+    import os as _os
+    import secrets as _secrets
+    import stat as _stat
+    from pathlib import Path as _Path
+    target = _Path(dest)
+    try:
+        st = _os.lstat(target)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+            raise ValueError("the token file must be a regular file path (no symlink, device or directory)")
+        if not overwrite:
+            raise FileExistsError("the token file already exists (pass --overwrite to replace it)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / (".tmp-" + _secrets.token_hex(8))
+    fd = _os.open(str(tmp), _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | getattr(_os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        _os.write(fd, secret.encode("utf-8") + b"\n")
+        _os.fsync(fd)
+    finally:
+        _os.close(fd)
+    _os.replace(tmp, target)
+
+
+def _group_roles(pairs) -> dict:
+    out: dict = {}
+    for p in pairs or ():
+        group, sep, role = str(p).rpartition("=")
+        if not sep or not group.strip() or not role.strip():
+            raise ValueError(f"--group-role must be GROUP=ROLE, got {p!r}")
+        out[group.strip()] = role.strip()
+    return out
+
+
+def cmd_sso(a) -> None:
+    """`sigil sso <verb>` — the OWNER registers an org's enterprise IdP and SCIM bearer (consumer PR-H). Every config
+    is OWNER-SIGNED; every role it maps is capped at viewer / analyst / org_admin (refused otherwise); a SCIM token is
+    written ONCE to a 0600 file (`--token-out`) and only its fingerprint is stored — the token is never printed.
+
+      sp-info <org> --public-base URL          the URLs to give the customer's IdP (ACS, SP entity id, OIDC
+                                               redirect URI, SCIM base URL, sign-in link)
+      set-saml <org> --public-base URL --idp-entity-id ID --idp-sso-url URL --idp-cert PEM [...]
+      set-oidc <org> --public-base URL --issuer URL --client-id ID --jwks-uri URL --authorize-endpoint URL
+                     --token-endpoint URL [...]
+      rotate-scim-token <org> --token-out FILE  a fresh bearer (the previous one stops working at once)
+      disable-scim <org>                        SCIM off (SSO sign-in keeps working)
+      revoke <org> [--deprovision-members]      SSO + SCIM off; optionally revoke every SSO-provisioned member
+      status [<org>]                            the active configs (never a token or fingerprint)
+
+    The routes serving all this are absent unless VIGIL_CUSTOMER_SSO is on; a config signed while it is off stays
+    inert until it is turned on. Exit 2 on a refusal."""
+    import time as _time
+
+    from . import config
+    from .governor.orgs import OrgRegistry
+    from .governor.sso_config import SsoConfigError, SsoConfigRegistry
+    from .ui.sso_edge import public_urls
+    store = SpineStore()
+    reg = SsoConfigRegistry(store)
+    verb = a.sso_cmd
+    try:
+        if verb == "status":
+            cfgs = [c for c in reg.configs() if not a.org or c.org_id == a.org]
+            if not cfgs:
+                print("  no active SSO config" + (f" for {a.org}" if a.org else ""))
+            for c in cfgs:
+                idp = c.idp_entity_id if c.protocol == "saml" else c.oidc_issuer
+                groups = ", ".join(f"{g}->{r}" for g, r in sorted(c.group_role_map.items())) or "(none)"
+                print(f"  {c.org_id}: {c.protocol} IdP {idp}; default {c.default_role}, cap {c.role_cap}; "
+                      f"groups {groups}; SCIM {'on' if c.scim_enabled and c.scim_token_fp else 'off'}")
+            return
+        urls = public_urls(a.public_base, a.org) if getattr(a, "public_base", None) else None
+        if verb == "sp-info":
+            if urls is None:
+                raise ValueError("--public-base is required")
+            for k in ("saml_acs_url", "saml_sp_entity_id", "oidc_redirect_uri", "scim_base_url", "login_url"):
+                print(f"  {k}: {urls[k]}")
+            return
+        if verb in ("set-saml", "set-oidc"):
+            if urls is None:
+                raise ValueError("--public-base is required")
+            if OrgRegistry(store).org(a.org) is None:
+                raise ValueError(f"no active org {a.org!r}")
+            token = ""
+            if a.scim:
+                if not a.token_out:
+                    raise ValueError("--scim needs --token-out FILE (the bearer is written there, never printed)")
+                import secrets as _secrets
+                token = _secrets.token_urlsafe(32)
+                # the file FIRST: a signed fingerprint whose plaintext was never delivered would be a dead SCIM token
+                _write_owner_secret_file(a.token_out, token, overwrite=a.overwrite)
+            common = dict(default_role=a.default_role, role_cap=a.role_cap, group_role_map=_group_roles(a.group_role),
+                          clock_skew_seconds=a.clock_skew, scim_enabled=bool(a.scim), scim_token=token,
+                          issued_at=_time.time())
+            if verb == "set-saml":
+                certs = []
+                for path in a.idp_cert or ():
+                    with open(path, encoding="utf-8") as fh:
+                        certs.append(fh.read())
+                seq = reg.set_saml_config(a.org, idp_entity_id=a.idp_entity_id, idp_certs_pem=certs,
+                                          idp_sso_url=a.idp_sso_url, sp_entity_id=urls["saml_sp_entity_id"],
+                                          acs_url=urls["saml_acs_url"], **common)
+            else:
+                from urllib.parse import urlparse as _urlparse
+                hosts = list(a.egress_host or ()) or sorted({(_urlparse(u).hostname or "").lower()
+                                                             for u in (a.jwks_uri, a.token_endpoint)} - {""})
+                seq = reg.set_oidc_config(a.org, issuer=a.issuer, client_id=a.client_id, jwks_uri=a.jwks_uri,
+                                          authorize_endpoint=a.authorize_endpoint, token_endpoint=a.token_endpoint,
+                                          redirect_uri=urls["oidc_redirect_uri"],
+                                          signing_algs=tuple(a.signing_alg or ("RS256",)), egress_hosts=hosts,
+                                          **common)
+            print(f"  {verb[4:].upper()} SSO configured for {a.org} (owner-signed, seq {seq}); "
+                  f"SCIM {'on — the bearer was written (0600) to the requested file' if token else 'off'}")
+            for k in ("saml_acs_url", "saml_sp_entity_id") if verb == "set-saml" else ("oidc_redirect_uri",):
+                print(f"  {k}: {urls[k]}")
+            print(f"  scim_base_url: {urls['scim_base_url']}\n  login_url: {urls['login_url']}")
+        elif verb == "rotate-scim-token":
+            if reg.config(a.org) is None:
+                raise ValueError(f"no active SSO config for {a.org!r}")
+            import secrets as _secrets
+            token = _secrets.token_urlsafe(32)
+            _write_owner_secret_file(a.token_out, token, overwrite=a.overwrite)   # delivered BEFORE it is signed
+            seq, _tok = reg.rotate_scim_token(a.org, issued_at=_time.time(), token=token)
+            print(f"  SCIM bearer rotated for {a.org} (owner-signed, seq {seq}); the new token was written (0600) "
+                  f"to the requested file; the previous token no longer authenticates")
+        elif verb == "disable-scim":
+            seq = reg.disable_scim(a.org, issued_at=_time.time())
+            print(f"  SCIM disabled for {a.org} (owner-signed, seq {seq}); SSO sign-in is unchanged")
+        elif verb == "revoke":
+            if reg.config(a.org) is None:
+                raise ValueError(f"no active SSO config for {a.org!r}")
+            reg.revoke_config(a.org)
+            gone = 0
+            if a.deprovision_members:
+                orgs = OrgRegistry(store)
+                for m in orgs.memberships(a.org):
+                    if m.username.startswith("sso_"):
+                        orgs.revoke_membership(a.org, m.username)
+                        gone += 1
+            print(f"  SSO + SCIM revoked for {a.org}" + (f"; {gone} SSO-provisioned membership(s) revoked"
+                                                         if a.deprovision_members else ""))
+    except (SsoConfigError, ValueError, OSError) as exc:
+        print(f"  refused: {exc}")
+        sys.exit(2)
+    if not config.customer_sso_enabled():
+        print("  note: VIGIL_CUSTOMER_SSO is off in this environment — the sign-in and SCIM routes are absent until "
+              "it is on (set it in both customer.env and cockpit.env)")
+
+
 def cmd_trial(a) -> None:
     """`sigil trial backfill-claims` — owner-sign an email trial claim for every existing customer account
     (active or revoked) whose canonical mailbox is not yet claimed, so an existing account cannot take a
@@ -4691,6 +4844,57 @@ def main(argv=None) -> None:
     _p.add_argument("--org", default=None, help="only this org (default: every active org)")
     _p.add_argument("--reason", required=True, help="why (recorded in the audit)")
     _p.set_defaults(fn=cmd_org_roles)
+    psso = sub.add_parser("sso", help="owner registration of an org's enterprise SSO (SAML / OIDC) + SCIM bearer "
+                                      "(consumer PR-H; routes absent unless VIGIL_CUSTOMER_SSO is on)")
+    psso_sub = psso.add_subparsers(dest="sso_cmd", required=True)
+    _p = psso_sub.add_parser("status", help="the active SSO configs (never a token or fingerprint)")
+    _p.add_argument("org", nargs="?", default=None)
+    _p.set_defaults(fn=cmd_sso)
+    _p = psso_sub.add_parser("sp-info", help="the public URLs to register at the customer's IdP")
+    _p.add_argument("org")
+    _p.add_argument("--public-base", required=True, help="the customer app's https origin")
+    _p.set_defaults(fn=cmd_sso)
+
+    def _sso_set_args(p) -> None:
+        p.add_argument("org")
+        p.add_argument("--public-base", required=True, help="the customer app's https origin (derives ACS/SP id/"
+                                                            "redirect/SCIM URLs)")
+        p.add_argument("--default-role", default="viewer", help="viewer | analyst | org_admin")
+        p.add_argument("--role-cap", default="org_admin", help="viewer | analyst | org_admin (never higher)")
+        p.add_argument("--group-role", action="append", default=[], help="GROUP=ROLE (repeatable)")
+        p.add_argument("--clock-skew", type=int, default=60, help="assertion / token clock skew (seconds)")
+        p.add_argument("--scim", action="store_true", help="enable SCIM and mint its bearer (needs --token-out)")
+        p.add_argument("--token-out", default="", help="write the SCIM bearer here (0600; never printed)")
+        p.add_argument("--overwrite", action="store_true", help="allow --token-out to replace an existing file")
+        p.set_defaults(fn=cmd_sso)
+    _p = psso_sub.add_parser("set-saml", help="owner-sign an org's SAML IdP")
+    _sso_set_args(_p)
+    _p.add_argument("--idp-entity-id", required=True)
+    _p.add_argument("--idp-sso-url", required=True, help="the IdP SingleSignOnService URL (HTTP-Redirect, https)")
+    _p.add_argument("--idp-cert", action="append", required=True, help="an IdP signing certificate PEM file")
+    _p = psso_sub.add_parser("set-oidc", help="owner-sign an org's enterprise OIDC IdP (PKCE public client)")
+    _sso_set_args(_p)
+    _p.add_argument("--issuer", required=True)
+    _p.add_argument("--client-id", required=True)
+    _p.add_argument("--jwks-uri", required=True)
+    _p.add_argument("--authorize-endpoint", required=True)
+    _p.add_argument("--token-endpoint", required=True)
+    _p.add_argument("--signing-alg", action="append", default=[], help="asymmetric only (default RS256)")
+    _p.add_argument("--egress-host", action="append", default=[],
+                    help="IdP host the provisioner may call (default: the JWKS + token endpoint hosts)")
+    _p = psso_sub.add_parser("rotate-scim-token", help="mint a fresh SCIM bearer (the old one stops at once)")
+    _p.add_argument("org")
+    _p.add_argument("--token-out", required=True, help="write the bearer here (0600; never printed)")
+    _p.add_argument("--overwrite", action="store_true")
+    _p.set_defaults(fn=cmd_sso)
+    _p = psso_sub.add_parser("disable-scim", help="turn SCIM off for an org (SSO sign-in unchanged)")
+    _p.add_argument("org")
+    _p.set_defaults(fn=cmd_sso)
+    _p = psso_sub.add_parser("revoke", help="revoke an org's SSO + SCIM config")
+    _p.add_argument("org")
+    _p.add_argument("--deprovision-members", action="store_true",
+                    help="also revoke every SSO/SCIM-provisioned (sso_*) membership of the org")
+    _p.set_defaults(fn=cmd_sso)
     ptr = sub.add_parser("trial", help="free-trial owner operations (pricing)")
     ptr_sub = ptr.add_subparsers(dest="trial_cmd", required=True)
     ptr_bf = ptr_sub.add_parser("backfill-claims",

@@ -540,7 +540,8 @@ class Provisioner:
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  shard_assignments=None,
-                 expose_dev_tokens: bool = False, now_fn=time.time):
+                 saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, sso_oidc_http_post=None,
+                 sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up. None
         # (the default, and every pre-PR-F construction) ⇒ shard-on-signup is a byte-identical no-op. Even when
@@ -628,6 +629,16 @@ class Provisioner:
         # vigil-customer.nginx.conf). The limiter stores only sha256(key). Over the limit means no trial (the
         # account is still created). The IP is never an identity or a claim key.
         self.trial_ip_limiter = trial_ip_limiter
+        # Consumer PR-H — SSO / SCIM (VIGIL_CUSTOMER_SSO; wired by the factory only while the flag is on). The
+        # durable single-use SAML assertion-ID ledger (None ⇒ SAML sign-in refused), the per-(org, IP) SCIM
+        # failed-authentication limiter and the per-org SCIM write limiter (either None ⇒ SCIM refused, 503), and
+        # the enterprise-OIDC egress hooks (both None ⇒ the owner-signed per-org host allowlist; a test injects a
+        # local fake IdP).
+        self.saml_replay = saml_replay
+        self.scim_auth_limiter = scim_auth_limiter
+        self.scim_write_limiter = scim_write_limiter
+        self.sso_oidc_http_post = sso_oidc_http_post
+        self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -1135,6 +1146,32 @@ class Provisioner:
             cred = self.customer_credentials.by_credential_id(identity.credential_id or "")
             return cred.username if cred is not None else None
         return None
+
+    # -- Consumer PR-H: enterprise SSO + SCIM (VIGIL_CUSTOMER_SSO; dispatched only while it is on) --------
+    # Session-less bootstrap actions like login/oidc_finish: the hop key alone gates the call, and the org only
+    # selects WHICH owner-signed config the presented proof (IdP signature bound to the login's AuthnRequest /
+    # nonce, or the org's SCIM bearer) must verify under — see ui/sso_provision.py for the full contract.
+    def sso_login_start(self, org_id: str, *, ip: str = "") -> dict:
+        """The org's IdP sign-in endpoint (owner-signed, non-secret) for an SP-initiated SSO sign-in."""
+        from .sso_provision import sso_login_start
+        return sso_login_start(self, org_id, ip=ip)
+
+    def sso_saml_acs(self, org_id: str, saml_response: str, *, request_id: str, ip: str = "") -> dict:
+        """Verify a SAML Response bound to this login's AuthnRequest → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_saml_acs
+        return sso_saml_acs(self, org_id, saml_response, request_id=request_id, ip=ip)
+
+    def sso_oidc_finish(self, org_id: str, *, code: str, code_verifier: str, nonce: str, ip: str = "") -> dict:
+        """Enterprise-OIDC code exchange + id_token verification → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_oidc_finish
+        return sso_oidc_finish(self, org_id, code=code, code_verifier=code_verifier, nonce=nonce, ip=ip)
+
+    def scim_request(self, org_id: str, *, method: str, path: str, query: str = "", body=None,
+                     authorization: str = "", ip: str = "") -> dict:
+        """One bearer-authenticated SCIM 2.0 request → {status, body, deactivated[, retry_after]}."""
+        from .sso_provision import scim_request
+        return scim_request(self, org_id, method=method, path=path, query=query, body=body,
+                            authorization=authorization, ip=ip)
 
     # -- Google OIDC login (E2b) -------------------------------------------------------------------
     def oidc_finish(self, *, code: str, code_verifier: str, nonce: str, ip: str = "",
@@ -3848,7 +3885,8 @@ class Provisioner:
 
 
 def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time,
-                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None) -> Provisioner:
+                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,
+                      sso_oidc_http_post=None, sso_oidc_jwks_fetcher=None) -> Provisioner:
     """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
     the persisted owner identity — THIS is the only process that holds it), the filesystem email-token +
     login-rate-limit ledgers rooted under SIGIL_HOME (config), and the configured EmailSender
@@ -3964,4 +4002,24 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                               if config.TRIAL_LAUNCH_DAILY_CAP > 0 else None),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
+        **_sso_wiring(config, LoginRateLimiter, sso_oidc_http_post, sso_oidc_jwks_fetcher),
     )
+
+
+def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) -> dict:
+    """Consumer PR-H — the SSO / SCIM ledgers, ONLY while VIGIL_CUSTOMER_SSO is on (off ⇒ {} ⇒ the Provisioner is
+    built exactly as before, and its SSO/SCIM methods are unreachable: the dispatch 404s them). The durable SAML
+    assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
+    then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN per minute,
+    guard-and-count); and the enterprise-OIDC egress hooks a test injects."""
+    if not config.customer_sso_enabled():
+        return {}
+    from .saml import SamlReplayLedger
+    return {"saml_replay": SamlReplayLedger(config.CUSTOMER_SAML_REPLAY_DIR),
+            "scim_auth_limiter": limiter_cls(config.SCIM_AUTH_RATELIMIT_DIR, max_fails=10, window_s=300.0,
+                                             base_lock_s=300.0, max_lock_s=3600.0),
+            # a BUDGET, not a penalty: an over-budget burst waits out the rest of the minute (no escalation), so a
+            # large initial IdP sync slows down rather than locking itself out
+            "scim_write_limiter": limiter_cls(config.SCIM_WRITE_RATELIMIT_DIR, max_fails=config.SCIM_OPS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

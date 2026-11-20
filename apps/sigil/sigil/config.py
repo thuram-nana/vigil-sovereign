@@ -451,6 +451,32 @@ def apex_autonomous_enabled() -> bool:
     reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
     closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
     return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+def customer_sso_enabled() -> bool:
+    """True iff the consumer SSO / SCIM surfaces are ON (`VIGIL_CUSTOMER_SSO` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off EVERY SSO/SCIM route / action is absent (404 exactly as an unknown
+    route), the edge serves no SAML ACS / enterprise-OIDC callback / SCIM endpoint, the provisioner's `sso_*` /
+    `scim_*` dispatch returns None, no SSO config is read and no membership is ever provisioned from an IdP — so
+    the server is byte-identical to a build without SSO. The master flag over the whole PR-H pipeline
+    (`governor.sso_config`, `governor.scim`, `ui.saml`, `ui.scim`). Read at call time.
+
+    Even when ON, every leg still fails closed unless the OWNER has signed a per-org SSO config
+    (`governor.sso_config`): SSO proves identity, the owner-signed config supplies the (ceiling-capped) role, and
+    SCIM/SAML/OIDC can provision ONLY `viewer`/`analyst`/`org_admin` — never `operator`/`founder`/`owner` or any
+    money/offense authority, which stay owner-signed. SAML signature verification additionally requires a vetted
+    XML-DSig backend (`ui.saml.signxml_sig_verifier`); absent it, SAML login fails closed (enterprise-OIDC does
+    not need it). Set the SAME value in customer.env and cockpit.env: the edge serves the routes, the cockpit
+    dispatches the actions (a value on one side only fails closed)."""
+    return (os.environ.get("VIGIL_CUSTOMER_SSO") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-H — the provisioner-side SSO/SCIM ledgers (written only while VIGIL_CUSTOMER_SSO is on): the durable
+# single-use SAML assertion-ID ledger (replay guard), the per-(org, client IP) failed-SCIM-authentication limiter
+# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN authenticated writes per org per minute — bounds how
+# fast even a valid token can grow the spine).
+CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
+SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
+SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
+SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 600)
 
 
 def apex_impact_enabled() -> bool:

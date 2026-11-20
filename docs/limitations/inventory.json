@@ -574,6 +574,22 @@
       "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
+      "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
+      "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/saml.py",
+        "symbol": "signxml_sig_verifier"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/ui/saml.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
