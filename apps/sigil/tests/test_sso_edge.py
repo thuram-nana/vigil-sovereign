@@ -667,6 +667,29 @@ def test_refused_saml_sign_ins_lock_the_address_out_of_start_and_acs(stack, sign
     assert stack.orgs().memberships(ORG_A) == []
 
 
+def test_a_saml_answer_the_parser_cannot_decode_is_a_counted_audited_refusal(stack, signed):
+    """A validly signed answer whose XML declaration names an encoding the parser cannot decode is refused like any
+    other unverifiable answer: COUNTED by the per-IP sign-in limiter and audited as a denied sign-in — never an
+    exception that escapes the ACS tail's accounting (the cockpit's generic 500 path)."""
+    u = stack.saml_org(ORG_A)
+
+    def answer() -> "tuple[bytes, str]":
+        r, _sid = stack.start(ORG_A)
+        req, relay = _authn_request(r.location)
+        return _sign(_saml_response(request_id=req.get("ID"), audience=u["saml_sp_entity_id"],
+                                    recipient=u["saml_acs_url"], name_id="alice@acme.com"), IDP_KEY), relay
+
+    # isolation control: the very same kind of signed answer, without the declaration, signs in
+    xml, relay = answer()
+    assert stack.post_acs(xml, relay).location.startswith("/api/customer/sso/finish?ticket=")
+    for _ in range(5):                                                 # the limiter's threshold within its window
+        xml, relay = answer()
+        undecodable = b'<?xml version="1.0" encoding="x-no-such-codec"?>' + xml
+        assert stack.post_acs(undecodable, relay).location == "/#sso=err"
+    assert [a["outcome"] for a in stack.audits("sso_login")] == ["ok"] + ["denied"] * 5
+    assert stack.start(ORG_A)[0].location == "/#sso=err"              # counted: the address is now locked out
+
+
 # =====================================================================================================================
 # Enterprise OIDC
 # =====================================================================================================================

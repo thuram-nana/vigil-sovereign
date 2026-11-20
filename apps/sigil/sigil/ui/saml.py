@@ -6,8 +6,9 @@ owner-signed `governor.sso_config`, capped at the ceiling — the IdP authentica
 
 WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion is refused):
 
-  1. XML HARDENING — a DOCTYPE/DTD is refused outright at the expat level (so NO internal/external entity can be
-     declared or expanded: XXE and billion-laughs are closed by construction), plus a byte-size cap.
+  1. XML HARDENING — a DOCTYPE/DTD is refused outright at the expat level, inside the one parse that builds the
+     tree (so NO internal/external entity can be declared or expanded: XXE and billion-laughs are closed by
+     construction), plus a byte-size cap; every parse failure is a refusal.
   2. EXACTLY ONE ASSERTION in the whole document, and NO two elements share an `ID` — the structural core of the
      signature-wrapping (XSW) defence: an attacker cannot smuggle a second, forged assertion for the processor
      to read while the signature covers a hidden original.
@@ -108,54 +109,67 @@ class SamlIdentity(NamedTuple):
 
 
 # ---------------------------------------------------------------------------------------------------
-# XML hardening — refuse a DTD outright (no entities can then exist), cap the size, parse.
+# XML hardening — ONE expat parse that refuses a DTD (no entities can then exist) AND builds the tree; size cap.
 # ---------------------------------------------------------------------------------------------------
 
 class _DtdFound(Exception):
     """Internal sentinel raised the instant expat sees a `<!DOCTYPE` — it fires at the DOCTYPE *start*, BEFORE
-    any entity declaration in the internal subset is read or expanded, so aborting here closes billion-laughs
-    and XXE at the source (no entity ever exists to expand or resolve)."""
+    any entity declaration in the internal subset is read or expanded, and pyexpat stops the parser there, so
+    billion-laughs and XXE are closed at the source (no entity ever exists to expand or resolve)."""
 
 
-def _reject_dtd(xml_bytes: bytes) -> None:
-    """A raw-expat pre-pass that FAILS CLOSED if the document declares a DOCTYPE/DTD. The C-accelerated
-    `ElementTree.XMLParser` exposes no handler hook (its `.parser` is None), so DTD rejection is done here with
-    `xml.parsers.expat` directly — whose `StartDoctypeDeclHandler` raises `_DtdFound` at the DOCTYPE start,
-    aborting before any `<!ENTITY>` is read. External entity resolution is also refused. On a malformed document
-    we return quietly and let the real tree parse below raise the precise `SamlError`."""
-    from xml.parsers import expat
-    p = expat.ParserCreate()
+def _refuse_dtd(*_a) -> None:
+    raise _DtdFound()
 
-    def _on_doctype(*_a):
-        raise _DtdFound()
 
-    p.StartDoctypeDeclHandler = _on_doctype
-    p.ExternalEntityRefHandler = lambda *_a, **_k: 0   # 0 ⇒ refuse external entity resolution
-    try:
-        p.Parse(bytes(xml_bytes), True)
-    except _DtdFound:
-        raise SamlError("refusing a SAML document that declares a DOCTYPE/DTD (XXE / entity-expansion defence)")
-    except expat.ExpatError:
-        return                                         # malformed — the ET parse below raises the real error
+def _universal(name: str) -> str:
+    """expat's namespaced name (`uri}local`, with the `}` separator) → ElementTree's `{uri}local`; a name with no
+    namespace is unchanged — exactly ElementTree's own expat-backed parser's mapping."""
+    return "{" + name if "}" in name else name
 
 
 def _parse_hardened(xml_bytes: bytes) -> ET.Element:
-    """Parse `xml_bytes` into an ElementTree root, FAIL-CLOSED. A DOCTYPE/DTD is refused up front (`_reject_dtd`)
-    so NO internal or external entity can be declared — XXE and billion-laughs are closed by construction. With
-    no DTD, only the five predefined XML entities exist; any other `&foo;` is an undefined-entity ParseError
-    (⇒ refusal). A byte-size cap bounds the input."""
+    """Parse `xml_bytes` into an ElementTree root, FAIL-CLOSED, in ONE expat parse that both refuses a DTD and
+    builds the tree. The refusal is that parse's own `StartDoctypeDeclHandler`, which raises at the DOCTYPE start
+    (pyexpat stops parsing there), so NO internal or external entity can be declared — XXE and billion-laughs are
+    closed by construction — and the root returned is the product of that very parse: there is no second,
+    unguarded parse of the same bytes (`ElementTree.fromstring` cannot carry the guard: its C-accelerated
+    `XMLParser` exposes no expat handler hook). The parse events feed `ElementTree.TreeBuilder` the way
+    ElementTree's own expat-backed `XMLParser` does (namespace-aware, `}` separator, attributes in document order,
+    comments and PIs dropped), so the root is the tree `ElementTree.fromstring` builds for the same bytes —
+    `test_saml` pins that equivalence. With no DTD only the five predefined entities exist, so any other `&foo;`
+    is expat's undefined-entity error. EVERY failure — malformed XML, an undefined entity, an XML declaration naming
+    an encoding expat cannot decode (the codec's LookupError / ValueError) — is a `SamlError`, so the caller's
+    refusal path (counted and audited) always runs. A byte-size cap bounds the input."""
     if not isinstance(xml_bytes, (bytes, bytearray)):
         raise SamlError("SAML input must be bytes")
     if len(xml_bytes) > _MAX_SAML_BYTES:
         raise SamlError("SAML document exceeds the size cap")
     if len(xml_bytes) == 0:
         raise SamlError("empty SAML document")
-    _reject_dtd(xml_bytes)
+    from xml.parsers import expat
+    builder = ET.TreeBuilder()
+
+    def _start(tag: str, attr_list: list) -> None:
+        # ordered_attributes ⇒ [name, value, name, value, ...] in document order
+        builder.start(_universal(tag), {_universal(attr_list[i]): attr_list[i + 1]
+                                        for i in range(0, len(attr_list), 2)})
+
+    p = expat.ParserCreate(None, "}")
+    p.buffer_text = True
+    p.ordered_attributes = True
+    p.StartDoctypeDeclHandler = _refuse_dtd
+    p.EntityDeclHandler = _refuse_dtd                  # unreachable without a DTD; refused again regardless
+    p.ExternalEntityRefHandler = lambda *_a: 0          # 0 ⇒ refuse external entity resolution
+    p.StartElementHandler = _start
+    p.EndElementHandler = lambda tag: builder.end(_universal(tag))
+    p.CharacterDataHandler = builder.data
     try:
-        root = ET.fromstring(bytes(xml_bytes))
-    except SamlError:
-        raise
-    except Exception as e:  # noqa: BLE001 — any malformed-XML / undefined-entity error → fail-closed refusal
+        p.Parse(bytes(xml_bytes), True)
+        root = builder.close()
+    except _DtdFound:
+        raise SamlError("refusing a SAML document that declares a DOCTYPE/DTD (XXE / entity-expansion defence)")
+    except Exception as e:  # noqa: BLE001 — malformed XML / undefined entity / undecodable encoding → refusal
         raise SamlError("SAML document is not well-formed XML") from e
     if root is None:
         raise SamlError("SAML document has no root element")

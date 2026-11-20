@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -244,13 +245,49 @@ def test_oversize_and_empty_refused():
     ("<!DOCTYPE samlp:Response>", "user@acme"),                           # a bare DOCTYPE, no entity at all
 ], ids=["internal-entity", "bare-doctype"])
 def test_a_doctype_on_an_otherwise_valid_response_is_refused_by_the_dtd_guard(doctype, nameid):
-    # the DTD tests above carry no assertion (and the XXE one an undefined external entity), so without
-    # `_reject_dtd` they are still refused — by `_single_assertion` / the parser. This Response is otherwise valid.
+    # the DTD tests above carry no assertion (and the XXE one an undefined external entity), so without the
+    # parser's DOCTYPE refusal they are still refused — by `_single_assertion` / the parser. This Response is otherwise
+    # valid.
     xml = _response(nameid=nameid).replace(b'<?xml version="1.0"?>', b'<?xml version="1.0"?>' + doctype.encode(), 1)
     with pytest.raises(SamlError, match="DOCTYPE"):
         _verify(xml)
     # isolation control: the same Response without the DTD verifies
     assert _verify(_response()).name_id == "user@acme"
+
+
+@pytest.mark.parametrize("encoding", ["x-no-such-codec", "shift_jis"], ids=["unknown-codec", "multi-byte-codec"])
+def test_an_undecodable_encoding_declaration_is_a_clean_saml_refusal(encoding):
+    # an otherwise-valid Response whose XML declaration names an encoding expat cannot decode: the refusal is a
+    # SamlError like every other, never the codec's LookupError / ValueError escaping the verifier (the sign-in tail
+    # counts and audits a refused verification on a SamlError — `test_sso_edge` pins that end to end)
+    xml = _response().replace(b'<?xml version="1.0"?>', f'<?xml version="1.0" encoding="{encoding}"?>'.encode(), 1)
+    with pytest.raises(SamlError, match="not well-formed"):
+        _verify(xml)
+    # isolation control: the same Response under its plain declaration verifies
+    assert _verify(_response()).name_id == "user@acme"
+
+
+def _shape(el):
+    return (el.tag, list(el.attrib.items()), el.text, el.tail, [_shape(c) for c in el])
+
+
+_MIXED = ('<r xmlns="urn:d" xmlns:p="urn:p" xmlns:q="urn:q" xml:lang="en" p:k="1" plain="v">'
+          '  lead &#x41;&amp;&lt;&gt;&quot;&apos; <![CDATA[<raw> & ]]>café'
+          '<p:c q:z="2">in<!-- a comment -->side</p:c>tail<?pi data?>more<e/>\n'
+          '<q:n>deep<x>y</x>z</q:n></r>')
+
+
+@pytest.mark.parametrize("doc", [
+    _response(),
+    _MIXED.encode("utf-8"),
+    ('<?xml version="1.0" encoding="UTF-16"?>' + _MIXED).encode("utf-16"),
+    b'<?xml version="1.0" encoding="ISO-8859-1"?><r a="caf\xe9">\xe9t\xe9</r>',
+], ids=["saml-response", "mixed-utf8", "mixed-utf16", "latin1"])
+def test_the_hardened_parse_builds_exactly_the_tree_elementtree_builds(doc):
+    # the DTD refusal lives in the ONE parse that builds the tree; that tree must be exactly ElementTree's (the
+    # structural / XSW checks read it): namespaced names, attributes in order, text / tail around comments, PIs,
+    # CDATA and character references, and every encoding expat decodes
+    assert _shape(saml._parse_hardened(doc)) == _shape(ET.fromstring(doc))
 
 
 def _padded(total: int) -> bytes:
