@@ -413,9 +413,12 @@ def _wiring(flags: dict, script: str) -> dict:
         'function viewSoon(t) { return "viewSoon:" + t; }',
         ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
          "LAUNCH_ON = false, CODE_ON = false;")] + [f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS])
+    # PR-L (Area 11): the shell also reads ATTACK_PATH_ON, so app.js's own flag line rides in beside PR-G's (read from
+    # the page dataset like theirs: none of these flag sets names attackPath, so the shell shows no Attack-path link).
     prog = "\n".join([_DOM, f"require({json.dumps(str(UI_JS))});", world, _line(src, r"^  function h\(\) \{.*\}$"),
                       _fn(src, "pageFlag"), _var(src, "PLANS_ON"), _var(src, "REPORT_EXPORT_ON"),
-                      _var(src, "COMPLIANCE_ON"), _var(src, "REPORTS_ON"), _fn(src, "navLink"), _fn(src, "shell"),
+                      _var(src, "COMPLIANCE_ON"), _var(src, "REPORTS_ON"), _var(src, "ATTACK_PATH_ON"),
+                      _fn(src, "navLink"), _fn(src, "shell"),
                       _line(src, r"^  function routeShown\(route\) \{.*\}$"), src[i:src.index("\n  };", i) + 5],
                       "const out = {};\n(async () => {\n" + script + "\n})().then(() => "
                       "process.stdout.write(JSON.stringify(out)), e => { console.error(e && e.stack || e); "
