@@ -502,6 +502,12 @@
    "file": "039-m1c-2-strix-prices-opus-4-5-at-their-own-list-ra.patch",
    "sha256": "76cf8f82a5a8da1975332995f9d5a9e79b5f2b8c80ff131cf64e6d8aa4730114",
    "subject": "M1c-2: Strix prices Opus 4.5+ at their own list rate"
+  },
+  {
+   "commit": "961f1c68125585be8a80f5beebaa34bccb164225",
+   "file": "040-vendor-strix-lock-mcp-1-30-0-fixes-cve-2026-1155.patch",
+   "sha256": "5e639895117f0c7b2f2aaddd8143503eb4a30d96116179b2aa1d3132f9ae2782",
+   "subject": "vendor/strix: lock mcp 1.30.0 (fixes CVE-2026-115563)"
   }
  ],
  "schema": 1,
@@ -748,7 +754,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "678118c847f6f5f053c8b240947104ba4efe02ffe972d81d70ee39b7049fe1d4"
+  "vendor/strix/uv.lock": "45552d393eaeb3624b43ee728b82c92d0c18afd196e896a9aacc5635d1ab8567"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
