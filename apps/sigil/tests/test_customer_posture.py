@@ -761,8 +761,8 @@ def test_with_the_flag_off_the_app_is_unchanged():
     table = src[i:src.index("\n  };", i) + 5]
     views = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogleCode", "viewBilling",
              "viewBillingReturn", "viewInvoices", "viewAssets", "viewAssessments", "viewGuideScreen", "viewMonitoring",
-             "viewTeam", "viewCode", "viewSecurityScreen", "viewFixFirst")
-    stubs = ("var SECURITY_ON = false, MONITORING_ON = false, CODE_ON = false, TEAM_ON = false;\n"
+             "viewTeam", "viewCode", "viewSecurityScreen", "viewFixFirst", "viewAttackPath")
+    stubs = ("var SECURITY_ON = false, MONITORING_ON = false, CODE_ON = false, TEAM_ON = false, ATTACK_PATH_ON = false;\n"
              "function ntfWidget() { return null; }\nasync function doLogout() {}\n"
              "function viewSoon(t) { return \"viewSoon:\" + t; }\n"
              + "\n".join(f"function {v}() {{ return {json.dumps(v)}; }}" for v in views))
@@ -1047,9 +1047,12 @@ def test_the_guide_walks_through_fix_first_with_the_screens_own_words():
     assert (st["where"], st["route"]) == ("Fix first", "#/fix-first")
     # the step names the page switch the screen is served under — the very name the top bar reads (pageFlag)
     assert st["when"] == "posture"
-    # it sits between reading the findings and confirming a fix: read them, fix the worst first, confirm the fix
+    # it sits between reading the findings and confirming a fix: read them, fix the worst first, then confirm.
+    # a later step (the attack-path story) may fall between fixing and the retest, so fixfirst need only land
+    # immediately after findings and strictly before the confirm step.
     order = [s["id"] for ch in out["chapters"] if ch["id"] == "assess" for s in ch["steps"]]
-    assert order.index("findings") + 1 == order.index("fixfirst") == order.index("retest") - 1
+    assert order.index("findings") + 1 == order.index("fixfirst")
+    assert order.index("fixfirst") < order.index("retest")
     told = " ".join(st["clicks"])
     src = _src()
     # every control the step names is one the screen really shows
