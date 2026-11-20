@@ -1652,10 +1652,23 @@
     var note = launchUi.notes[a.slug];
     return mine.map(launchRow).concat([note ? launchNote(note) : null, mine.length ? null : launchPicker(a)]);
   }
+  // PR-F: a started launch still waiting in the job queue. The server sends `queued` only while its fair queue is on,
+  // and only a count — how many runs the scheduler starts first, never whose.
+  function launchQueued(l) {
+    return l.state === "running" && !!l.queued && typeof l.queued.ahead === "number" && l.queued.ahead >= 0;
+  }
+  function queuedNote(ahead) {
+    var n = Math.floor(ahead);
+    return "The system is busy, so this assessment is queued at position " + (n + 1)
+      + (n ? " (" + n + " ahead of it)" : " (next to start)") + ". It starts on its own; there is nothing to do.";
+  }
   function launchRow(l) {
     var key = l.slug + ":" + l.launch;
     var depth = own(DEPTH_LABELS, l.depth);
-    var rows = [h("p.cust-launch-status", { text: own(STATE_LABELS, l.state) + (depth ? " · " + depth : "") })];
+    var queued = launchQueued(l);
+    var rows = [h("p.cust-launch-status", { text: (queued ? "Queued" : own(STATE_LABELS, l.state))
+      + (depth ? " · " + depth : "") })];
+    if (queued) rows.push(h("p.cust-muted", { text: queuedNote(l.queued.ahead) }));
     if (l.expired) {
       rows.push(h("p.cust-muted", { text: "This launch can no longer start. Cancel it to release its credits." }));
     }
