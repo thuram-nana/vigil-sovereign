@@ -360,12 +360,12 @@ def test_config_cap_bounds_provisioned_role(env):
 _aid = itertools.count(1)
 
 
-def _saml_in(env, nameid, *, audit=None):
-    """A verified SAML sign-in to acme (SCIM on in `env`) asserting `nameid`; the IdP's groups claim is irrelevant
-    in a directory-managed org."""
+def _saml_in(env, nameid, *, audit=None, groups=()):
+    """A verified SAML sign-in to acme (SCIM on in `env`) asserting `nameid` (and `groups`, which a directory-managed
+    org ignores: only a just-in-time org selects by the assertion's groups)."""
     orgreg, cfgreg = env
     aid = f"sx{next(_aid)}"
-    return uiscim.sso_login_saml(_saml_response(aid=aid, nameid=nameid, groups=()), org_id="acme",
+    return uiscim.sso_login_saml(_saml_response(aid=aid, nameid=nameid, groups=groups), org_id="acme",
                                  config_registry=cfgreg, org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
                                  sig_verifier=lambda b, c: frozenset({aid}), issued_at=_issue(), audit=audit)
 
@@ -504,3 +504,61 @@ def test_a_refused_clamp_grant_is_a_clean_sign_in_refusal(env, monkeypatch):
     with pytest.raises(SsoLoginError, match="the mint refused"):              # the edge's uniform refusal, never a 500
         _saml_in(env, "bob@acme.test")
     assert orgreg.membership_role(bob["id"], "acme") == "org_admin"
+
+
+# --- SCIM-managed sign-in: each refusal on the link has its own isolating test ----------------------------------------
+
+def _scim_dispatch(env, method, path, body, *, audit=None):
+    orgreg, cfgreg = env
+    return uiscim.scim_dispatch(method, path, body, ACME_AUTH, org_id="acme", config_registry=cfgreg,
+                                org_registry=orgreg, now=NOW, issued_at=_issue(), audit=audit)
+
+
+def _directory(env):
+    from sigil.governor.scim_directory import ScimDirectoryRegistry
+    orgreg, _ = env
+    return ScimDirectoryRegistry(orgreg.store, owner_key=OWNER, trusted_pubkey=OP).directory("acme")
+
+
+_DEACTIVATE = {"Operations": [{"op": "replace", "path": "active", "value": False}]}
+
+
+@pytest.mark.parametrize("how", ["revoke-never-landed", "owner-regrant", "jit-regrant-while-scim-was-off"])
+def test_scim_on_sign_in_refuses_a_deactivated_directory_user_even_with_a_live_membership(env, how):
+    """A deactivation normally also revokes the membership, so `no active membership` refuses first. In each state
+    below the directory says INACTIVE while a membership is still live, and the active check is the only barrier:
+    the critical audit before the revoke failed (the IdP retries later); the owner re-granted the person by hand;
+    or the owner turned SCIM off, a just-in-time sign-in re-granted the derived id, and SCIM came back on."""
+    orgreg, cfgreg = env
+    st, dave = _scim(env, "POST", "/scim/v2/Users", {"userName": "dave@acme.test", "groups": [{"value": "admins"}]})
+    assert st == 201
+    uid = dave["id"]
+    assert _saml_in(env, "dave@acme.test").role == "org_admin"                     # control: active, admitted
+    if how == "revoke-never-landed":
+        def audit(action, target, outcome):
+            if action == "scim_deactivate":
+                raise OSError("audit store unavailable")
+        with pytest.raises(OSError):
+            _scim_dispatch(env, "PATCH", f"/scim/v2/Users/{uid}", _DEACTIVATE, audit=audit)
+    else:
+        assert _scim_dispatch(env, "PATCH", f"/scim/v2/Users/{uid}", _DEACTIVATE).status == 200
+        assert orgreg.membership_role(uid, "acme") is None
+        if how == "owner-regrant":
+            orgreg.grant_membership("acme", uid, "founder", issued_at=_issue())
+        else:
+            cfgreg.disable_scim("acme", issued_at=_issue())
+            assert _saml_in(env, "dave@acme.test", groups=("admins",)).username == uid
+            _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "analyst"}, role_cap="org_admin")
+    assert _directory(env).user(uid).active is False and orgreg.membership_role(uid, "acme") is not None
+    with pytest.raises(SsoLoginError, match="deactivated"):
+        _saml_in(env, "dave@acme.test")
+
+
+def test_scim_on_sign_in_refuses_an_active_directory_user_whose_membership_was_revoked(env):
+    orgreg, _ = env
+    st, fay = _scim(env, "POST", "/scim/v2/Users", {"userName": "fay@acme.test", "groups": [{"value": "sec"}]})
+    assert st == 201 and _saml_in(env, "fay@acme.test").role == "analyst"          # control: admitted
+    orgreg.revoke_membership("acme", fay["id"])                                    # the owner revokes her by hand
+    assert _directory(env).user(fay["id"]).active is True                          # the IdP still lists her
+    with pytest.raises(SsoLoginError, match="no active membership"):
+        _saml_in(env, "fay@acme.test")
