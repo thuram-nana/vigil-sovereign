@@ -286,7 +286,8 @@ def test_the_acs_binds_the_signed_in_response_to(case, ok, tmp_path):
     else:
         with pytest.raises(uisaml.SamlError):
             uisaml.verify_saml_response(_resp(**case), **args)
-        assert led.try_spend("a1", 1e12, now=1_000_400_000.0)  # a refused response never spends its id
+        # a refused response never spends its id (in the org's own partition, where the verifier spends it)
+        assert led.try_spend("a1", 1e12, now=1_000_400_000.0, scope=_cfg().org_id)
 
 
 def test_an_empty_expected_request_id_fails_closed(tmp_path):

@@ -356,7 +356,7 @@ def test_missing_not_on_or_after_refused():
         _verify(_response(assertions=a))
 
 
-LATER = "2001-09-20T00:00:00Z"                              # well after EXPIRED
+LATER = "2001-09-15T00:00:00Z"            # after EXPIRED (+ skew), within the bounded assertion lifetime of it
 
 
 @pytest.mark.parametrize("still_valid,guard", [
@@ -421,6 +421,53 @@ def test_the_replay_ledger_is_bounded(tmp_path):
         led.try_spend("a3", NOW + 60, now=NOW)
     # once the spent ids are past NotOnOrAfter (+ grace) they are reaped, and there is room again
     assert led.try_spend("a3", NOW + 60, now=NOW + 60 + led._GRACE + 1)
+
+
+def test_one_org_can_neither_fill_nor_refuse_another_orgs_replay_ledger(tmp_path):
+    # ONE ledger directory serves every org, partitioned per org: "evil" fills ITS partition with ordinary
+    # successful sign-ins (cap 2 here, 65536 in production) and is refused at capacity, while "victim" still
+    # verifies against the same directory — and a replay is still refused inside each org's own partition.
+    led = saml.SamlReplayLedger(tmp_path / "replay", max_outstanding=2)
+    evil, victim = dataclasses.replace(CFG, org_id="evil"), dataclasses.replace(CFG, org_id="victim")
+    for aid in ("e1", "e2"):
+        assert _verify(_response(aid=aid), signed=(aid,), cfg=evil, ledger=led).assertion_id == aid
+    with pytest.raises(SamlError, match="capacity"):
+        _verify(_response(aid="e3"), signed=("e3",), cfg=evil, ledger=led)
+    assert _verify(_response(aid="v1"), signed=("v1",), cfg=victim, ledger=led).assertion_id == "v1"
+    with pytest.raises(SamlError, match="replay refused"):
+        _verify(_response(aid="v1"), signed=("v1",), cfg=victim, ledger=led)
+    with pytest.raises(SamlError):                               # the full partition refuses its own replay too
+        _verify(_response(aid="e2"), signed=("e2",), cfg=evil, ledger=led)
+    # the partitions are named by a hash of the org id, never the id itself
+    assert sorted(p.name for p in (tmp_path / "replay").iterdir()) == sorted(led._partition(o).name
+                                                                             for o in ("evil", "victim"))
+    assert all("evil" not in p.name and "victim" not in p.name for p in (tmp_path / "replay").iterdir())
+
+
+def _iso(epoch: float) -> str:
+    import datetime
+    return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_LIFETIME = saml._MAX_ASSERTION_LIFETIME_SECONDS
+
+
+@pytest.mark.parametrize("cond_far,scd_far", [(True, True), (False, True), (True, False)],
+                         ids=["both", "subject-confirmation", "conditions"])
+def test_an_assertion_deliverable_beyond_the_bounded_lifetime_is_refused(cond_far, scd_far):
+    # The IdP chooses NotOnOrAfter and the replay marker must outlive the EARLIEST one, so an assertion still
+    # deliverable more than the bounded lifetime from now is refused — only the earliest bound matters (a far
+    # Conditions window beside a short SubjectConfirmation, the common IdP shape, is fine).
+    far, near = _iso(NOW + _LIFETIME + 1), _iso(NOW + 300)
+    xml = _response(cond_nooa=far if cond_far else near, scd_nooa=far if scd_far else near)
+    if cond_far and scd_far:
+        with pytest.raises(SamlError, match="bounded assertion lifetime"):
+            _verify(xml)
+        # same-shape control: exactly AT the bound it verifies
+        at = _iso(NOW + _LIFETIME)
+        assert _verify(_response(cond_nooa=at, scd_nooa=at)).name_id == "user@acme"
+    else:
+        assert _verify(xml).name_id == "user@acme"
 
 
 # the NotOnOrAfter `_assertion` stamps by default (2001-09-14T00:00:00Z), as epoch seconds
