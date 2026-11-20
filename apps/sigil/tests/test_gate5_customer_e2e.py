@@ -90,6 +90,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/assets": ("Authorized assets", ("api/customer/assets",)),
     "#/assessments": ("Assessments", ("api/customer/assessments", "api/customer/launches")),
     "#/team": ("Team", ("api/customer/members",)),
+    "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
@@ -105,6 +106,11 @@ _CONTROLS: dict[str, tuple[str, ...]] = {
     "#/assets": ("Request ownership challenge", "Re-check now", "Re-issue challenge"),
     "#/assessments": ("Launch", "Pause", "View findings"),
     "#/team": ("Add member", "Change role", "Remove"),
+    # Website: Continue a half-finished proof, Prove again a lapsed one, Connect a website; Code repository: Connect
+    # GitHub, Open Code; Cloud account: Cancel / Continue a connection not finished, Connect again / Disconnect a lapsed
+    # one, Disconnect a connected one, Connect an AWS account
+    "#/connect": ("Continue", "Prove again", "Connect a website", "Connect GitHub", "Open Code", "Cancel",
+                  "Connect again", "Disconnect", "Connect an AWS account"),
     "#/monitoring": ("Turn on Observe", "Turn on Respond", "Switch to Respond", "Turn off"),
     "#/attack-path": ("View findings",),
     "#/guide": ("Replay the welcome tour",),
@@ -124,16 +130,19 @@ _ROUTE_STAGES: dict[str, tuple[str, "str | None", "str | None", str, str]] = {
 _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # The page flags the walk turns ON (the merged screens). security / passkey are read by no script on this base; they
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
-# add it here (its stage then reds loudly — the screen fell back home — until it does).
+# add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
+# (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
-               "code": "1", "posture": "1", "attackPath": "1", "blindVuln": "1", "googleSignin": "0",
-               "oidcHandoff": "0", "iosInstall": "0"}
+               "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
+               "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0"}
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
-# (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. Fix first (PR-B) is served only with
-# its own switch AND its master switch, VIGIL_APEX_PRESENTATION.
+# (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
+# api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
+# writes data-cloud-connect="1" only with both on). Fix first (PR-B) is served only with its own switch AND its
+# master switch, VIGIL_APEX_PRESENTATION.
 _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
-              "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION")
+              "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION")
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -266,10 +275,21 @@ process.on("unhandledRejection",e=>{errors.push(String(e&&e.stack||e));});
 const tick=()=>new Promise(r=>setImmediate(r));    // a real event-loop turn, independent of the stubbed timers
 """
 
+
+def _connect_challenge(host: str, token: str) -> dict:
+    """A site's outstanding challenge exactly as ``asset_ownership.assets_overview`` projects it into the Connect read:
+    the three placements and the marker (``vigil-site-verification=<token>``; the meta tag carries the bare token)."""
+    marker = "vigil-site-verification=" + token
+    return {"dns_name": "_vigil-challenge." + host, "dns_value": marker,
+            "well_known_url": "https://" + host + "/.well-known/vigil-site-verification.txt", "well_known_body": marker,
+            "meta_tag": '<meta name="vigil-site-verification" content="' + token + '">', "marker": marker}
+
+
 # What a signed-in founder's workspace answers: enough that every merged screen's real controls render (a credit
-# top-up to buy, a verified and a pending host, an assessment ready to launch and one running, a teammate, a monitored
-# and an unmonitored host on a plan, an invoice). Catalog-shaped (the processor's own amount for a pack); no figure
-# for what an assessment costs anywhere.
+# top-up to buy, a verified and a pending host, an assessment ready to launch and one running, a teammate, a site
+# proven / lapsed / half-proven with a connected repository and an AWS account connected / lapsed / not finished, a
+# monitored and an unmonitored host on a plan, an invoice). Catalog-shaped (the processor's own amount for a pack); no
+# figure for what an assessment costs anywhere.
 _FAKE_SERVER = {
     "api/customer/onboarding": {"ok": True, "state": "done"},
     "api/customer/notifications": {"notifications": [], "count": 0},
@@ -316,6 +336,30 @@ _FAKE_SERVER = {
     "api/customer/members": {"org_id": "org_acme", "members": [
         {"username": "cust_ana", "email": "ana@acme.com", "role": "founder"},
         {"username": "cust_ben", "email": "ben@acme.com", "role": "analyst", "since": 1700000000}]},
+    # Connect: the real Provisioner.customer_connect_overview shape — connect.connect_overview's three legs (sites =
+    # assets_overview rows, each still carrying its challenge; repos = the allowlisted row with the one-way slug; cloud
+    # = cloud_overview rows, a not-finished one carrying only provider + account) plus `available`, every flow on, so
+    # each tile renders its real buttons (90-day proofs and grants, as the registries record them).
+    "api/customer/connect": {
+        "org_id": "org_acme",
+        "sites": [
+            {"host": "a.example", "method": "dns-txt", "verified_at": 1700000000.0, "expires_at": 1800000000.0,
+             "status": "verified", "challenge": _connect_challenge("a.example", "ta")},
+            {"host": "c.example", "method": "dns-txt", "verified_at": 1692224000.0, "expires_at": 1700000000.0,
+             "status": "expired", "challenge": _connect_challenge("c.example", "tc")},
+            {"host": "p.example", "status": "pending", "challenge": _connect_challenge("p.example", "t")}],
+        "repos": [{"repo": "github.com/acme/api", "slug": "cust_cb6a4aaca84a658370d13b8b",
+                   "block_threshold": "critical_high", "monthly_limit_credits": 0}],
+        "cloud": [
+            {"provider": "aws", "account_id": "111111111111",
+             "role_ref": "arn:aws:iam::111111111111:role/VigilSecurityAudit", "verified_at": 1792224000.0,
+             "expires_at": 1800000000.0, "access": "read-only", "status": "connected"},
+            {"provider": "aws", "account_id": "222222222222",
+             "role_ref": "arn:aws:iam::222222222222:role/VigilSecurityAudit", "verified_at": 1692224000.0,
+             "expires_at": 1700000000.0, "access": "read-only", "status": "expired"},
+            {"provider": "aws", "account_id": "333333333333", "access": "read-only", "status": "pending"}],
+        "available": {"site_check": True, "site_auto_recheck": True, "repos": True, "repo_connect": True,
+                      "cloud_connect": True}},
     "api/customer/monitoring": {"org_id": "org_acme", "can_manage": True,
                                 "grants": [{"host": "a.example", "mode": "observe", "not_before": 1.0,
                                             "not_after": 1800000000.0, "active": True}],
@@ -590,8 +634,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "posture",
-                  "posture/trend"):
+        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
+                  "posture", "posture/trend"):
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()
