@@ -2864,9 +2864,26 @@ def cmd_org_roles(a) -> None:
         sys.exit(2)
 
 
-def _write_owner_secret_file(dest: str, secret: str, *, overwrite: bool) -> None:
-    """Write `secret` to `dest` 0600, atomically (temp + replace), refusing a symlink / non-regular target and an
-    existing file unless `overwrite`. The secret is never printed — the owner hands the FILE to the IdP admin."""
+def _commit_owner_secret_file(staged, dest: str) -> None:
+    """Put a `_stage_owner_secret_file` result in place at `dest` (one atomic rename in the same directory)."""
+    import os as _os
+    _os.replace(staged, dest)
+
+
+def _discard_owner_secret_file(staged) -> None:
+    import os as _os
+    try:
+        _os.unlink(staged)
+    except OSError:
+        pass
+
+
+def _stage_owner_secret_file(dest: str, secret: str, *, overwrite: bool):
+    """Write `secret` 0600 + fsynced to a fresh temp file BESIDE `dest` and return its path, refusing a symlink /
+    non-regular `dest` and an existing one unless `overwrite`. `dest` itself is untouched until
+    `_commit_owner_secret_file` renames the temp over it (atomic, same directory) — so a caller can make the secret
+    durable BEFORE it signs anything, yet replace `dest` only once the signing succeeded. The secret is never
+    printed: the owner hands the FILE to the IdP admin."""
     import os as _os
     import secrets as _secrets
     import stat as _stat
@@ -2885,11 +2902,33 @@ def _write_owner_secret_file(dest: str, secret: str, *, overwrite: bool) -> None
     tmp = target.parent / (".tmp-" + _secrets.token_hex(8))
     fd = _os.open(str(tmp), _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | getattr(_os, "O_NOFOLLOW", 0), 0o600)
     try:
-        _os.write(fd, secret.encode("utf-8") + b"\n")
-        _os.fsync(fd)
-    finally:
-        _os.close(fd)
-    _os.replace(tmp, target)
+        try:
+            _os.write(fd, secret.encode("utf-8") + b"\n")
+            _os.fsync(fd)
+        finally:
+            _os.close(fd)
+    except BaseException:
+        _discard_owner_secret_file(tmp)
+        raise
+    return tmp
+
+
+def _sign_with_staged_secret(dest: str, secret: str, *, overwrite: bool, sign):
+    """Run `sign()` (the owner-signing of a SCIM bearer's fingerprint) with `secret` already durable on disk — staged
+    beside `dest`, since a signed fingerprint whose plaintext was never delivered would be a dead SCIM token — and
+    replace `dest` only once `sign()` succeeded: a refused or failed signing leaves `dest` exactly as it was (never a
+    token that was not signed; never the live token's only copy replaced). Returns `sign()`'s result."""
+    staged = _stage_owner_secret_file(dest, secret, overwrite=overwrite)
+    try:
+        result = sign()
+    except BaseException:
+        _discard_owner_secret_file(staged)
+        raise
+    try:
+        _commit_owner_secret_file(staged, dest)
+    except OSError as e:
+        raise OSError(f"the bearer was signed but could not be moved into place ({e}); it is in {staged}") from e
+    return result
 
 
 def _group_roles(pairs) -> dict:
@@ -2957,28 +2996,31 @@ def cmd_sso(a) -> None:
                     raise ValueError("--scim needs --token-out FILE (the bearer is written there, never printed)")
                 import secrets as _secrets
                 token = _secrets.token_urlsafe(32)
-                # the file FIRST: a signed fingerprint whose plaintext was never delivered would be a dead SCIM token
-                _write_owner_secret_file(a.token_out, token, overwrite=a.overwrite)
-            common = dict(default_role=a.default_role, role_cap=a.role_cap, group_role_map=_group_roles(a.group_role),
-                          clock_skew_seconds=a.clock_skew, scim_enabled=bool(a.scim), scim_token=token,
-                          issued_at=_time.time())
-            if verb == "set-saml":
-                certs = []
-                for path in a.idp_cert or ():
-                    with open(path, encoding="utf-8") as fh:
-                        certs.append(fh.read())
-                seq = reg.set_saml_config(a.org, idp_entity_id=a.idp_entity_id, idp_certs_pem=certs,
-                                          idp_sso_url=a.idp_sso_url, sp_entity_id=urls["saml_sp_entity_id"],
-                                          acs_url=urls["saml_acs_url"], **common)
-            else:
+
+            def sign() -> int:
+                common = dict(default_role=a.default_role, role_cap=a.role_cap,
+                              group_role_map=_group_roles(a.group_role), clock_skew_seconds=a.clock_skew,
+                              scim_enabled=bool(a.scim), scim_token=token, issued_at=_time.time())
+                if verb == "set-saml":
+                    certs = []
+                    for path in a.idp_cert or ():
+                        with open(path, encoding="utf-8") as fh:
+                            certs.append(fh.read())
+                    return reg.set_saml_config(a.org, idp_entity_id=a.idp_entity_id, idp_certs_pem=certs,
+                                               idp_sso_url=a.idp_sso_url, sp_entity_id=urls["saml_sp_entity_id"],
+                                               acs_url=urls["saml_acs_url"], **common)
                 from urllib.parse import urlparse as _urlparse
                 hosts = list(a.egress_host or ()) or sorted({(_urlparse(u).hostname or "").lower()
                                                              for u in (a.jwks_uri, a.token_endpoint)} - {""})
-                seq = reg.set_oidc_config(a.org, issuer=a.issuer, client_id=a.client_id, jwks_uri=a.jwks_uri,
-                                          authorize_endpoint=a.authorize_endpoint, token_endpoint=a.token_endpoint,
-                                          redirect_uri=urls["oidc_redirect_uri"],
-                                          signing_algs=tuple(a.signing_alg or ("RS256",)), egress_hosts=hosts,
-                                          **common)
+                return reg.set_oidc_config(a.org, issuer=a.issuer, client_id=a.client_id, jwks_uri=a.jwks_uri,
+                                           authorize_endpoint=a.authorize_endpoint, token_endpoint=a.token_endpoint,
+                                           redirect_uri=urls["oidc_redirect_uri"],
+                                           signing_algs=tuple(a.signing_alg or ("RS256",)), egress_hosts=hosts,
+                                           **common)
+            # the bearer is durable BEFORE its fingerprint is signed, and lands at --token-out only once the config
+            # is: a refused config (any validation, e.g. an over-bound --clock-skew) leaves that file as it was
+            seq = (_sign_with_staged_secret(a.token_out, token, overwrite=a.overwrite, sign=sign) if token
+                   else sign())
             print(f"  {verb[4:].upper()} SSO configured for {a.org} (owner-signed, seq {seq}); "
                   f"SCIM {'on — the bearer was written (0600) to the requested file' if token else 'off'}")
             for k in ("saml_acs_url", "saml_sp_entity_id") if verb == "set-saml" else ("oidc_redirect_uri",):
@@ -2989,8 +3031,10 @@ def cmd_sso(a) -> None:
                 raise ValueError(f"no active SSO config for {a.org!r}")
             import secrets as _secrets
             token = _secrets.token_urlsafe(32)
-            _write_owner_secret_file(a.token_out, token, overwrite=a.overwrite)   # delivered BEFORE it is signed
-            seq, _tok = reg.rotate_scim_token(a.org, issued_at=_time.time(), token=token)
+            # durable BEFORE it is signed; at --token-out only once it is (a refused rotation leaves the file as it was)
+            seq, _tok = _sign_with_staged_secret(
+                a.token_out, token, overwrite=a.overwrite,
+                sign=lambda: reg.rotate_scim_token(a.org, issued_at=_time.time(), token=token))
             print(f"  SCIM bearer rotated for {a.org} (owner-signed, seq {seq}); the new token was written (0600) "
                   f"to the requested file; the previous token no longer authenticates")
         elif verb == "disable-scim":

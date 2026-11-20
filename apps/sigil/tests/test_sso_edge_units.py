@@ -624,6 +624,43 @@ def test_cli_help_says_how_scim_and_the_sign_in_clamp_treat_roles(argv, needles,
         assert needle in out, (argv, needle)
 
 
+def test_cli_a_refused_config_or_rotation_never_touches_the_token_file(cli_env, capsys, monkeypatch):
+    """The bearer is durable before its fingerprint is signed, but lands at --token-out only once it is: a set-saml
+    refused AFTER the bearer was minted (an over-bound clock skew, a malformed --group-role, an unreadable cert) leaves
+    no file behind, and with --overwrite on the live token's file it leaves that file - the live token's only copy -
+    as it was; a refused rotation likewise. No staged temp file is left either."""
+    cli, path, tmp = cli_env
+    certf = tmp / "idp.pem"
+    certf.write_text(CERT)
+    base = ["sso", "set-saml", "org_abc", "--public-base", "https://app.example.com", "--idp-entity-id", "https://idp",
+            "--idp-sso-url", "https://idp/sso", "--idp-cert", str(certf)]
+    out = tmp / "tokens"
+    out.mkdir()
+    fresh = out / "fresh.token"
+    for bad in (["--clock-skew", "601"], ["--group-role", "nonsense"], ["--idp-cert", str(tmp / "missing.pem")]):
+        with pytest.raises(SystemExit) as e:
+            cli.main(base + bad + ["--scim", "--token-out", str(fresh)])
+        assert e.value.code == 2 and not fresh.exists(), bad
+    assert SsoConfigRegistry(SpineStore(path)).config("org_abc") is None
+    live = out / "live.token"
+    cli.main(base + ["--scim", "--token-out", str(live)])                      # control: signed, and delivered
+    tok = live.read_text().strip()
+    assert SsoConfigRegistry(SpineStore(path)).config("org_abc").scim_token_fp == token_fingerprint(tok)
+    with pytest.raises(SystemExit) as e:
+        cli.main(base + ["--scim", "--token-out", str(live), "--overwrite", "--clock-skew", "601"])
+    assert e.value.code == 2 and live.read_text().strip() == tok
+
+    def refused(*_a, **_k):
+        raise SsoConfigError("refused for the test")
+    monkeypatch.setattr(SsoConfigRegistry, "rotate_scim_token", refused)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["sso", "rotate-scim-token", "org_abc", "--token-out", str(live), "--overwrite"])
+    assert e.value.code == 2 and live.read_text().strip() == tok
+    assert SsoConfigRegistry(SpineStore(path)).config("org_abc").scim_token_fp == token_fingerprint(tok)
+    assert sorted(p.name for p in out.iterdir()) == ["live.token"]                # no staged temp file left
+    capsys.readouterr()
+
+
 def test_cli_refuses_ceiling_breaches_symlinks_and_unknown_orgs(cli_env, capsys):
     cli, path, tmp = cli_env
     certf = tmp / "idp.pem"
