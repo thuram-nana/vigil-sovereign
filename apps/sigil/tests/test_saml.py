@@ -444,6 +444,53 @@ def test_one_org_can_neither_fill_nor_refuse_another_orgs_replay_ledger(tmp_path
     assert all("evil" not in p.name and "victim" not in p.name for p in (tmp_path / "replay").iterdir())
 
 
+def test_a_concurrent_sweep_never_reaps_a_marker_another_spend_is_still_writing(tmp_path, monkeypatch):
+    # Spender A is paused right after it created its file and before it wrote anything; spender B's spend (and so its
+    # sweep) runs inside that window. A's marker must survive it: a sweep that read A's still-empty marker as
+    # garbage and reaped it let A's assertion be spent — and verified — a second time.
+    import os
+    import threading
+    led = saml.SamlReplayLedger(tmp_path / "replay")
+    created, resume = threading.Event(), threading.Event()
+    real_open = os.open
+
+    def pausing_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if threading.current_thread().name == "spender-A" and flags & os.O_CREAT and not created.is_set():
+            created.set()
+            resume.wait(10)
+        return fd
+    monkeypatch.setattr(saml.os, "open", pausing_open)
+    out: dict = {}
+    a = threading.Thread(name="spender-A", target=lambda: out.update(a=led.try_spend("A", NOW + 300, now=NOW)))
+    a.start()
+    assert created.wait(10)
+    out["b"] = led.try_spend("B", NOW + 300, now=NOW)            # B sweeps while A's file exists, still unwritten
+    resume.set()
+    a.join(10)
+    assert out == {"a": True, "b": True}
+    assert led.try_spend("A", NOW + 300, now=NOW + 1) is False     # A's marker survived: its replay is refused
+    assert led.try_spend("B", NOW + 300, now=NOW + 1) is False
+    assert sorted(p.name for p in led._partition("").iterdir()) == sorted(led._marker(led._partition(""), x).name
+                                                                          for x in ("A", "B"))   # no temp left
+
+
+def test_an_in_flight_temp_file_never_counts_and_is_reaped_only_once_stale(tmp_path):
+    import os
+    import time
+    led = saml.SamlReplayLedger(tmp_path / "replay", max_outstanding=2)
+    assert led.try_spend("a1", NOW + 60, now=NOW)
+    part = led._partition("")
+    stale, fresh = part / (led._TMP_PREFIX + "0" * 32), part / (led._TMP_PREFIX + "1" * 32)
+    stale.write_text("")
+    fresh.write_text("")
+    old = time.time() - led._TMP_STALE - 60
+    os.utime(stale, (old, old))
+    assert led.try_spend("a2", NOW + 60, now=NOW)                # two temp files beside a1 never fill a cap of 2
+    assert not stale.exists() and fresh.exists()                 # a crashed spend's stale leftover is reaped
+    assert led._marker(part, "a1").exists() and led._marker(part, "a2").exists()   # the markers are untouched
+
+
 def _iso(epoch: float) -> str:
     import datetime
     return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

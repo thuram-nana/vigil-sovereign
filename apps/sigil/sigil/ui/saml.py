@@ -239,21 +239,29 @@ def _parse_instant(value: Optional[str], what: str) -> float:
 
 class SamlReplayLedger:
     """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, accept_until, scope=org)`
-    O_EXCL-creates a marker named `sha256(id)` (fixed hex, no traversal/newline injection); the exclusive create
-    is the serialization point, so of N concurrent presentations exactly ONE wins and the rest are refused
-    (replay). The ledger is PARTITIONED by `scope` (the verifier passes the config's org): each org's markers live
-    in that org's own sub-directory (named by a hash of the org id, never the id itself) with its OWN sweep and
-    its OWN cap, so a tenant — whose IdP chooses its assertions' NotOnOrAfter — can fill only its own partition,
-    never refuse another org's sign-ins at capacity nor make another org's spend sweep its markers. A per-spend
-    sweep + a hard cap bound each partition. `accept_until` is an instant after which NO
-    presentation of that assertion can pass the temporal guard at any allowed skew — the verifier passes its
-    earliest NotOnOrAfter PLUS `_MAX_CLOCK_SKEW_SECONDS`, never the skew in force at the first spend (the owner
-    may raise it, up to that bound, before a replay arrives) — and a marker is reaped only once that instant is
-    more than a grace in the past, so by then the temporal guard refuses the assertion whatever skew the config
-    carries (a marker reaped while any allowed window is still open would let it verify twice). Stdlib only."""
+    publishes a marker named `sha256(id)` (fixed hex, no traversal/newline injection) ATOMICALLY: the payload is
+    written and fsynced to a private temp file first, then hard-linked to the marker name. The link is the
+    serialization point — it fails if the name exists — so of N concurrent presentations exactly ONE wins and the
+    rest are refused (replay); and the marker name never exists without its payload, so a concurrent spend's sweep
+    can never mistake a half-written marker for garbage and reap it (which would let that assertion be spent, and
+    verified, again). A sweep skips the in-flight temp files (they never count as markers) and reaps one only once
+    it is stale by real file age (a crashed spend's leftover).
+
+    The ledger is PARTITIONED by `scope` (the verifier passes the config's org): each org's markers live in that
+    org's own sub-directory (named by a hash of the org id, never the id itself) with its OWN sweep and its OWN cap,
+    so a tenant — whose IdP chooses its assertions' NotOnOrAfter — can fill only its own partition, never refuse
+    another org's sign-ins at capacity nor make another org's spend sweep its markers. A per-spend sweep + a hard
+    cap bound each partition. `accept_until` is an instant after which NO presentation of that assertion can pass
+    the temporal guard at any allowed skew — the verifier passes its earliest NotOnOrAfter PLUS
+    `_MAX_CLOCK_SKEW_SECONDS`, never the skew in force at the first spend (the owner may raise it, up to that
+    bound, before a replay arrives) — and a marker is reaped only once that instant is more than a grace in the
+    past, so by then the temporal guard refuses the assertion whatever skew the config carries (a marker reaped
+    while any allowed window is still open would let it verify twice). Stdlib only."""
 
     _DEFAULT_MAX = 65536
     _GRACE = 300.0
+    _TMP_PREFIX = ".tmp-"          # an in-flight spend's private temp file (a marker name is 64 hex, never this)
+    _TMP_STALE = 3600.0            # real seconds after which a leftover temp file is a crashed spend's, and reaped
 
     def __init__(self, path, *, max_outstanding: int = _DEFAULT_MAX) -> None:
         self.dir = Path(path)
@@ -273,6 +281,15 @@ class SamlReplayLedger:
         except OSError:
             return 0
         for entry in entries:
+            if entry.name.startswith(self._TMP_PREFIX):
+                # Another spend's temp file, not a marker: never counted, and never reaped while that spend may still
+                # be linking it — only once it is stale by REAL file age (a crashed spend's leftover).
+                try:
+                    if time.time() - entry.stat(follow_symlinks=False).st_mtime > self._TMP_STALE:
+                        self._unlink(entry.path)
+                except OSError:
+                    pass
+                continue
             try:
                 rec = json.loads(Path(entry.path).read_text(encoding="utf-8"))
                 expiry = float(rec["exp"])
@@ -296,7 +313,7 @@ class SamlReplayLedger:
                   scope: str = "") -> bool:
         """True iff this assertion ID is spent for the FIRST time in `scope`'s partition (accept); False if already
         spent there (replay → refuse). The marker is kept until `accept_until` (+ grace). Fail-closed on a blank id.
-        A full partition, or a real I/O error at the exclusive-create, raises (the caller refuses)."""
+        A full partition, or a real I/O error writing or linking the marker, raises (the caller refuses)."""
         aid = str(assertion_id or "").strip()
         if not aid:
             return False
@@ -308,14 +325,22 @@ class SamlReplayLedger:
             raise SamlError("SAML replay ledger at capacity")
         marker = self._marker(part, aid)
         payload = json.dumps({"exp": float(accept_until)}, ensure_ascii=False)
+        # The payload goes to a private temp file (written + fsynced) and is then hard-linked to the marker name, so
+        # the marker never exists without its payload; the link is the serialization point (an existing name ⇒ a
+        # replay). The temp name is removed either way.
+        tmp = part / (self._TMP_PREFIX + secrets.token_hex(16))
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return False                                  # already spent → replay refused
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(str(tmp), str(marker))
+            except FileExistsError:
+                return False                              # already spent → replay refused
+        finally:
+            self._unlink(str(tmp))
         return True
 
 
