@@ -133,7 +133,14 @@ _CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "
 _STATE_DIRS = ("qdrant", "graph",
                # PRICING M1c: the model gateway's per-launch meters — MONEY data (an unsettled run's charge is
                # computed from its meter), hash-chained, packaged verbatim so a restored install settles it.
-               "model_meter")
+               "model_meter",
+               # legal/governance S1: the customer-entered General profile (ui/preferences_store.py — legal entity,
+               # registered address, contractual + emergency contacts). The customer typed it and NOTHING regenerates
+               # it, so a restore must bring it back; it is contact data, so it is restored owner-only
+               # (see _PRIVATE_STATE_DIRS).
+               "customer_preferences")
+# State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
+_PRIVATE_STATE_DIRS = ("customer_preferences",)
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -152,6 +159,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
     "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
+    "customer_preferences",     # legal/governance S1: the customer-entered General profile (0600/0700 on restore)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
@@ -182,12 +190,13 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "operator": "in-flight operator plan/journal pre-images — operational scratch, off the trust root",
     "customer": "ephemeral customer-edge operational markers (cookie sessions + single-use email "
                 "verify/recover tokens + login/signup/member rate-limit lockouts + the onboarding tour's "
-                "finished/skipped marks + the settings shell's General preferences + the app's copies of "
-                "launches reserved and not started yet) — the "
+                "finished/skipped marks + the app's copies of launches reserved and not started yet) — the "
                 "AUTHORITATIVE customer accounts/orgs/memberships/wallet/reservations are owner-signed on the spine "
                 "(captured); these regenerate (re-login / re-request / limits reset / the tour shows once more), "
                 "never recovery state (a lost launch copy leaves its reservation on the spine: a later launch of the "
-                "same host supersedes it and `ops-sweep reservations` releases it)",
+                "same host supersedes it and `ops-sweep reservations` releases it). The settings shell's General "
+                "profile is NOT here: the customer typed it and nothing regenerates it, so it is its own top-level "
+                "`customer_preferences`, captured",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
@@ -267,12 +276,21 @@ def _is_sensitive_rel(rel: str) -> bool:
     land at the process umask (potentially world-readable). Covers the WARDEN kernel key
     (``warden/warden.key`` — a plaintext-0600 Rust-kernel file that rides inside the passphrase-sealed body)
     and ANY packaged ``*.key`` file, PLUS ``sigil.env`` (the persisted config / legacy secret tier, which can
-    hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY). The whole backup body is AEAD-sealed at rest
-    regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
-    if rel.endswith(".key") or rel == "sigil.env":
+    hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY), PLUS every file of a :data:`_PRIVATE_STATE_DIRS`
+    subtree (personal data — a customer's contact details), whose directories are restored 0700 as well. The whole
+    backup body is AEAD-sealed at rest regardless; this closes the post-restore on-disk perms of the sensitive
+    material itself."""
+    if rel.endswith(".key") or rel == "sigil.env" or _is_private_state_rel(rel):
         return True
     # #70: the unit EnvironmentFiles (may hold secrets) are owner-only on restore too.
     return "/" not in rel and rel.endswith(".env")
+
+
+def _is_private_state_rel(rel: str) -> bool:
+    """True iff ``rel`` is a file inside a :data:`_PRIVATE_STATE_DIRS` subtree (restored 0600, its directories 0700).
+    A ``\\`` counts as the separator it is to :func:`_safe_target`."""
+    top, sep, _rest = rel.replace("\\", "/").partition("/")
+    return bool(sep) and top in _PRIVATE_STATE_DIRS
 
 
 def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Path, str]]:
@@ -1625,6 +1643,14 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
             if _is_sensitive_rel(rel):
                 os.chmod(target, 0o600)
+            if _is_private_state_rel(rel):
+                # personal data: every directory from the file's own up to its top-level unit is owner-only too
+                # (0700, as the store keeps it), never the umask's world-listable default
+                top = staged_dir / rel.replace("\\", "/").partition("/")[0]
+                d = target.parent
+                while d != top.parent:
+                    os.chmod(d, 0o700)
+                    d = d.parent
         from .spine.home_unit import HomeUnit, unit_shape
         pruned = pruned or unit_shape(HomeUnit.for_home(staged_dir), require_archive=False).pruned
         if pruned and not config.pruned_restore_enabled():

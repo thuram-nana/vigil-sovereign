@@ -6,9 +6,14 @@ Authorized administrators = the Team screen, Billing) and adds a General tab tha
 / contact profile. That profile is a UI PREFERENCE — never money, never authority, never a signed spine record — kept
 server-side, per account:
 
-  * ui/preferences_store keeps one hashed-name 0600 file per account in a 0700 directory under customer/; only the
-    CLOSED PREFERENCE_KEYS allowlist of string fields is ever stored, and anything missing, unreadable, malformed,
-    oversized or symlinked reads as the documented DEFAULTS (an empty profile), never an error;
+  * ui/preferences_store keeps one hashed-name 0600 file per account in a 0700 directory of its own
+    ($SIGIL_HOME/customer_preferences — the backup CAPTURES it: the customer typed it and nothing regenerates it); only
+    the CLOSED PREFERENCE_KEYS allowlist of string fields that are valid text is ever stored, and anything missing,
+    unreadable, malformed, oversized or symlinked reads as the documented DEFAULTS (an empty profile), never an error;
+  * a save merges ONLY the keys it names (one save at a time, so concurrent saves of different fields both land), and
+    is refused with nothing written rather than ever losing a field: a record over the read bound (_MAX_BYTES, measured
+    on the SERIALISED bytes — an accepted save always reads back as accepted), a lone surrogate or body bytes that are
+    not text (a clean 400, never a codec error's message), a stored file that cannot be read;
   * Provisioner.preferences_get / preferences_set serve an ACTIVE customer only, enforce the allowlist, and write to
     the per-account store — NEVER to the signed append-only spine (no audit row): a customer cannot grow the spine by
     saving the tab;
@@ -18,7 +23,9 @@ server-side, per account:
     / unknown-action 404, with nothing relayed to the cockpit — needs a session (401), and reads/records for the
     session's account only — a body naming another account changes nothing for it;
   * app.js adds the Settings tab + #/settings hub only while data-settings="1"; off, it is byte-identical (no tab,
-    #/settings is the home screen, no preferences call is made);
+    #/settings is the home screen, no preferences call is made). The hub links Account security only where that
+    screen is shown; a failed read shows an error with Save disabled (never an empty form); Save sends only the
+    fields the customer changed; and every class it renders is styled;
   * the in-app guide covers the Settings screen (its step names the page switch, ``when: "settings"``) and lists it only
     while routeShown shows #/settings: with the flag off the Guide screen is byte-identical and the tour never visits it.
 
@@ -35,21 +42,42 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
                                                                  (and test_1, by the 404's exact body)
   * the edge takes the account from the body                  -> test_5_account_is_the_hop_principal_no_cross_account
   * the edge always writes data-settings="1"                  -> test_1_flag_off_route_404_page_and_nav_byte_identical
-  * the hub invents an authority/money control                -> test_2_flag_on_hub_renders_and_links_existing_screens
+  * the hub invents an authority/money control, spends credits
+    or changes monitoring (a POST, a raw request, an app.js
+    writer such as startCheckout / doLaunch / monTurnOn)      -> test_2_flag_on_hub_renders_and_links_existing_screens
   * the guide has no Settings step                            -> test_11_the_guide_covers_settings_only_while_it_is_shown
                                                                  (and test_customer_onboarding's screen census)
   * the guide lists a switch-named step whatever the switch   -> test_11_the_guide_covers_settings_only_while_it_is_shown
   * routeShown ignores the settings flag                      -> test_11_the_guide_covers_settings_only_while_it_is_shown
+  * the store caps code points, not the serialised bytes      -> test_12_an_accepted_save_always_reads_back_as_accepted
+  * the store takes a lone surrogate / the read surfaces one  -> test_13_unencodable_text_is_refused_in_plain_words
+  * the provisioner lets a codec error's message through      -> test_13_unencodable_text_is_refused_in_plain_words
+                                                                 (end to end: test_13b)
+  * the edge echoes the codec's message for body bytes that
+    are not text, or its plain refusal ignores the flag       -> test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing
+  * a failed read renders an (empty) form / Save enabled      -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
+  * Save sends every field, not only the changed ones         -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
+  * a save merges onto defaults when the file cannot be read  -> test_15_the_server_merges_only_the_keys_it_is_sent
+  * saves are not serialized (no _SAVE_LOCK)                  -> test_15b_concurrent_saves_of_different_fields_both_land
+  * the backup leaves the profile out / restores it umask     -> test_10_backup_captures_the_profile_and_toggle_off_is_byte_identical
+                                                                 (and test_backup_recovery_functional)
+  * the hub links Account security with that screen off      -> test_16_the_hub_links_account_security_only_where_it_is_shown
+  * the hub ignores routeShown                                -> test_16_the_hub_links_account_security_only_where_it_is_shown
+  * a class the Settings block renders has no style           -> test_17_every_class_the_settings_hub_renders_is_styled
 """
 from __future__ import annotations
 
+import errno
 import http.client
 import json
+import os
 import re
 import shutil
 import stat
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -74,6 +102,7 @@ from sigil.ui.provision import ProvisionDenied, ProvisionError, Provisioner
 FLAG = "VIGIL_CUSTOMER_SETTINGS"
 APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 APP_JS = APP / "app.js"
+APP_CSS = APP / "app.css"
 INDEX_HTML = APP / "index.html"
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
@@ -95,7 +124,7 @@ def _no_flag(monkeypatch):
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    d = tmp_path / "customer" / "preferences"
+    d = tmp_path / "customer_preferences"
     monkeypatch.setattr(config, "CUSTOMER_PREFERENCES_DIR", d)
     return d
 
@@ -127,6 +156,21 @@ def _sign_in(ep, email):
     c, r = _post(op, ep, "/api/customer/login", {"email": email, "password": "customer-pw-1"})
     assert c == 200, (c, r)
     return op, r["username"]
+
+
+def _post_raw(opener, port, path, data: bytes):
+    """A POST of these exact body bytes (the shared _post re-encodes its body as JSON), answered as (status, body)."""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method="POST",
+                                 headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"})
+    try:
+        with opener.open(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw
 
 
 def _page_and_build(tmp_path):
@@ -166,6 +210,8 @@ def _settings_block(src: str) -> str:
 
 _WORLD_S = r"""
 document.body.dataset.settings = __FLAG__;
+document.body.dataset.security = __SECURITY__;
+if (__SECURITY_JS__) { window.VIGIL_SECURITY = {}; }        // security.js loaded (the page loads it before app.js)
 globalThis.location = { hash: "#/settings" };
 let who = { authenticated: true, username: "cust_me" };
 const state = { get: () => ({ who }) };
@@ -174,17 +220,32 @@ const navs = []; function nav(r) { navs.push(r); }
 let refreshed = 0; async function refreshWho() { refreshed++; }
 const calls = [];
 let prefs = __PREFS__;
-let getFail = null, postFail = null;
+let getFail = null, postFail = null, getReply = null;
 function failure(f) { const e = new Error(f.message || (f.data && f.data.error) || "failed");
   e.status = f.status; e.data = f.data || null; return e; }
 const VUI = window.VUI;
 VUI.getJSON = async p => { calls.push(["GET", p]); if (getFail) { const f = getFail; getFail = null; throw failure(f); }
+  if (getReply) { const r = getReply; getReply = null; return r; }
   return { ok: true, preferences: prefs }; };
 VUI.postJSON = async (p, b) => { calls.push(["POST", p, b]); if (postFail) { const f = postFail; postFail = null; throw failure(f); }
   prefs = Object.assign({}, prefs, (b && b.preferences) || {}); return { ok: true, preferences: prefs }; };
+// every other way a page could reach the network, recorded — each answering inertly, so a call is seen in `raw`, not
+// lost to a crash: the hub must use none of them
+const raw = [];
+globalThis.fetch = async u => { raw.push(["fetch", String(u)]);
+  return { ok: false, status: 599, headers: { get: () => null }, json: async () => ({}), text: async () => "" }; };
+globalThis.XMLHttpRequest = function () { raw.push(["xhr"]); this.open = () => {}; this.send = () => {};
+  this.setRequestHeader = () => {}; };
+try { Object.defineProperty(globalThis, "navigator", { configurable: true,
+  value: { sendBeacon: u => { raw.push(["beacon", String(u)]); return true; } } }); } catch (e) { /* kept as is */ }
+VUI.uploadChunked = async u => { raw.push(["upload", String(u)]); return {}; };
+VUI.sse = u => { raw.push(["sse", String(u)]); return { close() {} }; };
+// every call to one of app.js's own writers (buy credits, launch, monitoring on/off ...), recorded by its stand-in
+// (_writer_stubs): the hub must call none of them
+const writes = [];
 const toasts = []; VUI.toast = m => { toasts.push(m); };
-VUI.errorBanner = () => {};
-var GUIDE = null, GUIDE_ON = false;
+const banners = []; VUI.errorBanner = m => { banners.push(m); };
+var GUIDE = null, GUIDE_ON = false, MONITORING_ON = false, CODE_ON = false;
 function shell(inner, current) { return h("div.cust-shell", { dataset: { current: current } }, inner); }
 function viewLogin() { return h("div.cust-login"); }
 function viewDashboard() { return h("div.cust-dash"); }
@@ -193,17 +254,68 @@ function show() { VUI.mount(root, ROUTES["#/settings"]()); return root; }
 """
 
 
-def _settings_app(flag: str = "1", prefs=None) -> str:
+def _settings_app(flag: str = "1", prefs=None, *, security: str = "1", security_js: bool = True) -> str:
+    """The harness: the stubs above plus app.js's own code for the hub, extracted verbatim — the Settings block, the
+    helpers it calls, routeShown and the Account-security switch (``security``: its page flag; ``security_js``: whether
+    security.js is on the page) — and a recording stand-in for each of app.js's writers (``_writer_stubs``)."""
     src = APP_JS.read_text(encoding="utf-8")
-    world = (_WORLD_S.replace("__FLAG__", json.dumps(flag))
+    world = (_WORLD_S.replace("__FLAG__", json.dumps(flag)).replace("__SECURITY__", json.dumps(security))
+             .replace("__SECURITY_JS__", json.dumps(security_js))
              .replace("__PREFS__", json.dumps(prefs if prefs is not None else {})))
-    return "\n".join([world,
-                      _line(src, r"^  function h\(\) \{.*\}$"), _fn(src, "pageFlag"),
-                      _line(src, r'^  var API = "[^"]*";'), _fn(src, "field"),
-                      _line(src, r"^  function val\(id\) \{.*\}$"), _line(src, r"^  function here\(\) \{.*\}$"),
-                      _fn(src, "loadingHolder"), _line(src, r"^  function err\(msg\) \{.*$"),
-                      _settings_block(src),
-                      'const ROUTES = {\n' + _line(src, r'^    "#/settings": function .*,$') + '\n};'])
+    harness = "\n".join([world,
+                         _line(src, r"^  function h\(\) \{.*\}$"), _fn(src, "pageFlag"),
+                         _line(src, r'^  var API = "[^"]*";'), _fn(src, "field"),
+                         _line(src, r"^  function val\(id\) \{.*\}$"), _line(src, r"^  function here\(\) \{.*\}$"),
+                         _fn(src, "loadingHolder"), _line(src, r"^  function err\(msg\) \{.*$"),
+                         _line(src, r"^  var SECURITY = window\.VIGIL_SECURITY;$"),
+                         _line(src, r"^  var SECURITY_ON = .*;$"),
+                         _line(src, r"^  function routeShown\(route\) \{.*\}$"),
+                         _settings_block(src),
+                         'const ROUTES = {\n' + _line(src, r'^    "#/settings": function .*,$') + '\n};'])
+    return harness + "\n" + _writer_stubs(src, harness)
+
+
+def _writer_stubs(src: str, harness: str) -> str:
+    """A stand-in for each of app.js's own writers (``_app_writers``) the harness does not define itself: a call to one
+    is RECORDED in ``writes`` — so a hub that buys credits or turns monitoring on reds on what it called, rather than
+    only crashing on a name the harness lacks."""
+    names = sorted(n for n in _app_writers(src, _settings_block(src))
+                   if not re.search(r"\bfunction " + re.escape(n) + r"\(", harness))
+    return "\n".join(f'function {n}() {{ writes.push("{n}"); return Promise.resolve({{}}); }}' for n in names)
+
+
+def _top_level_functions(src: str) -> dict:
+    """app.js's top-level (two-space) function declarations: name -> its source (a one-liner, or up to its closing
+    ``  }`` line)."""
+    out, lines, i = {}, src.split("\n"), 0
+    while i < len(lines):
+        m = re.match(r"^  (?:async )?function (\w+)\(", lines[i])
+        if not m:
+            i += 1
+            continue
+        if lines[i].rstrip().endswith("}") and lines[i].count("{") == lines[i].count("}"):
+            out[m.group(1)] = lines[i]
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j] != "  }":
+            j += 1
+        out[m.group(1)] = "\n".join(lines[i:j + 1])
+        i = j + 1
+    return out
+
+
+# A write, as app.js makes one: the kit's POST, the step-up wrapper every money / authority change rides, an upload,
+# or a raw request.
+_WRITE = re.compile(r"postJSON\(|withStepUp\(|uploadChunked\(|sendBeacon|XMLHttpRequest|\bfetch\(")
+
+
+def _app_writers(src: str, block: str) -> set:
+    """The names of app.js's own functions OUTSIDE the Settings block that make a write themselves (buy credits,
+    launch or retest, turn monitoring on or off, change the team, sign in or out ...) — computed from app.js, so a
+    writer added later is covered too."""
+    rest = src.replace(block, "")
+    return {name for name, body in _top_level_functions(rest).items() if _WRITE.search(body)}
 
 
 # =====================================================================================================================
@@ -279,6 +391,11 @@ def test_1b_flag_off_the_edge_answers_its_own_404_and_relays_nothing(monkeypatch
 # 2. Flag ON: the #/settings hub renders and links the existing screens; adds no authority/money control
 # =====================================================================================================================
 def test_2_flag_on_hub_renders_and_links_existing_screens(tmp_path):
+    """The hub renders, links the screens that already exist, and the ONLY thing it ever sends is the General tab's own
+    preferences — it spends no credits, changes no monitoring, no role, no plan. Proven both ways: executed (every
+    button the hub shows is clicked, before and after a save, and every request is recorded, the kit's and any other
+    way to the network, as is every call to one of app.js's own writers) and in the source (the Settings block names
+    no app.js function that writes, and no path but its own)."""
     _need_node()
     out = _node(_settings_app("1", _PROFILE) + r"""
 show(); await tick();
@@ -287,26 +404,66 @@ out.title = text(root.querySelector("h2"));
 out.onRender = calls.slice();                                            // what the hub calls just to render
 out.links = root.querySelectorAll(".cust-settings-link").map(b => b.getAttribute("data-route"));
 out.fields = PREF_FIELDS.map(f => { const el = root.querySelector("#pref-" + f[0]); return el ? el.value : null; });
-// saving the General tab posts the preference (never an authority/money route); the server's merge is reflected back
+// every button the hub shows, clicked as it is: a link only navigates; Save with nothing changed sends nothing
+out.buttons = buttons(root);
+for (const b of root.querySelectorAll("button")) { b.click(); await tick(); await tick(); }
+out.afterClicks = calls.slice(out.onRender.length);
+out.navs = navs.slice();
+// a changed field, saved: one POST of the preferences route, carrying only that field
+const n = calls.length;
 root.querySelector("#pref-legal_entity_name").value = "Beta SARL";
 button(root, "Save").click(); await tick(); await tick();
-out.afterSave = calls[calls.length - 1];
-out.toasts = toasts;
+out.afterSave = calls.slice(n);
+out.toasts = toasts.slice();
+// and the hub as the save re-rendered it: every button clicked again
+const m = calls.length;
+for (const b of root.querySelectorAll("button")) { b.click(); await tick(); await tick(); }
+out.afterReclicks = calls.slice(m);
+out.all = calls; out.raw = raw; out.writes = writes;
 """)
     assert out["settingsOn"] is True and out["title"] == "Settings"
     # rendering only READS the preferences — it makes no POST, so the hub adds no new authority/money mutation
     assert out["onRender"] == [["GET", "api/customer/preferences"]]
-    # it LINKS the screens that already exist (no new control forked here)
+    # it LINKS the screens that already exist (no new control forked here), and its links only navigate there
     assert out["links"] == ["#/security", "#/team", "#/billing"]
+    assert out["buttons"] == ["Save", "Account security & sign-in", "Authorized administrators", "Billing"]
+    assert out["afterClicks"] == [] and out["navs"] == ["#/security", "#/team", "#/billing"]
     # the General tab shows every field, pre-filled from what the server stored
     assert out["fields"] == [_PROFILE[k] for k in store.PREFERENCE_KEYS]
-    # Save posts the whole tab to the preferences route only — a UI preference, not a money/authority verb
-    assert out["afterSave"][0] == "POST" and out["afterSave"][1] == "api/customer/preferences"
-    assert out["afterSave"][2]["preferences"]["legal_entity_name"] == "Beta SARL" and out["toasts"] == ["Saved"]
-    # and the hub posts to no other route (no member/billing/authority mutation lives in the Settings block)
-    block = _settings_block(APP_JS.read_text(encoding="utf-8"))
-    assert "postJSON" in block
-    assert block.count('postJSON(API + "/preferences"') == 1 and "/member/" not in block and "/billing/" not in block
+    # Save posts to the preferences route only — the field that changed, nothing else (a UI preference, not a money,
+    # monitoring or authority verb); the server's merge is reflected back
+    assert out["afterSave"] == [["POST", "api/customer/preferences", {"preferences": {"legal_entity_name": "Beta SARL"}}]]
+    assert out["toasts"] == ["No changes to save", "Saved"] and out["afterReclicks"] == []
+    # EVERY request the hub ever made: the preferences route, and a POST carries only allowlisted string fields;
+    # nothing went to the network any other way
+    for call in out["all"]:
+        assert call[1] == "api/customer/preferences" and call[0] in ("GET", "POST"), call
+        if call[0] == "POST":
+            assert set(call[2]) == {"preferences"}, call
+            assert set(call[2]["preferences"]) <= set(store.PREFERENCE_KEYS), call
+            assert all(isinstance(v, str) for v in call[2]["preferences"].values()), call
+    assert out["raw"] == []
+    # ... and it called none of app.js's own writers (each one's stand-in records a call): no credits bought, no
+    # launch, monitoring neither turned on nor off, no team change
+    assert out["writes"] == []
+    # the source: the Settings block's code (its comments dropped) reaches the network only through its own
+    # preferences route ...
+    src = APP_JS.read_text(encoding="utf-8")
+    block = _settings_block(src)
+    code = re.sub(r"(^|\s)//[^\n]*", r"\1", block)
+    assert re.findall(r"VUI\.(\w+JSON)\(API \+ \"([^\"]*)\"", code) == [("getJSON", "/preferences"),
+                                                                      ("postJSON", "/preferences")]
+    assert len(re.findall(r"\bAPI\b", code)) == 2 and not re.search(r"[\"'`]/?api/", code)
+    for banned in ("fetch(", "XMLHttpRequest", "sendBeacon", "uploadChunked", ".sse(", "location.href",
+                   "location.assign", "location.replace", "window.open"):
+        assert banned not in code, banned
+    # ... and names none of app.js's functions that write: buying credits (startCheckout), launching or retesting
+    # (doLaunch, launchAction, retestFinding), monitoring (monTurnOn, monTurnOff), the team (viewTeam), Red-Pen
+    # (codePost), the step-up wrapper (withStepUp), signing in or out ...
+    writers = _app_writers(src, block)
+    assert {"startCheckout", "doLaunch", "launchAction", "retestFinding", "monTurnOn", "monTurnOff", "codePost",
+            "withStepUp"} <= writers, sorted(writers)
+    assert sorted(w for w in writers if re.search(r"\b" + w + r"\b", code)) == []
 
 
 # =====================================================================================================================
@@ -539,14 +696,40 @@ def test_9_get_post_get_round_trips_for_the_same_account(tmp_path, monkeypatch, 
 
 
 # =====================================================================================================================
-# 10. Backup excludes the customer/ store (a restore shows defaults); toggling the flag OFF again is byte-identical
+# 10. The backup CAPTURES the customer-entered profile (a restore brings it back, owner-only); toggling the flag OFF
+#     again is byte-identical
 # =====================================================================================================================
-def test_10_backup_excludes_customer_store_and_toggle_off_is_byte_identical(tmp_path, monkeypatch):
+def test_10_backup_captures_the_profile_and_toggle_off_is_byte_identical(tmp_path, monkeypatch):
     from sigil import backup
-    # the whole customer/ subtree is excluded from a (sovereign) backup, so a restore shows the documented defaults
-    assert config.CUSTOMER_PREFERENCES_DIR.parent.name == "customer"
-    assert backup.classify_top_level("customer") == "excluded"
-    assert "preferences" in backup._EXCLUSION_REASONS["customer"]
+    from sigil.backup import create_backup
+    from test_backup_recovery_functional import PW, _make_full_source, _restore
+    # the customer typed the profile and nothing regenerates it, so it is NOT under customer/ (the operational markers
+    # the backup excludes): it is its own top-level directory, CAPTURED, restored owner-only
+    assert config.CUSTOMER_PREFERENCES_DIR == config.SIGIL_HOME / "customer_preferences"
+    assert backup.classify_top_level("customer_preferences") == "captured"
+    assert "customer_preferences" in backup._STATE_DIRS and "customer_preferences" in backup._PRIVATE_STATE_DIRS
+    # and the customer/ exclusion no longer files it under markers that "regenerate": what it lists is ephemeral only,
+    # and it says where the profile went
+    reason = backup._EXCLUSION_REASONS["customer"]
+    excluded = reason[reason.index("(") + 1:reason.index(")")]
+    assert "onboarding tour" in excluded and "preferences" not in excluded and "profile" not in excluded
+    assert "`customer_preferences`, captured" in reason
+    # a REAL backup of a home whose profile the REAL store wrote, restored into a fresh home: the store reads the
+    # profile back from the restored home, 0600 in a 0700 directory (contact data, as the store keeps it)
+    src, vault, owner, _w = _make_full_source(tmp_path)
+    monkeypatch.setattr(config, "CUSTOMER_PREFERENCES_DIR", src / "customer_preferences")
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    dest = tmp_path / "bk.sglbk"
+    create_backup(dest, PW, home=src, vault=vault, owner_key=owner)
+    new, _rv, out = _restore(tmp_path, dest)
+    assert out["verified"] is True
+    monkeypatch.setattr(config, "CUSTOMER_PREFERENCES_DIR", new / "customer_preferences")
+    assert store.read_prefs("cust_ana") == _PROFILE
+    restored = new / "customer_preferences"
+    files = list(restored.iterdir())
+    assert stat.S_IMODE(restored.stat().st_mode) == 0o700
+    assert files and {stat.S_IMODE(p.stat().st_mode) for p in files} == {0o600}
+    assert not (new / "customer").exists()                # nothing of the excluded customer/ tree came with it
     # toggling the flag OFF again is byte-identical: the page returns to data-settings="0" and nothing residual remains
     monkeypatch.setenv(FLAG, "1")
     on, build_on = _page_and_build(tmp_path / "on")
@@ -556,8 +739,8 @@ def test_10_backup_excludes_customer_store_and_toggle_off_is_byte_identical(tmp_
     assert off == base and 'data-settings="0"' in off                  # off == the baseline build, byte for byte
     assert on.replace('data-settings="1"', 'data-settings="0"').replace(build_on, build_off) == off
     # and with the flag off the edge route is gone again (no residual route), and no migration is needed to serve it:
-    # the store is customer-plane state (a restore shows defaults), never a code migration
-    home = tmp_path / "customer" / "preferences"
+    # the store is plain per-account state (a backup carries it as it is), never a code migration
+    home = tmp_path / "toggle" / "customer_preferences"
     monkeypatch.setattr(config, "CUSTOMER_PREFERENCES_DIR", home)
     sov, edge, ep, op, user = _signed_up(tmp_path, monkeypatch, "toggle@acme.io")
     try:
@@ -648,3 +831,352 @@ out.navs = navs;
     assert on["shown"] == [True, True]
     assert on["titles"] == ["The Overview", "Bring in your team", "Notifications", "Record your organization's details"]
     assert on["go"] == ["Go to Overview", "Go to Team", "Go to Settings"] and on["navs"] == ["#/settings"]
+
+
+# =====================================================================================================================
+# 12. An accepted save always reads back as accepted: the read bound is enforced on the SERIALISED record, not on code
+#     points (a non-ASCII character is 6 bytes escaped, an emoji 12) — over it the save is refused, nothing written
+# =====================================================================================================================
+def _record_bytes(prefs: dict, now: float = 1.0) -> int:
+    """The size of the record write_prefs stores for this profile — what the read bound is measured on."""
+    return len(json.dumps({"prefs": {**store.DEFAULTS, **prefs}, "at": float(now)}, sort_keys=True).encode("utf-8"))
+
+
+def test_12_an_accepted_save_always_reads_back_as_accepted(home):
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    f = home / store._name("cust_ana")
+    before = f.read_bytes()
+    # within the per-value cap but over the serialised bound: refused, nothing written. (It used to be ACCEPTED, and the
+    # next read took the oversized file for the empty defaults: the save wiped the whole profile.)
+    wide = {"legal_entity_name": "é" * store._MAX_VALUE_LEN, "registered_address": "é" * store._MAX_VALUE_LEN}
+    emoji = {"emergency_contact_name": "\U0001F600" * 700}
+    for over in (wide, emoji):
+        assert all(len(v) <= store._MAX_VALUE_LEN for v in over.values())
+        assert _record_bytes({**_PROFILE, **over}) > store._MAX_BYTES
+        with pytest.raises(ValueError, match="too long to store"):
+            store.write_prefs("cust_ana", over, now=2.0)
+        assert f.read_bytes() == before and store.read_prefs("cust_ana") == _PROFILE     # the profile kept, whole
+    with pytest.raises(ValueError, match="too long to store"):
+        store.write_prefs("cust_ben", emoji, now=1.0)
+    assert not (home / store._name("cust_ben")).exists()                              # a first save: no file at all
+    # the bound is exact: a record of exactly _MAX_BYTES is kept and reads back as accepted; one byte more is refused
+    base = {"legal_entity_name": "é" * store._MAX_VALUE_LEN, "registered_address": "é" * 300}
+    pad = store._MAX_BYTES - _record_bytes({**base, "emergency_contact_name": ""})
+    assert 0 < pad <= store._MAX_VALUE_LEN
+    exact = {**base, "emergency_contact_name": "x" * pad}
+    assert _record_bytes(exact) == store._MAX_BYTES
+    assert store.write_prefs("cust_cy", exact, now=1.0) == {**store.DEFAULTS, **exact}
+    assert store.read_prefs("cust_cy") == {**store.DEFAULTS, **exact}
+    assert (home / store._name("cust_cy")).stat().st_size == store._MAX_BYTES
+    with pytest.raises(ValueError, match="too long to store"):
+        store.write_prefs("cust_dee", {**base, "emergency_contact_name": "x" * (pad + 1)}, now=1.0)
+    assert not (home / store._name("cust_dee")).exists()
+    # the bound narrows no ASCII profile the per-value cap allows: every field at the cap is kept
+    full = {k: "x" * store._MAX_VALUE_LEN for k in store.PREFERENCE_KEYS}
+    assert store.write_prefs("cust_eve", full, now=1.7e9) == full and store.read_prefs("cust_eve") == full
+    # and across characters that serialise wider than they look, EVERY save the store accepts reads back as accepted
+    for i, ch in enumerate(("é", "中", "\U0001F600", "\x01", '"', "\\", " ")):
+        for n in (1, 100, 500, store._MAX_VALUE_LEN):
+            user, prefs = f"cust_shape_{i}_{n}", {"legal_entity_name": ch * n, "registered_address": ch * n}
+            try:
+                merged = store.write_prefs(user, prefs, now=1.0)
+            except ValueError:
+                assert not (home / store._name(user)).exists(), (ch, n)
+                continue
+            assert store.read_prefs(user) == merged == {**store.DEFAULTS, **prefs}, (ch, n)
+
+
+# =====================================================================================================================
+# 13. Text that cannot be encoded (a lone UTF-16 surrogate) is refused in plain words, nothing written: never stored,
+#     never a codec error's own message
+# =====================================================================================================================
+_UNENCODABLE = ("\ud800", "Acme \udfff SARL", "\udc00\ud800", "Acme \ud83d")   # lone high, lone low, reversed, cut pair
+
+
+def _plain(msg: str) -> bool:
+    """A refusal in plain words: it has a UTF-8 form and quotes no codec error ("'utf-8' codec can't encode ...")."""
+    msg.encode("utf-8")
+    return not any(w in msg for w in ("codec", "surrogates not allowed", "can't encode", "can't decode"))
+
+
+def test_13_unencodable_text_is_refused_in_plain_words(home, monkeypatch):
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    f = home / store._name("cust_ana")
+    before = f.read_bytes()
+    for k in store.PREFERENCE_KEYS:
+        for bad in _UNENCODABLE:
+            with pytest.raises(ValueError, match="not valid text") as ei:
+                store.write_prefs("cust_ana", {k: bad}, now=2.0)
+            assert _plain(str(ei.value)), str(ei.value)
+    with pytest.raises(ValueError, match="not valid text"):
+        store.write_prefs("cust_ben", {"legal_entity_name": "\ud800"}, now=1.0)
+    assert f.read_bytes() == before and not (home / store._name("cust_ben")).exists()
+    # a key that is not valid text is an unknown key, its echo escaped
+    with pytest.raises(ValueError, match="unknown preference key") as ei:
+        store.write_prefs("cust_ana", {"\udc80": "x"}, now=2.0)
+    assert _plain(str(ei.value))
+    # a well-formed surrogate PAIR is ordinary text (an emoji): kept, and it reads back
+    kept = store.write_prefs("cust_ana", {"emergency_contact_name": "Dana \U0001F600"}, now=3.0)
+    assert kept["emergency_contact_name"] == "Dana \U0001F600" == store.read_prefs("cust_ana")["emergency_contact_name"]
+    # a stored value that is not valid text (only a raw file write makes one) is never surfaced: it reads as ""
+    f.write_text(json.dumps({"prefs": {**_PROFILE, "legal_entity_name": "Acme \ud800"}}))
+    assert store.read_prefs("cust_ana") == {**_PROFILE, "legal_entity_name": ""}
+    # the provisioner refuses in plain words, never with the codec's message — even should one come up from the store
+    p, s, custs = _prov()
+    custs.create("ana@acme.io", issued_at=1.0, password="password-xyz", username="cust_ana")
+    with pytest.raises(ProvisionError) as ei:
+        p.preferences_set("cust_ana", {"legal_entity_name": "\ud800"})
+    assert _plain(str(ei.value)) and "not valid text" in str(ei.value)
+
+    def _codec(*_a, **_k):
+        "\ud800".encode("utf-8")                               # raises the codec's own UnicodeEncodeError
+
+    monkeypatch.setattr(store, "write_prefs", _codec)
+    with pytest.raises(ProvisionError) as ei:
+        p.preferences_set("cust_ana", {"legal_entity_name": "Acme SARL"})
+    assert str(ei.value) == "the preferences could not be saved: a value is not valid text"
+
+
+_NOT_TEXT = (b'{"preferences": {"registered_address": "\xff"}}',              # bytes that are not UTF-8 at all:
+             b'{"preferences": {"registered_address": "1 Rue \xc0\x80"}}')    # a stray byte, an overlong NUL
+
+
+def test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing(tmp_path, monkeypatch, home):
+    """End to end over the loopback hop: a lone surrogate (the JSON escape, or a surrogate's raw bytes), one as a key,
+    body bytes that are not text at all, and a profile over the read bound are each a 400 in plain words — never a
+    codec's own message (the edge's, after a write, or its body reader's) — and the stored profile is unchanged: it still
+    reads back, whole. With the flag off the route is absent, and the edge answers such a body exactly as it answers it
+    on any other unknown path."""
+    monkeypatch.setenv(FLAG, "1")
+    sov, edge, ep, op, ana = _signed_up(tmp_path, monkeypatch, "ana@acme.io")
+    try:
+        assert _post(op, ep, "/api/customer/preferences", {"preferences": _PROFILE}) == (
+            200, {"ok": True, "preferences": _PROFILE})
+        wide = {"legal_entity_name": "é" * store._MAX_VALUE_LEN, "registered_address": "é" * store._MAX_VALUE_LEN}
+        for raw in (json.dumps({"preferences": {"legal_entity_name": "\ud800"}}).encode("ascii"),
+                    b'{"preferences": {"registered_address": "1 Rue \xed\xa0\x80"}}',
+                    json.dumps({"preferences": {"\udc80": "x"}}).encode("ascii"),
+                    *_NOT_TEXT,
+                    json.dumps({"preferences": wide}).encode("ascii")):
+            c, r = _post_raw(op, ep, "/api/customer/preferences", raw)
+            assert c == 400 and isinstance(r, dict) and _plain(r.get("error", "")), (raw[:48], c, r)
+            assert _get(op, ep, "/api/customer/preferences") == (200, {"ok": True, "preferences": _PROFILE}), raw[:48]
+        assert store.read_prefs(ana) == _PROFILE
+        for raw in _NOT_TEXT:
+            assert _post_raw(op, ep, "/api/customer/preferences", raw) == (
+                400, {"error": "bad request: the body is not valid text"}), raw
+        # flag off: no such route, and the plain refusal is not there either — the edge's answer is the one any other
+        # unknown customer path gets for the same bytes, as it always was
+        monkeypatch.delenv(FLAG)
+        for raw in _NOT_TEXT:
+            off = _post_raw(op, ep, "/api/customer/preferences", raw)
+            assert off == _post_raw(op, ep, "/api/customer/not-a-route", raw), (raw, off)
+            assert off[0] == 400 and off[1] != {"error": "bad request: the body is not valid text"}, (raw, off)
+        monkeypatch.setenv(FLAG, "1")
+        assert store.read_prefs(ana) == _PROFILE
+    finally:
+        sov.shutdown()
+        edge.shutdown()
+
+
+# =====================================================================================================================
+# 14. A failed read (anything but a sign-in problem) shows an error with Save disabled — never an empty form whose Save
+#     would blank the stored fields; and Save sends ONLY the fields the customer changed
+# =====================================================================================================================
+_FAILED_READ = r"""
+getFail = __FAIL__;
+show(); await tick(); await tick();
+out.error = text(root.querySelector(".cust-settings-error"));
+out.role = root.querySelector(".cust-settings-error").getAttribute("role");
+out.inputs = root.querySelectorAll("input").length;
+const save = button(root, "Save");
+out.saveDisabled = !!save.disabled;
+save.click(); await tick(); await tick();                      // a disabled Save ignores the click ...
+await save.listeners.click[0](); await tick();                 // ... and even run directly, it sends nothing
+out.posts = calls.filter(c => c[0] === "POST");
+out.banners = banners.slice();
+// Try again reads once more and, answered this time, shows the stored details with Save enabled
+button(root, "Try again").click(); await tick(); await tick();
+out.gets = calls.filter(c => c[0] === "GET").length;
+out.fields = PREF_FIELDS.map(f => { const el = root.querySelector("#pref-" + f[0]); return el ? el.value : null; });
+out.saveEnabled = !button(root, "Save").disabled;
+out.navs = navs; out.refreshed = refreshed;
+"""
+
+
+def test_14_a_failed_read_shows_an_error_and_save_is_disabled():
+    _need_node()
+    for fail in ({"status": 500, "data": {"error": "provision failed"}}, {"status": 502},
+                 {"status": 503, "data": {"error": "updating"}},
+                 {"status": 403, "data": {"error": "denied: requester is not an active customer"}},
+                 {"message": "network down"}):
+        out = _node(_settings_app("1", _PROFILE) + _FAILED_READ.replace("__FAIL__", json.dumps(fail)))
+        assert out["error"].startswith("Could not load your organization's details") and out["role"] == "alert", fail
+        assert out["inputs"] == 0 and out["saveDisabled"] is True and out["posts"] == [], fail   # no form, nothing sent
+        assert out["banners"] == ["Your organization's details could not be loaded, so nothing was saved. "
+                                  "Select Try again."], fail
+        assert out["gets"] == 2 and out["fields"] == [_PROFILE[k] for k in store.PREFERENCE_KEYS], fail
+        assert out["saveEnabled"] is True and out["navs"] == [] and out["refreshed"] == 0, fail
+    # a reply without the profile is a failed read like any other: no form
+    out = _node(_settings_app("1", _PROFILE) + r"""
+getReply = { ok: true };
+show(); await tick(); await tick();
+out.error = text(root.querySelector(".cust-settings-error")); out.inputs = root.querySelectorAll("input").length;
+out.saveDisabled = !!button(root, "Save").disabled;
+""")
+    assert out["error"].startswith("Could not load") and out["inputs"] == 0 and out["saveDisabled"] is True
+    # a sign-in problem goes to sign-in, as on every screen
+    out = _node(_settings_app("1", _PROFILE) + r"""
+getFail = { status: 401 };
+show(); await tick(); await tick();
+out.navs = navs; out.refreshed = refreshed; out.error = text(root.querySelector(".cust-settings-error"));
+""")
+    assert out["navs"] == ["#/login"] and out["refreshed"] == 1 and out["error"] is None
+    # Save sends ONLY what the customer changed: an untouched stored field is never sent, so it can never be blanked; a
+    # field emptied on purpose is sent empty; with nothing changed nothing is sent
+    out = _node(_settings_app("1", _PROFILE) + r"""
+show(); await tick();
+button(root, "Save").click(); await tick(); await tick();
+out.unchanged = calls.filter(c => c[0] === "POST");
+root.querySelector("#pref-registered_address").value = "2 Avenue Foch, 75116 Paris, FR";
+root.querySelector("#pref-emergency_contact_phone").value = "  ";
+root.querySelector("#pref-legal_entity_name").value = "  Acme SARL  ";       // the same once trimmed: unchanged
+button(root, "Save").click(); await tick(); await tick();
+out.posts = calls.filter(c => c[0] === "POST");
+out.toasts = toasts;
+out.fields = PREF_FIELDS.map(f => root.querySelector("#pref-" + f[0]).value);
+""")
+    changed = {"registered_address": "2 Avenue Foch, 75116 Paris, FR", "emergency_contact_phone": ""}
+    assert out["unchanged"] == [] and out["toasts"] == ["No changes to save", "Saved"]
+    assert out["posts"] == [["POST", "api/customer/preferences", {"preferences": changed}]]
+    assert out["fields"] == [{**_PROFILE, **changed}[k] for k in store.PREFERENCE_KEYS]
+
+
+# =====================================================================================================================
+# 15. The server merges ONLY the keys it is sent — and never takes a stored file it cannot read for an empty profile
+# =====================================================================================================================
+def test_15_the_server_merges_only_the_keys_it_is_sent(home, monkeypatch):
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    f = home / store._name("cust_ana")
+    # each partial save changes the key it names and keeps every other stored field; naming nothing changes nothing
+    for k in store.PREFERENCE_KEYS:
+        assert store.write_prefs("cust_ana", {k: "changed"}, now=2.0) == {**_PROFILE, k: "changed"}
+        assert store.write_prefs("cust_ana", {k: _PROFILE[k]}, now=2.0) == _PROFILE
+    assert store.write_prefs("cust_ana", {}, now=2.0) == _PROFILE
+    before = f.read_bytes()
+    # the stored file is there but cannot be read right now: the save is REFUSED and nothing is written — a merge onto
+    # the empty defaults would have blanked the five fields this save does not name
+    real_open = os.open
+
+    def _unreadable(path, flags, *a, **k):
+        if str(path) == str(f):
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(os, "open", _unreadable)
+    with pytest.raises(PermissionError):
+        store.write_prefs("cust_ana", {"legal_entity_name": "Beta SARL"}, now=3.0)
+    assert store.read_prefs("cust_ana") == store.DEFAULTS          # the read keeps its contract: defaults, no raise
+    p, s, custs = _prov()
+    custs.create("ana@acme.io", issued_at=1.0, password="password-xyz", username="cust_ana")
+    with pytest.raises(ProvisionError, match="could not be saved"):
+        p.preferences_set("cust_ana", {"legal_entity_name": "Beta SARL"})
+    monkeypatch.setattr(os, "open", real_open)
+    assert f.read_bytes() == before and store.read_prefs("cust_ana") == _PROFILE   # whole: every field it had
+    # no file yet holds no stored profile: a first save proceeds (a symlink where it goes: test_6)
+    assert store.write_prefs("cust_new", {"legal_entity_name": "New SA"}, now=4.0) == {
+        **store.DEFAULTS, "legal_entity_name": "New SA"}
+
+
+def test_15b_concurrent_saves_of_different_fields_both_land(home, monkeypatch):
+    """Saves run one at a time (the cockpit serves requests on threads): two saves racing — each reading the stored
+    profile before the other wrote — would have the later write put back, over the field the earlier one changed, the
+    value it had read. The race is forced here, not hoped for: each save's read waits (up to a second) for the other
+    save's read. Unserialized, both reads meet and both saves merge onto the same old profile; serialized, the second
+    save cannot read until the first has written, so the wait gives up and the second save merges onto the first."""
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    real_load = store._load
+    both_read = threading.Barrier(2)
+
+    def _read_then_wait_for_the_other(username, *, strict):
+        got = real_load(username, strict=strict)
+        try:
+            both_read.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass                                       # the other save could not read meanwhile: serialized
+        return got
+
+    monkeypatch.setattr(store, "_load", _read_then_wait_for_the_other)
+    errors = []
+
+    def _save(key, value):
+        try:
+            store.write_prefs("cust_ana", {key: value}, now=2.0)
+        except Exception as e:  # noqa: BLE001 — surfaced by the assertion below
+            errors.append(e)
+
+    saves = [threading.Thread(target=_save, args=("legal_entity_name", "Beta SARL")),
+             threading.Thread(target=_save, args=("registered_address", "2 Avenue Foch, 75116 Paris, FR"))]
+    for t in saves:
+        t.start()
+    for t in saves:
+        t.join(timeout=30)
+    monkeypatch.setattr(store, "_load", real_load)
+    assert errors == [] and not any(t.is_alive() for t in saves)
+    assert store.read_prefs("cust_ana") == {**_PROFILE, "legal_entity_name": "Beta SARL",
+                                            "registered_address": "2 Avenue Foch, 75116 Paris, FR"}
+
+
+# =====================================================================================================================
+# 16. The hub links Account security only where that screen is shown — and asks routeShown for every link
+# =====================================================================================================================
+_LINKS = r"""
+show(); await tick();
+out.links = root.querySelectorAll(".cust-settings-link").map(b => b.getAttribute("data-route"));
+out.labels = buttons(root);
+out.securityShown = routeShown("#/security");
+"""
+
+
+def test_16_the_hub_links_account_security_only_where_it_is_shown():
+    _need_node()
+    on = _node(_settings_app("1", _PROFILE) + _LINKS)
+    assert on["links"] == ["#/security", "#/team", "#/billing"]
+    # Account security off (its page flag off or unexpanded, or security.js not on the page): #/security is the home
+    # screen, so the hub offers no link to it. routeShown itself, which the guide reads, is unchanged: the guide stays
+    # exactly as it was
+    for security, js in (("0", True), ("", True), ("__VIGIL_SECURITY__", True), ("1", False)):
+        off = _node(_settings_app("1", _PROFILE, security=security, security_js=js) + _LINKS)
+        assert off["links"] == ["#/team", "#/billing"], (security, js)
+        assert "Account security & sign-in" not in off["labels"] and off["securityShown"] is True, (security, js)
+    # every link asks routeShown: a screen routeShown hides gets no link
+    hidden = _node(_settings_app("1", _PROFILE) + 'routeShown = r => r !== "#/billing";\n' + _LINKS)
+    assert hidden["links"] == ["#/security", "#/team"]
+
+
+# =====================================================================================================================
+# 17. Every class the Settings hub renders has a style in app.css
+# =====================================================================================================================
+def _css_rules(css: str) -> list:
+    """app.css as (selector list, declarations) pairs, comments dropped (the rules inside an @media block count too)."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    return [(m.group(1).strip(), m.group(2).strip()) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css)]
+
+
+def test_17_every_class_the_settings_hub_renders_is_styled():
+    block = _settings_block(APP_JS.read_text(encoding="utf-8"))
+    rules = [(sel, body) for sel, body in _css_rules(APP_CSS.read_text(encoding="utf-8")) if body]
+    rendered = {c for tag in re.findall(r'\bh\("([^"]+)"', block) for c in re.findall(r"\.([\w-]+)", tag)}
+    ours = sorted(c for c in rendered if c.startswith("cust-"))
+    assert {"cust-field", "cust-settings-links", "cust-settings-link", "cust-settings-general-form",
+            "cust-settings-error", "cust-pref-save", "cust-pref-retry"} <= set(ours), ours
+
+    def styled(token: str) -> bool:
+        return any(re.search(re.escape(token) + r"(?![\w-])", sel) for sel, _body in rules)
+
+    assert [c for c in ours if not styled("." + c)] == []
+    assert styled("#cust-settings-general")
+    # the tab's email and phone fields look like its text fields (the shared kit styles text/url/password inputs only)
+    for t in ("email", "tel"):
+        assert any(f".cust-field input[type={t}]" in sel and "background" in body and "border" in body
+                   for sel, body in rules), t

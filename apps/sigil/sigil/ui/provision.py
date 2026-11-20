@@ -1411,12 +1411,14 @@ class Provisioner:
         return {"ok": True, "preferences": read_prefs(requester)}
 
     def preferences_set(self, requester: str, prefs: dict, *, now: "Optional[float]" = None) -> dict:
-        """Record the requesting customer's General preferences (``prefs`` merged onto the stored profile) and return
-        the full stored profile. Account-level: the requester is the hop-bound session principal, never a body field,
-        and must be an ACTIVE customer. Only the CLOSED ``PREFERENCE_KEYS`` allowlist is accepted (any other key, a
-        non-string, or an over-long value is refused); a secret / authority / money key can never be written. This is
-        a UI preference: it is written to the per-account store, NEVER to the signed append-only spine (no audit row),
-        so a customer cannot grow the spine by saving the tab."""
+        """Record the requesting customer's General preferences (``prefs`` merged onto the stored profile — only the
+        keys it names) and return the full stored profile. Account-level: the requester is the hop-bound session
+        principal, never a body field, and must be an ACTIVE customer. Only the CLOSED ``PREFERENCE_KEYS`` allowlist is
+        accepted (any other key, a non-string, text with a lone surrogate, an over-long value, or a profile too large to
+        read back is refused, nothing written); a secret / authority / money key can never be written. Every refusal is
+        a ``ProvisionError`` in plain words — never a codec's own message. This is a UI preference: it is written to
+        the per-account store, NEVER to the signed append-only spine (no audit row), so a customer cannot grow the
+        spine by saving the tab."""
         if self.customers.customer(requester) is None:
             raise ProvisionDenied("requester is not an active customer")
         if not isinstance(prefs, dict):
@@ -1425,6 +1427,8 @@ class Provisioner:
         t = self._now() if now is None else float(now)
         try:
             merged = write_prefs(requester, prefs, now=t)
+        except UnicodeError:                        # a ValueError too: caught first, so a codec's message never leaks
+            raise ProvisionError("the preferences could not be saved: a value is not valid text") from None
         except ValueError as e:
             raise ProvisionError(f"the preferences could not be saved: {str(e)[:120]}") from None
         except OSError as e:

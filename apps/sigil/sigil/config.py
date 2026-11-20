@@ -218,8 +218,10 @@ CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
 # The settings shell's General-tab preferences (ui/preferences_store.py): the legal-entity / contact profile a
 # workspace records (entity name, registered address, contractual + emergency contact). A UI preference, never money
 # or authority and never on the signed spine — one hashed-name JSON file per account; written only while
-# VIGIL_CUSTOMER_SETTINGS is on. Losing it shows the documented defaults (an empty profile).
-CUSTOMER_PREFERENCES_DIR = _customer / "preferences"
+# VIGIL_CUSTOMER_SETTINGS is on. The customer typed it and nothing regenerates it, so it is NOT under customer/ (the
+# operational markers a backup excludes): it is its own top-level directory, which the backup captures
+# (backup._STATE_DIRS) and a restore brings back.
+CUSTOMER_PREFERENCES_DIR = SIGIL_HOME / "customer_preferences"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.

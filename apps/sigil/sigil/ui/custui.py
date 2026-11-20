@@ -982,6 +982,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_body()
         except (ValueError, OSError) as e:
+            if isinstance(e, UnicodeDecodeError) and action == "preferences" and _settings_on():
+                # the settings shell's General tab: body bytes that are not text are refused in plain words, never
+                # with the codec's own message (with the flag off there is no such route: the answer is as before)
+                return self._deny(400, "bad request: the body is not valid text")
             return self._deny(400, f"bad request: {str(e)[:200]}")
         except Exception:  # noqa: BLE001 — e.g. RecursionError: JSON nested deeper than the parser follows
             return self._deny(400, "bad request: the body could not be read")
