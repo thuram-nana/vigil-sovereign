@@ -82,6 +82,56 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-badge-expired  { color: var(--danger, #e2776c); border-color: var(--danger, #e2776c); }
 .cust-register { margin-top: 24px; }
 
+/* ---- Fix first (PR-B; only while the edge writes data-posture="1"): the posture tile, its sparkline, the list ---- */
+.cust-fix-body { display: grid; gap: 16px; }
+.cust-posture { display: grid; gap: 10px; }
+.cust-posture p { margin: 0; }
+.cust-posture-figure { display: flex; align-items: baseline; gap: 6px; }
+/* the screen's one hero figure: the app's own sans, proportional digits */
+.cust-posture-score { font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.cust-posture-max { font-size: var(--fs-lg); color: var(--text-2); }
+.cust-posture-delta { display: flex; align-items: center; gap: 6px; color: var(--text-1); }
+.cust-posture-delta.up .cust-posture-arrow { color: var(--st-confirmed); }
+.cust-posture-delta.down .cust-posture-arrow { color: var(--st-blocked); }
+/* the sparkline's line ink, chosen per theme: each clears 3:1 on the card and stays apart from the accent dot */
+.cust-posture-trend { --posture-spark: var(--text-2); display: grid; gap: 4px; }
+:root[data-theme="light"] .cust-posture-trend { --posture-spark: var(--text-1); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .cust-posture-trend { --posture-spark: var(--text-1); }
+}
+.cust-posture-spark { display: block; width: 100%; max-width: 360px; height: auto; overflow: visible; }
+.cust-posture-base { stroke: var(--border); stroke-width: 1; }
+.cust-posture-line { fill: none; stroke: var(--posture-spark); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.cust-posture-cross { stroke: var(--border-strong); stroke-width: 1; }
+.cust-posture-now { fill: var(--st-running); stroke: var(--bg-1); stroke-width: 2; }
+.cust-posture-hover { fill: var(--posture-spark); stroke: var(--bg-1); stroke-width: 2; }
+.cust-posture-hit { fill: transparent; outline: none; }
+.cust-posture-hit:focus-visible { fill: color-mix(in srgb, var(--st-running) 14%, transparent); }
+.cust-posture-readout { min-height: 1.4em; font-size: var(--fs-sm); color: var(--text-1); font-variant-numeric: tabular-nums; }
+.cust-posture-how summary, .cust-posture-table summary, .cust-fix-all summary { cursor: pointer; font-size: var(--fs-sm); color: var(--text-1); }
+.cust-posture-how p { margin-top: 6px; }
+.cust-posture-table .cust-table { margin-top: 8px; }
+.cust-fix-preview { border-color: var(--owner-line); }
+.cust-fix-preview p { margin: 0 0 8px; }
+.cust-fix-list { display: grid; gap: 12px; }
+.cust-fix-entry { display: grid; gap: 10px; }
+.cust-fix-entry p { margin: 0; }
+.cust-fix-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cust-fix-title { font-size: var(--fs-lg); }
+.cust-fix-where { color: var(--text-1); word-break: break-word; }
+.cust-fix-meta { font-size: var(--fs-sm); color: var(--text-2); }
+.cust-fix-sec { display: grid; gap: 4px; }
+.cust-fix-sec > .k { font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: var(--tracking-label);
+  color: var(--text-2); font-weight: 600; }
+.cust-fix-sec code { padding: 1px 5px; border-radius: 6px; background: var(--bg-3); word-break: break-all; }
+.cust-fix-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cust-fix-chip { padding: 3px 9px; }
+.cust-fix-all ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; font-size: var(--fs-sm); }
+.cust-fix-all p { margin-top: 6px; font-size: var(--fs-sm); }
+.sev-unrated { color: var(--text-1); background: color-mix(in srgb, var(--text-1) 14%, transparent); }
+.cust-fix-fixed summary { cursor: pointer; font-weight: 600; }
+.cust-fix-fixedlist { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+
 /* ---- notification centre (bell + unread badge + dropdown panel) ---- */
 /* The bell stays inline in the topbar, but the PANEL is anchored to the topbar (the positioned ancestor),
    not the bell — the bell can wrap to any position, while the topbar's right edge is always the shell edge,
@@ -365,6 +415,21 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 /* "Sign in with a passkey" on the sign-in screen */
 .cust-passkey-block { margin-top: 16px; }
 .cust-passkey { width: 100%; justify-content: center; margin-top: 12px; }
+
+/* PR-I — the "Independently verifiable" proof badge and its verify-it-yourself panel (shown only while the edge has
+   VIGIL_CUSTOMER_PROOF_BADGE on). The badge is a real button (keyboard + screen reader), styled like the kit's badges. */
+.cust-proof { margin-top: 10px; }
+.cust-proof-badge { cursor: pointer; font: inherit; background: none; }
+.cust-proof-badge:focus-visible { outline: 2px solid var(--ok, #6cd08a); outline-offset: 2px; }
+.cust-proof-panel { margin-top: 10px; padding: 12px 14px; border-radius: var(--r-2, 10px);
+  border: 1px solid var(--border, #2a2a2a); display: grid; gap: 6px; }
+.cust-proof-panel[hidden] { display: none; }
+.cust-proof-panel h4 { margin: 0; }
+.cust-proof-panel p { margin: 0; }
+.cust-proof-panel .cust-kv span:last-child { word-break: break-all; text-align: right; font-variant-numeric: tabular-nums; }
+.cust-proof-anchors { margin: 0; padding-left: 1.2em; }
+.cust-proof-cmd { margin: 0; padding: 10px 12px; border-radius: var(--r-2, 10px); background: var(--bg-2, #111);
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 0.85rem; }
 
 /* ---- PR-L (Area 11): blind-vuln (out-of-band) confirmation + attack-path storytelling --------------------------
    Rendered ONLY when the edge has the matching flag on (VIGIL_CUSTOMER_BLIND_VULN / VIGIL_CUSTOMER_ATTACK_PATH);

@@ -618,6 +618,26 @@ def customer_retest_reproof_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_posture_enabled() -> bool:
+    """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
+    Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of
+    what to fix first — each open finding's plain-language impact, its standards chips and its exact remediation — read
+    from the edge's ``api/customer/posture`` (the cockpit's ``customer_posture`` action) and
+    ``api/customer/posture/trend`` (``posture_trend``, which also feeds the Overview's Posture card).
+
+    Effective ONLY together with `presentation_enabled()` (VIGIL_APEX_PRESENTATION): that is the master switch over
+    the consumer posture surface and the signed presentation block this screen renders, so this flag on with it off
+    is OFF. OFF by default (mirrors `redpen_enabled`): both routes and both cockpit actions are absent (404, exactly
+    as an unknown route), the page's ``data-posture`` switch is "0", there is no Fix first tab, ``#/fix-first`` is
+    the home screen exactly as an unknown route, and the Overview has no Posture card and makes no posture read — so
+    the app is byte-identical to a build without it. Everything shown is a read-only projection of the org's OWN
+    oracle-confirmed findings (``ui/customer_posture.py``): it mints nothing, decides no verdict and makes no model
+    call. Read by the customer edge when it starts (it is written into the page) and by the edge and the cockpit on
+    every request for the routes — set the SAME value in customer.env and cockpit.env."""
+    return ((os.environ.get("VIGIL_CUSTOMER_POSTURE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+            and presentation_enabled())
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account
@@ -1718,3 +1738,48 @@ def apex_oob_enabled() -> bool:
     FACT still requires the full collector provisioning (an owner-pinned collector pubkey + the deployment
     collector private key + a verified owner-signed authority), exactly like every other out-of-band class."""
     return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_proof_badge_enabled() -> bool:
+    """True iff the customer PROOF BADGE + per-finding PCF export (consumer PR-I, Area 8) are ON
+    (`VIGIL_CUSTOMER_PROOF_BADGE` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the edge
+    download route (``/api/customer/assessments/proof``) and the ``proof_export`` cockpit action are absent (404
+    exactly as an unknown route), the findings read carries NO ``proof`` overlay, the page's
+    ``__VIGIL_PROOF_BADGE__`` switch is "0" and the public site's ``/verify`` explainer is absent — so the server is
+    byte-identical to a build without the feature. A PURE sovereign projection of already-signed data: it mints no
+    FACT, touches no target and makes no model call. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_PROOF_BADGE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_proof_delegation_paths() -> "tuple[Path, ...]":
+    """The owner-signed OFFENSE-GOVERNANCE delegation certs (`VIGIL_CUSTOMER_PROOF_DELEGATIONS`: ABSOLUTE paths
+    separated by ``os.pathsep``) the proof badge derives its governance trust root(s) from — normally the same file
+    the finding drain admits findings under (``VIGIL_FINDING_GOV_DELEGATION``), plus the previous one(s) during a
+    governance-key rotation. A relative / unexpanded (``%``) entry is dropped (fail-closed: it can never resolve to
+    a different file than the operator meant). Each listed cert is still verified at use against the CURRENT owner
+    key, its role, the finding's engagement scope and the CURRENT clock (an expired delegation vouches for
+    nothing), so this list can only ever narrow what verifies, never widen it. Empty → no finding is badged and no
+    proof bundle is produced. Read at call time."""
+    raw = os.environ.get("VIGIL_CUSTOMER_PROOF_DELEGATIONS") or ""
+    out: "list[Path]" = []
+    for part in raw.split(os.pathsep):
+        v = part.strip()
+        if not v or "%" in v or not Path(v).is_absolute():
+            continue
+        out.append(Path(v))
+    return tuple(out)
+
+
+def proof_published_fingerprints() -> "tuple[str, ...]":
+    """The governance trust-root fingerprints VIGIL PUBLISHES for auditors (`VIGIL_PROOF_PUBLISHED_FINGERPRINTS`:
+    ``sha256:<64 lowercase hex>`` values separated by commas and/or whitespace). The public ``/verify`` explainer
+    prints them (the out-of-band channel an auditor pins from), and, when the list is non-empty, the proof export
+    refuses a bundle whose trust root is not on it — so a customer is never handed a badge an auditor could not
+    re-check against the published pin. A malformed entry is dropped (never "fixed up"). Read at call time."""
+    import re as _re
+    raw = os.environ.get("VIGIL_PROOF_PUBLISHED_FINGERPRINTS") or ""
+    seen: "list[str]" = []
+    for tok in _re.split(r"[\s,]+", raw.strip()):
+        if _re.fullmatch(r"sha256:[0-9a-f]{64}", tok) and tok not in seen:
+            seen.append(tok)
+    return tuple(seen)

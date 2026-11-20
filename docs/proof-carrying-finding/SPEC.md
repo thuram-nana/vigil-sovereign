@@ -150,3 +150,63 @@ integrity, and chain are fully checkable standalone; reproduction is the one lay
 
 A single flipped byte anywhere — a signature, a certificate field, a chain entry, a raw artifact, or
 the retained oracle_context — flips a standalone verify to NOT SOUND.
+
+## 8. Single signed-finding bundle (`vigil.pcf-finding-bundle/1`)
+
+Shape: `schemas/pcf-finding-bundle.schema.json`. This is the artifact a VIGIL customer downloads for ONE
+finding from the customer app ("Download proof bundle"). It is assembled by the customer's own
+(sovereign) plane, which holds exactly what crossed the offense→sovereign seam for that finding: the
+governance-signed certificate and its signatures. It therefore carries ONE `SignedEvidence` (§4) and the
+`TrustRoot` (§6) it verifies under — no engagement chain, no retained `oracle_context`, no raw evidence.
+
+```
+{
+  "format":                 "vigil.pcf-finding-bundle/1",
+  "signed_evidence":        { "certificate": {...}, "signatures": [ {key_id, signature_b64}, ... ] },
+  "trust_root":             { "schema_version", "threshold", "authorizers": [...] },
+  "trust_root_fingerprint": "sha256:<hex>"   # OPTIONAL convenience copy — never the anchor
+  "cert_digest":            "<hex>"          # OPTIONAL convenience copy of digest_payload(certificate)
+  "finding_ref":            "<str>"          # OPTIONAL convenience copy of certificate.finding_ref
+}
+```
+
+### 8.1 Checks (`verify_pcf.py finding`)
+
+ALWAYS checked; any failure refuses the bundle (exit 2, `finding NOT VERIFIED`):
+
+1. **shape** — the exact `format` tag; `signed_evidence.certificate` an object; `signed_evidence.signatures`
+   a non-empty list; `trust_root` an object.
+2. **fingerprint** — `trust_root_fingerprint(trust_root)` equals the out-of-band pin (§6), before any crypto;
+   and, when the bundle carries its own `trust_root_fingerprint`, that copy equals the computed value.
+3. **faithful** — when present, `cert_digest == digest_payload(certificate)` and
+   `finding_ref == certificate.finding_ref` (a wrapper that restates the certificate differently is a
+   lying wrapper and is refused).
+4. **authentic** — `verify_threshold(evidence_signing_bytes(certificate), signatures, trust_root)` (§3).
+5. **provenance** — if the signed certificate carries a `provenance` member, it must be `reproduced` or
+   `live_redrive` (§8.3).
+
+Checked ONLY when the input is supplied, and printed `NOT CHECKED` otherwise:
+
+6. **bound** — `--oracle-context FILE`: `digest_payload(oracle_context) == certificate.oracle_context_digest`.
+7. **artifacts** — `--evidence-root DIR`: each `certificate.artifacts[]` entry re-hashes, path-confined (§4).
+
+NEVER checked by this mode: **reproduction** (re-running the oracle needs the retained context and the
+VIGIL verifier, §7) and the **chain** (a single-finding bundle carries none; the engagement's whole
+certificate set is the `bundle` mode's, §5).
+
+Exit `0` (`finding VERIFIED`) iff every always-checked layer and every supplied optional layer passes.
+
+### 8.2 What a verified single-finding bundle proves
+
+That the exact certificate bytes — the finding's class, its location (`surface`), the digest of the
+evidence the oracle judged (`oracle_context_digest`), the signed verify/patch note (`how_to_verify`), the
+signed presentation block when present, and every other member — were signed by at least `threshold`
+distinct keys of the trust root whose fingerprint you pinned, and have not changed by one byte since. It
+does not, by itself, re-establish that the oracle re-fires (reproduction), nor that no sibling finding of
+the same engagement was withheld (the chain).
+
+### 8.3 Provenance
+
+`provenance` is dropped from the canonical certificate whenever it is a FACT value (`reproduced` /
+`live_redrive`), so a certificate without the member is a FACT certificate. The member survives into the
+signed bytes only for a non-FACT context (for example `llm`), which this mode refuses.

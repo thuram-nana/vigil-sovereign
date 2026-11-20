@@ -668,6 +668,10 @@ function ser(e) {
 
 _RETEST_START = '  var RETEST_ON = pageFlag("retest");'
 _RETEST_END = "  // ---- end of retest (C1b)"
+# findingsBlock also calls the PR-I proof block (proofBadge); it is extracted verbatim too, and stays off here (the page
+# writes no data-proof-badge), so every card below is exactly the retest card.
+_PROOF_START = '  var PROOF_ON = pageFlag("proofBadge");'
+_PROOF_END = "  // ---- end of proof badge (PR-I)"
 # PR-L (Area 11): findingsBlock also calls blindVulnBadge, so the SPA harness slices in the blind-vuln region
 # (its own var BLIND_VULN_ON = pageFlag("blindVuln") + helpers) exactly as it does the retest region. With the
 # flag off (the harness sets no data-blind-vuln) blindVulnBadge returns null, so the card stays byte-identical.
@@ -703,7 +707,8 @@ def _harness(flag="1", *, server="{}"):
     env = _PRELUDE % {"flag": json.dumps(flag), "server": server}
     return (_dom() + f"\nrequire({json.dumps(str(UI_JS))});\nconst out = {{}};\n" + env + "\n"
             + _fn(src, "kv") + "\n" + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
-            + _slice(src, _BLIND_START, _BLIND_END)       # PR-L: findingsBlock also calls blindVulnBadge
+            + _slice(src, _PROOF_START, _PROOF_END)        # PR-I: findingsBlock also calls proofBadge
+            + _slice(src, _BLIND_START, _BLIND_END)        # PR-L: findingsBlock also calls blindVulnBadge
             + _ser())
 
 
@@ -899,6 +904,7 @@ console.log(JSON.stringify(cases.map(function (c) { return ser(findingsBlock(c.h
             + _ser() + _fn(src, "kv") + "\n")
     prog_base = head + _BASE_FINDINGSBLOCK + inputs
     prog_cur = (head + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
+                + _slice(src, _PROOF_START, _PROOF_END)     # PR-I's proof hook, off too: still identical
                 + _slice(src, _BLIND_START, _BLIND_END) + inputs)   # PR-L: blindVulnBadge is null when off
     rb = subprocess.run([_need_node(), "-e", prog_base], capture_output=True, text=True, timeout=60)
     rc = subprocess.run([_need_node(), "-e", prog_cur], capture_output=True, text=True, timeout=60)
