@@ -82,6 +82,22 @@ def test_user_by_name_matches_by_letter_case_only_never_a_case_folding_look_alik
         assert d.user_by_name(look_alike) is None, ascii(look_alike)
 
 
+@pytest.mark.parametrize("pad", ["\u00a0", "\u3000", "\u2003", "\u0085", "\u2028", " ", "\t"],
+                         ids=lambda p: f"U+{ord(p):04X}")
+def test_a_lookup_key_padded_with_whitespace_matches_nobody(pad):
+    # a key that differs from a member's userName / externalId only by surrounding whitespace is a DIFFERENT
+    # identifier: it is never trimmed into the member's
+    d = _reg(_store()).directory("acme")
+    d.put_user(U1, user_name="kate@acme.test", external_id="00u-kate", active=True, now=_now())
+    for padded in (pad + "kate@acme.test", "KATE@acme.test" + pad):
+        assert d.user_by_name(padded) is None, ascii(padded)
+    for padded in (pad + "00u-kate", "00u-kate" + pad):
+        assert d.user_by_external_id(padded) is None, ascii(padded)
+    for blank in ("", pad, pad * 3):
+        assert d.user_by_name(blank) is None and d.user_by_external_id(blank) is None
+    assert d.user_by_name("KATE@acme.test").id == U1 and d.user_by_external_id("00u-kate").id == U1   # controls
+
+
 def test_an_unsigned_or_attacker_signed_record_is_inert():
     s = _store()
     _reg(s, owner=ATTACKER).directory("acme").put_user(U1, user_name="evil", active=True, now=_now())

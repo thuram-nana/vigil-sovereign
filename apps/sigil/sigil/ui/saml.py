@@ -521,10 +521,16 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
                                    scope=str(getattr(config, "org_id", "") or "")):
         raise SamlError("SAML assertion replay refused (ID already spent)")
 
-    # --- IDENTITY (never a role): the NameID, plus attributes and the IdP-asserted groups (for role SELECTION).
-    name_id = _text(subject.find(_A("NameID")))
-    if not name_id:
+    # --- IDENTITY (never a role): the NameID, plus attributes and the IdP-asserted groups (for role SELECTION). The
+    # NameID is taken EXACTLY as signed, never trimmed: one that begins or ends with whitespace (any Unicode space,
+    # e.g. a no-break or ideographic space) is a DIFFERENT identifier that merely renders like a member's, so it is
+    # refused rather than trimmed into that member's name.
+    nid_el = subject.find(_A("NameID"))
+    name_id = (nid_el.text or "") if nid_el is not None else ""
+    if not name_id.strip():
         raise SamlError("assertion Subject has no NameID (no usable identity)")
+    if name_id != name_id.strip():
+        raise SamlError("assertion NameID begins or ends with whitespace (refused, never trimmed)")
     attrs, groups = _extract_attributes(assertion)
     authn = assertion.find(_A("AuthnStatement"))
     session_index = (authn.get("SessionIndex") if authn is not None else "") or ""

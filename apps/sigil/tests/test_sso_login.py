@@ -269,12 +269,12 @@ def _b64u(b):
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
-def _signed_jwt(priv, *, iss, aud, sub, nonce, groups, now=NOW, kid="k1"):
+def _signed_jwt(priv, *, iss, aud, sub, nonce, groups, now=NOW, kid="k1", **claims):
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
     hdr = _b64u(json.dumps({"alg": "RS256", "kid": kid}).encode())
     payload = _b64u(json.dumps({"iss": iss, "aud": aud, "sub": sub, "nonce": nonce, "exp": now + 300,
-                                "iat": now - 10, "groups": groups}).encode())
+                                "iat": now - 10, "groups": groups, **claims}).encode())
     sig = priv.sign(f"{hdr}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
     return f"{hdr}.{payload}.{_b64u(sig)}"
 
@@ -617,3 +617,82 @@ def test_the_clamp_resolves_the_role_from_the_directory_never_from_the_assertion
     _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="org_admin")       # the Admins mapping is gone
     res = _saml_in(env, "bob@acme.test", groups=("sec",))                            # the assertion claims sec
     assert res.role == "viewer" and orgreg.membership_role(bob["id"], "acme") == "viewer"
+
+
+# --- identifiers padded with whitespace: refused at every entry, never trimmed into a member's ----------------------
+
+_PADS = [" ", "　", " "]
+
+
+def _gamma_oidc_scim(env):
+    """gamma: enterprise OIDC with SCIM on (directory-managed)."""
+    orgreg, cfgreg = env
+    orgreg.create_org("gamma", "Gamma", owner="owner", issued_at=_issue())
+    cfgreg.set_oidc_config("gamma", issuer="https://oidc", client_id="cid", jwks_uri="https://oidc/jwks",
+                           authorize_endpoint="https://oidc/a", token_endpoint="https://oidc/t",
+                           redirect_uri="https://app/cb", signing_algs=("RS256",), egress_hosts=("oidc",),
+                           group_role_map={"admins": "org_admin"}, scim_enabled=True,
+                           scim_token=GAMMA_AUTH[len("Bearer "):], issued_at=_issue())
+
+
+@pytest.mark.parametrize("pad", _PADS, ids=lambda p: f"U+{ord(p):04X}")
+def test_an_oidc_subject_or_object_id_padded_with_whitespace_never_signs_in_as_a_member(env, pad):
+    """An id_token `sub` / `oid` that differs from a member's userName / externalId only by surrounding whitespace is
+    a DIFFERENT IdP identifier that merely renders like it: the sign-in is refused, never trimmed into the member."""
+    orgreg, cfgreg = env
+    _gamma_oidc_scim(env)
+    st, kate = _scim(env, "POST", "/scim/v2/Users", {"userName": "kate@acme.test", "externalId": "oid-kate",
+                                                    "groups": [{"value": "admins"}]}, auth=GAMMA_AUTH, org="gamma")
+    assert st == 201
+    k, jwk = _rsa_jwk_and_key()
+
+    def sign_in(sub, **claims):
+        jwt = _signed_jwt(k, iss="https://oidc", aud="cid", sub=sub, nonce="N1", groups=[], **claims)
+        return uiscim.sso_login_oidc(jwt, org_id="gamma", config_registry=cfgreg, org_registry=orgreg,
+                                     jwks_keys=[jwk], expected_nonce="N1", now=NOW, issued_at=_issue())
+    for padded in (pad + "kate@acme.test", "kate@acme.test" + pad):
+        with pytest.raises(SsoLoginError, match="begins or ends with whitespace"):
+            sign_in(padded)
+    with pytest.raises(SsoLoginError, match="begins or ends with whitespace"):
+        sign_in("someone-else", oid="oid-kate" + pad)
+    assert sign_in("kate@acme.test").username == kate["id"]                           # controls: exact values link
+    assert sign_in("someone-else", oid="oid-kate").username == kate["id"]
+
+
+@pytest.mark.parametrize("pad", _PADS, ids=lambda p: f"U+{ord(p):04X}")
+def test_a_just_in_time_subject_padded_with_whitespace_mints_nothing(env, pad):
+    """Just-in-time, a padded subject would derive the SAME membership id as the unpadded one (the derivation trims):
+    it is refused before that, and nothing is minted."""
+    orgreg, cfgreg = env
+    cfgreg.disable_scim("acme", issued_at=_issue())
+    cfg = cfgreg.config("acme")
+    for padded in (pad + "carol@acme.test", "carol@acme.test" + pad):
+        with pytest.raises(SsoLoginError, match="begins or ends with whitespace"):
+            uiscim._login_principal(orgreg, cfg, subject=padded, groups=("admins",), issued_at=_issue())
+    assert orgreg.memberships("acme") == []
+    res = uiscim._login_principal(orgreg, cfg, subject="carol@acme.test", groups=("admins",), issued_at=_issue())
+    assert res.role == "org_admin" and res.seq is not None                            # control: minted
+
+
+@pytest.mark.parametrize("attr", ["userName", "externalId"])
+def test_scim_refuses_an_identifier_padded_with_whitespace_never_trims_it(env, attr):
+    """A SCIM write whose userName / externalId begins or ends with whitespace is refused (400 invalidValue) — never
+    trimmed into a member's identifier (which surfaced as a uniqueness collision, or re-keyed the member)."""
+    orgreg, _ = env
+    st, kate = _scim(env, "POST", "/scim/v2/Users", {"userName": "kate@acme.test", "externalId": "00u-kate"})
+    assert st == 201
+    padded = {"userName": "kate@acme.test ", "externalId": "00u-kate "}[attr]
+    other = {"userName": "other@acme.test", "externalId": "00u-other"}
+    for method, path, body in (
+            ("POST", "/scim/v2/Users", {**other, attr: padded}),
+            ("PUT", f"/scim/v2/Users/{kate['id']}", {"userName": "kate@acme.test", "externalId": "00u-kate",
+                                                      attr: padded}),
+            ("PATCH", f"/scim/v2/Users/{kate['id']}", {"Operations": [{"op": "replace", "path": attr,
+                                                                       "value": padded}]}),
+            ("PATCH", f"/scim/v2/Users/{kate['id']}", {"Operations": [{"op": "replace", "value": {attr: padded}}]})):
+        st, body = _scim(env, method, path, body)
+        assert st == 400 and body["scimType"] == "invalidValue" and "whitespace" in body["detail"], (method, body)
+    st, b = _scim(env, "GET", f"/scim/v2/Users/{kate['id']}", None)
+    assert (b["userName"], b["externalId"]) == ("kate@acme.test", "00u-kate")        # kate is unchanged
+    st, b = _scim(env, "POST", "/scim/v2/Users", other)
+    assert st == 201                                                                  # control: exact values land

@@ -96,9 +96,18 @@ def username_key(user_name: str) -> "tuple[str, str]":
     either mapping alone) it never equates a look-alike with the letter it resembles — KELVIN SIGN vs `K` (its
     uppercase is itself), LONG S vs `s` (their lowercases differ), `ß` vs `ss`, a ligature vs its letters, dotted or
     dotless `i` vs `i` — so a DIFFERENT IdP account whose name merely looks like a member's can neither be linked
-    to that member at sign-in nor collide with it in the directory."""
+    to that member at sign-in nor collide with it in the directory. Whitespace is never trimmed either: an identifier
+    that begins or ends with whitespace (any Unicode space) is refused at every entry — the SCIM write, the SAML
+    NameID, the OIDC sub — and matches nobody here (`_exact_key`), so a padded look-alike is never trimmed INTO a
+    member's identifier."""
     s = str(user_name or "")
     return s.lower(), s.upper()
+
+
+def _exact_key(value: object) -> str:
+    """A lookup key used EXACTLY as given: "" (matches nobody) when it is blank or begins or ends with whitespace."""
+    s = str(value or "")
+    return s if s.strip() and s == s.strip() else ""
 
 
 def edge_id(group_id: str, user_id: str) -> str:
@@ -231,16 +240,18 @@ class OrgDirectory:
 
     def user_by_name(self, user_name: str) -> Optional[DirectoryUser]:
         """The user whose userName equals `user_name` up to letter case ONLY (`username_key`: SCIM userName is
-        caseExact=false, but a case-folding look-alike is a different name)."""
-        want = str(user_name or "").strip()
+        caseExact=false, but a case-folding look-alike is a different name). `user_name` is compared as given, never
+        trimmed: a blank one, or one that begins or ends with whitespace, matches nobody (`_exact_key`)."""
+        want = _exact_key(user_name)
         if not want:
             return None
         key = username_key(want)
         return next((u for u in self.users() if username_key(u.user_name) == key), None)
 
     def user_by_external_id(self, external_id: str) -> Optional[DirectoryUser]:
-        """The user whose externalId equals `external_id` EXACTLY (externalId is caseExact)."""
-        want = str(external_id or "").strip()
+        """The user whose externalId equals `external_id` EXACTLY (externalId is caseExact; never trimmed — a blank or
+        padded one matches nobody)."""
+        want = _exact_key(external_id)
         if not want:
             return None
         return next((u for u in self.users() if u.external_id == want), None)

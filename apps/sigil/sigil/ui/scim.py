@@ -36,6 +36,9 @@ directory is BOOKKEEPING — the authority is still the ceiling-capped owner-sig
 SIGN-IN SEMANTICS:
   * an org whose config has SCIM OFF provisions JUST-IN-TIME: a verified sign-in mints (or updates) the capped
     membership with the role the config resolves for the assertion's groups;
+  * in either mode the subject is used EXACTLY as the IdP signed it: one that begins or ends with whitespace (any
+    Unicode space) is refused, never trimmed into a member's identifier — and a SCIM write refuses such a
+    `userName` / `externalId` likewise (400), so a padded look-alike can neither sign in as nor collide with a member;
   * an org whose config has SCIM ON is DIRECTORY-MANAGED: sign-in links the verified subject to the directory user
     whose `userName` (case-insensitively — by letter case only, never a case-folding look-alike) or `externalId`
     matches it (the SAML NameID; the OIDC `sub`, or Entra's immutable `oid`) and admits only an ACTIVE user with a
@@ -253,6 +256,12 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
     DIFFERENT person than the one now carrying the old name. Mints nothing in that mode except the CLAMP: a
     membership above the role the CURRENT owner-signed config resolves for the user is brought down to it first
     (never raised; a role the owner set outside the ceiling is left as the owner set it)."""
+    for ident in (subject, *link_ids):
+        # an identifier is used EXACTLY as the IdP signed it: one that begins or ends with whitespace (any Unicode
+        # space) is a DIFFERENT identifier that merely renders like a member's — refused, never trimmed into it
+        if not isinstance(ident, str) or not ident.strip() or ident != ident.strip():
+            raise SsoLoginError("the verified identity is blank or begins or ends with whitespace (refused, never "
+                                "trimmed into another identifier)")
     if not config.scim_enabled:
         return _provision_from_identity(org_registry, config, external_id=subject, groups=groups,
                                         issued_at=issued_at, audit=audit)
@@ -338,8 +347,9 @@ def sso_login_oidc(id_token: str, *, org_id: str, config_registry, org_registry,
     groups = claims.get(_OIDC_GROUPS_CLAIM)
     groups = tuple(g for g in groups if isinstance(g, str)) if isinstance(groups, list) else ()
     oid = claims.get(_OIDC_OBJECT_ID_CLAIM)
-    link_ids = (oid.strip(),) if isinstance(oid, str) and oid.strip() else ()
-    return _login_principal(org_registry, config, subject=sub.strip(), link_ids=link_ids, groups=groups,
+    link_ids = (oid,) if isinstance(oid, str) and oid.strip() else ()
+    # `sub` / `oid` pass on EXACTLY as signed (never trimmed): `_login_principal` refuses a padded one
+    return _login_principal(org_registry, config, subject=sub, link_ids=link_ids, groups=groups,
                             issued_at=now if issued_at is None else issued_at,
                             directory_registry=directory_registry, audit=audit)
 
@@ -535,13 +545,23 @@ def _profile_from(resource: dict) -> dict:
     return out
 
 
+def _identifier(value: object, what: str) -> str:
+    """A user's link identifier (`userName` / `externalId`) EXACTLY as the IdP sent it — never trimmed: one that
+    begins or ends with whitespace (any Unicode space) is refused, so a padded look-alike of a member's identifier is
+    never trimmed INTO it (and so neither linked to that member at sign-in nor collided with it here)."""
+    s = str(value or "")
+    if s != s.strip():
+        raise _ScimFail(400, f"{what} must not begin or end with whitespace", "invalidValue")
+    return s
+
+
 def _user_state_from(resource: dict) -> dict:
     active = resource.get("active", True)
     b = _as_bool(active)
     if b is None:
         raise _ScimFail(400, "active must be a boolean", "invalidValue")
-    return {"user_name": str(resource.get("userName") or "").strip(),
-            "external_id": str(resource.get("externalId") or "").strip(),
+    return {"user_name": _identifier(resource.get("userName"), "userName"),
+            "external_id": _identifier(resource.get("externalId"), "externalId"),
             "display_name": str(resource.get("displayName") or "").strip(),
             "active": b, "selectors": _selectors_from(resource), "profile": _profile_from(resource)}
 
@@ -665,10 +685,12 @@ def _user_apply(st: dict, kind: str, path: str, value: object) -> None:
     elif a == "username":
         if kind == "remove" or not isinstance(value, str) or not value.strip():
             raise _ScimFail(400, "userName is required and cannot be removed", "invalidValue")
-        st["user_name"] = value.strip()
-    elif a in ("externalid", "displayname"):
-        key = "external_id" if a == "externalid" else "display_name"
-        st[key] = "" if kind == "remove" else str(value if isinstance(value, str) else "").strip()
+        st["user_name"] = _identifier(value, "userName")
+    elif a == "externalid":
+        st["external_id"] = "" if kind == "remove" else _identifier(value if isinstance(value, str) else "",
+                                                                    "externalId")
+    elif a == "displayname":
+        st["display_name"] = "" if kind == "remove" else str(value if isinstance(value, str) else "").strip()
     elif a in ("roles", "groups"):
         vals = list(_scim._group_selectors({"roles": value if isinstance(value, list) else [value]}))
         if kind == "replace":

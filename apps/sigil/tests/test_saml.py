@@ -577,6 +577,20 @@ def test_the_skew_bound_is_in_lockstep_with_the_config():
 
 # --- missing structure ------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("pad", [" ", "　", " ", "\u0085", " ", " ", "\t", "\n"],
+                         ids=lambda p: f"U+{ord(p):04X}")
+def test_a_nameid_padded_with_whitespace_is_refused_never_trimmed(pad):
+    # A NameID that differs from a member's only by surrounding whitespace (a no-break / ideographic / em space, a
+    # line separator, ...) is a DIFFERENT IdP identifier that merely renders like the member's: refused, never
+    # trimmed into it. A whitespace-only NameID is no identity at all.
+    for padded in (pad + "user@acme", "user@acme" + pad):
+        with pytest.raises(SamlError, match="begins or ends with whitespace"):
+            _verify(_response(nameid=padded))
+    with pytest.raises(SamlError, match="has no NameID"):
+        _verify(_response(nameid=pad * 3))
+    assert _verify(_response(nameid="user@acme")).name_id == "user@acme"         # same-shape control
+
+
 def test_missing_subject_refused():
     with pytest.raises(SamlError):
         _verify(_response(with_subject=False))
