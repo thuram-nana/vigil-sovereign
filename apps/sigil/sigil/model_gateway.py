@@ -112,8 +112,8 @@ from vigil_core import model_metering as mm  # noqa: E402
 from vigil_core.rate_card import DEFAULT_RATE_CARD, RateCard  # noqa: E402
 from vigil_core.model_grant import STOP_CREDITS_EXHAUSTED, STOP_HEADER, ModelGrant, decode_token  # noqa: E402
 
-__all__ = ["GatewayConfig", "GrantMeter", "MeterBusy", "MeterTotals", "ModelGateway", "config_from_env", "start",
-           "start_from_env"]
+__all__ = ["GatewayConfig", "GrantMeter", "MIN_USEFUL_OUTPUT_TOKENS", "MeterBusy", "MeterTotals", "ModelGateway",
+           "config_from_env", "forget_closed_meter", "plain_request_worst_mc", "start", "start_from_env"]
 
 _log = logging.getLogger(__name__)
 
@@ -139,6 +139,30 @@ def min_request_mc(card: Any) -> int:
     A balance below it can never have a request admitted, so a metered launch is refused before it starts; above it,
     whether a given request fits depends on its real prompt, which the gateway decides per request."""
     return int(card.request_worst_mc(_INPUT_MARGIN_TOKENS + 1, 0, _MIN_OUTPUT_TOKENS))
+
+
+#: PR-J2 — the least output a request may ask for and still be admitted against a prepaid allowance (``reserve``
+#: refuses ``allowance`` when not even this many output tokens fit): a caller that sizes its own hold for one request
+#: (:func:`plain_request_worst_mc`) asks for at least this many.
+MIN_USEFUL_OUTPUT_TOKENS = _MIN_OUTPUT_TOKENS
+
+
+def plain_request_worst_mc(card: Any, raw_len: int, max_tokens: int) -> int:
+    """PR-J2: what the gateway RESERVES, against a prepaid allowance, for ONE plain model request — no image, no
+    Anthropic-defined tool, no cached prefix counted — whose body is ``raw_len`` bytes and whose ``max_tokens`` is
+    ``max_tokens``, in milli-credits at ``card``'s rates: exactly ``_admit``'s prepaid ``worst(max_tokens)`` over the
+    request's byte bound (``input_bound_tokens``: a token is never shorter than a byte, plus ``_INPUT_MARGIN_TOKENS``)
+    at the dearest input rate, plus its output. A caller that holds this much for the request it then sends
+    byte-for-byte has it admitted with its ``max_tokens`` intact (the assistant's per-turn wallet draw,
+    ``ui.assistant_wallet``). Raises ``ValueError`` for a size that is not a non-negative int, or for a ``max_tokens``
+    below :data:`MIN_USEFUL_OUTPUT_TOKENS` (such a request is never admitted against an allowance)."""
+    for name, v in (("raw_len", raw_len), ("max_tokens", max_tokens)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if max_tokens < _MIN_OUTPUT_TOKENS:
+        raise ValueError(f"a request asking for fewer than {_MIN_OUTPUT_TOKENS} output tokens is never admitted "
+                         f"against an allowance")
+    return int(card.request_worst_mc(raw_len + _INPUT_MARGIN_TOKENS, 0, max_tokens))
 
 
 def _fit_tokens(worst_mc: "Callable[[int], int]", room_mc: int, most: int) -> int:
@@ -1051,6 +1075,25 @@ class GrantMeter:
         with st.cond:
             return st.pending_nano
 
+    def forget(self, mid: str) -> bool:
+        """PR-J2 — drop launch ``mid``'s IN-MEMORY state once it is CLOSED (its ``.closed`` sentinel is on disk) and
+        holds nothing in flight: no open request, no open worker slot, no pending reservation and no record a failed
+        write still owes. Everything it held is on disk, so a later request for it re-reads the file and is refused as
+        closed — nothing is lost and nothing is re-admitted. A gateway that meters one launch per assistant TURN calls
+        this after each turn's settle, so its memory stays bounded by the turns in flight. True when dropped; a meter
+        this instance never loaded, or one that is still open or busy, is kept (False)."""
+        with self._guard:
+            st = self._states.get(mid)
+            if st is None:
+                return False
+            with st.cond:
+                if st.opens or st.worker_opens or st.unwritten or st.pending_nano or st.poisoned:
+                    return False
+                if not (st.closed or self._closed_elsewhere(mid)):
+                    return False
+                del self._states[mid]
+                return True
+
     def charge_records(self, mid: str) -> "list[dict[str, Any]]":
         """W4 — every CHARGE-bearing line of a launch, oldest first, read from disk with its hash chain checked
         (raises ``ValueError`` if broken or malformed). Each record carries a ``kind``:
@@ -1801,6 +1844,25 @@ class ModelGateway:
                 raise _Refusal(529, "overloaded_error", "VIGIL cannot extend this run's allowance right now",
                                retry_after=5)
             return cur
+
+    def forget_meter(self, mid: str) -> bool:
+        """PR-J2 — drop everything this gateway keeps in memory for the CLOSED launch ``mid``: its meter state
+        (:meth:`GrantMeter.forget`, which refuses while anything is in flight or the meter is still open), its cached
+        allowance and extension lock, and its remembered prompt-cache prefixes. Called after an assistant turn's
+        settle (one meter per turn), so a long-lived gateway's memory does not grow with every turn. A request that
+        still arrives for ``mid`` re-reads the meter from disk and is refused as closed. True when dropped."""
+        if not self.meter.forget(mid):
+            return False
+        with self._extend_guard:
+            lock = self._extend_locks.pop(mid, None)
+        if lock is not None:
+            with lock:                                   # never under another allowance decision for the same launch
+                self._allowances.pop(mid, None)
+        else:
+            self._allowances.pop(mid, None)
+        with self._prefix_guard:
+            self._prefixes.pop(mid, None)
+        return True
 
     def input_bound_tokens(self, raw_len: int, found: Mapping[str, int]) -> int:
         """An upper bound on a request's input tokens from what the gateway can see: a token is never shorter than
@@ -2589,6 +2651,24 @@ def stop(server: _Server, *, drain_s: Optional[float] = None) -> None:
     with _RUNNING_LOCK:
         for k in [k for k, v in _RUNNING.items() if v is server]:
             del _RUNNING[k]
+
+
+def forget_closed_meter(mid: str) -> int:
+    """PR-J2 — tell every model gateway running in THIS process (the cockpit's, :func:`start_from_env`) that launch
+    ``mid`` is closed and settled, so each drops what it keeps in memory for it (:meth:`ModelGateway.forget_meter`,
+    which keeps a meter that is still open or busy). Returns how many dropped it; 0 when no gateway runs here (a
+    meter on disk is never touched). Never raises: a gateway that cannot drop it keeps it, which costs memory only."""
+    with _RUNNING_LOCK:
+        servers = list(_RUNNING.values())
+    dropped = 0
+    for server in servers:
+        gateway = getattr(server, "gateway", None)
+        try:
+            if gateway is not None and gateway.forget_meter(mid):
+                dropped += 1
+        except Exception:  # noqa: BLE001 — memory housekeeping never fails a settle
+            _log.warning("model gateway: could not drop a settled launch's in-memory state", exc_info=True)
+    return dropped
 
 
 # ---------------------------------------------------------------------------------------------------------------

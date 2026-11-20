@@ -97,9 +97,23 @@ _SLOW_HOP_TIMEOUTS_S = {
 }
 
 
+#: PR-J2 — an assistant turn ACCOUNTED to the org (``VIGIL_CUSTOMER_ASSISTANT_WALLET``) is billed for its model
+#: request once the gateway answered it, so the edge outwaits the cockpit's whole turn: its admission, the gateway dial
+#: (``assistant_wallet.TURN_DIAL_TIMEOUT_S``) and its settle. A slow answer is then delivered — never billed while the
+#: customer is told it failed. Never above the slowest hop in the table (the drain deadline stays as pinned).
+_ASSISTANT_ACCOUNTED_HOP_S = 60.0
+
+
 def _hop_timeout(action: str) -> float:
     """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
+    if action == "assistant_ask" and _assistant_accounted():
+        return _ASSISTANT_ACCOUNTED_HOP_S
     return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
+
+
+def _assistant_accounted() -> bool:
+    from .. import config as _config
+    return _config.customer_assistant_wallet_enabled()
 
 
 # The installed-app Google hand-off: failed redemptions (wrong code, unknown or expired record) per client IP.
