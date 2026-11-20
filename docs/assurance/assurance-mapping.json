@@ -3778,6 +3778,7 @@
         "LIMIT-external-audit-team",
         "LIMIT-frontc-shard-cross-host-deploy",
         "LIMIT-gesture-native-inject-unwired",
+        "LIMIT-report-pdf-renderer-unprovisioned",
         "LIMIT-restore-hard-pruned-spine",
         "LIMIT-sigil-voice-probe-egress-not-gatewayed"
       ]

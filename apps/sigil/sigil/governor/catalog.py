@@ -373,6 +373,15 @@ def plans() -> list[dict]:
     return [e.public() for e in _offered()]
 
 
+def credit_plan_entries(*, offered_only: bool) -> tuple[CatalogEntry, ...]:
+    """PR-G (Area 6): the CREDIT subscription plans of the owner catalog — never a top-up, never an AEGIS monitoring
+    plan — in catalog order: the ones ON SALE (``offered_only``: the Plans screen and the plan-change targets) or every
+    one ever sold (a workspace may still hold a retired plan, which a change must recognise). A pure read: it decides
+    no money (the signer still mints only from ``mintable_entitlements``)."""
+    src = _offered() if offered_only else _CATALOG
+    return tuple(e for e in src if e.kind == EVENT_SUBSCRIPTION_ACTIVE and not e.monitor_hosts)
+
+
 def launch_products() -> tuple[LaunchProduct, ...]:
     """The EC-7 tiered Quick/Deep launch products ON OFFER — `()` unless config.tiered_products_enabled()
     (default OFF ⇒ byte-identical to pre-EC-7: no tiered product is listed, and plans() / expected_amounts() /

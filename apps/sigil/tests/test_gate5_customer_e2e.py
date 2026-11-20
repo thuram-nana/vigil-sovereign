@@ -94,6 +94,8 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/guide": ("Guide", ()),
+    "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
+    "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
 }
 _PREAUTH: dict[str, str] = {"#/login": "Sign in", "#/signup": "Create your account",
                             "#/recover": "Reset your password", "#/google-code": "Finish signing in with Google"}
@@ -108,6 +110,8 @@ _CONTROLS: dict[str, tuple[str, ...]] = {
     "#/monitoring": ("Turn on Observe", "Turn on Respond", "Switch to Respond", "Turn off"),
     "#/attack-path": ("View findings",),
     "#/guide": ("Replay the welcome tour",),
+    "#/plans": ("Upgrade", "Downgrade", "Cancel plan", "Buy credits on Billing"),
+    "#/reports": ("Download report", "Download PDF"),
 }
 # The pending screens that will add a ROUTE: stage -> (route, its own <h2> or None, its read or None, TODO, why
 # pending). The other pending items (Retest, the W6 billing dashboard, the Overview aggregation) live inside merged
@@ -127,13 +131,15 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # add it here (its stage then reds loudly — the screen fell back home — until it does).
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "posture": "1", "attackPath": "1", "blindVuln": "1", "googleSignin": "0",
-               "oidcHandoff": "0", "iosInstall": "0"}
+               "oidcHandoff": "0", "iosInstall": "0",
+               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. Fix first (PR-B) is served only with
 # its own switch AND its master switch, VIGIL_APEX_PRESENTATION.
 _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
-              "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION")
+              "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
+              "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP")   # + PR-G
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -364,6 +370,30 @@ _FAKE_SERVER = {
                   "weights": {"critical": 45, "high": 22, "unrated": 12, "medium": 9, "low": 3, "info": 1},
                   "counts_fixes": True, "note": "an honest heuristic for prioritising, not a measured or certified rating"},
         "generated_from": "proven_findings"},
+    # PR-G (Area 6): a workspace on the middle plan (so Upgrade, Downgrade and Cancel plan all render), and the
+    # standards mapping of one proven finding. Catalog-shaped prices; nothing about what an assessment costs.
+    "api/customer/billing/plans": {
+        "org_id": "org_acme", "can_manage": True, "scheduled_change": None, "depths": [],
+        "current": {"plan_id": "pro", "status": "active", "period_end": 1800000000.0, "credits_per_period": 6000,
+                    "active": True, "price_id": "price_pro", "name": "Pro (monthly)", "amount_minor": 9900,
+                    "currency": "USD", "period_days": 30.0, "retired": False},
+        "trial": {"credits": 100, "had_trial": True, "preview_locked": False, "rules": ["One trial per workspace."]},
+        "pay_as_you_go": {"packs": [{"price_id": "price_topup", "name": "Credit top-up", "credits": 50,
+                                     "amount_minor": 500, "currency": "USD"}], "rules": ["Bought credits never expire."]},
+        "tiers": [{"id": p, "price_id": p, "name": n, "amount_minor": a, "currency": "USD", "credits_per_period": c,
+                   "period_days": 30.0, "current": act == "current", "scheduled": False, "action": act, "rules": []}
+                  for p, n, a, c, act in (("price_research", "Research (monthly)", 2900, 2000, "downgrade"),
+                                          ("price_pro", "Pro (monthly)", 9900, 6000, "current"),
+                                          ("price_team", "Team (monthly)", 29900, 20000, "upgrade"))],
+        "actions": {"checkout": False, "change": True, "cancel": True, "change_unavailable_reason": "",
+                    "plan_checkout_pending": False}},
+    "api/customer/compliance": {
+        "org_id": "org_acme", "findings_total": 1, "generated_from": "proven_findings", "findings_elsewhere": [],
+        "statement": "x",
+        "frameworks": [{"framework": "owasp", "label": "OWASP Top 10", "version": "OWASP Top 10:2021", "summary": {},
+                        "controls": [{"id": "A03:2021", "name": "Injection", "status": "weakness_proven",
+                                      "findings": [{"finding_ref": "f1", "title": "SQL injection",
+                                                    "host": "a.example", "retest": None}]}]}]},
 }
 
 
@@ -591,7 +621,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
         for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "posture",
-                  "posture/trend"):
+                  "posture/trend", "billing/plans", "report", "report/pdf", "compliance"):   # + PR-G (Area 6)
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

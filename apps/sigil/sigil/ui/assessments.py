@@ -47,7 +47,8 @@ _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity",
                 # APEX PR-A — the SIGNED presentation block (plain-language impact + standards chips + exact
                 # remediation). Projected through this SAME allowlist, but ONLY while VIGIL_APEX_PRESENTATION is
                 # on (see ``_finding_json``), so the flag-off findings read is byte-identical (a presentation-
-                # bearing cert is never surfaced). It is additive SIGNED data that rides the per-finding tenant-
+                # bearing cert is never surfaced) — on the fold-cache path too, whose index is keyed by the flag
+                # (see ``_indexed``). It is additive SIGNED data that rides the per-finding tenant-
                 # scoped projection, so a cross-tenant presentation can never leak, and is purely descriptive —
                 # never read for any verdict.
                 "presentation",
@@ -55,7 +56,8 @@ _CERT_FIELDS = ("finding_ref", "bug_class", "surface", "confidence", "severity",
                 # attestation. Each is additive, purely-descriptive SIGNED data that rides this SAME tenant-scoped
                 # allowlist, but ONLY while its own default-OFF flag is on (``attack_path`` -> VIGIL_CUSTOMER_ATTACK_PATH,
                 # ``oob_attestation`` -> VIGIL_CUSTOMER_BLIND_VULN; see ``_finding_json``), so the flag-off read is
-                # byte-identical (a chain/attestation-bearing cert is never surfaced). ``attack_path`` restates
+                # byte-identical (a chain/attestation-bearing cert is never surfaced) — on the fold-cache path too,
+                # whose index is keyed by every one of these flags (see ``_indexed``). ``attack_path`` restates
                 # oracles that already fired (no un-grounded edge); ``oob_attestation`` is the existing independent
                 # pinned-collector receipt. Neither is EVER read for a verdict and neither can promote a finding.
                 "attack_path", "oob_attestation")
@@ -88,24 +90,28 @@ def _org_slug_set(store, org_id: str, *, now: float) -> set[str]:
 
 
 def _presentation_on() -> bool:
-    """True iff the APEX PR-A presentation spine is armed (``config.presentation_enabled``). Read at projection
-    time; process-static in practice (a deploy-time env flag), so the fold index + the scan path agree."""
+    """True iff the APEX PR-A presentation spine is armed (``config.presentation_enabled``). The scans read it at
+    projection time; a fold-cache read reads it ONCE per read and binds that value into the index's cache identity
+    (``_indexed``), so the fold index and the scan path agree for EVERY value of the flag — including a flag that
+    changes inside a running process, which no longer leaves the index answering with the old value's rows."""
     from .. import config
     return config.presentation_enabled()
 
 
 def _attack_path_on() -> bool:
     """True iff APEX PR-L (Area 11) attack-path storytelling is armed (``config.customer_attack_path_enabled``).
-    Read at projection time; process-static in practice (a deploy-time env flag), so the fold index + the scan
-    path agree. OFF -> the inert ``attack_path`` cert field is never surfaced (byte-identical)."""
+    The scans read it at projection time; a fold-cache read reads it ONCE per read and binds that value into the
+    index's cache identity (``_indexed``), exactly as ``_presentation_on``. OFF -> the inert ``attack_path`` cert
+    field is never surfaced (byte-identical)."""
     from .. import config
     return config.customer_attack_path_enabled()
 
 
 def _blind_vuln_on() -> bool:
     """True iff APEX PR-L (Area 11) blind-vuln (out-of-band) confirmation is armed
-    (``config.customer_blind_vuln_enabled``). Read at projection time; process-static in practice. OFF -> the
-    inert ``oob_attestation`` cert field is never surfaced (byte-identical)."""
+    (``config.customer_blind_vuln_enabled``). The scans read it at projection time; a fold-cache read reads it ONCE
+    per read and binds that value into the index's cache identity (``_indexed``), exactly as ``_presentation_on``.
+    OFF -> the inert ``oob_attestation`` cert field is never surfaced (byte-identical)."""
     from .. import config
     return config.customer_blind_vuln_enabled()
 
@@ -113,7 +119,8 @@ def _blind_vuln_on() -> bool:
 # The gated nested cert blocks: each is surfaced ONLY while its flag is on, and is DEEP-COPIED on projection (it
 # is a nested dict/list read by reference from the spine record, and the scan path returns these rows directly
 # with no later copy, so a caller must never alias — or mutate — the record). All are additive, purely-descriptive
-# SIGNED data; none is ever read for a verdict. Maps the cert field -> the flag-read that gates it.
+# SIGNED data; none is ever read for a verdict. Maps the cert field -> the flag-read that gates it. Every projection
+# reads these flags through ``_gates_now`` (the ONE seam); a fold-cache read binds the values into its cache identity.
 _GATED_FIELDS = {
     "presentation": _presentation_on,
     "attack_path": _attack_path_on,
@@ -121,14 +128,23 @@ _GATED_FIELDS = {
 }
 
 
-def _finding_json(payload: dict, cert: dict) -> dict[str, Any]:
+def _gates_now() -> "dict[str, bool]":
+    """Every gated block's flag, read ONCE now: ``{cert field: on}`` in ``_GATED_FIELDS`` order. A scan projects each
+    finding under it; a fold-cache read seeds its view with it and binds it into the index's cache identity."""
+    return {f: bool(on()) for f, on in _GATED_FIELDS.items()}
+
+
+def _finding_json(payload: dict, cert: dict, *, gates: "Optional[dict[str, bool]]" = None) -> dict[str, Any]:
+    """One finding through the ``_CERT_FIELDS`` allowlist. ``gates`` is the ``{gated field: flag}`` the projection is
+    made under: the fold index passes the values its view was built for (its cache identity); a scan passes nothing
+    and reads every flag now. A gated field absent from ``gates`` reads as OFF (never surfaced)."""
     out: dict[str, Any] = {"engagement_slug": cert.get("engagement_slug")}
     # finding_ref/oracle_context_digest live at the spine payload top level too (receiver mirrors them); prefer
     # the cert value, fall back to the payload, so the projection is robust to either carrier. The gated nested
-    # blocks are each read ONCE here (not per-field inside the loop) so the flag read is cheap and consistent.
-    gated_on = {f: on() for f, on in _GATED_FIELDS.items()}
+    # blocks' flags are each read ONCE here (not per-field inside the loop) so the flag read is cheap and consistent.
+    gated_on = _gates_now() if gates is None else gates
     for f in _CERT_FIELDS:
-        if f in gated_on and not gated_on[f]:
+        if f in _GATED_FIELDS and not gated_on.get(f, False):
             continue                 # flag OFF -> this nested block is never surfaced (the read stays byte-identical)
         v = cert.get(f, payload.get(f))
         if v is not None:
@@ -142,14 +158,21 @@ class _AssessmentsView:
     per request: `findings[slug]` / `outcomes[slug]` = [(seq, projected json)] in spine order, built from EXACTLY
     the records the scans keep (same kind / dict / certificate checks; the projection is the same pure
     function). A record whose engagement slug is unhashable (the scans' `in slug_set` would raise on it) poisons
-    the view, so every read falls back to the unchanged scan and raises exactly where it did."""
+    the view, so every read falls back to the unchanged scan and raises exactly where it did.
 
-    __slots__ = ("findings", "outcomes", "poisoned")
+    `gates` is the ``{gated field: flag}`` the finding rows are projected under (every ``_GATED_FIELDS`` block: the
+    APEX presentation, the attack path, the out-of-band attestation) — fixed when the view is seeded, never re-read
+    while folding, and part of the entry's cache identity (``_indexed``): a read under any other value of any of them
+    rebuilds rather than answer with rows projected under these. A gate the seed does not name is OFF."""
 
-    def __init__(self) -> None:
+    __slots__ = ("findings", "outcomes", "poisoned", "gates")
+
+    def __init__(self, gates: "Optional[dict[str, bool]]" = None) -> None:
         self.findings: dict = {}
         self.outcomes: dict = {}
         self.poisoned = False
+        given = gates or {}
+        self.gates: "dict[str, bool]" = {f: bool(given.get(f, False)) for f in _GATED_FIELDS}
 
 
 def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
@@ -175,18 +198,42 @@ def _assessments_step(view: _AssessmentsView, r, _ctx) -> None:
         return
     if not isinstance(slug, str):
         return                                   # readers ask for str slugs only: keep no unreadable rows
-    row = _finding_json(p, cert) if isinstance(cert, dict) else _outcome_json(p)   # a str slug on a finding => a dict cert
+    # a str slug on a finding => a dict cert; projected under the view's OWN flag values (its cache identity)
+    row = _finding_json(p, cert, gates=view.gates) if isinstance(cert, dict) else _outcome_json(p)
     index.setdefault(slug, []).append((int(getattr(r, "seq", 0)), row))
 
 
 _ASSESSMENTS_FOLD = FoldCache("ui.assessments", step=_assessments_step)
 
 
+def _ungated(row: dict, gates: "dict[str, bool]") -> dict:
+    """``row`` without each gated field whose flag is OFF in ``gates`` — a new dict when it had one (the cached row is
+    never mutated), else ``row`` itself."""
+    off = [f for f in _GATED_FIELDS if f in row and not gates.get(f, False)]
+    if not off:
+        return row
+    return {k: v for k, v in row.items() if k not in off}
+
+
 def _indexed(store, which: str, slugs) -> Any:
     """[(seq, json)] of the indexed `which` rows ('findings' / 'outcomes') for `slugs`, or `_UNCACHED`. A
-    `live_window` read: the scans never load the snapshot, so a snapshot that cannot be loaded declines."""
-    return cached_unsigned_read(_ASSESSMENTS_FOLD, store, seed=lambda snap: (_AssessmentsView(), -1), live_window=True,
-                                reader=lambda v: [row for s in slugs for row in getattr(v, which).get(s, ())])
+    `live_window` read: the scans never load the snapshot, so a snapshot that cannot be loaded declines.
+
+    A finding row's projection depends on every ``_GATED_FIELDS`` flag (``_finding_json``: the APEX presentation
+    block, the attack path, the out-of-band attestation), so each flag is read ONCE per read (``_gates_now``) and all
+    of them are part of the fold's cache IDENTITY, as ``(field, value)`` pairs: the view is seeded with them (every
+    step projects under them) and an entry built under any other value never answers — the read rebuilds under its
+    own. A read also drops, from every row it returns, each gated field whose flag is OFF for it: a second,
+    independent refusal, so no cached row can surface a gated block while its flag is off."""
+    gates = _gates_now()
+    any_off = not all(gates.values())
+
+    def reader(v: _AssessmentsView) -> list:
+        rows = [row for s in slugs for row in getattr(v, which).get(s, ())]
+        return [(seq, _ungated(j, gates)) for seq, j in rows] if any_off else rows
+
+    return cached_unsigned_read(_ASSESSMENTS_FOLD, store, seed=lambda snap: (_AssessmentsView(gates), -1),
+                                live_window=True, identity=tuple(gates.items()), reader=reader)
 
 
 def _newest_first(rows: list, limit: int) -> "tuple[list, int]":
