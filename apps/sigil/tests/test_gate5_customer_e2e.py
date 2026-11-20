@@ -564,7 +564,9 @@ _BUTTON_KEYS = ("buttons", "liveButtons", "disabledButtons", "deadButtons")
 
 
 def test_dropping_or_disabling_any_control_reds_its_screen():
-    """The census is count- and disabled-aware on EVERY walked screen, exercised in the walk itself. On each screen,
+    """The census is count- and disabled-aware, exercised in the walk itself on every screen of _SCREENS and _PREAUTH
+    (the merged #/security and #/code screens are covered by their stage tests and the tab walk, not by this probe). On
+    each probed screen,
     for each listed control in turn: ONE of its buttons dropped (a row that stops rendering it — for a control its data
     renders twice, its label is still on the page), ONE disabled while it keeps its click handler (it is still wired),
     and ONE rendered twice; then some other button of the screen disabled, and that button rendered twice (a

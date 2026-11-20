@@ -85,7 +85,7 @@ showing the Overview, until you do); a new route no stage claims fails `test_the
 | a billing role is refused a testing read (403) and still reads billing | `AUTOMATED` `test_a_billing_role_is_honestly_refused_a_testing_read` |
 | the walk boots exactly the scripts the page loads, and makes no network call | `AUTOMATED` `test_the_walk_boots_every_script_the_page_loads` |
 | every route is walked or claimed by a pending stage | `AUTOMATED` `test_the_screen_map_matches_app_routes` |
-| the screen check counts and refuses disabled controls: one of a same-label pair dropped, a listed control disabled with its click handler kept, one rendered twice, any other button disabled, or a same-label group no list counts, fails that screen (on every walked screen, and as real regressions of `app.js`) | `AUTOMATED` `test_dropping_or_disabling_any_control_reds_its_screen` · `test_a_real_regression_in_app_js_reds_the_census` |
+| the screen check counts and refuses disabled controls: one of a same-label pair dropped, a listed control disabled with its click handler kept, one rendered twice, any other button disabled, or a same-label group no list counts, fails that screen (probed on every screen of `_SCREENS` and `_PREAUTH`, and as real regressions of `app.js`; `#/security` and `#/code` are covered by their stage tests and the tab walk) | `AUTOMATED` `test_dropping_or_disabling_any_control_reds_its_screen` · `test_a_real_regression_in_app_js_reds_the_census` |
 | the per-screen census, bound to the sha256 of every script walked, as evidence | `AUTOMATED` `test_the_census_accounts_for_every_screen_and_is_saved_as_evidence` |
 
 ## C. The §13.2 wallet journey: buy, launch, pause, resume, settle, reconcile
