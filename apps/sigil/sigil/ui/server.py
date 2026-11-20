@@ -1756,6 +1756,16 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # APEX consumer PR-B — the Fix-first screen's reads: the posture + worst-first list + trend, and the trend alone
+        # (the Overview's Posture card). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_POSTURE is on together
+        # with its master flag VIGIL_APEX_PRESENTATION; requester = the hop principal, org = the edge SESSION's.
+        if action in ("customer_posture", "posture_trend"):
+            from .. import config as _config
+            if not _config.customer_posture_enabled():
+                return None
+            if action == "customer_posture":
+                return p.customer_posture(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_posture_trend(requester, str(body.get("org_id", "")), ip=ip)
         # C6 — the customer Code (Red-Pen) screen. Absent (unknown action -> 404) unless VIGIL_REDPEN_ENABLED is on, the
         # same master flag that gates the edge routes. requester is the hop principal and org the edge SESSION's (never a
         # free body field) — except redpen_connect_record, the GitHub post-install callback, which has no session and

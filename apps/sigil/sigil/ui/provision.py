@@ -543,10 +543,10 @@ class Provisioner:
                  saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
-        # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up. None
-        # (the default, and every pre-PR-F construction) ⇒ shard-on-signup is a byte-identical no-op. Even when
-        # injected it stays inert unless `customer_fair_queue_enabled()` + `multi_shard_enabled()` + an owner
-        # `shard_ids()` topology are all set — a tenant NEVER chooses its shard (see `_place_on_signup`).
+        # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up
+        # (`build_provisioner` injects it; None ⇒ shard-on-signup is a no-op). Injected, it stays inert unless
+        # `customer_fair_queue_enabled()` + `multi_shard_enabled()` + an owner `shard_ids()` topology are all set — a
+        # tenant NEVER chooses its shard (see `_place_on_signup`).
         self.shard_assignments = shard_assignments
         self.customers = customers
         self.orgs = orgs
@@ -663,14 +663,15 @@ class Provisioner:
 
     def _place_on_signup(self, org_id: str) -> None:
         """PR-F: owner-sign a SHARD PLACEMENT for a newly-created tenant, when the fair-queue + multi-shard flags
-        are on and the owner has named a shard topology. A byte-identical NO-OP otherwise: without an injected
-        registry (every pre-PR-F build), with either flag off, or with no owner `shard_ids()` nothing is read,
-        minted or appended. A tenant NEVER chooses its shard — the shard is server-chosen from owner topology +
-        current load and owner-signed (`shard_on_signup.assign_on_signup`). IDEMPOTENT (a tenant already placed is
-        a no-op), so it rides the idempotent-forward sign-up transaction: the caller runs it under the sign-up lock
-        before the commit marker, so a crash before the commit re-drives to exactly one placement. A placement
-        failure (e.g. a mis-named shard) fails the sign-up CLOSED (the token stays valid for a safe retry) rather
-        than leaving a routable-but-unplaced tenant — consistent with Finding A's 'ONE account/org/trial — or
+        are on and the owner has named a shard topology. A byte-identical NO-OP otherwise: without a registry, with
+        either flag off, or with no owner `shard_ids()` nothing is read, minted or appended. A tenant NEVER chooses
+        its shard — the shard is server-chosen from owner topology + current load and owner-signed
+        (`shard_on_signup.assign_on_signup`). IDEMPOTENT (a tenant already placed is a no-op), so it rides the
+        idempotent-forward sign-up transaction: the caller runs it under the sign-up lock before the commit marker,
+        and it takes the cross-process `placement_lock` itself, so a crash before the commit re-drives to exactly
+        one placement and a concurrent owner backfill can never place the tenant a second time. A placement failure
+        (e.g. a mis-named shard, a busy lock) fails the sign-up CLOSED (the token stays valid for a safe retry)
+        rather than leaving a routable-but-unplaced tenant — consistent with Finding A's 'ONE account/org/trial — or
         nothing'."""
         if self.shard_assignments is None:
             return
@@ -680,8 +681,11 @@ class Provisioner:
         shard_ids = config.shard_ids()
         if not shard_ids:
             return
-        from ..governor.shard_on_signup import assign_on_signup
-        assign_on_signup(self.shard_assignments, org_id, shard_ids=shard_ids, issued_at=self._next_issued())
+        from ..governor.shard_on_signup import assign_on_signup, placement_lock
+        # the CROSS-PROCESS placement lock (the owner's `sigil shard backfill` holds it too): the in-process sign-up
+        # lock alone cannot stop another process from seeing this tenant unplaced and placing it as well.
+        with placement_lock(self.store):
+            assign_on_signup(self.shard_assignments, org_id, shard_ids=shard_ids, issued_at=self._next_issued())
 
     def _audit(self, action: str, *, requester: str = "", org_id: str = "", target: str = "",
                outcome: str = "", reason: str = "", critical: bool = False, attestation: bool = False,
@@ -3622,6 +3626,42 @@ class Provisioner:
         from .finding_preview import preview_locked
         return preview_locked(self.store, org_id, wallet=self.wallet)
 
+    # ---- APEX consumer PR-B: the Fix-first screen's reads (``ui/customer_posture.py``) --------------------------------
+    def customer_posture(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """PR-B — the session org's Fix-first view: the 0-100 posture over its OPEN oracle-confirmed findings, the
+        worst-first list of what to fix (PR-A's triage entry per finding: plain-language impact + standards chips +
+        exact remediation, the signed parts only when signed), what a retest proved fixed, and the trend from the
+        same pass. ``admit_customer(view_assessments)`` on the hop-bound SESSION org (never a body field), then the
+        pure projection; retest verdicts count only while the retest UI is on (the same switch the Assessments
+        screen shows them under). A trial-preview org whose report is locked gets the preview here too: only the one
+        revealed finding in full, every other entry without its fix. Refuses unless ``customer_posture_enabled``
+        (the cockpit dispatch is already absent then)."""
+        import time as _t
+        from .. import config
+        from . import customer_posture as _cp
+        if not config.customer_posture_enabled():
+            raise ProvisionDenied("the posture view is not enabled")
+        t, verdicts = _t.time(), config.customer_retest_ui_enabled()
+
+        def project(s, o):
+            locked = self._preview_locked(o)
+            can_buy = locked and self.orgs.admit_customer(username=requester, org_id=o, permission="manage_billing")
+            return _cp.customer_posture(s, o, now=t, retest_verdicts=verdicts, locked=locked, can_buy=can_buy)
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
+
+    def customer_posture_trend(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """PR-B — the session org's posture over the last twelve weeks (the Overview's Posture card; the Fix-first
+        screen reads the same series inside ``customer_posture``). Same gate, scope and switch as
+        :meth:`customer_posture`; an aggregate of severity only, so a locked trial org's preview is unaffected."""
+        import time as _t
+        from .. import config
+        from . import customer_posture as _cp
+        if not config.customer_posture_enabled():
+            raise ProvisionDenied("the posture view is not enabled")
+        t, verdicts = _t.time(), config.customer_retest_ui_enabled()
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _cp.posture_trend(s, o, now=t, retest_verdicts=verdicts))
+
     def customer_assets(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
         """Per-host ownership status (verified / pending / expired) for the SESSION org's assets — the read
         behind the customer 'Domains' view (SS-4). Tenant-scoped by ``_customer_read``'s ``admit_customer``
@@ -3902,6 +3942,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.trial_claim import TrialClaimRegistry
     from ..governor.customers import CustomerRegistry
     from ..governor.orgs import OrgRegistry
+    from ..governor.shard_assignment import ShardAssignmentRegistry
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailCodeLedger, EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
@@ -3935,6 +3976,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         customers=CustomerRegistry(store),
         orgs=orgs,
         wallet=WalletRegistry(store),
+        # PR-F: the owner-keyed shard-assignment registry `_place_on_signup` owner-signs a new tenant's placement
+        # through. Constructing it reads nothing; it is consulted only when VIGIL_CUSTOMER_FAIR_QUEUE +
+        # VIGIL_MULTI_SHARD are on and the owner named a topology (VIGIL_SHARD_IDS) — otherwise a sign-up is unchanged.
+        shard_assignments=ShardAssignmentRegistry(store, owner_key=orgs.owner_key,
+                                                  trusted_pubkey=orgs.trusted_pubkey),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
         # the 6-digit email codes, OFF unless VIGIL_CUSTOMER_EMAIL_CODE: 5 wrong codes per email+purpose per hour

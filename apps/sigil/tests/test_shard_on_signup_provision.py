@@ -1,9 +1,13 @@
-"""Consumer PR-F — shard-placement-on-signup wired through the Provisioner (``_place_on_signup``).
+"""Consumer PR-F — shard-placement-on-signup wired through the Provisioner (``_place_on_signup``) and its factory.
 
-Pins the byte-identical-OFF contract and the flag-ON mint:
-  * DEFAULT OFF / no injected registry ⇒ a sign-up mints NO shard assignment (byte-identical to pre-PR-F);
-  * flag ON but ``multi_shard`` OFF, or no owner ``shard_ids`` ⇒ still no placement (every gate must hold);
-  * all gates ON ⇒ the sign-up owner-signs ONE shard placement for the new org, idempotently.
+Pins the byte-identical-OFF contract and the flag-ON mint, counting the REAL spine records (never just a return):
+  * every gate leg alone keeps the spine free of ``governor.shard_assignment`` records — no registry, the PR-F flag
+    off (multi-shard on + topology set + registry injected: the one case where that flag alone decides), multi-shard
+    off, no owner topology;
+  * all gates ON ⇒ the sign-up owner-signs exactly ONE placement for the new org — on the email path, the Google
+    path, and through the production factory ``build_provisioner``;
+  * a crash right after the placement re-drives to exactly one placement (idempotent-forward sign-up);
+  * the owner backfill and a sign-up share one cross-process placement lock.
 A tenant never supplies a shard — placement is server-chosen from owner topology.
 """
 from __future__ import annotations
@@ -15,7 +19,7 @@ import pytest
 
 from sigil.governor.customers import CustomerRegistry
 from sigil.governor.orgs import OrgRegistry
-from sigil.governor.shard_assignment import ShardAssignmentRegistry
+from sigil.governor.shard_assignment import SIGNAL as SHARD_SIGNAL, ShardAssignmentRegistry
 from sigil.governor.wallet import WalletRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
@@ -25,10 +29,11 @@ from sigil.ui.provision import Provisioner
 
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
+_FLAGS = ("VIGIL_CUSTOMER_FAIR_QUEUE", "VIGIL_MULTI_SHARD", "VIGIL_SHARD_IDS")
 
 
-def _prov(*, with_shards: bool):
-    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+def _prov(*, with_shards: bool, store=None):
+    s = store or SpineStore(tempfile.mktemp(suffix=".jsonl"))
     custs = CustomerRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     orgs = OrgRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     wallet = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
@@ -47,47 +52,68 @@ def _signup(p, email="alice@acme.com") -> str:
     return p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)["org_id"]
 
 
-def _all_on(monkeypatch):
-    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
-    monkeypatch.setenv("VIGIL_MULTI_SHARD", "1")
-    monkeypatch.setenv("VIGIL_SHARD_IDS", "shard01,shard02")
+def _shard_records(s) -> list:
+    """Every shard-assignment record on the spine, whatever its signature — the ground truth a gate must keep empty."""
+    return [r for r in s.iter_records() if isinstance(r.payload, dict) and r.payload.get("signal") == SHARD_SIGNAL]
 
+
+def _set(monkeypatch, *, fair: bool, multi: bool, ids: str):
+    for name, on in (("VIGIL_CUSTOMER_FAIR_QUEUE", fair), ("VIGIL_MULTI_SHARD", multi)):
+        if on:
+            monkeypatch.setenv(name, "1")
+        else:
+            monkeypatch.delenv(name, raising=False)
+    if ids:
+        monkeypatch.setenv("VIGIL_SHARD_IDS", ids)
+    else:
+        monkeypatch.delenv("VIGIL_SHARD_IDS", raising=False)
+
+
+def _all_on(monkeypatch):
+    _set(monkeypatch, fair=True, multi=True, ids="shard01,shard02")
+
+
+# -- every gate leg alone keeps the spine free of placements ------------------------------------------------------
 
 def test_signup_default_off_mints_no_placement(monkeypatch):
-    # No flags, registry injected: byte-identical pre-PR-F — the sign-up itself still works, no shard record.
-    monkeypatch.delenv("VIGIL_CUSTOMER_FAIR_QUEUE", raising=False)
-    monkeypatch.delenv("VIGIL_MULTI_SHARD", raising=False)
-    monkeypatch.delenv("VIGIL_SHARD_IDS", raising=False)
+    _set(monkeypatch, fair=False, multi=False, ids="")
     p, s, shards = _prov(with_shards=True)
     org_id = _signup(p)
-    assert org_id.startswith("org_")
-    assert shards.placement(org_id) is None
+    assert org_id.startswith("org_")                       # the sign-up itself still works
+    assert shards.placement(org_id) is None and _shard_records(s) == []
 
 
-def test_signup_without_injected_registry_is_a_noop(monkeypatch):
-    # Even all-on, a provisioner built WITHOUT a registry (every pre-PR-F construction) places nothing.
+def test_signup_without_a_registry_is_a_noop(monkeypatch):
+    # all gates ON, but no registry: nothing may be placed — not even through a registry built on the fly.
     _all_on(monkeypatch)
-    p, s, shards = _prov(with_shards=False)
+    p, s, _ = _prov(with_shards=False)
     org_id = _signup(p)
-    # the account/org/membership/trial all minted; the shard registry simply was not consulted.
     assert org_id.startswith("org_")
+    assert _shard_records(s) == [], "a placement was minted although no registry was injected"
+
+
+def test_signup_prf_flag_off_multishard_on_topology_set_mints_no_placement(monkeypatch):
+    # the ONE case where PR-F's own flag decides: multi-shard on, a topology named, the registry injected.
+    _set(monkeypatch, fair=False, multi=True, ids="shard01,shard02")
+    p, s, shards = _prov(with_shards=True)
+    org_id = _signup(p)
+    assert shards.placement(org_id) is None
+    assert _shard_records(s) == [], "VIGIL_CUSTOMER_FAIR_QUEUE off must keep sign-up placement off"
 
 
 def test_signup_flag_on_but_multi_shard_off_mints_no_placement(monkeypatch):
-    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
-    monkeypatch.delenv("VIGIL_MULTI_SHARD", raising=False)
-    monkeypatch.setenv("VIGIL_SHARD_IDS", "shard01")
+    _set(monkeypatch, fair=True, multi=False, ids="shard01")
     p, s, shards = _prov(with_shards=True)
-    assert shards.placement(_signup(p)) is None
+    assert shards.placement(_signup(p)) is None and _shard_records(s) == []
 
 
 def test_signup_all_on_but_no_topology_mints_no_placement(monkeypatch):
-    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
-    monkeypatch.setenv("VIGIL_MULTI_SHARD", "1")
-    monkeypatch.delenv("VIGIL_SHARD_IDS", raising=False)
+    _set(monkeypatch, fair=True, multi=True, ids="")
     p, s, shards = _prov(with_shards=True)
-    assert shards.placement(_signup(p)) is None           # fail-safe: no owner topology -> no guess
+    assert shards.placement(_signup(p)) is None and _shard_records(s) == []   # fail-safe: no topology, no guess
 
+
+# -- all gates ON ⇒ exactly one owner-signed placement ---------------------------------------------------------------
 
 def test_signup_all_on_owner_signs_one_placement(monkeypatch):
     _all_on(monkeypatch)
@@ -97,8 +123,7 @@ def test_signup_all_on_owner_signs_one_placement(monkeypatch):
     assert placement is not None
     assert placement.shard_id in ("shard01", "shard02")   # an OWNER-named shard, never tenant-chosen
     assert placement.epoch == 1
-    # exactly one active placement for this org (idempotent transaction, not a double-mint).
-    assert len([x for x in shards.placements() if x.tenant_id == org_id]) == 1
+    assert len(_shard_records(s)) == 1
 
 
 def test_two_signups_balance_across_shards(monkeypatch):
@@ -106,15 +131,93 @@ def test_two_signups_balance_across_shards(monkeypatch):
     p, s, shards = _prov(with_shards=True)
     a = _signup(p, "a@x.com")
     b = _signup(p, "b@x.com")
-    placed = {shards.placement(a).shard_id, shards.placement(b).shard_id}
-    assert placed == {"shard01", "shard02"}               # least-loaded spreads the two across both shards
+    assert {shards.placement(a).shard_id, shards.placement(b).shard_id} == {"shard01", "shard02"}
 
 
-def test_repeated_confirm_is_idempotent_single_placement(monkeypatch):
-    # confirm_signup is single-use, but the placement itself must be idempotent under the commit-marker retry
-    # semantics. Assert exactly one placement after a successful sign-up (no second epoch, no duplicate).
+def test_a_crash_right_after_the_placement_re_drives_to_exactly_one(monkeypatch):
+    from test_trial_signup import _crash_after
     _all_on(monkeypatch)
     p, s, shards = _prov(with_shards=True)
-    org_id = _signup(p)
+    _crash_after(monkeypatch, p, "_place_on_signup")       # the placement is appended, then the process "dies"
+    tok = p.request_signup("crash@acme.com", ip="1.1.1.1", now=100.0)["dev_token"]
+    with pytest.raises(RuntimeError):
+        p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)
+    assert len(_shard_records(s)) == 1                     # placed before the crash ...
+    org_id = p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)["org_id"]   # ... retried
+    assert len(_shard_records(s)) == 1, "the retry placed the tenant a second time"
     assert shards.placement(org_id).epoch == 1
-    assert len([x for x in shards.placements() if x.tenant_id == org_id]) == 1
+
+
+def test_the_google_signup_path_places_too(monkeypatch):
+    from sigil.governor.customer_credentials import CustomerCredentialRegistry
+    from sigil.ui.customer_identity import CustomerIdentity
+    _all_on(monkeypatch)
+    p, s, shards = _prov(with_shards=True)
+    p.customer_credentials = CustomerCredentialRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    ident = CustomerIdentity(method="google-oidc", email="g@gmail.com", email_verified=True,
+                             federated_iss="https://accounts.google.com", federated_sub="sub-g")
+    with p._lock:
+        p._link_or_provision_federated(ident, now=100.0)
+    assert len(_shard_records(s)) == 1
+    assert shards.placements()[0].shard_id in ("shard01", "shard02")
+
+
+def test_signup_holds_the_cross_process_placement_lock(monkeypatch):
+    # a placement taken while another process holds the placement lock fails CLOSED (nothing appended; the token
+    # stays valid) instead of racing that process — then succeeds once the lock is free.
+    from sigil.governor.shard_on_signup import placement_lock
+    from vigil_integration.live.seam_lock import LockBusy
+    import sigil.governor.shard_on_signup as sos
+    _all_on(monkeypatch)
+    p, s, shards = _prov(with_shards=True)
+    monkeypatch.setattr(sos, "_PLACEMENT_LOCK_WAIT_S", 0.05)
+    tok = p.request_signup("lock@acme.com", ip="1.1.1.1", now=100.0)["dev_token"]
+    import subprocess
+    import sys
+    held = subprocess.Popen([sys.executable, "-c", (
+        "import fcntl, os, sys, time\n"
+        f"fd = os.open({str(s.path.parent / (s.path.stem + '.shards.lock'))!r}, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\nprint('held', flush=True)\ntime.sleep(30)\n")],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert held.stdout.readline().strip() == "held"
+        with pytest.raises(LockBusy):
+            p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)
+        assert _shard_records(s) == []
+    finally:
+        held.kill()
+        held.wait()
+    org_id = p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)["org_id"]
+    assert shards.placement(org_id) is not None and len(_shard_records(s)) == 1
+    with placement_lock(s, wait_s=0.0):                    # released: the lock is free again after the sign-up
+        pass
+
+
+# -- the production factory ---------------------------------------------------------------------------------------------
+
+def _factory(tmp_path, monkeypatch):
+    from sigil import config
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.provision import build_provisioner
+    for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
+        monkeypatch.setattr(config, attr, tmp_path / attr.lower())
+    ensure_owner_keypair()
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    return build_provisioner(s, expose_dev_tokens=True), s
+
+
+def test_the_production_factory_places_a_signup_when_all_gates_are_on(tmp_path, monkeypatch):
+    _all_on(monkeypatch)
+    p, s = _factory(tmp_path, monkeypatch)
+    assert isinstance(p.shard_assignments, ShardAssignmentRegistry)
+    org_id = _signup(p, "factory@acme.com")
+    placement = ShardAssignmentRegistry(s, owner_key=None).placement(org_id)   # verified under the owner pubkey
+    assert placement is not None and placement.shard_id in ("shard01", "shard02") and placement.epoch == 1
+    assert len(_shard_records(s)) == 1
+
+
+def test_the_production_factory_places_nothing_with_the_flag_off(tmp_path, monkeypatch):
+    _set(monkeypatch, fair=False, multi=True, ids="shard01,shard02")
+    p, s = _factory(tmp_path, monkeypatch)
+    _signup(p, "factory-off@acme.com")
+    assert _shard_records(s) == []

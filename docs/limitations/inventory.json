@@ -576,6 +576,22 @@
       "w16_issue": null
     },
     {
+      "id": "LIMIT-consumer-shard-on-signup-ops",
+      "title": "Shard-placement-on-sign-up pins hard-prune: the spine snapshot seed does not yet carry shard-assignment rows",
+      "summary": "With VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD on and an owner shard topology (VIGIL_SHARD_IDS), every sign-up owner-signs a ShardPlacement (apps/sigil/sigil/governor/shard_on_signup.assign_on_signup, under the cross-process placement_lock), and 'sigil shard backfill' places tenants created before the switch was on -- all built and tested (test_shard_on_signup, test_shard_on_signup_provision). The operational limit of turning placement on: carrying shard-assignment rows into the spine snapshot seed is not yet built, so a hard prune (spine.prune) FAILS CLOSED past any active placement until the owner re-signs it above the prune point. It is fail-safe (a placement is never silently dropped by a prune), not a data-loss path; the only consequence is that, with a placement per sign-up, the oldest active placement bounds how far hard-prune advances until the seed carries shard rows. Default-OFF: with the flag off no placement is minted and prune is unaffected (byte-identical).",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+        "symbol": "assign_on_signup"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
       "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
       "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
       "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
@@ -826,6 +842,27 @@
       "snippet": "Not wired by the factory yet",
       "kind": "non-debt",
       "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
+    },
+    {
+      "file": "apps/sigil/sigil/config.py",
+      "snippet": "deploy-gated and outside",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "customer_fair_queue_enabled + shard_ids docstrings: standing up the elastic we-host shard fleet the shard ids name is owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "deploy-gated and outside this module",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "module docstring: standing up / scaling the cross-HOST we-host fleet, and the cross-host dispatch/copy, are owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "not yet built",
+      "kind": "debt",
+      "limit_id": "LIMIT-consumer-shard-on-signup-ops",
+      "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
     }
   ]
 }
