@@ -709,22 +709,27 @@ def multi_shard_enabled() -> bool:
 
 
 def customer_fair_queue_enabled() -> bool:
-    """True iff the customer FAIR cross-tenant launch QUEUE + shard-placement-on-signup are on
-    (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative; consumer PR-F). OFF by default (mirrors `redpen_enabled` /
-    `customer_monitoring_enabled`): with it off a sign-up mints NO shard assignment (the historical
-    single-placement deployment), the launch surface shows NO cross-tenant queue position, and every surface is
-    byte-identical to a build without PR-F.
+    """True iff consumer PR-F is on (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative). OFF by default (mirrors
+    `redpen_enabled` / `customer_monitoring_enabled`): the job queue claims in arrival order, the launches read shows
+    no queue position, a sign-up mints no shard assignment — every surface byte-identical to a build without PR-F.
+    Read at call time. The consumer plan named this flag VIGIL_FAIR_QUEUE; it ships under the VIGIL_CUSTOMER_* name
+    every consumer-wave flag uses.
 
-    When ON (together with `multi_shard_enabled()` AND an owner-set `shard_ids()` topology) a sign-up is placed on
-    a shard by the OWNER-signed provisioner — a tenant NEVER self-assigns (the shard is server-chosen from owner
-    topology + current load, exactly like a launch AMOUNT is server-decided), and the launch surface may show an
-    honest cross-tenant "queued" position so load surfaces as a truthful wait, never a silent drop.
+    ON, three things change, each wired on its production path:
+      * FAIR CLAIM — the engine job queue (`framework.v2.engagement_scheduler.EngagementScheduler.claim_next`, which
+        reads this same env var offense-side) claims the oldest job of the tenant with the fewest jobs running, then
+        the least recent service (`vigil_core.fair_share`), so one tenant's backlog never starves another's launch.
+      * QUEUED — the customer launches read (`ui.customer_launches`) marks a started launch still waiting in that
+        queue with how many jobs are claimed before it (a count; never whose).
+      * SHARD ON SIGN-UP — with `multi_shard_enabled()` AND an owner `shard_ids()` topology also set, every sign-up
+        path owner-signs the new org's shard placement (`Provisioner._place_on_signup`; a tenant NEVER chooses its
+        shard). Coupled to THIS flag on purpose: `VIGIL_MULTI_SHARD` alone is Front C's ROUTING switch, whose owner
+        places tenants explicitly; an owner who runs that keeps exactly that until they also opt in to automatic
+        placement, which writes an owner-signed record per sign-up (see LIMIT-consumer-shard-on-signup-ops).
 
-    Fairness is a cross-TENANT ORDERING only: it NEVER parallelizes one target (per-target scan stays SERIAL — the
-    engine's slug lease / serial-proof-per-host governor is untouched) and it mints NO FACT (only the oracle mints
-    facts; a queue position is a UI notice, never a finding). The elastic we-host k8s/Firecracker fleet these
-    shards map to is OWNER-GATED infra, out of this code's scope — this flag gates only the in-repo placement +
-    ordering. Read at call time."""
+    Fairness orders work and nothing else: one target is never parallelized (a job whose slug is running waits; the
+    slug lease + run gate are untouched), and a queue position mints NO FACT. The elastic we-host fleet the shard ids
+    name is owner deploy work, deploy-gated and outside this flag (LIMIT-frontc-shard-cross-host-deploy)."""
     return (os.environ.get("VIGIL_CUSTOMER_FAIR_QUEUE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
@@ -740,8 +745,8 @@ def shard_ids() -> "tuple[str, ...]":
     topology the provisioner places NOTHING on sign-up (fail-safe — a tenant is never guessed onto a shard, and
     routing then fails closed for it), so even with the flags on, shard-on-signup stays inert until the owner
     names the shards. A malformed entry (not a safe single path component) is DROPPED, so a bad owner value can
-    never traverse a path. The owner stands up the matching cross-HOST fleet separately — that elastic we-host
-    k8s/Firecracker infra is OWNER-GATED and out of this code's scope. Read at call time."""
+    never traverse a path. Standing up the matching cross-HOST fleet is owner deploy work, deploy-gated and outside
+    this reader (LIMIT-frontc-shard-cross-host-deploy). Read at call time."""
     raw = (os.environ.get("VIGIL_SHARD_IDS") or "").strip()
     if not raw:
         return ()
