@@ -39,6 +39,11 @@ _PROOF_START = '  var PROOF_ON = pageFlag("proofBadge");'
 _PROOF_END = "  // ---- end of proof badge (PR-I)"
 _RETEST_START = '  var RETEST_ON = pageFlag("retest");'
 _RETEST_END = "  // ---- end of retest (C1b)"
+# PR-L (Area 11) merged in: the shared findingsBlock now also calls blindVulnBadge, so the harness slices in the
+# blind-vuln region (its own var BLIND_VULN_ON = pageFlag("blindVuln") + helpers) exactly as it does retest/proof.
+# With the flag off (the harness carries no data-blind-vuln) blindVulnBadge returns null, so the proof card is unchanged.
+_BLIND_START = '  var BLIND_VULN_ON = pageFlag("blindVuln");'
+_BLIND_END = "  // ---- Attack-path storytelling (PR-L, Area 11)"
 
 
 # ------------------------------------------------------------------------------------- the SPA under node ----
@@ -77,6 +82,7 @@ _PRELUDE = r"""
 document.body.dataset.proofBadge = %(flag)s;
 var API = "api/customer";                 // app.js's own constant, above the extracted code
 var GUIDE_ON = false, RETEST_ON = false, PROOF_ON = false;
+var BLIND_VULN_ON = false, ATTACK_PATH_ON = false;   // PR-L flags, stubbed off; the sliced blind block resets its own
 function pageFlag(name) { var ds = (document.body && document.body.dataset) || {}; return ds[name] === "1"; }
 function nav() {} async function refreshWho() {}
 const VUI = window.VUI;
@@ -90,7 +96,9 @@ def _run(script: str, *, flag="1") -> dict:
     src = APP_JS.read_text(encoding="utf-8")
     prog = (_DOM + f"\nrequire({json.dumps(str(UI_JS))});\nconst out = {{}};\n" + _PRELUDE % {"flag": json.dumps(flag)}
             + _fn(src, "kv") + "\n" + _fn(src, "findingsBlock") + "\n" + _slice(src, _RETEST_START, _RETEST_END)
-            + _slice(src, _PROOF_START, _PROOF_END) + _SER
+            + _slice(src, _PROOF_START, _PROOF_END)
+            + _slice(src, _BLIND_START, _BLIND_END)        # PR-L: findingsBlock also calls blindVulnBadge
+            + _SER
             + "\n(async () => {\n" + script
             + "\n})().then(() => process.stdout.write(JSON.stringify(out)),"
               " e => { console.error(e && e.stack || e); process.exit(3); });")

@@ -2119,6 +2119,11 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     from . import billing_alerts
     if billing_alerts.start_background(srv.store) is not None:
         print("  (low-balance alerts: emailing billing admins once per crossing)")
+    # PR-J2: with VIGIL_CUSTOMER_ASSISTANT_WALLET (and metered billing), settle in the background any assistant turn a
+    # crash left holding credit — exactly, once its grant can no longer be used. A no-op when off.
+    from . import assistant_wallet
+    if assistant_wallet.start_background(srv.store) is not None:
+        print("  (assistant turns: a turn a crash left holding credit is settled in the background)")
     # PRICING M1c: with VIGIL_MODEL_GATEWAY_ENABLED, the sovereign model gateway every metered customer run's
     # model requests go through (loopback; holds the provider key; meters per launch). A no-op when disabled.
     from .. import model_gateway

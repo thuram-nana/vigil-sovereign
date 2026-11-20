@@ -661,9 +661,12 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
     # ONE pass over the spine: the reservations and, with the settle record on, every settled launch's settlement
     # evidence (its recorded decision and the entries that landed), so no launch is ever re-scanned on its own here
     ix = scan_reservations(gate.store, kp.public_key_b64, evidence=record)
+    turns_on = config.customer_assistant_wallet_enabled()
     rows: list[dict] = []
     for res in sorted(ix.reservations.values(), key=lambda r: r.seq):
         oid, slug, nonce = res.key
+        if turns_on and _is_assistant_turn(oid, slug):
+            continue                                       # PR-J2: not a launch — sweep_assistant_turns owns it
         row = {"slug": slug, "org_id": oid, "nonce": nonce, "units_reserved": res.reserved,
                "reserved_at": res.issued_at}
         if res.key in ix.settled or is_lease_settled(base, slug, nonce):
@@ -724,6 +727,58 @@ def sweep_superseded_reservations(gate: Any, *, now: float, ttl_s: float, apply:
             rows.append({**row, "status": "already_settled"})
         else:
             rows.append({**row, "status": "released", "refunded": int(r.get("refunded", 0))})
+    return {"applied": bool(apply), "items": rows}
+
+
+def _is_assistant_turn(org_id: str, slug: str) -> bool:
+    """PR-J2 — whether reservation ``(org_id, slug)`` is a customer security-assistant TURN of ``org_id`` (its own
+    ``asst_`` slug), not a launch."""
+    from .ui.assistant_wallet import assistant_slug, is_assistant_slug
+    return is_assistant_slug(slug) and slug == assistant_slug(org_id)
+
+
+def sweep_assistant_turns(gate: Any, *, now: float, apply: bool = False) -> dict:
+    """PR-J2 — report (and with ``apply`` settle) every customer security-assistant TURN that needs a settle nobody
+    else will give it (``ui.assistant_wallet.AssistantTurns.stale``): one held past its grant's life plus a grace with
+    no settle (``assistant_unsettled`` — a crash between its hold and its settle), or one whose recorded settle
+    decision has money that has not landed (``settle_interrupted``, with its pending amounts). Under ``apply`` each is
+    settled through the turn's own EXACT settle (its closed meter's confirmed charge kept, the rest returned; an
+    interrupted one finished from its RECORDED decision, never re-decided) — ``assistant_settled`` /
+    ``settle_completed`` with what moved, ``deferred`` while it must wait (a request still in flight, a busy lock),
+    ``settle_failed`` otherwise. A turn still within its grant's life is never listed (its own settle owns it).
+    Behind ``VIGIL_CUSTOMER_ASSISTANT_WALLET``: off, nothing is listed (the reservation sweep is byte-identical)."""
+    from . import config
+    if not config.customer_assistant_wallet_enabled():
+        return {"applied": bool(apply), "items": []}
+    if gate.owner_key is None:
+        raise ValueError("no owner key — the sweep cannot verify reservations (fail-closed)")
+    from .ui.assistant_wallet import AssistantTurns
+    turns = AssistantTurns(gate)
+    rows: list[dict] = []
+    for t in turns.stale(now=now):
+        row = {"slug": t["slug"], "org_id": t["org_id"], "nonce": t["nonce"], "units_reserved": t["units_reserved"],
+               "reserved_at": t["reserved_at"]}
+        interrupted = t["why"] == "settle_interrupted"
+        if not apply:
+            pending = {k: t[k] for k in ("pending_plan", "pending_wallet", "pending_postpaid", "consumed", "basis")
+                       if k in t}
+            rows.append({**row, "status": "settle_interrupted" if interrupted else "assistant_unsettled", **pending})
+            continue
+        try:
+            r = turns.settle(org_id=t["org_id"], nonce=t["nonce"], now=now)
+        except Exception as e:  # noqa: BLE001 — one turn's failure never stops the sweep; it is listed again next time
+            r = {"ok": False, "error": f"settle failed: {type(e).__name__}"}
+        if r.get("ok") and r.get("action") == "launch_settled":
+            rows.append({**row, "status": "assistant_settled", "consumed_mc": int(r.get("consumed_mc", 0)),
+                         "refunded": int(r.get("refunded", 0))})
+        elif r.get("ok") and r.get("rolled_forward"):
+            rows.append({**row, "status": "settle_completed", **_moved(r)})
+        elif r.get("ok"):
+            rows.append({**row, "status": "already_settled"})
+        elif r.get("retry"):
+            rows.append({**row, "status": "deferred", "error": r.get("error", "")})
+        else:
+            rows.append({**row, "status": "settle_failed", "error": r.get("error", "")})
     return {"applied": bool(apply), "items": rows}
 
 

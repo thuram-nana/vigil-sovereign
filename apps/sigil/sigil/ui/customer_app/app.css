@@ -380,3 +380,50 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .cust-proof-anchors { margin: 0; padding-left: 1.2em; }
 .cust-proof-cmd { margin: 0; padding: 10px 12px; border-radius: var(--r-2, 10px); background: var(--bg-2, #111);
   overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 0.85rem; }
+
+/* ---- PR-L (Area 11): blind-vuln (out-of-band) confirmation + attack-path storytelling --------------------------
+   Rendered ONLY when the edge has the matching flag on (VIGIL_CUSTOMER_BLIND_VULN / VIGIL_CUSTOMER_ATTACK_PATH);
+   with the flag off these classes are never emitted, so the card/screen is byte-identical to before. */
+
+/* a quiet, text-style action (opens the "how we proved it" panel / inline toggles) */
+.cust-link-btn { background: none; border: 0; cursor: pointer; color: var(--st-running, #5b9bd5);
+  font: inherit; font-size: 0.85rem; padding: 2px 4px; text-decoration: underline; text-underline-offset: 2px; }
+.cust-link-btn:hover { color: var(--text-0); }
+
+/* the blind-vuln badge + its "how we proved it" detail panel */
+.cust-oob { display: grid; gap: 8px; margin: 2px 0 10px; padding: 12px 14px; border-radius: var(--r-2, 12px);
+  background: color-mix(in srgb, var(--ok, #6cd08a) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok, #6cd08a) 45%, var(--border, #2a2a2a)); }
+.cust-oob-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; }
+.cust-badge-oob { color: var(--ok, #6cd08a); border-color: var(--ok, #6cd08a);
+  background: color-mix(in srgb, var(--ok, #6cd08a) 14%, transparent); }
+.cust-oob-sub { opacity: 0.8; font-size: 0.82rem; }
+.cust-oob-detail { display: grid; gap: 2px; padding: 8px 10px; border-radius: var(--r-1, 8px);
+  background: var(--bg-2); border: 1px solid var(--border, #2a2a2a); }
+.cust-oob-detail[hidden] { display: none; }
+.cust-oob-detail .cust-kv .k { font-variant-numeric: tabular-nums; }
+
+/* the attack-path chain card: SVG ribbon + accessible interactive step list */
+.cust-chain-impact { display: inline-block; margin: 6px 0; padding: 3px 10px; border-radius: var(--r-pill, 999px);
+  font-size: 0.78rem; font-weight: 600; color: var(--sev-high, #e8894c);
+  border: 1px solid color-mix(in srgb, var(--sev-high, #e8894c) 55%, var(--border, #2a2a2a));
+  background: color-mix(in srgb, var(--sev-high, #e8894c) 10%, transparent); }
+.cust-chain-wrap { margin: 10px 0; display: flex; justify-content: center; }
+.cust-chain-svg { color: var(--st-running, #5b9bd5); max-width: 320px; }
+.cust-chain-box { fill: var(--bg-2); stroke: var(--border-strong, #384050); stroke-width: 1; }
+.cust-chain-box.start { fill: var(--bg-3); }
+.cust-chain-box.impact { fill: color-mix(in srgb, var(--sev-high, #e8894c) 16%, var(--bg-2));
+  stroke: var(--sev-high, #e8894c); }
+.cust-chain-lbl { fill: var(--text-0); font-size: 12px; font-family: inherit; font-weight: 600; }
+.cust-chain-edge { color: var(--st-running, #5b9bd5); }
+.cust-chain-edgelbl { fill: var(--text-0); opacity: 0.7; font-size: 10.5px; font-family: inherit; }
+.cust-chain-steps { display: grid; gap: 6px; margin-top: 8px; }
+.cust-chain-step { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left;
+  background: var(--bg-2); border: 1px solid var(--border, #2a2a2a); border-radius: var(--r-1, 8px);
+  padding: 8px 10px; cursor: pointer; color: var(--text-0); font: inherit; }
+.cust-chain-step:hover { border-color: var(--st-running, #5b9bd5); }
+.cust-chain-step-n { flex: 0 0 auto; width: 22px; height: 22px; display: grid; place-items: center;
+  border-radius: 999px; font-size: 0.74rem; font-weight: 700; color: var(--primary-fg, #0a0c10);
+  background: var(--st-running, #5b9bd5); }
+.cust-chain-step-main { display: grid; gap: 2px; font-size: 0.86rem; }
+.cust-chain-step-main .cust-muted { font-size: 0.76rem; }

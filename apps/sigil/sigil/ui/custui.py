@@ -94,9 +94,23 @@ _SLOW_HOP_TIMEOUTS_S = {
 }
 
 
+#: PR-J2 — an assistant turn ACCOUNTED to the org (``VIGIL_CUSTOMER_ASSISTANT_WALLET``) is billed for its model
+#: request once the gateway answered it, so the edge outwaits the cockpit's whole turn: its admission, the gateway dial
+#: (``assistant_wallet.TURN_DIAL_TIMEOUT_S``) and its settle. A slow answer is then delivered — never billed while the
+#: customer is told it failed. Never above the slowest hop in the table (the drain deadline stays as pinned).
+_ASSISTANT_ACCOUNTED_HOP_S = 60.0
+
+
 def _hop_timeout(action: str) -> float:
     """The edge→cockpit wait for ``action`` (read at call time so the table is the one source of truth)."""
+    if action == "assistant_ask" and _assistant_accounted():
+        return _ASSISTANT_ACCOUNTED_HOP_S
     return _SLOW_HOP_TIMEOUTS_S.get(action, _HOP_TIMEOUT_S)
+
+
+def _assistant_accounted() -> bool:
+    from .. import config as _config
+    return _config.customer_assistant_wallet_enabled()
 
 
 # The installed-app Google hand-off: failed redemptions (wrong code, unknown or expired record) per client IP.
@@ -209,6 +223,12 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # PR-I: whether each finding card may show the "Independently verifiable" proof badge (the same
     # VIGIL_CUSTOMER_PROOF_BADGE that serves its download route); a non-secret on/off value counting in the build id.
     proof_badge = _config.customer_proof_badge_enabled()
+    # APEX PR-L (Area 11): whether the customer Attack-path storytelling screen and the blind-vuln (out-of-band)
+    # confirmation badge are on. Each is a non-secret on/off value written into the page (counting in the build
+    # id); with each off its SPA surface is absent and the sovereign findings projection never surfaces the inert
+    # attack_path / oob_attestation field (byte-identical). Same flags that gate the projection in config.py.
+    attack_path = _config.customer_attack_path_enabled()
+    blind_vuln = _config.customer_blind_vuln_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -228,7 +248,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_PRESENTATION__": "1" if presentation else "0",
-                                     "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0"})
+                                     "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
+                                     "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
+                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign

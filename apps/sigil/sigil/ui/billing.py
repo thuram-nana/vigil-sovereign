@@ -185,6 +185,35 @@ def _balance_after_mc(grants, plan_grants, plan_tranches, charge_events, now: fl
     return bal
 
 
+def _count_turn(acc: "Optional[dict[str, Any]]", turn: "dict[str, Any]") -> None:
+    """PR-J2 — add ONE assistant turn (shaped like a statement scan) to the statement's assistant totals ``acc``."""
+    if acc is None:
+        return
+    acc["turns"] += 1
+    if turn.get("status") == "ok":
+        acc["requests"] += int(turn.get("requests", 0))
+        acc["amount_mc"] += int(turn.get("amount_mc", 0))
+    else:
+        acc["unavailable"] += 1                          # its meter failed its integrity check: never priced
+    if turn.get("running"):
+        acc["running"] += 1
+        acc["held_mc"] += int(turn.get("held_mc", 0))
+
+
+def _turn_summary(acc: "dict[str, Any]", metered: bool) -> "dict[str, Any]":
+    """PR-J2 — the statement's ``assistant`` block: the org's assistant turns, the model requests they made and what
+    they were charged, in credits (never a model name, never an estimate); while metered, also the turns still
+    running and the credit they hold."""
+    from vigil_core.rate_card import format_credits
+    out: "dict[str, Any]" = {"turns": acc["turns"], "requests": acc["requests"],
+                             "credits": format_credits(acc["amount_mc"]), "amount_mc": acc["amount_mc"]}
+    if acc["unavailable"]:
+        out["unavailable"] = acc["unavailable"]
+    if metered:
+        out.update(running=acc["running"], held_mc=acc["held_mc"])
+    return out
+
+
 def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_dir, limit: int = 500,
                   now: Optional[float] = None) -> dict[str, Any]:
     """The per-charge usage statement of ONE org, newest first: each metered AI request of each of the org's scans,
@@ -212,7 +241,15 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
     totals join them: ``bought_mc`` (the org's ``topup`` purchases) and ``trial_mc`` (its ``trial`` grant), from the
     SAME verified grant scan the balance-after timeline uses (``WalletRegistry.purchase_grants``) and over the same
     live window — a ``refund`` return of a scan's unused reservation is never counted as bought. Nothing else changes.
-    The billing dashboard (W6 UI) renders the live consumption and these totals."""
+    The billing dashboard (W6 UI) renders the live consumption and these totals.
+
+    PR-J2 (behind ``VIGIL_CUSTOMER_ASSISTANT_WALLET``; the flag OFF ⇒ byte-identical): a customer security-assistant
+    TURN billed to the org's credits (``ui.assistant_wallet`` — an ``asst_`` reservation of the org's own) is not a
+    scan: each of its charges is listed under the operation "Security assistant" (``source: "assistant"``) — in the
+    charges, the balance-after timeline and the totals exactly like any other charge, so I4 holds unchanged — and the
+    turns are summed in a top-level ``assistant`` block (``turns``, ``requests``, ``credits`` / ``amount_mc``, and while
+    metered the ``running`` turns and the ``held_mc`` they hold, which is also in the aggregate ``held_mc``) instead
+    of the ``scans`` list."""
     from vigil_core.model_grant import meter_id
     from vigil_core.rate_card import MC_PER_CREDIT, format_credits, rate_card
 
@@ -226,6 +263,13 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
     meter = GrantMeter(meter_dir)
     ix = scan_reservations(store, trusted_pubkey, org_id=org_id)
     metered = config.metered_billing_enabled()
+    turn_slug: Optional[str] = None
+    turn_operation = ""
+    assistant: "Optional[dict[str, Any]]" = None
+    if config.customer_assistant_wallet_enabled():      # PR-J2: the org's OWN assistant slug, re-derived here
+        from .assistant_wallet import STATEMENT_OPERATION, assistant_slug
+        turn_slug, turn_operation = assistant_slug(org_id), STATEMENT_OPERATION
+        assistant = {"turns": 0, "requests": 0, "amount_mc": 0, "unavailable": 0, "running": 0, "held_mc": 0}
     scans: list[dict[str, Any]] = []
     charges: list[dict[str, Any]] = []
     charge_events: list[tuple] = []                      # (ts, (seq, idx), amount_mc, charge) for the timeline
@@ -234,6 +278,7 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
     for r in sorted(ix.reservations.values(), key=lambda r: r.seq, reverse=True):
         if r.org_id != org_id:
             continue
+        turn = turn_slug is not None and r.slug == turn_slug
         scan: dict[str, Any] = {"scan": r.slug, "launch": r.nonce, "started_at": r.issued_at}
         running = metered and r.key not in ix.settled    # a reserved-but-not-yet-settled launch still holds credit
         try:
@@ -250,14 +295,20 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
                 scan_held = MC_PER_CREDIT * r.reserved
                 held_mc += scan_held
                 scan["held_mc"] = scan_held               # W6: this scan's own share of the held credit
-            scans.append(scan)
+            if turn:
+                _count_turn(assistant, scan)              # PR-J2: an assistant turn is summed, never a scan
+            else:
+                scans.append(scan)
             continue
         scan_mc = 0
         for idx, rec in enumerate(records):
             lines, amount, operation = _charge_display(rec, card)
             scan_mc += amount
-            charge = {"ts": rec["ts"], "scan": r.slug, "launch": r.nonce, "operation": operation,
+            charge = {"ts": rec["ts"], "scan": r.slug, "launch": r.nonce,
+                      "operation": turn_operation if turn else operation,
                       "lines": lines, "credits": format_credits(amount), "amount_mc": amount}
+            if turn:
+                charge["source"] = "assistant"            # PR-J2: the statement line of an assistant turn
             charges.append(charge)
             if metered:
                 charge_events.append((rec["ts"], (r.seq, idx), amount, charge))
@@ -274,11 +325,16 @@ def billing_usage(store, org_id: str, *, trusted_pubkey: Optional[str], meter_di
         # ``requests`` stays the count of metered MODEL requests (worker-time and premium charges are lines, not requests)
         scan.update(status="ok", requests=sum(1 for rec in records if rec.get("kind", "ai") == "ai"),
                     credits=format_credits(scan_mc), amount_mc=scan_mc)
-        scans.append(scan)
+        if turn:
+            _count_turn(assistant, scan)                  # PR-J2: an assistant turn is summed, never a scan
+        else:
+            scans.append(scan)
     charges.sort(key=lambda c: c["ts"], reverse=True)
     n = max(1, min(int(limit), 5000))
     out: dict[str, Any] = {"org_id": org_id, "currency": "credits", "scans": scans, "charges": charges[:n],
                            "count": len(charges), "credits": format_credits(total_mc), "amount_mc": total_mc}
+    if assistant is not None:
+        out["assistant"] = _turn_summary(assistant, metered)
     if metered:
         import time as _time
         t = float(now) if now is not None else _time.time()
