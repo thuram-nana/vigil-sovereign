@@ -1828,6 +1828,18 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
                                             str(body.get("question", "")), ip=ip)
+
+        # PR-I — the per-finding PROOF BUNDLE download (the governance-signed certificate + the shipped verifier, a ZIP
+        # re-verifiable offline). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_PROOF_BADGE is on; org from the
+        # edge SESSION, the finding's identity (slug + certificate digest, as the badge gave it) from the body.
+        if action == "proof_export":
+            from .. import config as _config
+            if not _config.customer_proof_badge_enabled():
+                return None
+            return p.customer_proof_export(requester, str(body.get("org_id", "")),
+                                           engagement_slug=str(body.get("engagement_slug") or ""),
+                                           cert_digest=str(body.get("cert_digest") or ""), ip=ip)
+
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":

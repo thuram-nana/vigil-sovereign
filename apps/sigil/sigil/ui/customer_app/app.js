@@ -1302,6 +1302,7 @@
         f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
         retestBadge(f.retest),                         // C1b: the persisted verdict (null, so dropped, when off/none)
         retestControls(f),                             // C1b: the Retest button + its result (null when off)
+        proofBadge(f),                                 // PR-I: "Independently verifiable" (null when off/unverified)
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
@@ -1569,6 +1570,72 @@
     return msg("Retest could not run. Nothing changed.");
   }
   // ---- end of retest (C1b) --------------------------------------------------------------------------------------
+
+  // ---- Assessments: the proof badge + "verify it yourself" (PR-I) -----------------------------------------------
+  // Shown only while the edge writes data-proof-badge="1" (VIGIL_CUSTOMER_PROOF_BADGE). A finding card shows the
+  // "Independently verifiable" badge ONLY when the server's findings read says that finding's OWN signed certificate
+  // verified (f.proof.verifiable === true: two independent verifiers, against VIGIL's owner-delegated governance keys);
+  // anything else — no proof field, false, a malformed digest — shows no badge at all, never a softer one. The badge
+  // opens a panel: what is signed (the two anchors, in plain words), the evidence and certificate digests, a Download
+  // proof bundle link (a ZIP the customer checks OFFLINE with the shipped verifier) and the exact command. The page
+  // asserts nothing itself: every value shown is the server's, and the download is the server's verified bytes. Off:
+  // proofBadge returns null, so the kit drops it and findingsBlock renders exactly the card it always did.
+  var PROOF_ON = pageFlag("proofBadge");
+  function proofHex64(v) { return typeof v === "string" && /^[0-9a-f]{64}$/.test(v); }
+  function proofFingerprint(v) { return typeof v === "string" && /^sha256:[0-9a-f]{64}$/.test(v); }
+  function proofBadge(f) {
+    var p = f && f.proof;
+    if (!PROOF_ON || !p || p.verifiable !== true || !f.engagement_slug || !proofHex64(p.cert_digest)
+        || !proofFingerprint(p.trust_root_fingerprint)) return null;
+    var panel = h("div.cust-proof-panel", { role: "region", "aria-label": "Verify this finding yourself" });
+    panel.hidden = true;
+    var btn = h("button.cust-badge.cust-badge-verified.cust-proof-badge", { type: "button", "aria-expanded": "false",
+      text: "✓ Independently verifiable", onClick: function () {
+        var opening = panel.hidden;
+        if (opening && !panel.firstChild) VUI.mount(panel, proofPanel(f, p));
+        panel.hidden = !opening;
+        btn.setAttribute("aria-expanded", opening ? "true" : "false");
+      } });
+    return h("div.cust-proof", {}, [btn, panel]);
+  }
+  function proofDownloadHref(f, p) {
+    // the finding's identity exactly as the read gave it (never an org or a user: the server takes those from the session)
+    return API + "/assessments/proof?engagement_slug=" + encodeURIComponent(f.engagement_slug)
+      + "&cert_digest=" + encodeURIComponent(p.cert_digest);
+  }
+  function proofPanel(f, p) {
+    var need = Number(p.threshold) > 0 ? Number(p.threshold) : 1;
+    var cmd = "python3 verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint " + p.trust_root_fingerprint;
+    return h("div", {}, [
+      h("h4", { text: "Verify this finding yourself" }),
+      h("p", { text: "Don't take our word for it: this finding carries a cryptographic proof you can check yourself, "
+        + "offline, without a VIGIL account." }),
+      h("p.cust-muted", { text: "What is signed:" }),
+      h("ul.cust-proof-anchors", {}, [
+        h("li", { text: "VIGIL's governance keys signed this exact finding — at least " + need + " key"
+          + (need === 1 ? "" : "s") + " had to agree. Anyone can check this with the proof bundle below." }),
+        h("li", { text: "It is recorded in your account's tamper-evident ledger, chained under a ledger head the owner "
+          + "key signs. VIGIL checks this side on its servers; it is not part of the download." }),
+      ]),
+      f.oracle_context_digest ? kv("Evidence fingerprint", f.oracle_context_digest) : null,
+      kv("Certificate", p.cert_digest),
+      kv("Trust-root fingerprint", p.trust_root_fingerprint),
+      h("p.cust-muted", { text: "Pin the trust-root fingerprint from VIGIL's public verify page (/verify), not from this "
+        + "screen: the fingerprint is what makes the check independent of VIGIL." }),
+      h("div.row", {}, [h("a.btn.cust-proof-download", { href: proofDownloadHref(f, p), download: true,
+        text: "Download proof bundle" })]),
+      h("p.cust-muted", { text: "Unzip it, then run the verifier inside it (it needs only Python 3 and the "
+        + "cryptography package):" }),
+      h("pre.cust-proof-cmd", {}, [h("code", { text: cmd })]),
+      h("p.cust-muted", { text: "A verified result proves the signed certificate is authentic and unchanged since VIGIL "
+        + "signed it. It does not re-run the test against your host." }),
+      // a retest's "fixed" is the retest's own verdict: the bundle proves the finding, never the fix
+      f.retest && f.retest.status === "fixed" ? h("p.cust-muted", { text: "Your retest shows this finding fixed. That "
+        + "is the retest's own result and is not part of this bundle, which proves the finding as VIGIL first proved "
+        + "it." }) : null,
+    ]);
+  }
+  // ---- end of proof badge (PR-I) --------------------------------------------------------------------------------
 
   // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
   // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:

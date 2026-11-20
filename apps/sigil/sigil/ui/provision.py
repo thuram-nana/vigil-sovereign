@@ -3436,6 +3436,22 @@ class Provisioner:
         # no other org's retest (and no sibling sharing a finding_ref) can attach; only provisioner-written count.
         if config.customer_retest_ui_enabled() and isinstance(out, dict) and isinstance(out.get("findings"), list):
             _assess.overlay_retests(self.store, out["findings"], now=t)
+        # PR-I — overlay each shown finding's proof-badge state (``f["proof"]``) ONLY while the proof badge is on AND the
+        # report is not preview-locked (a locked trial org's proofs unlock with the full report, like retest); off, the
+        # findings read is byte-identical. The overlay re-states signed bytes only (it can only ever REMOVE a badge) and
+        # is bounded to the already tenant-scoped page's own slugs. A fault in it never fails the read: the rows are
+        # then served with no badge at all (fail-closed for the badge, never for the findings).
+        if (config.customer_proof_badge_enabled() and isinstance(out, dict) and isinstance(out.get("findings"), list)
+                and not out.get("preview")):
+            from . import proof_export as _proof
+            try:
+                _proof.overlay_proofs(self.store, out["findings"], now=t)
+            except Exception as e:  # noqa: BLE001 — a badge fault must never take the findings read down
+                import logging
+                logging.getLogger(__name__).warning("proof badges unavailable for this read (%s)", type(e).__name__)
+                for f in out["findings"]:
+                    if isinstance(f, dict):
+                        f.pop("proof", None)
         return out
 
     def customer_assessment_posture(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
@@ -3449,6 +3465,40 @@ class Provisioner:
         from . import finding_presentation as _fp
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _fp.assessment_posture(s, o, now=_t.time()))
+
+    def customer_proof_export(self, requester: str, requester_org_id: str, *, engagement_slug: str = "",
+                              cert_digest: str = "", ip: str = "", now: "Optional[float]" = None) -> dict:
+        """PR-I — the downloadable PROOF BUNDLE for ONE of the session org's findings: a deterministic ZIP of the
+        finding's governance-signed certificate + signatures + the trust root (``proof-bundle.json``,
+        ``vigil.pcf-finding-bundle/1``), the shipped standalone verifier and a README of the exact commands — which a
+        customer's auditor re-verifies OFFLINE with no VIGIL involvement. Absent unless VIGIL_CUSTOMER_PROOF_BADGE is
+        on (gated at the dispatch; refused here too if reached). ``requester``/``requester_org_id`` are the hop-bound
+        session principal, NEVER a body field; the finding is named by its identity as the findings read's badge gave
+        it (``engagement_slug`` + ``cert_digest``).
+
+        Order (fail-closed at each step): ``admit_customer(view_assessments)`` on the session org; a trial-preview org
+        whose report is still locked is refused (proofs unlock with the full report, exactly like retest); the finding
+        is resolved ONLY within the org's own current slug set (``proof_export.find_signed_findings`` — another
+        tenant's finding is structurally not found, even by its exact digest); the bundle is handed out only when BOTH
+        independent verifiers accept it against a CURRENT owner-delegated governance root (and, when VIGIL publishes
+        its fingerprints, a published one). A PURE read: it mints nothing, signs nothing, appends nothing, touches no
+        target and makes no model call; the bundle carries PUBLIC keys only."""
+        from .. import config
+        if not config.customer_proof_badge_enabled():
+            raise ProvisionDenied("proof bundles are not enabled")
+        t = self._now() if now is None else float(now)
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not read this org (view_assessments)")
+        if self._preview_locked(requester_org_id):
+            raise ProvisionDenied("proof bundles unlock with the full report: buy credits to download proofs")
+        from . import proof_export as _proof
+        try:
+            return _proof.export_for_org(self.store, requester_org_id, engagement_slug=str(engagement_slug or ""),
+                                         cert_digest=str(cert_digest or ""), now=t)
+        except LookupError:
+            raise ProvisionDenied("no such finding for this workspace") from None
+        except _proof.ProofUnavailable as e:
+            raise ProvisionDenied(str(e)) from None
 
     def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
         """PR-J — answer ONE customer security question for the SESSION org, grounded ONLY in that org's oracle-confirmed

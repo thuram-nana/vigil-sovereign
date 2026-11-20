@@ -149,7 +149,7 @@ sha256:f2f1254d298412b147019166db8f8201b30b635b79c40800964713e0ebbeca21
 
 | Verifier | sha256 |
 |---|---|
-| `docs/proof-carrying-finding/verify_pcf.py` | `6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6` |
+| `docs/proof-carrying-finding/verify_pcf.py` | `cd79863729e9910706c930a23b9b4de4aa73fb588494fd0c24eff46287a5891c` |
 | `docs/proof-carrying-finding/verify_vf.py` | `54b27fccffa79c87c9a3d609c76e5388051f786a42d2bf96085224644a4aba56` |
 | `engine/crucible/framework/v2/evidence/audit_offline_verifier.py` | `32e134c20d60bb34b34ba4bf28dbdd959114d14d2366d5aadd364764681d9de6` |
 
