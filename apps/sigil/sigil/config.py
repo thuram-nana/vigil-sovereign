@@ -337,6 +337,35 @@ def presentation_enabled() -> bool:
     return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_attack_path_enabled() -> bool:
+    """True iff the customer Attack-path storytelling screen is ON (`VIGIL_CUSTOMER_ATTACK_PATH` affirmative). OFF
+    by default (Area 11 UI): with it off the ``#/attack-path`` SPA route is the home screen (exactly as an unknown
+    route), no nav link is shown, the page's ``__VIGIL_ATTACK_PATH__`` switch is "0", and the sovereign findings
+    projection NEVER surfaces the inert ``attack_path`` cert field — so the server is byte-identical to a build
+    without the feature.
+
+    PURE PRESENTATION: ``attack_path`` is additive, purely-descriptive signed DATA that rides the EXISTING
+    tenant-scoped finding projection (``assessments._finding_json``); it restates oracles that already fired for
+    the org's OWN proven findings, is NEVER read for any verdict, and can promote nothing. The screen only draws
+    a chain the signed data already established — it invents no finding and asserts no impact the cert did not.
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ATTACK_PATH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_blind_vuln_enabled() -> bool:
+    """True iff the customer blind-vulnerability (out-of-band) confirmation badge is ON (`VIGIL_CUSTOMER_BLIND_VULN`
+    affirmative). OFF by default (Area 11 UI): with it off the finding card renders byte-identically (no badge),
+    the page's ``__VIGIL_BLIND_VULN__`` switch is "0", and the sovereign findings projection NEVER surfaces the
+    inert ``oob_attestation`` cert field — so the server is byte-identical to a build without the feature.
+
+    PURE PRESENTATION: ``oob_attestation`` is the EXISTING signed, independent out-of-band callback receipt
+    (pinned-collector-key attested) carried on the finding cert as inert DATA. The badge only SURFACES that a
+    proven finding was confirmed out of band (a vuln with no visible response); it re-verifies nothing, promotes
+    nothing, and is shown ONLY when the signed attestation is present — absence is never rendered as "clean".
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_BLIND_VULN") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_assistant_enabled() -> bool:
     """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
     (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
@@ -348,6 +377,52 @@ def customer_assistant_enabled() -> bool:
     key). Read at call time. Even ON, a turn still fails closed unless the model gateway is reachable and an owner key
     is present to mint the turn's grant."""
     return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_assistant_wallet_enabled() -> bool:
+    """True iff every customer security-assistant turn is ACCOUNTED to the asking org (PR-J2,
+    `VIGIL_CUSTOMER_ASSISTANT_WALLET` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the assistant
+    is exactly PR-J's — refused while metered billing is on, otherwise metered against its grant's cap — the model
+    gateway's allowance source never answers for an assistant grant, the customer statement carries no assistant line
+    and the reservation sweep has no assistant leg: byte-identical to a build without it. ON (with
+    `VIGIL_CUSTOMER_ASSISTANT`), in EVERY billing mode a turn is admitted only within the org's rate limit and daily
+    turn budget (`assistant_turns_per_hour` / `assistant_turns_per_day`; over either ⇒ rate limited) and only after an
+    owner-signed audit record of it (who asked, for which org, under which grant — `governor.assistant_turns`) is on the
+    spine. With `VIGIL_METERED_BILLING` on it is also BILLED to the org's own credits: before its one model request the
+    turn HOLDS that request's worst case (an owner-signed reserve keyed by the turn's grant nonce — refused, with nothing
+    held, when the exact balance or the credit line cannot cover it), the gateway admits the request only within that
+    hold, and the turn then settles EXACTLY (its confirmed metered charge kept to the milli-credit, the rest returned)
+    with a "Security assistant" line on the statement (`ui.assistant_wallet`). With metered billing off nothing is
+    drawn (flat billing: VIGIL bears the model cost, bounded per org per day by the turn budget times the grant's cap).
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT_WALLET") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def assistant_turns_per_hour() -> int:
+    """PR-J2 — the most security-assistant turns ONE org may have answered in any rolling hour
+    (`VIGIL_ASSISTANT_TURNS_PER_HOUR`, default 20), counted from the owner-signed turn ledger
+    (`governor.assistant_turns`); a turn past it is refused as rate limited. Consulted only while
+    `customer_assistant_wallet_enabled()`. A junk/out-of-range value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_HOUR") or "").strip()
+    try:
+        n = int(raw) if raw else 20
+    except ValueError:
+        return 20
+    return n if 1 <= n <= 10_000 else 20
+
+
+def assistant_turns_per_day() -> int:
+    """PR-J2 — the daily turn BUDGET of ONE org's security assistant: the most turns it may have answered in any
+    rolling day (`VIGIL_ASSISTANT_TURNS_PER_DAY`, default 100), from the same ledger as `assistant_turns_per_hour`. With
+    each turn's model spend capped by its grant (`assistant_cap_nano_usd`), a flat-billed org can cost VIGIL at most
+    this many times that cap a day. Consulted only while `customer_assistant_wallet_enabled()`. A junk/out-of-range
+    value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_DAY") or "").strip()
+    try:
+        n = int(raw) if raw else 100
+    except ValueError:
+        return 100
+    return n if 1 <= n <= 100_000 else 100
 
 
 def customer_notify_enabled() -> bool:

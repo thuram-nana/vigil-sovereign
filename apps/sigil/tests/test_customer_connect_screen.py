@@ -100,8 +100,9 @@ _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogle
           "viewInvoices", "viewAssets", "viewAssessments", "viewGuideScreen", "viewMonitoring", "viewTeam", "viewCode",
           "viewSecurityScreen", "viewConnect")
 # Every OTHER page flag the extracted code may reference, off. CONNECT_ON is read from the page by app.js's own line.
+# ATTACK_PATH_ON / BLIND_VULN_ON are PR-L's (Area 11) flags: the extracted shell + route table read ATTACK_PATH_ON.
 _OTHER_FLAGS_OFF = ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-                    "LAUNCH_ON = false, CODE_ON = false;")
+                    "LAUNCH_ON = false, CODE_ON = false, ATTACK_PATH_ON = false, BLIND_VULN_ON = false;")
 
 
 def _wiring(flag: str, script: str) -> dict:

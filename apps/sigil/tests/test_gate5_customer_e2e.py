@@ -92,6 +92,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/team": ("Team", ("api/customer/members",)),
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/guide": ("Guide", ()),
 }
 _PREAUTH: dict[str, str] = {"#/login": "Sign in", "#/signup": "Create your account",
@@ -110,6 +111,7 @@ _CONTROLS: dict[str, tuple[str, ...]] = {
     "#/connect": ("Continue", "Prove again", "Connect a website", "Connect GitHub", "Open Code", "Cancel",
                   "Connect again", "Disconnect", "Connect an AWS account"),
     "#/monitoring": ("Turn on Observe", "Turn on Respond", "Switch to Respond", "Turn off"),
+    "#/attack-path": ("View findings",),
     "#/guide": ("Replay the welcome tour",),
 }
 # The pending screens that will add a ROUTE: stage -> (route, its own <h2> or None, its read or None, TODO, why
@@ -130,7 +132,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
-               "code": "1", "connect": "1", "cloudConnect": "1", "googleSignin": "0", "oidcHandoff": "0",
+               "code": "1", "connect": "1", "cloudConnect": "1", "attackPath": "1", "blindVuln": "1", "googleSignin": "0", "oidcHandoff": "0",
                "iosInstall": "0"}
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
@@ -308,6 +310,21 @@ _FAKE_SERVER = {
          "challenge": {"host": "p.example", "dns_name": "_vigil-challenge.p.example", "token": "t"}}]},
     "api/customer/assessments": {"assessments": [{"slug": "cust_a", "host": "a.example", "findings": 2},
                                                  {"slug": "cust_b", "host": "b.example", "findings": 0}]},
+    # the Attack-path screen reads this on arrival (PR-L); a finding carrying the inert attack_path chain so the
+    # SVG narrative + "View findings" control render (and an oob_attestation so the blind-vuln badge has data).
+    "api/customer/assessments/findings": {"count": 1, "findings": [
+        {"engagement_slug": "cust_a", "finding_ref": "F1", "bug_class": "ssrf", "surface": "https://a.example/in",
+         "severity": "critical", "title": "SSRF to cloud metadata", "confidence": "high",
+         "attack_path": {"schema": 1, "destination": "customer records in S3", "impact": "data access",
+                         "steps": [{"src": "unauthenticated request", "edge": "SSRF", "dst": "cloud metadata",
+                                    "technique": "169.254.169.254", "oracle": "ssrf_oob_oracle", "finding_ref": "F1"},
+                                   {"src": "cloud metadata", "edge": "credential theft", "dst": "IAM credentials",
+                                    "oracle": "metadata_read_oracle", "finding_ref": "F1"},
+                                   {"src": "IAM credentials", "edge": "s3:GetObject", "dst": "S3 object read",
+                                    "oracle": "s3_read_oracle", "finding_ref": "F2"}]},
+         "oob_attestation": {"schema": 1, "method": "dns", "collector_key_id": "oob-collector-ed25519-7f3a",
+                             "canary": "a1b2c3d4e5f6", "received_at": 1700000000,
+                             "receipt_digest": "sha256:9c1e4f2a7b8d"}}]},
     "api/customer/launches": {"org_id": "org_acme", "pause_resume": True,
                               "launches": [{"slug": "cust_b", "launch": "n1", "state": "running", "depth": "quick",
                                             "actions": ["pause"], "lease": {}}],
