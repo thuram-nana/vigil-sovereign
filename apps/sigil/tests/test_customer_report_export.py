@@ -158,7 +158,8 @@ def test_the_presentation_flag_flips_between_two_reads_under_the_fold_cache(monk
         assert again is entry                                                        # ... and reused its entry
         built.append((present, entry))
     for present, entry in built:                        # each entry was built under its own read's flag value
-        assert entry.key[-2:] == ("presentation", present) and entry.state.presentation == present
+        identity = dict(entry.key[-len(am._GATED_FIELDS):])        # the (gated field, value) pairs that close its key
+        assert identity["presentation"] is present and entry.state.gates == identity
 
 
 def test_another_tenants_finding_is_never_in_the_report():

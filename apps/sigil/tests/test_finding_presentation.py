@@ -164,15 +164,17 @@ def _cached_org(monkeypatch):
 
 def test_the_cached_index_is_projected_under_the_value_its_read_keyed_it_by(monkeypatch):
     """The flag is read ONCE per fold-cache read and bound into the view the index is folded into
-    (``_AssessmentsView.presentation``), never re-read while folding: a flag that changes mid-fold cannot leave an
-    entry whose rows disagree with the value in its cache identity (every later read under that value reuses them)."""
+    (``_AssessmentsView.gates``), never re-read while folding: a flag that changes mid-fold cannot leave an
+    entry whose rows disagree with the value in its cache identity (every later read under that value reuses them).
+    The flag is patched at ``_GATED_FIELDS``, the one seam every projection reads the gates through."""
     store = _cached_org(monkeypatch)
     looks = iter([True])                                   # ON for the read's own look, OFF for any later one
-    monkeypatch.setattr(_assess, "_presentation_on", lambda: next(looks, False))
+    monkeypatch.setitem(_assess._GATED_FIELDS, "presentation", lambda: next(looks, False))
     out = _assess.assessment_findings(store, "acme", now=NOW)
     assert isinstance(out["findings"][0].get("presentation"), dict)
     (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()
-    assert entry.key[-2:] == ("presentation", True) and entry.state.presentation is True
+    identity = dict(entry.key[-len(_assess._GATED_FIELDS):])        # the (gated field, value) pairs that close its key
+    assert identity["presentation"] is True and entry.state.gates["presentation"] is True
     assert all("presentation" in j for rows in entry.state.findings.values() for _seq, j in rows)
 
 
@@ -191,7 +193,7 @@ def test_a_flag_off_cached_read_drops_the_block_even_from_an_index_built_on(monk
                  _assess.all_findings_for_org(store, "acme", now=NOW)):
         assert rows and all("presentation" not in f for f in rows), rows
     (again,) = _assess._ASSESSMENTS_FOLD._entries.values()
-    assert again is entry and entry.state.presentation is True     # served from the flag-ON index, and refused
+    assert again is entry and entry.state.gates["presentation"] is True     # served from the flag-ON index, and refused
 
 
 # ---- posture read end-to-end + the SIGNED-only honesty ---------------------------------------------

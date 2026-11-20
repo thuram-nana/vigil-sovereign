@@ -129,10 +129,11 @@ def cached_unsigned_read(cache: FoldCache, store, *, seed: Callable[[Any], "tupl
     `live_window` as in `cached_read`.
 
     `identity` names every OTHER input the folded view depends on — a flag its projection reads (the assessments
-    index carries the signed presentation block only while `VIGIL_APEX_PRESENTATION` is on). It is bound into the
-    key BY VALUE, so an entry built under one value never answers a read under another: that read rebuilds under its
-    own value (and `seed` must build the view for that same value — never re-read it while folding). Empty (the
-    default) leaves the key exactly as it was."""
+    index carries each signed gated block — the presentation, the attack path, the out-of-band attestation — only
+    while that block's own flag is on, so it passes one `(field, value)` pair per flag). It is bound into the key BY
+    VALUE, so an entry built under one value never answers a read under another: that read rebuilds under its own
+    value (and `seed` must build the view for that same value — never re-read it while folding). Empty (the default)
+    leaves the key exactly as it was."""
     if not fold_cache_enabled():
         return UNCACHED
     snap = _snapshot(store, live_window)
