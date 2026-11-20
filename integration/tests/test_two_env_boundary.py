@@ -236,6 +236,9 @@ assert "strix" not in _m, "issue_sync must not import strix at module scope"
 import vigil_integration.jobs.notify_drain  # PR-D: the notify orchestrator — STDLIB ONLY, ALL sovereign logic injected
 assert "framework" not in _m, "jobs.notify_drain must not import framework at module scope"
 assert "strix" not in _m, "jobs.notify_drain must not import strix at module scope"
+import sigil.ui.customer_posture       # PR-B: the customer Fix-first read + posture trend (SOVEREIGN; read-only spine)
+assert "framework" not in _m, "ui.customer_posture must not import framework at module scope"
+assert "strix" not in _m, "ui.customer_posture must not import strix at module scope"
 import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
 assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
 assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
