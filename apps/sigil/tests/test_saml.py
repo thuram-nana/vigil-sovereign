@@ -446,6 +446,28 @@ def test_one_assertion_never_verifies_twice_at_any_allowed_skew(skew):
     assert _verify(_response(aid="a2"), signed=("a2",), now=last, cfg=cfg, ledger=led).assertion_id == "a2"
 
 
+_MAX_SKEW = saml._MAX_CLOCK_SKEW_SECONDS
+
+
+@pytest.mark.parametrize("first,then", [(0, _MAX_SKEW), (60, _MAX_SKEW), (100, _MAX_SKEW), (60, 60),
+                                        (_MAX_SKEW, 0)], ids=lambda v: f"{v}")
+def test_one_assertion_never_verifies_twice_when_the_skew_changes_between_presentations(first, then):
+    # The owner may re-sign the config with a LARGER skew (still within the bound) after an assertion was spent. The
+    # marker must therefore outlive every window an allowed skew could open — not just the one in force at the first
+    # spend, else it is reaped at NotOnOrAfter + first + grace while the new skew still accepts the assertion.
+    led = _led()
+    assert _verify(_response(), now=NOW, cfg=dataclasses.replace(CFG, clock_skew_seconds=first),
+                   ledger=led).assertion_id == "a1"
+    cfg = dataclasses.replace(CFG, clock_skew_seconds=then)
+    last = NOOA + then - 0.5                                     # the replayed config's window's final second
+    for t in sorted({NOOA, NOOA + first + _GRACE + 1, NOOA + (first + then) / 2, last, NOOA + then,
+                     NOOA + _MAX_SKEW + _GRACE + 1}):
+        with pytest.raises(SamlError, match="replay refused" if t <= last else "NotOnOrAfter has passed"):
+            _verify(_response(), now=t, cfg=cfg, ledger=led)
+    # same-shape control: a FRESH assertion id verifies at that last instant under the new skew
+    assert _verify(_response(aid="a2"), signed=("a2",), now=last, cfg=cfg, ledger=led).assertion_id == "a2"
+
+
 def test_the_verifier_refuses_a_clock_skew_over_its_bound():
     over = dataclasses.replace(CFG, clock_skew_seconds=saml._MAX_CLOCK_SKEW_SECONDS + 1)
     with pytest.raises(SamlError, match="clock skew exceeds"):

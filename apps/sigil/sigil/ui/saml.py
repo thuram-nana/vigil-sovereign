@@ -27,9 +27,10 @@ WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion i
      this browser's login minted, and the Response's own `InResponseTo`, when present, must too. So an
      unsolicited (IdP-initiated) response, or a response to ANOTHER login, is refused — the unsigned Response
      attribute alone is never trusted for this, the signed one is.
-  9. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger, kept until the window the time
-     guards accept it in (the earliest NotOnOrAfter PLUS the skew) has closed; a second presentation refuses at
-     any allowed skew.
+  9. REPLAY — the assertion `ID` is spent single-use in a durable atomic ledger, kept until the earliest
+     NotOnOrAfter PLUS the LARGEST skew any config may carry (`_MAX_CLOCK_SKEW_SECONDS`) has passed — not the
+     skew in force at the first presentation, which the owner may raise (up to that bound) before a second one —
+     so a second presentation refuses at any allowed skew, also when the skew changed in between.
 
 The SP-initiated request side lives here too: `new_request_id` + `build_authn_request` +
 `authn_request_redirect_url` produce the (unsigned) AuthnRequest for the SAML HTTP-Redirect binding — pure
@@ -230,11 +231,12 @@ class SamlReplayLedger:
     """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, accept_until)`
     O_EXCL-creates a marker named `sha256(id)` (fixed hex, no traversal/newline injection); the exclusive create
     is the serialization point, so of N concurrent presentations exactly ONE wins and the rest are refused
-    (replay). A per-spend sweep + a hard cap bound the directory. `accept_until` is the LAST instant the verifier
-    could still accept that assertion — its earliest NotOnOrAfter PLUS the configured clock skew — and a marker is
-    reaped only once that instant is more than a grace in the past, so by then the temporal guard refuses the
-    assertion at ANY skew (a marker reaped while the window is still open would let it verify twice). Stdlib
-    only."""
+    (replay). A per-spend sweep + a hard cap bound the directory. `accept_until` is an instant after which NO
+    presentation of that assertion can pass the temporal guard at any allowed skew — the verifier passes its
+    earliest NotOnOrAfter PLUS `_MAX_CLOCK_SKEW_SECONDS`, never the skew in force at the first spend (the owner
+    may raise it, up to that bound, before a replay arrives) — and a marker is reaped only once that instant is
+    more than a grace in the past, so by then the temporal guard refuses the assertion whatever skew the config
+    carries (a marker reaped while any allowed window is still open would let it verify twice). Stdlib only."""
 
     _DEFAULT_MAX = 65536
     _GRACE = 300.0
@@ -456,9 +458,11 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
                 raise SamlError("Response InResponseTo does not name this login's AuthnRequest")
 
     # --- REPLAY: spend the assertion ID single-use. The time guards above accept it until the earliest NotOnOrAfter
-    # PLUS the skew, so its marker must be kept until exactly then — reaped any earlier (e.g. at NotOnOrAfter + a
-    # fixed grace smaller than the skew), the same assertion would verify a second time inside its open window.
-    accept_until = min(cond_nooa, scd_nooa) + skew
+    # PLUS the skew of the config in force AT THAT presentation, and the owner may re-sign a larger skew (up to the
+    # bound) between two presentations — so its marker is kept until the earliest NotOnOrAfter plus the LARGEST
+    # skew any config may carry. Reaped any earlier (at NotOnOrAfter + a grace smaller than the skew, or + the skew
+    # in force at the FIRST spend), the same assertion would verify a second time inside a window still open.
+    accept_until = min(cond_nooa, scd_nooa) + _MAX_CLOCK_SKEW_SECONDS
     if not replay_ledger.try_spend(assertion_id, accept_until, now=now):
         raise SamlError("SAML assertion replay refused (ID already spent)")
 
