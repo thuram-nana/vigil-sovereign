@@ -209,6 +209,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     passkey = security and _config.customer_passkey_enabled()
     launch_ui = _config.customer_launch_ui_enabled()
     retest_ui = _config.customer_retest_ui_enabled()
+    # PR-B: whether the Fix-first screen is on (the posture, its trend and what to fix first) — the same switch that
+    # serves its two reads; a non-secret on/off value written into the page, counting in the build id.
+    posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
@@ -243,6 +246,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PASSKEY__": "1" if passkey else "0",
                                      "__VIGIL_LAUNCH_UI__": "1" if launch_ui else "0",
                                      "__VIGIL_RETEST__": "1" if retest_ui else "0",
+                                     "__VIGIL_POSTURE__": "1" if posture else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
@@ -668,6 +672,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
+        # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
+        if path == "/api/customer/posture" and _posture_on():
+            return self._customer_read_relay("customer_posture")
+        if path == "/api/customer/posture/trend" and _posture_on():
+            return self._customer_read_relay("posture_trend")
         if path == "/api/customer/assessments/posture" and _presentation_on():   # PR-A (flag OFF -> unknown-route 404)
             return self._customer_read_relay("assessment_posture")
         if path == "/api/customer/assessments/proof" and _proof_badge_on():    # PR-I (flag OFF -> unknown-route 404)
@@ -1518,6 +1528,12 @@ def _launch_ui_on() -> bool:
 def _retest_on() -> bool:
     from .. import config as _config
     return _config.customer_retest_ui_enabled()
+
+
+def _posture_on() -> bool:
+    # APEX consumer PR-B — the Fix-first screen (VIGIL_CUSTOMER_POSTURE, effective only with VIGIL_APEX_PRESENTATION).
+    from .. import config as _config
+    return _config.customer_posture_enabled()
 
 
 def _redpen_on() -> bool:
