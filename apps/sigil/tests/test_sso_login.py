@@ -562,3 +562,58 @@ def test_scim_on_sign_in_refuses_an_active_directory_user_whose_membership_was_r
     assert _directory(env).user(fay["id"]).active is True                          # the IdP still lists her
     with pytest.raises(SsoLoginError, match="no active membership"):
         _saml_in(env, "fay@acme.test")
+
+
+# --- the clamp: WHICH member it re-grants, and from WHAT it resolves -------------------------------------------------
+
+def _second_admin(env) -> None:
+    """A non-SSO administrator (the org's founder), so no clamp below is the org's last administrator's."""
+    orgreg, _ = env
+    orgreg.grant_membership("acme", "cust_founder", "founder", issued_at=_issue())
+
+
+def test_the_clamp_lands_on_the_linked_directory_user_of_an_okta_shaped_member(env):
+    """Okta / Entra always send an externalId, so the member's id derives from it — never from the userName the NameID
+    carries. The clamp must re-grant THAT id and nothing else (no membership for the NameID-derived id)."""
+    orgreg, _ = env
+    _second_admin(env)
+    st, rae = _scim(env, "POST", "/scim/v2/Users", {"userName": "rae@acme.test", "externalId": "00u-rae",
+                                                   "groups": [{"value": "admins"}]})
+    assert st == 201 and orgreg.membership_role(rae["id"], "acme") == "org_admin"
+    before = {m.username: m.role for m in orgreg.memberships("acme")}
+    _resign_acme(env, group_role_map={"admins": "analyst", "sec": "analyst"}, role_cap="analyst")
+    res = _saml_in(env, "rae@acme.test")
+    assert res.username == rae["id"] and res.role == "analyst"
+    assert {m.username: m.role for m in orgreg.memberships("acme")} == {**before, rae["id"]: "analyst"}
+
+
+def test_the_clamp_never_re_roles_the_member_a_derived_id_would_name(env):
+    """After a rename the NameID-derived id belongs to a DIFFERENT member: Pat, created as pat@acme.test with no
+    externalId (his id derives from that name), is renamed; Quinn (Okta-shaped) now carries pat@acme.test. The clamp
+    at Quinn's sign-in lands on Quinn alone, and Pat's role is untouched."""
+    orgreg, _ = env
+    _second_admin(env)
+    _, pat = _scim(env, "POST", "/scim/v2/Users", {"userName": "pat@acme.test"})
+    assert orgreg.membership_role(pat["id"], "acme") == "viewer"
+    st, _ = _scim(env, "PATCH", f"/scim/v2/Users/{pat['id']}",
+                  {"Operations": [{"op": "replace", "path": "userName", "value": "pat.old@acme.test"}]})
+    assert st == 200
+    st, quinn = _scim(env, "POST", "/scim/v2/Users", {"userName": "pat@acme.test", "externalId": "00u-quinn",
+                                                     "groups": [{"value": "admins"}]})
+    assert st == 201 and quinn["id"] != pat["id"] and orgreg.membership_role(quinn["id"], "acme") == "org_admin"
+    _resign_acme(env, group_role_map={"admins": "analyst", "sec": "analyst"}, role_cap="analyst")
+    res = _saml_in(env, "pat@acme.test")
+    assert res.username == quinn["id"] and orgreg.membership_role(quinn["id"], "acme") == "analyst"
+    assert orgreg.membership_role(pat["id"], "acme") == "viewer"
+
+
+def test_the_clamp_resolves_the_role_from_the_directory_never_from_the_assertion(env):
+    """A directory-managed org ignores the assertion's groups: the clamp resolves what the DIRECTORY gives the user
+    under the current config, even when the assertion names a group that maps higher."""
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    assert orgreg.membership_role(bob["id"], "acme") == "org_admin"
+    _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="org_admin")       # the Admins mapping is gone
+    res = _saml_in(env, "bob@acme.test", groups=("sec",))                            # the assertion claims sec
+    assert res.role == "viewer" and orgreg.membership_role(bob["id"], "acme") == "viewer"
