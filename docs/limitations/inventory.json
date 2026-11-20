@@ -606,6 +606,22 @@
       "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-consumer-shard-on-signup-ops",
+      "title": "Shard-placement-on-sign-up pins hard-prune: the spine snapshot seed does not yet carry shard-assignment rows",
+      "summary": "With VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD on and an owner shard topology (VIGIL_SHARD_IDS), every sign-up owner-signs a ShardPlacement (apps/sigil/sigil/governor/shard_on_signup.assign_on_signup, under the cross-process placement_lock), and 'sigil shard backfill' places tenants created before the switch was on -- all built and tested (test_shard_on_signup, test_shard_on_signup_provision). The operational limit of turning placement on: carrying shard-assignment rows into the spine snapshot seed is not yet built, so a hard prune (spine.prune) FAILS CLOSED past any active placement until the owner re-signs it above the prune point. It is fail-safe (a placement is never silently dropped by a prune), not a data-loss path; the only consequence is that, with a placement per sign-up, the oldest active placement bounds how far hard-prune advances until the seed carries shard rows. Default-OFF: with the flag off no placement is minted and prune is unaffected (byte-identical).",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+        "symbol": "assign_on_signup"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -842,6 +858,27 @@
       "snippet": "Not wired by the factory yet",
       "kind": "non-debt",
       "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
+    },
+    {
+      "file": "apps/sigil/sigil/config.py",
+      "snippet": "deploy-gated and outside",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "customer_fair_queue_enabled + shard_ids docstrings: standing up the elastic we-host shard fleet the shard ids name is owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "deploy-gated and outside this module",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "module docstring: standing up / scaling the cross-HOST we-host fleet, and the cross-host dispatch/copy, are owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "not yet built",
+      "kind": "debt",
+      "limit_id": "LIMIT-consumer-shard-on-signup-ops",
+      "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
     }
   ]
 }
