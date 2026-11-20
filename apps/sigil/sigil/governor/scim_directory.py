@@ -184,6 +184,10 @@ class DirectoryUser:
     selectors: tuple               # role selectors carried on the User resource (groups/roles values)
     profile: dict = field(default_factory=dict)
     issued_at: float = 0.0
+    # The sign-in CLAMP's bookkeeping (`ui.scim`): (the role the clamp took away, the issued_at of the membership
+    # grant the clamp minted), or () — never an IdP-supplied value, and never authority: it only lets a later
+    # sign-in give back what the clamp took while that grant is still the live one.
+    clamp: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -195,6 +199,19 @@ class DirectoryGroup:
     issued_at: float = 0.0
 
 
+def _clamp_from(value: object) -> tuple:
+    """The clamp bookkeeping of a user record — (took, at) — or () for none. A malformed value is no record (the
+    give-back it would allow then never applies: the fail-safe direction)."""
+    if not isinstance(value, dict):
+        return ()
+    took, at = value.get("from"), value.get("at")
+    if not isinstance(took, str) or not took or len(took) > MAX_ATTR:
+        return ()
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at):
+        return ()
+    return (took, float(at))
+
+
 def _user_from(org_id: str, rid: str, data: dict, at: float) -> Optional[DirectoryUser]:
     try:
         return DirectoryUser(
@@ -202,7 +219,7 @@ def _user_from(org_id: str, rid: str, data: dict, at: float) -> Optional[Directo
             external_id=_clean_str(data.get("externalId"), "externalId"),
             display_name=_clean_str(data.get("displayName"), "displayName"),
             active=data.get("active") is True, selectors=tuple(_clean_selectors(data.get("selectors"))),
-            profile=_clean_profile(data.get("profile")), issued_at=at)
+            profile=_clean_profile(data.get("profile")), issued_at=at, clamp=_clamp_from(data.get("clamp")))
     except (DirectoryError, TypeError, AttributeError):
         return None
 
@@ -289,14 +306,19 @@ class OrgDirectory:
         return seq
 
     def put_user(self, user_id: str, *, user_name: str, external_id: str = "", display_name: str = "",
-                 active: bool, selectors=(), profile: Optional[dict] = None, now: float) -> bool:
-        """Create or replace user `user_id`. Returns True iff a record was appended (False ⇒ already identical)."""
+                 active: bool, selectors=(), profile: Optional[dict] = None, clamp: tuple = (), now: float) -> bool:
+        """Create or replace user `user_id` (with the sign-in clamp's bookkeeping `clamp` = (took, at), or () for
+        none). Returns True iff a record was appended (False ⇒ already identical)."""
         if not _USER_ID_RE.fullmatch(str(user_id or "")):
             raise DirectoryError("a directory user id must be the per-org sso_ id")
         data = {"userName": _clean_str(user_name, "userName", required=True),
                 "externalId": _clean_str(external_id, "externalId"),
                 "displayName": _clean_str(display_name, "displayName"), "active": bool(active),
                 "selectors": _clean_selectors(selectors), "profile": _clean_profile(profile or {})}
+        if clamp:
+            data["clamp"] = {"from": str(clamp[0]), "at": float(clamp[1])}
+            if _clamp_from(data["clamp"]) != (str(clamp[0]), float(clamp[1])):
+                raise DirectoryError("malformed clamp bookkeeping")
         cur = self._users.get(user_id)
         if cur is not None and _user_data(cur) == data:
             return False
@@ -357,8 +379,11 @@ class OrgDirectory:
 
 
 def _user_data(u: DirectoryUser) -> dict:
-    return {"userName": u.user_name, "externalId": u.external_id, "displayName": u.display_name,
+    data = {"userName": u.user_name, "externalId": u.external_id, "displayName": u.display_name,
             "active": bool(u.active), "selectors": list(u.selectors), "profile": dict(u.profile)}
+    if u.clamp:
+        data["clamp"] = {"from": u.clamp[0], "at": u.clamp[1]}
+    return data
 
 
 class ScimDirectoryRegistry:

@@ -2912,7 +2912,7 @@ def cmd_sso(a) -> None:
       set-saml <org> --public-base URL --idp-entity-id ID --idp-sso-url URL --idp-cert PEM [...]
       set-oidc <org> --public-base URL --issuer URL --client-id ID --jwks-uri URL --authorize-endpoint URL
                      --token-endpoint URL [...]
-      rotate-scim-token <org> --token-out FILE  a fresh bearer (the previous one stops working at once)
+      rotate-scim-token <org> --token-out FILE  a fresh bearer (the previous one stops working at once; SCIM on)
       disable-scim <org>                        SCIM off (SSO sign-in keeps working)
       revoke <org> [--deprovision-members]      SSO + SCIM off; optionally revoke every SSO-provisioned member
       status [<org>]                            the active configs (never a token or fingerprint)
@@ -4832,7 +4832,15 @@ def main(argv=None) -> None:
         _p.set_defaults(fn=cmd_reports)
     _p = porg_sub.add_parser("set-member-role",
                              help="owner-sign a member's per-org role (any per-org role, founder included; the only "
-                                  "way to grant or change a founder)")
+                                  "way to grant or change a founder)",
+                             description="Owner-sign a member's per-org role (any per-org role, founder included; the "
+                                         "only way to grant or change a founder). In an org whose SSO config has SCIM "
+                                         "on, a directory member's IN-CEILING role (viewer / analyst / org_admin) "
+                                         "follows the IdP and the org's SSO config, not this verb: the IdP's next "
+                                         "write for that member re-resolves it, and the member's next sign-in lowers "
+                                         "it to what the config resolves (never the org's last administrator). Set "
+                                         "founder or operator here; set in-ceiling roles through the IdP's groups and "
+                                         "the SSO config's group roles.")
     _p.add_argument("org_id")
     _p.add_argument("username")
     _p.add_argument("role", help="viewer | analyst | operator | org_admin | founder")
@@ -4840,7 +4848,12 @@ def main(argv=None) -> None:
     _p.set_defaults(fn=cmd_org_roles)
     _p = porg_sub.add_parser("demote-founders",
                              help="re-grant org_admin to every active founder membership (idempotent; run before "
-                                  "rolling back to a build without the founder role)")
+                                  "rolling back to a build without the founder role)",
+                             description="Re-grant org_admin to every active founder membership (idempotent; run "
+                                         "before rolling back to a build without the founder role). In an org whose "
+                                         "SSO config has SCIM on, a demoted founder who is a directory member then "
+                                         "holds an in-ceiling role: their next sign-in lowers it to what the SSO "
+                                         "config resolves for them, unless they are the org's last administrator.")
     _p.add_argument("--org", default=None, help="only this org (default: every active org)")
     _p.add_argument("--reason", required=True, help="why (recorded in the audit)")
     _p.set_defaults(fn=cmd_org_roles)
@@ -4861,9 +4874,17 @@ def main(argv=None) -> None:
                                                             "redirect/SCIM URLs)")
         p.add_argument("--default-role", default="viewer", help="viewer | analyst | org_admin")
         p.add_argument("--role-cap", default="org_admin", help="viewer | analyst | org_admin (never higher)")
-        p.add_argument("--group-role", action="append", default=[], help="GROUP=ROLE (repeatable)")
+        p.add_argument("--group-role", action="append", default=[],
+                       help="GROUP=ROLE (repeatable). Re-signing REPLACES the whole role policy (map, default, cap): "
+                            "with SCIM on, a member it resolves lower is lowered at their next sign-in (never the "
+                            "org's last administrator), and given back at a later sign-in once a config resolves "
+                            "the role again")
         p.add_argument("--clock-skew", type=int, default=60, help="assertion / token clock skew (seconds)")
-        p.add_argument("--scim", action="store_true", help="enable SCIM and mint its bearer (needs --token-out)")
+        p.add_argument("--scim", action="store_true",
+                       help="enable SCIM and mint its bearer (needs --token-out). The org's members are then the "
+                            "directory's: a person signs in only once the IdP has pushed them, so a member who "
+                            "signed in just-in-time before is refused until then (each refusal counts against the "
+                            "sign-in rate limit of the address it came from)")
         p.add_argument("--token-out", default="", help="write the SCIM bearer here (0600; never printed)")
         p.add_argument("--overwrite", action="store_true", help="allow --token-out to replace an existing file")
         p.set_defaults(fn=cmd_sso)
@@ -4882,7 +4903,12 @@ def main(argv=None) -> None:
     _p.add_argument("--signing-alg", action="append", default=[], help="asymmetric only (default RS256)")
     _p.add_argument("--egress-host", action="append", default=[],
                     help="IdP host the provisioner may call (default: the JWKS + token endpoint hosts)")
-    _p = psso_sub.add_parser("rotate-scim-token", help="mint a fresh SCIM bearer (the old one stops at once)")
+    _p = psso_sub.add_parser("rotate-scim-token", help="mint a fresh SCIM bearer (the old one stops at once; turns "
+                                                       "SCIM on)",
+                             description="Mint a fresh SCIM bearer; the previous one stops authenticating at once. "
+                                         "This also turns SCIM on for the org: its members are then the directory's, "
+                                         "so a person the IdP has not pushed yet is refused at sign-in (each refusal "
+                                         "counts against the sign-in rate limit of the address it came from).")
     _p.add_argument("org")
     _p.add_argument("--token-out", required=True, help="write the bearer here (0600; never printed)")
     _p.add_argument("--overwrite", action="store_true")

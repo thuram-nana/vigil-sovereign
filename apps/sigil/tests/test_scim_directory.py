@@ -221,3 +221,25 @@ def test_user_id_shape_matches_sso_username():
     from sigil.governor.sso_config import SsoConfig
     cfg = SsoConfig(org_id="acme", protocol="saml", issued_at=1.0, state="active", idp_entity_id="https://idp")
     assert re.fullmatch(sd._USER_ID_RE, gscim.sso_username(cfg, "someone@acme.com"))
+
+
+def test_the_sign_in_clamp_note_round_trips_and_a_malformed_one_is_no_note():
+    s = _store()
+    d = _reg(s).directory("acme")
+    assert d.put_user(U1, user_name="bob@acme.test", active=True, clamp=("org_admin", 12.5), now=_now())
+    assert _reg(s).directory("acme").user(U1).clamp == ("org_admin", 12.5)        # re-folded from the spine
+    assert not d.put_user(U1, user_name="bob@acme.test", active=True, clamp=("org_admin", 12.5), now=_now())
+    assert d.put_user(U1, user_name="bob@acme.test", active=True, now=_now())       # a write without one clears it
+    assert _reg(s).directory("acme").user(U1).clamp == ()
+    for bad in ({"from": "", "at": 1.0}, {"from": 7, "at": 1.0}, {"from": "x" * (sd.MAX_ATTR + 1), "at": 1.0},
+                {"from": "org_admin", "at": "1"}, {"from": "org_admin", "at": True},
+                {"from": "org_admin", "at": float("nan")}, {"from": "org_admin", "at": float("inf")},
+                ["org_admin", 1.0], None):
+        assert sd._clamp_from(bad) == (), bad
+    with pytest.raises(DirectoryError, match="clamp"):
+        d.put_user(U2, user_name="y@acme.test", active=True, clamp=("org_admin", float("nan")), now=_now())
+    # a signed record carrying a malformed note still folds — as a user with NO note (the fail-safe direction)
+    _reg(s)._append("acme", "user", U2, "active", {"userName": "y@acme.test", "active": True,
+                                                   "clamp": {"from": "org_admin", "at": "soon"}}, issued_at=_now())
+    u = _reg(s).directory("acme").user(U2)
+    assert u is not None and u.user_name == "y@acme.test" and u.clamp == ()

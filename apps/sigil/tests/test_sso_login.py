@@ -437,8 +437,9 @@ def _resign_acme(env, **kw) -> None:
                            scim_token=ACME_AUTH[len("Bearer "):], issued_at=_issue(), **kw)
 
 
-def test_scim_on_sign_in_clamps_a_role_above_the_current_config_and_never_raises_one(env):
+def test_scim_on_sign_in_clamps_a_role_above_the_current_config_and_gives_back_only_what_it_took(env):
     orgreg, _ = env
+    _second_admin(env)
     _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
     _, carl = _scim(env, "POST", "/scim/v2/Users", {"userName": "carl@acme.test", "groups": [{"value": "sec"}]})
     assert orgreg.membership_role(bob["id"], "acme") == "org_admin"
@@ -463,11 +464,19 @@ def test_scim_on_sign_in_clamps_a_role_above_the_current_config_and_never_raises
     res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
     assert res.role == "viewer" and orgreg.membership_role(bob["id"], "acme") == "viewer"
     assert audits[1:] == [("sso_role_clamp", bob["id"], "role=viewer was=analyst")]
-    # (3) the owner LOOSENS it again: sign-in never RAISES a role (that waits for the IdP's next SCIM write)
+    # (3) the owner LOOSENS it again: the sign-in gives back what the clamps took (org_admin: the second clamp kept
+    # the FIRST one's note, as the live grant was the first clamp's), and nothing more happens after that
     _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "analyst"}, role_cap="org_admin")
     res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
-    assert res.role == "viewer" and res.seq is None and len(audits) == 2
-    assert orgreg.membership_role(bob["id"], "acme") == "viewer"
+    assert res.role == "org_admin" and res.seq is not None and orgreg.membership_role(bob["id"], "acme") == "org_admin"
+    assert audits[2:] == [("sso_role_restore", bob["id"], "role=org_admin was=viewer")]
+    assert _directory(env).user(bob["id"]).clamp == ()                       # fully given back: the note is spent
+    res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "org_admin" and res.seq is None and len(audits) == 3
+    # (4) Carl was never clamped: a looser config does not raise HIM at sign-in (that waits for the IdP's next write)
+    _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "org_admin"}, role_cap="org_admin")
+    res = _saml_in(env, "carl@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "analyst" and res.seq is None and len(audits) == 3
 
 
 def test_scim_on_sign_in_leaves_a_role_the_owner_set_outside_the_ceiling(env):
@@ -495,6 +504,7 @@ def test_scim_on_sign_in_refuses_when_the_config_resolves_no_role(env):
 def test_a_refused_clamp_grant_is_a_clean_sign_in_refusal(env, monkeypatch):
     from sigil.governor import scim as gscim
     orgreg, _ = env
+    _second_admin(env)
     _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
     _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="analyst")
 
@@ -696,3 +706,105 @@ def test_scim_refuses_an_identifier_padded_with_whitespace_never_trims_it(env, a
     assert (b["userName"], b["externalId"]) == ("kate@acme.test", "00u-kate")        # kate is unchanged
     st, b = _scim(env, "POST", "/scim/v2/Users", other)
     assert st == 201                                                                  # control: exact values land
+
+
+# --- the clamp's give-back, and the org's last administrator ---------------------------------------------------------
+
+def test_a_transient_config_mistake_heals_at_the_next_sign_in(env):
+    """A re-sign that forgot the group map (e.g. a certificate rotation re-run without --group-role) lowers every SCIM
+    member who signs in meanwhile; once the owner restores the map, each one's next sign-in gives the role back."""
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={}, role_cap="org_admin")                       # the mistake
+    assert _saml_in(env, "bob@acme.test").role == "viewer"
+    _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "analyst"}, role_cap="org_admin")   # restored
+    res = _saml_in(env, "bob@acme.test")
+    assert res.role == "org_admin" and orgreg.membership_role(bob["id"], "acme") == "org_admin"
+
+
+def test_the_give_back_never_undoes_a_change_made_after_the_clamp(env):
+    """The give-back applies only while the clamp's own grant is still the live one: a role the owner sets by hand
+    after the clamp stands (a sign-in never raises it), while an IdP write that leaves the membership as it was keeps
+    the note."""
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _, eve = _scim(env, "POST", "/scim/v2/Users", {"userName": "eve@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "viewer" and _saml_in(env, "eve@acme.test").role == "viewer"
+    orgreg.grant_membership("acme", bob["id"], "analyst", issued_at=_issue())        # the owner's own later change
+    st, _ = _scim(env, "PATCH", f"/scim/v2/Users/{eve['id']}",                      # an IdP write; membership as is
+                  {"Operations": [{"op": "replace", "path": "displayName", "value": "Eve E."}]})
+    assert st == 200 and orgreg.membership_role(eve["id"], "acme") == "viewer"
+    _resign_acme(env, group_role_map={"admins": "org_admin"}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "analyst"                           # the owner's change stands
+    assert _saml_in(env, "eve@acme.test").role == "org_admin"                         # given back
+
+
+def test_the_give_back_is_never_more_than_the_clamp_took(env):
+    """A member is given back at most the role the clamp took — partly while the config allows less, the rest once it
+    allows it — never a role it did not hold (any further raise waits for the IdP's next write)."""
+    _second_admin(env)
+    _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _scim(env, "POST", "/scim/v2/Users", {"userName": "carl@acme.test", "groups": [{"value": "sec"}]})
+    _resign_acme(env, group_role_map={}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "viewer" and _saml_in(env, "carl@acme.test").role == "viewer"
+    _resign_acme(env, group_role_map={"admins": "analyst", "sec": "org_admin"}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "analyst"           # partly: the config allows only analyst now
+    assert _saml_in(env, "carl@acme.test").role == "analyst"          # never more than the clamp took
+    _resign_acme(env, group_role_map={"admins": "org_admin", "sec": "org_admin"}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "org_admin"         # the rest, once the config allows it
+    assert _saml_in(env, "carl@acme.test").role == "analyst"
+
+
+def test_a_refused_audit_before_the_give_back_grants_nothing(env):
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "viewer"
+    _resign_acme(env, group_role_map={"admins": "org_admin"}, role_cap="org_admin")
+
+    def boom(action, *_a):
+        if action == "sso_role_restore":
+            raise OSError("audit store unavailable")
+    with pytest.raises(OSError):                                       # audited FIRST: no row, no grant
+        _saml_in(env, "bob@acme.test", audit=boom)
+    assert orgreg.membership_role(bob["id"], "acme") == "viewer"
+    assert _saml_in(env, "bob@acme.test").role == "org_admin"         # control: with the audit up it is given back
+
+
+def test_a_note_naming_a_role_outside_the_ceiling_gives_nothing_back(env):
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "viewer"
+    d = _directory(env)
+    u = d.user(bob["id"])
+    assert u.clamp[0] == "org_admin"
+    d.put_user(u.id, user_name=u.user_name, active=True, selectors=u.selectors, clamp=("founder", u.clamp[1]),
+               now=_issue())
+    _resign_acme(env, group_role_map={"admins": "org_admin"}, role_cap="org_admin")
+    assert _saml_in(env, "bob@acme.test").role == "viewer" and orgreg.membership_role(bob["id"], "acme") == "viewer"
+
+
+def test_the_clamp_never_demotes_the_orgs_last_administrator(env):
+    """`sigil org demote-founders` keeps each founder an administrator; an SSO-managed ex-founder whose config resolves
+    lower is then NOT clamped below administrator while no other administrator exists — the clamp waits until one
+    does (the owner's own membership verbs refuse to orphan an org likewise)."""
+    from sigil.ui.provision import owner_demote_founders
+    orgreg, _ = env
+    _resign_acme(env, group_role_map={"sec": "analyst"}, role_cap="analyst")
+    _, fay = _scim(env, "POST", "/scim/v2/Users", {"userName": "fay@acme.test", "groups": [{"value": "sec"}]})
+    orgreg.grant_membership("acme", fay["id"], "founder", issued_at=_issue())
+    assert _saml_in(env, "fay@acme.test").role == "founder"                           # outside the ceiling: as set
+    owner_demote_founders(orgreg.store, reason="pre-rollback", issued_at=_issue(), orgs=orgreg)
+    assert orgreg.membership_role(fay["id"], "acme") == "org_admin"
+    audits: list = []
+    res = _saml_in(env, "fay@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "org_admin" and res.seq is None and audits == []               # the last admin is kept
+    _second_admin(env)                                                                # another administrator appears
+    res = _saml_in(env, "fay@acme.test", audit=lambda *a: audits.append(a))
+    assert res.role == "analyst" and audits == [("sso_role_clamp", fay["id"], "role=analyst was=org_admin")]

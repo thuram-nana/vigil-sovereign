@@ -25,8 +25,11 @@ directory is BOOKKEEPING — the authority is still the ceiling-capped owner-sig
   * a user's role = `resolve_role(config, <role selectors on the User> + <names of the directory groups it is
     in>)` — the owner-signed config's map/default, clamped to its cap and the ceiling. A group named `founder` or
     a `roles: [{"value": "owner"}]` selects nothing the owner did not sign;
-  * SCIM only manages roles INSIDE the ceiling. A member the owner elevated by hand (`sigil org set-member-role`,
-    e.g. to founder) is never re-granted by SCIM; deactivation still revokes it (the safe direction wins);
+  * SCIM only manages roles INSIDE the ceiling (viewer / analyst / org_admin). A member the owner set by hand to a
+    role OUTSIDE it (`sigil org set-member-role`, e.g. founder) is never re-granted by SCIM nor clamped at sign-in;
+    deactivation still revokes it (the safe direction wins). An in-ceiling role of a directory user is the
+    directory's: the IdP's next write for that user re-resolves it from the config, and a sign-in caps it at what
+    the config resolves (below) — a hand-set in-ceiling role does not stick;
   * SCIM can only touch users in ITS OWN org's directory: a password customer, a Google-OIDC customer or another
     org's user is a 404 here, so a SCIM token can never revoke the org's founder;
   * deactivation (`active:false`, PATCH or PUT) and DELETE revoke the membership LIVE — the next request of that
@@ -44,11 +47,17 @@ SIGN-IN SEMANTICS:
     matches it (the SAML NameID; the OIDC `sub`, or Entra's immutable `oid`) and admits only an ACTIVE user with a
     live membership. A subject that matches no directory user is REFUSED — never resolved to a derived username,
     which could name a different member. A user the directory deactivated or deleted can therefore never sign back
-    in, even with a still-valid assertion. Sign-in mints nothing in this mode except a CLAMP: when the current
-    owner-signed config resolves a LOWER role for the user than its membership holds (the owner tightened the cap
-    or removed a group mapping), the membership is brought down to it before the person is admitted — never
-    raised (a raise waits for the IdP's next SCIM write), and a role the owner set by hand outside the ceiling is
-    left as the owner set it.
+    in, even with a still-valid assertion. Sign-in mints nothing in this mode except a CLAMP and its GIVE-BACK:
+      - when the current owner-signed config resolves a LOWER role for the user than its membership holds (the
+        owner tightened the cap or removed a group mapping), the membership is brought down to it before the person
+        is admitted — except the org's LAST administrator, who keeps the role until another one exists (the
+        owner's own membership verbs refuse to orphan an org likewise);
+      - the clamp notes the role it took in the user's directory record, keyed to the grant it minted, and while
+        that grant is still the member's live one a later sign-in gives back what the config resolves again —
+        never more than the clamp took — so a transient config mistake (a re-sign that dropped the group map)
+        heals at the next sign-in instead of sticking;
+      - any other raise waits for the IdP's next SCIM write, so a sign-in never undoes a change the owner (or the
+        IdP) made after the clamp; a role the owner set by hand outside the ceiling is left as the owner set it.
 
 ORG-SCOPED EVERYWHERE: the org is resolved from the SCIM bearer's config / the SSO login's server-side state, and
 provisioning always targets `config.org_id`. A caller never supplies a target org as a free field.
@@ -108,8 +117,9 @@ _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 @dataclass(frozen=True)
 class ProvisionResult:
     """The outcome of a successful SSO sign-in / SCIM provisioning — identity + the CAPPED role the member holds +
-    the spine seq of the owner-signed grant this call minted (None when it minted none: an unchanged JIT role or a
-    directory-managed sign-in). Carries NO secret, NO money figure, NO model id."""
+    the spine seq of the owner-signed grant this call minted (None when it minted none: a JIT sign-in whose role did
+    not change, or a directory-managed sign-in that neither clamped nor gave back a role). Carries NO secret, NO
+    money figure, NO model id."""
     org_id: str
     username: str
     role: str
@@ -253,9 +263,11 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
     immutable `link_ids`), and admit only an ACTIVE user holding a live membership. A subject no directory user
     matches is REFUSED: a derived `sso_username(subject)` is never looked up instead, since a directory user's id is
     derived from the userName / externalId it had when it was CREATED — after a rename that id belongs to a
-    DIFFERENT person than the one now carrying the old name. Mints nothing in that mode except the CLAMP: a
-    membership above the role the CURRENT owner-signed config resolves for the user is brought down to it first
-    (never raised; a role the owner set outside the ceiling is left as the owner set it)."""
+    DIFFERENT person than the one now carrying the old name. Mints nothing in that mode except the CLAMP and its
+    GIVE-BACK (see the module docstring): a membership above the role the CURRENT owner-signed config resolves for
+    the user is brought down to it first — never the org's last administrator's — and while that clamped grant is
+    still the live one a later sign-in gives back what the config allows again, never more than the clamp took (a
+    role the owner set outside the ceiling is left as the owner set it)."""
     for ident in (subject, *link_ids):
         # an identifier is used EXACTLY as the IdP signed it: one that begins or ends with whitespace (any Unicode
         # space) is a DIFFERENT identifier that merely renders like a member's — refused, never trimmed into it
@@ -281,21 +293,58 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
     if role is None:
         raise SsoLoginError("this organization adds members through its directory (SCIM) and this person has no "
                             "active membership; the organization's IT administrator must assign VIGIL to them")
-    if role in _scim.SCIM_PROVISIONABLE_ROLES:            # an owner-set role outside the ceiling stays the owner's
-        want = _directory_role(config, d, u)
-        if want is None:
-            raise SsoLoginError("no provisionable role resolves for this person (fail-closed)")
-        if _scim._provision_rank(want) < _scim._provision_rank(role):      # CLAMP down to the current config
-            if audit is not None:
-                audit("sso_role_clamp", u.id, f"role={want} was={role}")
-            try:
-                seq = _scim.provision_membership(org_registry, config, username=u.id, role=want,
-                                                 issued_at=issued_at)
-            except ScimError as e:                     # the ceiling gate / grant precondition refused
-                raise SsoLoginError(str(e)) from e
-            return ProvisionResult(org_id=config.org_id, username=u.id, role=want, external_id=str(subject),
-                                   seq=seq)
-    return ProvisionResult(org_id=config.org_id, username=u.id, role=role, external_id=str(subject))
+    held = ProvisionResult(org_id=config.org_id, username=u.id, role=role, external_id=str(subject))
+    if role not in _scim.SCIM_PROVISIONABLE_ROLES:         # an owner-set role outside the ceiling stays the owner's
+        return held
+    want = _directory_role(config, d, u)
+    if want is None:
+        raise SsoLoginError("no provisionable role resolves for this person (fail-closed)")
+    rank = _scim._provision_rank
+    # what an earlier clamp took — only while the grant it minted is still the live one (any later grant, by the
+    # owner or the IdP, makes the note stale: a sign-in never undoes a change made after the clamp)
+    took = u.clamp[0] if u.clamp and u.clamp[1] == _granted_at(org_registry, config.org_id, u.id) else None
+    if rank(want) < rank(role):                                          # CLAMP down to the current config
+        from .provision import _member_admins
+        # (`want` is below `role` <= org_admin, so it never holds manage_members: a clamp of the org's ONLY
+        # administrator would orphan the org — it waits until another administrator exists)
+        if _member_admins(org_registry, config.org_id) == {u.id}:
+            return held
+        return _regrant(org_registry, config, d, u, subject=subject, role=want, took=took or role,
+                        action="sso_role_clamp", detail=f"role={want} was={role}", issued_at=issued_at, audit=audit)
+    if took in _scim.SCIM_PROVISIONABLE_ROLES and rank(want) > rank(role):    # GIVE BACK what the clamp took
+        back = want if rank(want) <= rank(took) else took                     # never more than it took
+        return _regrant(org_registry, config, d, u, subject=subject, role=back,
+                        took=None if back == took else took, action="sso_role_restore",
+                        detail=f"role={back} was={role}", issued_at=issued_at, audit=audit)
+    return held
+
+
+def _granted_at(org_registry, org_id: str, username: str) -> Optional[float]:
+    """The issued_at of `username`'s live grant in `org_id` (None when it has none)."""
+    return next((m.issued_at for m in org_registry.memberships(org_id) if m.username == username), None)
+
+
+def _regrant(org_registry, config: SsoConfig, d: OrgDirectory, u: DirectoryUser, *, subject: str, role: str,
+             took: Optional[str], action: str, detail: str, issued_at: float,
+             audit: Optional[AuditFn]) -> ProvisionResult:
+    """Re-grant directory user `u` to `role` at sign-in (a clamp down, or the give-back of what a clamp took): the
+    critical audit row FIRST, then the ceiling-gated owner-signed grant, then the directory note of what the clamp
+    took (`took`; None ⇒ no note) keyed to that grant's issued_at, so a later sign-in can give it back only while
+    this grant is still the live one."""
+    if audit is not None:
+        audit(action, u.id, detail)
+    try:
+        seq = _scim.provision_membership(org_registry, config, username=u.id, role=role, issued_at=issued_at)
+    except ScimError as e:                             # the ceiling gate / grant precondition refused
+        raise SsoLoginError(str(e)) from e
+    at = _granted_at(org_registry, config.org_id, u.id)
+    try:
+        d.put_user(u.id, user_name=u.user_name, external_id=u.external_id, display_name=u.display_name,
+                   active=u.active, selectors=u.selectors, profile=u.profile,
+                   clamp=(took, at) if took and at is not None else (), now=issued_at)
+    except DirectoryError as e:
+        raise SsoLoginError(f"the sign-in clamp's directory note could not be written: {e}") from e
+    return ProvisionResult(org_id=config.org_id, username=u.id, role=role, external_id=str(subject), seq=seq)
 
 
 def sso_login_saml(xml_bytes: bytes, *, org_id: str, config_registry, org_registry, replay_ledger,
@@ -592,10 +641,12 @@ def _put_user(req: _Req, uid: str, st: dict) -> None:
     other = req.dir.user_by_name(st["user_name"])
     if other is not None and other.id != uid:
         raise _ScimFail(409, "a user with this userName already exists", "uniqueness")
+    cur = req.dir.user(uid)
     try:
         req.dir.put_user(uid, user_name=st["user_name"], external_id=st["external_id"],
                          display_name=st["display_name"], active=st["active"], selectors=st["selectors"],
-                         profile=st["profile"], now=req.at())
+                         profile=st["profile"], clamp=cur.clamp if cur is not None else (),   # sign-in bookkeeping
+                         now=req.at())
     except DirectoryError as e:
         raise _ScimFail(400, str(e), "invalidValue") from e
 

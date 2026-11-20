@@ -601,6 +601,29 @@ def test_cli_set_saml_writes_the_bearer_once_0600_and_never_prints_it(cli_env, c
     assert not SsoConfigRegistry(SpineStore(path)).config("org_abc").scim_enabled
 
 
+@pytest.mark.parametrize("argv,needles", [
+    (["org", "set-member-role", "--help"], ["follows the IdP and the org's SSO config", "last administrator",
+                                            "founder or operator here"]),
+    (["org", "demote-founders", "--help"], ["SCIM on", "unless they are the org's last administrator"]),
+    (["sso", "set-saml", "--help"], ["REPLACES the whole role policy", "given back", "pushed them",
+                                     "rate limit"]),
+    (["sso", "set-oidc", "--help"], ["REPLACES the whole role policy", "given back", "pushed them",
+                                     "rate limit"]),
+    (["sso", "rotate-scim-token", "--help"], ["turns SCIM on", "not pushed yet is refused"]),
+], ids=["set-member-role", "demote-founders", "set-saml", "set-oidc", "rotate-scim-token"])
+def test_cli_help_says_how_scim_and_the_sign_in_clamp_treat_roles(argv, needles, capsys):
+    """The owner verbs that touch a SCIM-managed org's roles say what SCIM and the sign-in clamp then do: an
+    in-ceiling role follows the IdP + config, a re-sign replaces the whole role policy (lowered at sign-in, given
+    back once allowed, never the last administrator), and turning SCIM on refuses members the IdP has not pushed."""
+    from sigil import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)
+    assert e.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())                   # argparse wraps the text
+    for needle in needles:
+        assert needle in out, (argv, needle)
+
+
 def test_cli_refuses_ceiling_breaches_symlinks_and_unknown_orgs(cli_env, capsys):
     cli, path, tmp = cli_env
     certf = tmp / "idp.pem"
