@@ -281,8 +281,12 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
     u = d.user_by_name(subject)
     if u is None:
         for key in (subject, *link_ids):
-            u = d.user_by_external_id(key)
-            if u is not None:
+            matches = d.users_by_external_id(key)
+            if len(matches) > 1:          # two directory users carry it: which person signed in is unknowable
+                raise SsoLoginError("more than one person in this organization's directory carries this identifier "
+                                    "(ambiguous, refused); the organization's IT administrator must correct it")
+            if matches:
+                u = matches[0]
                 break
     if u is None:
         raise SsoLoginError("this organization adds members through its directory (SCIM) and this person is not in "
@@ -641,6 +645,9 @@ def _put_user(req: _Req, uid: str, st: dict) -> None:
     other = req.dir.user_by_name(st["user_name"])
     if other is not None and other.id != uid:
         raise _ScimFail(409, "a user with this userName already exists", "uniqueness")
+    if st["external_id"] and any(o.id != uid for o in req.dir.users_by_external_id(st["external_id"])):
+        # a sign-in links a person by externalId, so two users carrying one would make that link ambiguous
+        raise _ScimFail(409, "a user with this externalId already exists", "uniqueness")
     cur = req.dir.user(uid)
     try:
         req.dir.put_user(uid, user_name=st["user_name"], external_id=st["external_id"],

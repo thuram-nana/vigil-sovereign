@@ -829,3 +829,44 @@ def test_an_unchanged_config_after_a_clamp_mints_nothing_on_later_sign_ins(env):
         assert res.role == "analyst" and res.seq is None
     assert len(audits) == 1
     assert orgreg.membership_role(bob["id"], "acme") == "analyst"
+
+
+# --- externalId: one person per identifier ---------------------------------------------------------------------------
+
+def test_a_scim_write_that_would_duplicate_an_external_id_is_a_409(env):
+    st, al = _scim(env, "POST", "/scim/v2/Users", {"userName": "al@acme.test", "externalId": "E-1",
+                                                  "groups": [{"value": "admins"}]})
+    assert st == 201
+    st, bz = _scim(env, "POST", "/scim/v2/Users", {"userName": "bz@acme.test"})
+    assert st == 201
+    patch = {"Operations": [{"op": "replace", "path": "externalId", "value": "E-1"}]}
+    st, body = _scim(env, "PATCH", f"/scim/v2/Users/{bz['id']}", patch)
+    assert st == 409 and body.get("scimType") == "uniqueness"
+    st, body = _scim(env, "PUT", f"/scim/v2/Users/{bz['id']}", {"userName": "bz@acme.test", "externalId": "E-1"})
+    assert st == 409 and body.get("scimType") == "uniqueness"
+    assert [u.id for u in _directory(env).users_by_external_id("E-1")] == [al["id"]]
+    # controls: a distinct externalId is accepted, and a user re-asserting its OWN externalId is not a duplicate
+    st, _ = _scim(env, "PATCH", f"/scim/v2/Users/{bz['id']}",
+                  {"Operations": [{"op": "replace", "path": "externalId", "value": "E-2"}]})
+    assert st == 200
+    st, _ = _scim(env, "PUT", f"/scim/v2/Users/{al['id']}", {"userName": "al@acme.test", "externalId": "E-1",
+                                                            "groups": [{"value": "admins"}]})
+    assert st == 200
+
+
+def test_a_sign_in_whose_external_id_two_directory_users_share_is_refused(env):
+    orgreg, _ = env
+    _, al = _scim(env, "POST", "/scim/v2/Users", {"userName": "al@acme.test", "externalId": "E-1",
+                                                 "groups": [{"value": "admins"}]})
+    _, bz = _scim(env, "POST", "/scim/v2/Users", {"userName": "bz@acme.test"})
+    assert _saml_in(env, "E-1").username == al["id"]                     # control: one carrier ⇒ admitted as al
+    d = _directory(env)                                                   # a duplicate already in the directory
+    cur = d.user(bz["id"])
+    d.put_user(cur.id, user_name=cur.user_name, external_id="E-1", display_name=cur.display_name, active=True,
+               selectors=cur.selectors, profile=cur.profile, now=_issue())
+    assert sorted(u.id for u in _directory(env).users_by_external_id("E-1")) == sorted([al["id"], bz["id"]])
+    audits: list = []
+    with pytest.raises(SsoLoginError, match="more than one person"):
+        _saml_in(env, "E-1", audit=lambda *a: audits.append(a))
+    assert audits == []
+    assert _saml_in(env, "bz@acme.test").username == bz["id"]            # a userName match is still unambiguous

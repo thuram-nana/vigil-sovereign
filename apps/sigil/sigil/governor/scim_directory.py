@@ -273,6 +273,14 @@ class OrgDirectory:
             return None
         return next((u for u in self.users() if u.external_id == want), None)
 
+    def users_by_external_id(self, external_id: str) -> "list[DirectoryUser]":
+        """EVERY user whose externalId equals `external_id` exactly (same matching as `user_by_external_id`). A caller
+        that admits a person by externalId must see more than one match as AMBIGUOUS, never pick one of them."""
+        want = _exact_key(external_id)
+        if not want:
+            return []
+        return [u for u in self.users() if u.external_id == want]
+
     def groups(self) -> "list[DirectoryGroup]":
         return [self._groups[k] for k in sorted(self._groups)]
 
