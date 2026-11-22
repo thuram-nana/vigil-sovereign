@@ -213,6 +213,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand Red-Pen schedule(s) {stranded_rps}: their only owner-signed active "
                           f"record sits below K and is not re-asserted live (dropping the schedule or resetting the "
                           f"per-(org,repo) anti-replay high-water); lower K or re-sign above K")
+    # (c, consumer PR-C) the SAME referential floor for governor.cloud_connect_grant: a read-only cloud grant whose only
+    # authoritative owner-signed ACTIVE record sits below K and is not re-asserted live would be silently disconnected
+    # (the registry folds a genesis scan with no seed) or, by resetting the per-(org,provider,account) high-water,
+    # re-open replay-resurrection of a captured grant for a disconnected account. Fail-closed, like the floors above;
+    # empty in the happy path (no cloud grants, or every active record sits >= K).
+    stranded_cg = stranded_active_cloud_grants(store, archived, K)
+    if stranded_cg:
+        raise PruneUnsafe(f"K={K} would strand cloud grant(s) {stranded_cg}: their only owner-signed active record "
+                          f"sits below K and is not re-asserted live (dropping the connection or resetting the "
+                          f"per-(org,provider,account) anti-replay high-water); lower K or reconnect above K")
     # (c, Front C S2a) the SAME referential floor for governor.shard_assignment: a tenant whose only authoritative
     # owner-signed ACTIVE assignment sits below K and is not re-asserted live would be silently UNASSIGNED (the
     # routing edge then refuses it) or, by resetting the per-tenant high-water, re-open replay-resurrection of a
@@ -651,6 +661,52 @@ def stranded_active_connected_repos(store, archived: list[Segment], K: int) -> l
     live_hw = _connected_repo_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
     neg = float("-inf")
     return sorted(f"{k[1]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
+
+
+def _cloud_grant_active_hw(records, resolver) -> "dict[tuple, float]":
+    """``{(org_id, provider, account_id): max VERIFIED-active issued_at}`` over ``records`` (consumer PR-C). Only
+    owner-signed active cloud-grant records (``authn`` bare-canonical, verified under the owner pubkey valid at their
+    seq) count; a disconnect / forged / unsigned record contributes nothing. Pure read, never raises out of the scan."""
+    from ..governor.cloud_connect import GRANT_SIGNAL as CG_SIGNAL, _GRANT_CORE as CG_CORE
+    from ..governor.authn import as_issued_at, verify_signed
+    hw: "dict[tuple, float]" = {}
+    for r in sorted(records, key=lambda r: r.seq):
+        p = getattr(r, "payload", None)
+        if not isinstance(p, dict) or p.get("signal") != CG_SIGNAL or p.get("state") != "active":
+            continue
+        oid, prov, acct = p.get("org_id"), p.get("provider"), p.get("account_id")
+        if not (isinstance(oid, str) and oid and isinstance(prov, str) and prov and isinstance(acct, str) and acct):
+            continue
+        if not verify_signed(p, CG_CORE, resolver.at(r.seq)):
+            continue
+        key = (oid, prov, acct)
+        at = as_issued_at(p.get("issued_at"))
+        if at > hw.get(key, float("-inf")):
+            hw[key] = at
+    return hw
+
+
+def stranded_active_cloud_grants(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, consumer PR-C) — the read-only cloud grants (`governor/cloud_connect.py`) a hard prune to K would STRAND:
+    those whose only authoritative owner-signed ACTIVE record sits in the pruned prefix [0..K) and is NOT superseded by
+    a live (>= K) active record with an equal-or-higher ``issued_at``. The fail-closed durability floor for the cloud
+    grant registry, which folds a signature-verifying genesis scan with NO snapshot seed — so a prune that dropped a
+    key's deciding active record would either silently DISCONNECT an active account or, by resetting its anti-replay
+    high-water, re-open REPLAY-RESURRECTION of a captured active grant for a disconnected one. Both are caught by the one
+    condition ``max(below-K active issued_at) > max(live active issued_at)``. EMPTY in the happy path. Returns keys as
+    ``provider:account@org_id``. VERIFIED-active only (a forged record never blocks a prune). Read-only. Mirrors
+    ``stranded_active_connected_repos`` / ``stranded_active_redpen_schedules``."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    below_hw = _cloud_grant_active_hw(below, resolver)
+    live_hw = _cloud_grant_active_hw(list(store.iter_records(since_seq=K - 1)), resolver)
+    neg = float("-inf")
+    return sorted(f"{k[1]}:{k[2]}@{k[0]}" for k, at in below_hw.items() if at > live_hw.get(k, neg))
 
 
 def _redpen_schedule_active_hw(records, resolver) -> "dict[tuple, float]":

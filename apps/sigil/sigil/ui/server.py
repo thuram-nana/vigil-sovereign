@@ -1828,6 +1828,45 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
                                             str(body.get("question", "")), ip=ip)
+        # Consumer PR-C — the unified CONNECT surface. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_CONNECT is on
+        # (the cloud actions also need VIGIL_CUSTOMER_CLOUD_CONNECT), the same flags that gate the edge routes; requester
+        # is the hop principal, org from the edge SESSION (never a free body field). Booleans are strict (`is True`): a
+        # string can never affirm authorization or start a re-check.
+        if action in ("connect_overview", "connect_ownership_poll"):
+            from .. import config as _config
+            if not _config.customer_connect_enabled():
+                return None
+            if action == "connect_overview":
+                return p.customer_connect_overview(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_ownership_poll(requester, str(body.get("org_id", "")), str(body.get("host") or ""),
+                                             method=str(body.get("method") or ""),
+                                             recheck=body.get("recheck") is True,
+                                             authorized=body.get("authorized") is True,
+                                             ip=ip, mfa_at=body.get("mfa_at"))
+        if action in ("cloud_connect_challenge", "cloud_connect_verify", "cloud_disconnect"):
+            from .. import config as _config
+            if not _config.customer_cloud_connect_enabled():
+                return None
+            org = str(body.get("org_id", ""))
+            prov, acct = str(body.get("provider") or ""), str(body.get("account_id") or "")
+            if action == "cloud_connect_challenge":
+                return p.cloud_connect_challenge(requester, org, prov, acct, ip=ip)
+            if action == "cloud_connect_verify":
+                return p.cloud_connect_verify(requester, org, prov, acct, str(body.get("role_ref") or ""), ip=ip,
+                                              mfa_at=body.get("mfa_at"))
+            return p.cloud_disconnect(requester, org, prov, acct, ip=ip)
+
+        # PR-I — the per-finding PROOF BUNDLE download (the governance-signed certificate + the shipped verifier, a ZIP
+        # re-verifiable offline). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_PROOF_BADGE is on; org from the
+        # edge SESSION, the finding's identity (slug + certificate digest, as the badge gave it) from the body.
+        if action == "proof_export":
+            from .. import config as _config
+            if not _config.customer_proof_badge_enabled():
+                return None
+            return p.customer_proof_export(requester, str(body.get("org_id", "")),
+                                           engagement_slug=str(body.get("engagement_slug") or ""),
+                                           cert_digest=str(body.get("cert_digest") or ""), ip=ip)
+
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":

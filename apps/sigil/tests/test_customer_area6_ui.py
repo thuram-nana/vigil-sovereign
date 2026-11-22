@@ -394,7 +394,7 @@ def test_the_app_statement_is_the_servers():
 # ---- the top bar, the routes and the guide (flag-gated) -----------------------------------------------------------
 _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogleCode", "viewBilling",
           "viewBillingReturn", "viewInvoices", "viewAssets", "viewAssessments", "viewTeam", "viewMonitoring",
-          "viewCode", "viewGuideScreen", "viewSecurityScreen", "viewPlans", "viewReports")
+          "viewCode", "viewGuideScreen", "viewSecurityScreen", "viewPlans", "viewReports", "viewConnect")
 
 
 def _wiring(flags: dict, script: str) -> dict:
@@ -412,7 +412,7 @@ def _wiring(flags: dict, script: str) -> dict:
         "function ntfWidget() { return null; }\nasync function doLogout() {}",
         'function viewSoon(t) { return "viewSoon:" + t; }',
         ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-         "LAUNCH_ON = false, CODE_ON = false;")] + [f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS])
+         "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false;")] + [f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS])
     # PR-L (Area 11): the shell also reads ATTACK_PATH_ON, so app.js's own flag line rides in beside PR-G's (read from
     # the page dataset like theirs: none of these flag sets names attackPath, so the shell shows no Attack-path link).
     prog = "\n".join([_DOM, f"require({json.dumps(str(UI_JS))});", world, _line(src, r"^  function h\(\) \{.*\}$"),
@@ -497,7 +497,7 @@ def test_the_guide_walks_through_plans_and_reports():
 # as it was before them — so the two renders can be compared.
 _GUIDE_RENDER = r"""
 Object.assign(document.body.dataset, %(flags)s);
-var MONITORING_ON = false, CODE_ON = false;
+var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false;
 %(page_flag)s
 %(route_shown)s
 const G = window.VIGIL_GUIDE;
