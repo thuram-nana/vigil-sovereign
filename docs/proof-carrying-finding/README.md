@@ -13,6 +13,8 @@ run VIGIL**. This directory is the public, framework-independent half of that pr
   - `trust-root.schema.json` — `TrustRoot` + `AuthorizerKey` (public keys + threshold).
   - `evidence-bundle.schema.json` — the top-level `evidence-bundle.json` object.
   - `pcf-certificate.schema.json` — the **PCF v0.1** wire format (`to_pcf` output).
+  - `pcf-finding-bundle.schema.json` — the **single signed-finding bundle** a customer downloads for one
+    finding (one `SignedEvidence` + its `TrustRoot`; SPEC §8).
 - **`SPEC.md`** — the byte-level spec: canonical JSON, domain separation, the m-of-n Ed25519
   threshold + weak-key rejection, the hash chain / signed head / anti-rollback high-water, and the
   out-of-band trust-root fingerprint pin. The verifier is derived from this, not from VIGIL's code.
@@ -66,6 +68,23 @@ Authenticity, binding, integrity, and chain are fully checkable **without** VIGI
 adoption lever: a third party can confirm that a signed, chained, byte-for-byte-intact finding really
 was issued under the operator's governance key, before ever installing VIGIL to re-run the oracle. A
 single flipped byte anywhere flips a standalone verify to NOT SOUND.
+
+## One finding at a time — the customer's proof bundle
+
+A VIGIL customer can download, for each finding in the app, a **single signed-finding bundle**
+(`vigil.pcf-finding-bundle/1`, SPEC §8): the finding's governance-signed certificate, its signatures, and
+the trust root they verify under — plus this verifier and a README of the exact commands. It is assembled
+by the customer's own plane from exactly what crossed the offense→sovereign seam for that finding, so it
+carries no engagement chain, no retained `oracle_context` and no raw evidence:
+
+```
+python3 verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint sha256:<hex>
+```
+
+Exit `0` (`finding VERIFIED`) proves the certificate is authentic under the pinned trust root, byte for
+byte, and that it declares a FACT provenance. Binding (`--oracle-context FILE`) and artifact integrity
+(`--evidence-root DIR`) are checked when you supply those inputs and reported `NOT CHECKED` otherwise;
+reproduction and the engagement chain are never checked by this mode (see the table above and SPEC §8.2).
 
 ## The out-of-band pin is what makes it zero-trust
 

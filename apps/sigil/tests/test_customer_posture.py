@@ -761,8 +761,9 @@ def test_with_the_flag_off_the_app_is_unchanged():
     table = src[i:src.index("\n  };", i) + 5]
     views = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogleCode", "viewBilling",
              "viewBillingReturn", "viewInvoices", "viewAssets", "viewAssessments", "viewGuideScreen", "viewMonitoring",
-             "viewTeam", "viewCode", "viewSecurityScreen", "viewFixFirst", "viewAttackPath")
-    stubs = ("var SECURITY_ON = false, MONITORING_ON = false, CODE_ON = false, TEAM_ON = false, ATTACK_PATH_ON = false;\n"
+             "viewTeam", "viewCode", "viewSecurityScreen", "viewFixFirst", "viewAttackPath", "viewConnect")
+    stubs = ("var SECURITY_ON = false, MONITORING_ON = false, CODE_ON = false, TEAM_ON = false, ATTACK_PATH_ON = false,"
+             " CONNECT_ON = false;\n"
              "function ntfWidget() { return null; }\nasync function doLogout() {}\n"
              "function viewSoon(t) { return \"viewSoon:\" + t; }\n"
              + "\n".join(f"function {v}() {{ return {json.dumps(v)}; }}" for v in views))

@@ -29,10 +29,17 @@ assert_no_offense()
 
 from ..bridge.daemon import bind_ok  # noqa: E402  (the ONE loopback/private bind invariant — reused, not re-authored)
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402  (stdlib-only graceful stop)
-from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402  (stdlib-only)
+from .static_site import IMMUTABLE, Asset, SiteSnapshot, normalize_rel, not_modified  # noqa: E402  (stdlib-only)
 
 # The packaged content tree (ships with the sigil package, so it deploys wherever sigil does).
 _PUBLIC_ROOT = Path(__file__).resolve().parent / "public_site"
+# PR-I — the public "Verify a VIGIL finding" explainer (/verify) and the shipped standalone verifier it hands out
+# (/verify/verify_pcf.py). Its OWN content root, outside public_site/, so the site snapshot and its build id are
+# byte-identical whether or not this feature exists; served only while VIGIL_CUSTOMER_PROOF_BADGE is on (read per
+# request). The verifier path is the one ui/proof_export.py ships in every proof bundle (a test pins the two equal).
+_PROOF_ROOT = Path(__file__).resolve().parent / "proof_site"
+_VERIFIER_PATH = Path(__file__).resolve().parents[4] / "docs" / "proof-carrying-finding" / "verify_pcf.py"
+_VERIFIER_REL = "verify/verify_pcf.py"
 
 # Strict CSP for a static, script-light marketing site: self only, no inline handlers, data: images (inline
 # SVG / data-URI icons), no framing, no off-site form submission. Set as a RESPONSE HEADER, never a <meta>.
@@ -67,6 +74,43 @@ def _number(raw: str, default: "int | None") -> "int | None":
     return int(raw) if _NUMBER.fullmatch(raw) else default
 
 
+def _proof_on() -> bool:
+    from .. import config
+    return config.customer_proof_badge_enabled()
+
+
+def _proof_site() -> "dict[str, Asset]":
+    """PR-I — the explainer page + the verifier, read ONCE at startup (like the site): ``{"verify": page,
+    "verify/verify_pcf.py": verifier}``, or ``{}`` when either cannot be read (the routes then 404 — fail-closed, and
+    the rest of the site is untouched). The page carries the verifier's sha256 and the governance fingerprint(s) VIGIL
+    publishes (``config.proof_published_fingerprints`` — each already validated as ``sha256:<64 hex>``, so nothing
+    from the environment reaches the page unvalidated)."""
+    import hashlib
+    from .. import config
+    try:
+        if not _VERIFIER_PATH.is_file() or _VERIFIER_PATH.stat().st_size > _MAX_BYTES:
+            return {}
+        data = _VERIFIER_PATH.read_bytes()
+    except OSError:
+        return {}
+    sha = hashlib.sha256(data).hexdigest()
+    fps = config.proof_published_fingerprints()
+    published = ("<ul>" + "".join(f"<li><code>{fp}</code></li>" for fp in fps) + "</ul>") if fps else (
+        '<p class="muted">VIGIL has not published a governance fingerprint on this site yet. Ask your VIGIL contact '
+        "for it through a channel you trust that is independent of the bundle you were given.</p>")
+    try:
+        snap = SiteSnapshot(_PROOF_ROOT, _CTYPES, max_file=_MAX_BYTES,
+                            html_values={"__VIGIL_VERIFIER_SHA256__": sha, "__VIGIL_PROOF_PUBLISHED__": published})
+    except (OSError, ValueError):
+        return {}
+    page = snap.get("verify.html")
+    if page is None:
+        return {}
+    verifier = Asset(rel=_VERIFIER_REL, body=data, ctype="text/plain; charset=utf-8", etag='"' + sha[:32] + '"',
+                     digest=sha[:12], versioned=False)
+    return {"verify": page, _VERIFIER_REL: verifier}
+
+
 class PublicServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
@@ -88,6 +132,9 @@ class PublicServer(GracefulMixin, ThreadingHTTPServer):
             self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
             # the whole site, read ONCE: what this process serves until it stops (one consistent build)
             self.site = SiteSnapshot(self.root, _CTYPES, max_file=_MAX_BYTES)
+            # PR-I: the /verify explainer + verifier, read once like the site; a separate snapshot, so the site and its
+            # build id are untouched; served only while the proof badge is on (checked per request)
+            self.proof = _proof_site()
             # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
             # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
             self.catalog_path = Path(catalog_path) if catalog_path else None
@@ -194,6 +241,8 @@ class PublicHandler(BaseHTTPRequestHandler):
         try:
             if urlparse(self.path).path == "/version.json":
                 return self._version(head=True)
+            if self._is_proof_route():
+                return self._serve_proof(head=True)
             return self._serve(head=True)
         except Exception:  # noqa: BLE001 — never 500-leak internals
             return self._fault(head=True)
@@ -213,7 +262,31 @@ class PublicHandler(BaseHTTPRequestHandler):
             return self._serve(head=False, override="cve/_detail.html")
         if re.fullmatch(r"/cve/year/\d{4}/?", path):
             return self._serve(head=False, override="cve/_year.html")
+        if self._is_proof_route():
+            return self._serve_proof(head=False)
         return self._serve(head=False)
+
+    # -- PR-I: the public "Verify a VIGIL finding" explainer (flag-gated per request) ------------------------------
+    def _is_proof_route(self) -> bool:
+        """True for /verify, /verify/ and anything under /verify/ while VIGIL_CUSTOMER_PROOF_BADGE is on. Off, these
+        paths fall through to the site exactly as before (which has no such page: the same 404)."""
+        rel = normalize_rel(urlparse(self.path).path)
+        return rel is not None and (rel == "verify" or rel.startswith("verify/")) and _proof_on()
+
+    def _serve_proof(self, head: bool):
+        rel = normalize_rel(urlparse(self.path).path)
+        hit = (getattr(self.server, "proof", None) or {}).get(rel or "")
+        if hit is None:
+            return self._not_found(head)
+        if not_modified(self.headers.get("If-None-Match", ""), hit.etag):
+            self._send_headers(304, hit.ctype, len(hit.body), cache=_PAGE_CACHE, etag=hit.etag)
+            return
+        self._send_headers(200, hit.ctype, len(hit.body), cache=_PAGE_CACHE, etag=hit.etag)
+        if not head:
+            try:
+                self.wfile.write(hit.body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     # -- read-only public CVE API (offense-free; reads the local catalog; no egress at request time) ---
     def _json(self, obj, code: int = 200):

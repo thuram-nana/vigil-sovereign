@@ -55,7 +55,7 @@
   "subject": [
     {
       "digest": {
-        "sha256": "6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6"
+        "sha256": "cd79863729e9910706c930a23b9b4de4aa73fb588494fd0c24eff46287a5891c"
       },
       "name": "docs/proof-carrying-finding/verify_pcf.py"
     },

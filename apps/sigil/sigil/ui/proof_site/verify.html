@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verify a VIGIL finding — VIGIL</title>
+<meta name="description" content="How an auditor checks a VIGIL finding's cryptographic proof offline, without a VIGIL account: the proof-carrying finding standard, the published verifier and the governance fingerprint to pin.">
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL" width="99" height="22"></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main">
+  <section class="hero"><div class="wrap">
+    <p class="eyebrow">For auditors</p>
+    <h1>Verify a VIGIL finding yourself.</h1>
+    <p class="lede">Every finding VIGIL reports to a customer carries a cryptographic proof. If a VIGIL customer gave
+      you a finding's proof bundle, you can check it here in three steps — offline, with no VIGIL account and none of
+      VIGIL's software.</p>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap prose">
+    <span class="chip chip--fact"><i class="dot"></i>What you are checking</span>
+    <h2>Two anchors, one of them yours to check</h2>
+    <p>A VIGIL finding is a <em>proof-carrying finding</em>: VIGIL's oracle confirms the issue from evidence VIGIL
+      captured itself, and the result is written into a signed <strong>evidence certificate</strong> — the finding's
+      class, its location, a SHA-256 digest of the exact evidence the oracle judged, and a note on how to verify and fix
+      it.</p>
+    <ol>
+      <li><strong>Governance signature (in the bundle).</strong> VIGIL's governance keys sign that certificate; a
+        threshold of distinct keys (m of n) must agree. This is what the proof bundle lets you check, byte for byte.</li>
+      <li><strong>Ledger anchor (on VIGIL's side).</strong> The signed certificate is then appended to the customer's
+        tamper-evident ledger, chained under a head the owner key signs. VIGIL checks this anchor on its servers; it is
+        not part of the download.</li>
+    </ol>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap prose">
+    <h2>Step 1 — pin VIGIL's governance fingerprint</h2>
+    <p>The proof bundle contains a copy of the governance trust root (public keys only). A copy can be swapped, so the
+      check is anchored by a fingerprint you take from this page — not from the bundle:</p>
+    __VIGIL_PROOF_PUBLISHED__
+  </div></section>
+
+  <section class="section--tight"><div class="wrap prose">
+    <h2>Step 2 — get the verifier and check it</h2>
+    <p>The verifier is one small, auditable Python file. It imports only the Python standard library and the
+      <code>cryptography</code> package — nothing of VIGIL's. The bundle includes a copy; you can also
+      <a href="/verify/verify_pcf.py">download it here</a>. Either way, check its SHA-256:</p>
+    <pre><code>sha256sum verify_pcf.py
+__VIGIL_VERIFIER_SHA256__  verify_pcf.py</code></pre>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap prose">
+    <h2>Step 3 — verify, offline</h2>
+    <pre><code>python3 -m pip install cryptography
+unzip vigil-proof-*.zip -d proof &amp;&amp; cd proof
+python3 verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint &lt;the fingerprint from step 1&gt;</code></pre>
+    <p>Exit code <code>0</code> and a last line of <code>finding VERIFIED</code> mean the proof checks out. Try the tamper
+      test: change any value of the certificate in <code>proof-bundle.json</code> (its <code>bug_class</code> or
+      <code>surface</code>, for example) and run it again — it prints <code>finding NOT VERIFIED</code> and exits
+      <code>2</code>. A file that is no longer valid JSON is an input error and exits <code>3</code>.</p>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap">
+    <div class="grid grid--2">
+      <div class="card">
+        <h3>What a verified result proves</h3>
+        <p>That the certificate was signed by at least the threshold of distinct VIGIL governance keys behind the
+          fingerprint you pinned, and that not one byte of it has changed since — its class, location, evidence digest
+          and every other field. And that it declares a FACT provenance: it was minted from evidence VIGIL captured or
+          re-drove itself, never from a model's text.</p>
+      </div>
+      <div class="card">
+        <h3>What it does not prove on its own</h3>
+        <p>That the issue still reproduces today: re-running VIGIL's deterministic oracle needs the retained evidence
+          and VIGIL's own verifier. It does not show that no other finding of the same assessment was withheld (that is
+          the engagement chain, which a single-finding bundle does not carry). The verifier prints which checks it ran
+          and which it did not.</p>
+      </div>
+    </div>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap prose">
+    <h2>The standard</h2>
+    <p>The bundle follows VIGIL's published proof-carrying-finding wire format (PCF v0.1): canonical JSON, a
+      domain-separated Ed25519 m-of-n threshold with weak-key rejection, and an out-of-band trust-root fingerprint. The
+      verifier is derived from that specification, not from VIGIL's code, and it says exactly which layers it checked.
+      Its bytes are pinned by VIGIL's signed verifier provenance — the SHA-256 shown in step 2.</p>
+  </div></section>
+</main>
+</body>
+</html>

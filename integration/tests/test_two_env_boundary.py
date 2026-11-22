@@ -90,6 +90,15 @@ import sigil.ui.sso_provision                # PR-H edge: the provisioner side o
 import sigil.ui.sso_edge                     # PR-H edge: the KEYLESS customer-edge SSO/SCIM routes (stdlib only)
 assert "framework" not in __import__("sys").modules, "PR-H SSO/SCIM modules must not import framework at module scope"
 assert "strix" not in __import__("sys").modules, "PR-H SSO/SCIM modules must not import strix at module scope"
+import sigil.governor.cloud_connect           # PR-C: the READ-ONLY cloud-grant registry (owner key) — SOVEREIGN
+assert "framework" not in __import__("sys").modules, "cloud_connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "cloud_connect must not import strix at module scope"
+import sigil.ui.connect                        # PR-C: the unified connect read projection (sites + repos + cloud)
+assert "framework" not in __import__("sys").modules, "ui.connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "ui.connect must not import strix at module scope"
+import sigil.ui.cloud_fetch                    # PR-C: the live AWS STS connect fetcher (stdlib SigV4) — SOVEREIGN
+assert "framework" not in __import__("sys").modules, "ui.cloud_fetch must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "ui.cloud_fetch must not import strix at module scope"
 import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
 _m = __import__("sys").modules
 assert "framework" not in _m, "warden_gate must not import framework at module scope"
@@ -236,6 +245,10 @@ assert "strix" not in _m, "remediation.apex_pcr must not import strix at module 
 import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
 assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
 assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
+import sigil.ui.proof_export                  # PR-I: the per-finding PCF export + proof badge (sovereign; re-states signed bytes)
+assert "framework" not in _m, "proof_export must not import framework at module scope"
+assert "strix" not in _m, "proof_export must not import strix at module scope"
+assert "_vigil_shipped_verify_pcf" not in _m, "proof_export must load the shipped verifier lazily, never at import"
 import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
 assert "framework" not in _m, "notify_channels must not import framework at module scope"
 assert "strix" not in _m, "notify_channels must not import strix at module scope"

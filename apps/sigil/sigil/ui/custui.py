@@ -65,6 +65,8 @@ _OIDC_SID_COOKIE = "vigil_customer_oidc_sid"
 _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         "object-src 'none'; img-src 'self' data:")
 _MAX_BODY = 65536
+# PR-I: the largest proof-bundle ZIP this edge will relay (the provisioner's own cap, proof_export.MAX_ZIP_BYTES).
+_MAX_PROOF_BYTES = 2 * 1024 * 1024
 
 # How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
 # worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
@@ -80,6 +82,11 @@ _SLOW_HOP_TIMEOUTS_S = {
     "oidc_finish": 45.0,
     # domain-ownership fetch: a 10 s ABSOLUTE wall-clock budget for the whole fetch -> + margin.
     "target_verify": 20.0,
+    # PR-C: the connect screen's automatic re-check runs that same ownership fetch -> the same budget.
+    "connect_ownership_poll": 20.0,
+    # PR-C: cloud connect = three STS calls (assume, caller identity, the negative control), each 5 s per blocking
+    # socket op (connect, then read) -> 30 s + margin.
+    "cloud_connect_verify": 45.0,
     # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
     "signup_request": 60.0,
     "recover_request": 60.0,
@@ -223,10 +230,17 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     overview = _config.customer_overview_enabled()
     # W6: the fuller Billing screen (the same billing reads either way; only how much the screen renders changes)
     billing_dashboard = _config.customer_billing_dashboard_enabled()
+    # PR-C: the Connect screen (VIGIL_CUSTOMER_CONNECT) and its cloud leg (VIGIL_CUSTOMER_CLOUD_CONNECT, which implies
+    # the first) — the same flags that serve their routes, so the screen and its API are never out of step
+    connect = _config.customer_connect_enabled()
+    cloud_connect = _config.customer_cloud_connect_enabled()
     # APEX PR-A: whether the Posture screen (score + worst-first triage + per-finding plain-language impact /
     # standards chips / remediation) is on — the same VIGIL_APEX_PRESENTATION that serves its route; a non-secret
     # on/off value written into the page, counting in the build id.
     presentation = _config.presentation_enabled()
+    # PR-I: whether each finding card may show the "Independently verifiable" proof badge (the same
+    # VIGIL_CUSTOMER_PROOF_BADGE that serves its download route); a non-secret on/off value counting in the build id.
+    proof_badge = _config.customer_proof_badge_enabled()
     # APEX PR-L (Area 11): whether the customer Attack-path storytelling screen and the blind-vuln (out-of-band)
     # confirmation badge are on. Each is a non-secret on/off value written into the page (counting in the build
     # id); with each off its SPA surface is absent and the sovereign findings projection never surfaces the inert
@@ -252,7 +266,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
+                                     "__VIGIL_CONNECT__": "1" if connect else "0",
+                                     "__VIGIL_CLOUD_CONNECT__": "1" if cloud_connect else "0",
                                      "__VIGIL_PRESENTATION__": "1" if presentation else "0",
+                                     "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0"})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
@@ -345,6 +362,22 @@ _CODE_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
     "code/fix": ("redpen_fix_this", ("repo", "finding_ref")),
     "code/retest": ("redpen_retest", ("repo", "finding_ref")),
 }
+
+# Consumer PR-C — the Connect screen's POST actions (served only while VIGIL_CUSTOMER_CONNECT is on; the cloud ones also
+# need VIGIL_CUSTOMER_CLOUD_CONNECT): the provisioner action each relays to, and the ONLY body fields it carries (the
+# org, the requester and the step-up stamp come from the session). `connect/ownership` is a POST because a re-check can
+# run the ownership fetch (and, on a pass, record the proof); its read, GET api/customer/connect, carries no finding data.
+_CONNECT_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
+    "connect/ownership": ("connect_ownership_poll", ("host", "method", "recheck", "authorized")),
+}
+_CLOUD_CONNECT_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
+    "connect/cloud/challenge": ("cloud_connect_challenge", ("provider", "account_id")),
+    "connect/cloud/verify": ("cloud_connect_verify", ("provider", "account_id", "role_ref")),
+    "connect/cloud/disconnect": ("cloud_disconnect", ("provider", "account_id")),
+}
+# The body fields that are customer AFFIRMATIONS / switches: relayed only as a real JSON true (anything else is false),
+# so a string or a number can never stand in for "I am authorized to test this asset".
+_CONNECT_BOOL_FIELDS = frozenset({"recheck", "authorized"})
 
 class CustomerServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
@@ -448,6 +481,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         ra = getattr(self, "_pending_retry_after", None)
         if ra:
             self.send_header("Retry-After", ra)
+        cd = getattr(self, "_pending_content_disposition", None)     # PR-I: set only by the proof-bundle download
+        if cd:
+            self._pending_content_disposition = None                 # single use: never rides a later response
+            self.send_header("Content-Disposition", cd)
         sc = getattr(self, "_pending_set_cookie", None)
         if sc:
             self.send_header("Set-Cookie", sc)
@@ -679,8 +716,12 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("posture_trend")
         if path == "/api/customer/assessments/posture" and _presentation_on():   # PR-A (flag OFF -> unknown-route 404)
             return self._customer_read_relay("assessment_posture")
+        if path == "/api/customer/assessments/proof" and _proof_badge_on():    # PR-I (flag OFF -> unknown-route 404)
+            return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
+        if path == "/api/customer/connect" and _connect_on():           # PR-C Connect screen (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("connect_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
             return self._code_connected()
         # E2b — Google OIDC (GET: the SPA links to /login as a top-level nav; the IdP redirects to /callback).
@@ -735,6 +776,44 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
         return self._json(r, c)
+
+    def _proof_download(self):
+        """PR-I — GET the proof bundle (a ZIP) for ONE of the session org's findings, as an attachment. Like every
+        customer read, the REQUESTER and the ORG come from the SERVER-side session, never the query (a query
+        ``org_id`` is ignored): the query carries only the finding's identity as the findings read gave it
+        (``engagement_slug`` + ``cert_digest``), each relayed only when it appears exactly once and within its bound
+        (else empty, which the provisioner refuses). The provisioner resolves the finding within the session org's own
+        slug set, verifies the bundle with two independent verifiers and returns its bytes; this edge only checks the
+        reply is the bytes it names (sha256 + size cap) and serves them ``no-store``. A cross-site request carries no
+        session (SameSite=Strict) → 401. No proof is ever assembled or verified here."""
+        import base64
+        import binascii
+        import re as _re
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                   "engagement_slug": one("engagement_slug", 200), "cert_digest": one("cert_digest", 64)}
+        c, r = self._provision("proof_export", str(rec.get("username") or ""), payload)
+        if c != 200 or not isinstance(r, dict):
+            return self._json(r, c)
+        try:
+            data = base64.b64decode(str(r.get("zip_b64") or ""), validate=True)
+        except (ValueError, binascii.Error):
+            return self._deny(502, "provisioner reply unreadable")
+        if not data or len(data) > _MAX_PROOF_BYTES or hashlib.sha256(data).hexdigest() != r.get("sha256"):
+            return self._deny(502, "provisioner reply unreadable")
+        name = str(r.get("filename") or "")
+        if not _re.fullmatch(r"vigil-proof-[A-Za-z0-9._-]{1,80}\.zip", name):
+            name = "vigil-proof.zip"
+        self._pending_content_disposition = f'attachment; filename="{name}"'
+        return self._send(200, data, "application/zip")
 
     # --- Google OIDC (E2b): the keyless edge drives the browser-facing half; the secret stays provisioner-side
     def _oidc_state_store(self):
@@ -1088,6 +1167,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._monitoring(action, body)
         if action in _CODE_ACTIONS and _redpen_on():                 # C6 Code screen (flag OFF -> unknown-action 404)
             return self._code(action, body)
+        if action in _CONNECT_ACTIONS and _connect_on():             # PR-C Connect (flag OFF -> unknown-action 404)
+            return self._connect(_CONNECT_ACTIONS[action], body)
+        if action in _CLOUD_CONNECT_ACTIONS and _cloud_connect_on():  # PR-C cloud leg (flag OFF -> unknown-action 404)
+            return self._connect(_CLOUD_CONNECT_ACTIONS[action], body)
         if action == "assistant/ask" and _assistant_on():            # PR-J assistant (flag OFF -> unknown-action 404)
             return self._assistant(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
@@ -1276,6 +1359,25 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                                       "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
         for k in fields:
             if k in body:
+                payload[k] = body[k]
+        c, r = self._provision(target, str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _connect(self, route: "tuple[str, tuple[str, ...]]", body: dict):
+        """PR-C — the Connect screen's actions. REQUESTER + ORG + step-up stamp from the SERVER-side session, never the
+        body (a body org_id is ignored): a customer connects assets only for THEIR bound org. Only the fields the route
+        names travel (copied by name, so nothing else can ride along); an affirmation/switch field travels only as a
+        real JSON true. The sovereign provisioner admits, checks, and records only owner-verified connections."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        target, fields = route
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}   # E3c step-up stamp from the SESSION, never body
+        for k in fields:
+            if k in _CONNECT_BOOL_FIELDS:
+                payload[k] = body.get(k) is True
+            elif k in body:
                 payload[k] = body[k]
         c, r = self._provision(target, str(rec.get("username") or ""), payload)
         return self._json(r, c)
@@ -1515,9 +1617,25 @@ def _presentation_on() -> bool:
     return _config.presentation_enabled()
 
 
+def _proof_badge_on() -> bool:
+    # PR-I — the proof badge + per-finding proof-bundle download (the same flag the cockpit proof_export action reads).
+    from .. import config as _config
+    return _config.customer_proof_badge_enabled()
+
+
 def _assistant_on() -> bool:
     from .. import config as _config
     return _config.customer_assistant_enabled()
+
+
+def _connect_on() -> bool:
+    from .. import config as _config
+    return _config.customer_connect_enabled()
+
+
+def _cloud_connect_on() -> bool:
+    from .. import config as _config
+    return _config.customer_cloud_connect_enabled()
 
 
 def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,

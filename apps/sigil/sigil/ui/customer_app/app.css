@@ -415,6 +415,39 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 /* "Sign in with a passkey" on the sign-in screen */
 .cust-passkey-block { margin-top: 16px; }
 .cust-passkey { width: 100%; justify-content: center; margin-top: 12px; }
+/* Connect (VIGIL_CUSTOMER_CONNECT): the three tiles, the proof panel, copyable values, the live re-check status */
+.cust-connect-tiles { align-items: start; }
+.cust-connect-tile h3 { margin-top: 0; }
+.cust-connect-list { display: grid; gap: 8px; margin: 8px 0; }
+.cust-connect-acct { display: grid; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); }
+.cust-connect-proof { margin-top: 14px; display: grid; gap: 10px; }
+.cust-connect-methods { display: flex; flex-wrap: wrap; gap: 8px; }
+.cust-connect-how p { margin: 0 0 6px; }
+.cust-connect-copy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0; }
+.cust-connect-copy .k { min-width: 6ch; opacity: 0.8; }
+.cust-connect-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.9rem; padding: 4px 8px;
+  border-radius: 8px; border: 1px solid var(--border); overflow-wrap: anywhere; word-break: break-all; }
+.cust-connect-policy { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.85rem; padding: 10px 12px;
+  border-radius: 10px; border: 1px solid var(--border); overflow-x: auto; max-width: 100%; margin: 6px 0; }
+.cust-connect-steps { display: grid; gap: 12px; padding-left: 1.2rem; margin: 0; }
+.cust-connect-status { margin: 0; min-height: 1.4em; }
+.cust-connect-authz { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.5rem 0; }
+.cust-copy { padding-inline: 10px; }
+
+/* PR-I — the "Independently verifiable" proof badge and its verify-it-yourself panel (shown only while the edge has
+   VIGIL_CUSTOMER_PROOF_BADGE on). The badge is a real button (keyboard + screen reader), styled like the kit's badges. */
+.cust-proof { margin-top: 10px; }
+.cust-proof-badge { cursor: pointer; font: inherit; background: none; }
+.cust-proof-badge:focus-visible { outline: 2px solid var(--ok, #6cd08a); outline-offset: 2px; }
+.cust-proof-panel { margin-top: 10px; padding: 12px 14px; border-radius: var(--r-2, 10px);
+  border: 1px solid var(--border, #2a2a2a); display: grid; gap: 6px; }
+.cust-proof-panel[hidden] { display: none; }
+.cust-proof-panel h4 { margin: 0; }
+.cust-proof-panel p { margin: 0; }
+.cust-proof-panel .cust-kv span:last-child { word-break: break-all; text-align: right; font-variant-numeric: tabular-nums; }
+.cust-proof-anchors { margin: 0; padding-left: 1.2em; }
+.cust-proof-cmd { margin: 0; padding: 10px 12px; border-radius: var(--r-2, 10px); background: var(--bg-2, #111);
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 0.85rem; }
 
 /* ---- PR-L (Area 11): blind-vuln (out-of-band) confirmation + attack-path storytelling --------------------------
    Rendered ONLY when the edge has the matching flag on (VIGIL_CUSTOMER_BLIND_VULN / VIGIL_CUSTOMER_ATTACK_PATH);
