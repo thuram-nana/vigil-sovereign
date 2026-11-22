@@ -2913,7 +2913,7 @@ def _stage_owner_secret_file(dest: str, secret: str, *, overwrite: bool):
     return tmp
 
 
-def _sign_with_staged_secret(dest: str, secret: str, *, overwrite: bool, sign):
+def _sign_then_deliver_owner_file(dest: str, secret: str, *, overwrite: bool, sign):
     """Run `sign()` (the owner-signing of a SCIM bearer's fingerprint) with `secret` already durable on disk — staged
     beside `dest`, since a signed fingerprint whose plaintext was never delivered would be a dead SCIM token — and
     replace `dest` only once `sign()` succeeded: a refused or failed signing leaves `dest` exactly as it was (never a
@@ -3019,8 +3019,8 @@ def cmd_sso(a) -> None:
                                            **common)
             # the bearer is durable BEFORE its fingerprint is signed, and lands at --token-out only once the config
             # is: a refused config (any validation, e.g. an over-bound --clock-skew) leaves that file as it was
-            seq = (_sign_with_staged_secret(a.token_out, token, overwrite=a.overwrite, sign=sign) if token
-                   else sign())
+            seq = int(_sign_then_deliver_owner_file(a.token_out, token, overwrite=a.overwrite, sign=sign) if token
+                      else sign())
             print(f"  {verb[4:].upper()} SSO configured for {a.org} (owner-signed, seq {seq}); "
                   f"SCIM {'on — the bearer was written (0600) to the requested file' if token else 'off'}")
             for k in ("saml_acs_url", "saml_sp_entity_id") if verb == "set-saml" else ("oidc_redirect_uri",):
@@ -3032,9 +3032,10 @@ def cmd_sso(a) -> None:
             import secrets as _secrets
             token = _secrets.token_urlsafe(32)
             # durable BEFORE it is signed; at --token-out only once it is (a refused rotation leaves the file as it was)
-            seq, _tok = _sign_with_staged_secret(
+            # only the sequence number comes back out of the signing step: the bearer itself never leaves the file
+            seq = int(_sign_then_deliver_owner_file(
                 a.token_out, token, overwrite=a.overwrite,
-                sign=lambda: reg.rotate_scim_token(a.org, issued_at=_time.time(), token=token))
+                sign=lambda: reg.rotate_scim_token(a.org, issued_at=_time.time(), token=token)[0]))
             print(f"  SCIM bearer rotated for {a.org} (owner-signed, seq {seq}); the new token was written (0600) "
                   f"to the requested file; the previous token no longer authenticates")
         elif verb == "disable-scim":
