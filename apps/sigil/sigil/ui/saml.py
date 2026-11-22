@@ -16,9 +16,12 @@ WHAT THIS MODULE VERIFIES, FAIL-CLOSED (every check must pass or the assertion i
      validly cover EITHER the one processed assertion itself OR the enveloping Response; because step 2 proved
      there is exactly one assertion in the document, a valid signature over the assertion/Response provably
      covers the element we read (no wrapping gap). A signature over any OTHER id does not satisfy the binding.
-  4. ISSUER == the org's configured `idp_entity_id`.
-  5. AUDIENCE restriction CONTAINS the org's `sp_entity_id` (org-scoping — org A's assertion fails org B).
-  6. RECIPIENT / DESTINATION == the org's `acs_url`.
+  4. RESPONSE STATUS — a Response must carry a top-level StatusCode of Success (absent or any other ⇒ refused).
+     ISSUER == the org's configured `idp_entity_id`.
+  5. AUDIENCE — at least one AudienceRestriction, and EACH one contains the org's `sp_entity_id` (org-scoping —
+     org A's assertion fails org B; a restriction naming only another SP is not met).
+  6. RECIPIENT / DESTINATION == the org's `acs_url`, read from a BEARER SubjectConfirmation (a holder-of-key or
+     any other confirmation method is never treated as bearer).
   7. TIME WINDOWS — Conditions NotBefore/NotOnOrAfter and SubjectConfirmationData NotOnOrAfter, within the
      configured clock skew (itself BOUNDED: a config over `_MAX_CLOCK_SKEW_SECONDS` is refused). A missing
      NotOnOrAfter is refused (it bounds the replay window).
@@ -98,6 +101,8 @@ _MAX_CLOCK_SKEW_SECONDS = 600
 # would pin markers for as long. Real IdPs issue minutes (a bearer SubjectConfirmationData is typically 5 minutes);
 # a day is far beyond any of them, and caps a marker's life at this + `_MAX_CLOCK_SKEW_SECONDS` + the ledger's grace.
 _MAX_ASSERTION_LIFETIME_SECONDS = 24 * 3600
+_STATUS_SUCCESS = "urn:oasis:names:tc:SAML:2.0:status:Success"
+_CM_BEARER = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
 
 # The signature-verifier backend contract: given the raw signed bytes and the owner-configured IdP certs (PEM),
 # return the set of element `ID`s whose enveloped signature validly verifies under one of those certs. An empty
@@ -442,6 +447,14 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
     if not bound:
         raise SamlError("no valid signature binds the processed assertion (forged / unsigned / wrapped)")
 
+    # --- RESPONSE STATUS: a Response must carry a top-level StatusCode of Success. A Response reporting any other
+    # status (Requester / Responder / AuthnFailed / ...) is the IdP saying the sign-in did NOT succeed, whatever
+    # assertion it wraps; a Response with no Status at all is malformed (the element is required) — both refused.
+    if root_is_response:
+        status_code = root.find(_P("Status") + "/" + _P("StatusCode"))
+        if status_code is None or str(status_code.get("Value") or "") != _STATUS_SUCCESS:
+            raise SamlError("the SAML Response status is not Success (the IdP reports the sign-in did not succeed)")
+
     # --- ISSUER (the assertion's, falling back to the Response's) == the configured IdP entity id.
     issuer_el = assertion.find(_A("Issuer"))
     if issuer_el is None and root_is_response:
@@ -449,14 +462,17 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
     if _text(issuer_el) != str(getattr(config, "idp_entity_id", "")):
         raise SamlError("SAML Issuer does not match the configured IdP entity id")
 
-    # --- AUDIENCE restriction CONTAINS our SP entity id (org-scoping).
+    # --- AUDIENCE: there is at least one AudienceRestriction and our SP entity id is in EACH of them (SAML core
+    # 2.5.1.4: every restriction must be met — one naming only another SP means the assertion is not for us).
     conditions = assertion.find(_A("Conditions"))
     if conditions is None:
         raise SamlError("assertion has no <Conditions> (cannot bound audience/time)")
-    audiences = {_text(a) for restr in conditions.findall(_A("AudienceRestriction"))
-                 for a in restr.findall(_A("Audience"))}
-    if str(getattr(config, "sp_entity_id", "")) not in audiences:
-        raise SamlError("assertion audience does not contain our SP entity id (wrong-tenant / replayed)")
+    restrictions = conditions.findall(_A("AudienceRestriction"))
+    sp_id = str(getattr(config, "sp_entity_id", ""))
+    if not restrictions or any(sp_id not in {_text(a) for a in restr.findall(_A("Audience"))}
+                               for restr in restrictions):
+        raise SamlError("assertion audience does not contain our SP entity id in every AudienceRestriction "
+                        "(wrong-tenant / replayed)")
 
     # --- TIME WINDOWS: Conditions NotBefore/NotOnOrAfter within skew (NotOnOrAfter required — bounds replay).
     cond_nooa = _parse_instant(conditions.get("NotOnOrAfter"), "Conditions/NotOnOrAfter")
@@ -470,14 +486,19 @@ def verify_saml_response(xml_bytes: bytes, *, config, now: float, replay_ledger:
     subject = assertion.find(_A("Subject"))
     if subject is None:
         raise SamlError("assertion has no <Subject>")
+    # Only a BEARER confirmation is accepted (the Web Browser SSO profile): a holder-of-key or sender-vouches
+    # confirmation asks the SP to prove something this edge never checks, so it is never treated as bearer.
     scd = None
     for sc in subject.findall(_A("SubjectConfirmation")):
+        if str(sc.get("Method") or "") != _CM_BEARER:
+            continue
         d = sc.find(_A("SubjectConfirmationData"))
         if d is not None:
             scd = d
             break
     if scd is None:
-        raise SamlError("assertion has no <SubjectConfirmationData> (cannot bind recipient/time)")
+        raise SamlError("assertion has no bearer <SubjectConfirmation> with <SubjectConfirmationData> (cannot bind "
+                        "recipient/time)")
     if str(scd.get("Recipient") or "") != str(getattr(config, "acs_url", "")):
         raise SamlError("SubjectConfirmationData Recipient does not match our ACS url")
     scd_nooa = _parse_instant(scd.get("NotOnOrAfter"), "SubjectConfirmationData/NotOnOrAfter")

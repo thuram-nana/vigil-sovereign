@@ -261,8 +261,10 @@ def _resp(*, scd_irt="_req1", resp_irt: "str | None" = "_req1", aid="a1") -> byt
     scd = f' InResponseTo="{scd_irt}"' if scd_irt is not None else ""
     return (f'<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
             f'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="r1" Destination="https://app/acs"{irt_attr}>'
+            f'<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>'
             f'<saml:Assertion ID="{aid}"><saml:Issuer>https://idp</saml:Issuer>'
-            f'<saml:Subject><saml:NameID>alice</saml:NameID><saml:SubjectConfirmation>'
+            f'<saml:Subject><saml:NameID>alice</saml:NameID>'
+            f'<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
             f'<saml:SubjectConfirmationData Recipient="https://app/acs" NotOnOrAfter="2001-09-14T00:00:00Z"{scd}/>'
             f'</saml:SubjectConfirmation></saml:Subject>'
             f'<saml:Conditions NotOnOrAfter="2001-09-14T00:00:00Z"><saml:AudienceRestriction>'
@@ -703,3 +705,53 @@ def test_cli_set_oidc_sp_info_and_revoke_deprovisions_sso_members(cli_env, capsy
     assert SsoConfigRegistry(SpineStore(path)).config("org_abc") is None
     assert orgs.membership_role("sso_" + "a" * 24, "org_abc") is None
     assert orgs.membership_role("cust_f", "org_abc") == "founder"            # only SSO-provisioned members
+
+
+@pytest.mark.parametrize("failing", ["write", "fsync"])
+def test_a_failed_bearer_stage_leaves_no_temp_file_behind(tmp_path, monkeypatch, failing):
+    """A write or fsync failure while staging the bearer discards the 0600 temp file it opened: nothing holding the
+    unsigned bearer is left beside --token-out, and --token-out itself is never created."""
+    from sigil import cli
+    out = tmp_path / "tokens"
+    out.mkdir()
+    dest = out / "scim.token"
+
+    def boom(*_a, **_k):
+        raise OSError(f"{failing} failed for the test")
+    monkeypatch.setattr(os, failing, boom)
+    try:
+        with pytest.raises(OSError, match=f"{failing} failed for the test"):
+            cli._stage_owner_secret_file(str(dest), "s3cret-bearer", overwrite=False)
+    finally:
+        monkeypatch.undo()
+    assert list(out.iterdir()) == []
+    staged = cli._stage_owner_secret_file(str(dest), "s3cret-bearer", overwrite=False)   # control: staged
+    assert [p.name for p in out.iterdir()] == [staged.name] and staged.read_text() == "s3cret-bearer\n"
+
+
+def test_a_failed_commit_keeps_the_signed_bearer_where_the_error_says(tmp_path, monkeypatch):
+    """Once the bearer's fingerprint is signed, a failed move into place must not destroy the staged copy (it is the
+    only copy of a live token): the error names the staged path, and that file still holds the bearer."""
+    from sigil import cli
+    out = tmp_path / "tokens"
+    out.mkdir()
+    dest = out / "scim.token"
+    signed: list = []
+
+    def boom(*_a, **_k):
+        raise OSError("replace failed for the test")
+    monkeypatch.setattr(os, "replace", boom)
+    try:
+        with pytest.raises(OSError, match="signed but could not be moved into place") as e:
+            cli._sign_then_deliver_owner_file(str(dest), "s3cret-bearer", overwrite=False,
+                                              sign=lambda: signed.append(1) or 7)
+    finally:
+        monkeypatch.undo()
+    assert signed == [1] and not dest.exists()
+    staged = [p for p in out.iterdir()]
+    assert len(staged) == 1 and staged[0].name.startswith(".tmp-")
+    assert str(staged[0]) in str(e.value) and staged[0].read_text() == "s3cret-bearer\n"
+    assert stat.S_IMODE(staged[0].stat().st_mode) == 0o600
+    # control: with the rename working the bearer lands at dest and the result is sign()'s
+    assert cli._sign_then_deliver_owner_file(str(dest), "s3cret-bearer", overwrite=False, sign=lambda: 7) == 7
+    assert dest.read_text() == "s3cret-bearer\n"

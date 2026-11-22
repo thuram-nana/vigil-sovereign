@@ -43,10 +43,13 @@ CFG = SsoConfig(org_id="acme", protocol="saml", issued_at=1.0, state="active",
                 sp_entity_id="https://sp.vigil/acme", acs_url="https://app.vigil/acs/acme", clock_skew_seconds=60)
 
 
+_BEARER = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
+
+
 def _assertion(aid="a1", aud="https://sp.vigil/acme", rcpt="https://app.vigil/acs/acme",
                nooa="2001-09-14T00:00:00Z", nb="2001-09-13T00:00:00Z", issuer="https://idp.example",
                nameid="user@acme", groups=("admins",), with_subject=True, with_conditions=True,
-               with_scd=True, with_nameid=True, cond_nooa=None, scd_nooa=None):
+               with_scd=True, with_nameid=True, cond_nooa=None, scd_nooa=None, cm=_BEARER, restrictions=None):
     # `cond_nooa` / `scd_nooa` override ONE NotOnOrAfter bound (None = `nooa`; "" = omit the attribute), so a test
     # can make exactly one of the two time guards the only one that refuses.
     cond_nooa = nooa if cond_nooa is None else cond_nooa
@@ -56,26 +59,35 @@ def _assertion(aid="a1", aud="https://sp.vigil/acme", rcpt="https://app.vigil/ac
     if with_subject:
         nid = f'<saml:NameID>{nameid}</saml:NameID>' if with_nameid else ''
         scd_attr = f' NotOnOrAfter="{scd_nooa}"' if scd_nooa else ''
-        scd = (f'<saml:SubjectConfirmation><saml:SubjectConfirmationData Recipient="{rcpt}"'
+        scd = (f'<saml:SubjectConfirmation Method="{cm}">'
+               f'<saml:SubjectConfirmationData Recipient="{rcpt}"'
                f'{scd_attr}/></saml:SubjectConfirmation>') if with_scd else ''
         subj = f'<saml:Subject>{nid}{scd}</saml:Subject>'
     cond = ""
     if with_conditions:
         nbattr = f' NotBefore="{nb}"' if nb else ''
         cond_attr = f' NotOnOrAfter="{cond_nooa}"' if cond_nooa else ''
-        cond = (f'<saml:Conditions{nbattr}{cond_attr}><saml:AudienceRestriction>'
-                f'<saml:Audience>{aud}</saml:Audience></saml:AudienceRestriction></saml:Conditions>')
+        # `restrictions` = the AudienceRestriction elements, each a tuple of its Audience values (None = one, `aud`)
+        restr = "".join('<saml:AudienceRestriction>' + "".join(f'<saml:Audience>{x}</saml:Audience>' for x in r)
+                        + '</saml:AudienceRestriction>' for r in (restrictions or ((aud,),)))
+        cond = f'<saml:Conditions{nbattr}{cond_attr}>{restr}</saml:Conditions>'
     return (f'<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{aid}">'
             f'<saml:Issuer>{issuer}</saml:Issuer>{subj}{cond}'
             f'<saml:AttributeStatement><saml:Attribute Name="groups">{grp}</saml:Attribute>'
             f'</saml:AttributeStatement></saml:Assertion>')
 
 
-def _response(assertions=None, dest="https://app.vigil/acs/acme", rid="r1", **kw):
+_SUCCESS = "urn:oasis:names:tc:SAML:2.0:status:Success"
+
+
+def _response(assertions=None, dest="https://app.vigil/acs/acme", rid="r1", status_code=_SUCCESS, **kw):
+    # `status_code` = the top-level Response StatusCode Value (None = omit the Status element)
     body = assertions if assertions is not None else _assertion(**kw)
+    status = (f'<samlp:Status><samlp:StatusCode Value="{status_code}"/></samlp:Status>'
+              if status_code is not None else '')
     destattr = f' Destination="{dest}"' if dest is not None else ''
     return (f'<?xml version="1.0"?><samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
-            f'ID="{rid}"{destattr}>{body}</samlp:Response>').encode()
+            f'ID="{rid}"{destattr}>{status}{body}</samlp:Response>').encode()
 
 
 def _led():
@@ -192,7 +204,7 @@ def test_a_verifier_answer_that_is_not_a_set_is_refused(attested):
 
 def _rooted(tag: str) -> bytes:
     return (f'<samlp:{tag} xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="w1">'
-            f'{_assertion()}</samlp:{tag}>').encode()
+            f'<samlp:Status><samlp:StatusCode Value="{_SUCCESS}"/></samlp:Status>{_assertion()}</samlp:{tag}>').encode()
 
 
 def test_a_signature_over_a_root_that_is_not_a_response_does_not_bind():
@@ -348,7 +360,8 @@ def test_not_yet_valid_refused():
 def test_missing_not_on_or_after_refused():
     a = ('<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">'
          '<saml:Issuer>https://idp.example</saml:Issuer>'
-         '<saml:Subject><saml:NameID>u</saml:NameID><saml:SubjectConfirmation>'
+         '<saml:Subject><saml:NameID>u</saml:NameID>'
+         '<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
          '<saml:SubjectConfirmationData Recipient="https://app.vigil/acs/acme"/></saml:SubjectConfirmation></saml:Subject>'
          '<saml:Conditions><saml:AudienceRestriction><saml:Audience>https://sp.vigil/acme</saml:Audience>'
          '</saml:AudienceRestriction></saml:Conditions></saml:Assertion>')
@@ -649,3 +662,81 @@ def test_a_config_without_a_cert_is_refused_even_by_a_verifier_that_attests():
 def test_fatal2_no_framework_import():
     import sigil.ui.saml  # noqa: F401
     assert "framework" not in sys.modules and "strix" not in sys.modules
+
+
+def test_the_bounded_assertion_lifetime_is_twenty_four_hours():
+    # the bound is pinned by its VALUE (the lifetime tests above read the constant, so they hold at any value): an
+    # assertion deliverable 24 h + 1 s from now is refused, one deliverable exactly 24 h from now verifies
+    assert saml._MAX_ASSERTION_LIFETIME_SECONDS == 86_400
+    far = _iso(NOW + 86_400 + 1)
+    with pytest.raises(SamlError, match="bounded assertion lifetime"):
+        _verify(_response(cond_nooa=far, scd_nooa=far))
+    at = _iso(NOW + 86_400)
+    assert _verify(_response(cond_nooa=at, scd_nooa=at)).name_id == "user@acme"
+
+
+# --- the Response status, EACH audience restriction, the bearer confirmation ---------------------------------------
+
+@pytest.mark.parametrize("code", ["urn:oasis:names:tc:SAML:2.0:status:Responder",
+                                  "urn:oasis:names:tc:SAML:2.0:status:Requester",
+                                  "urn:oasis:names:tc:SAML:2.0:status:AuthnFailed", "", None],
+                         ids=["responder", "requester", "authn-failed", "blank", "no-status"])
+def test_a_response_whose_status_is_not_success_is_refused(code):
+    # a signed assertion wrapped in a Response that reports a non-Success status (or none) is not a sign-in
+    with pytest.raises(SamlError, match="status is not Success"):
+        _verify(_response(status_code=code))
+    # same-shape control: the identical document with a Success status verifies
+    assert _verify(_response()).name_id == "user@acme"
+
+
+def test_only_the_top_level_status_code_is_read():
+    # a nested (second-level) Success under a top-level Responder is still a failed sign-in
+    body = _assertion()
+    nested = ('<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Responder">'
+              '<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:StatusCode>'
+              '</samlp:Status>')
+    xml = (f'<?xml version="1.0"?><samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
+           f'ID="r1" Destination="https://app.vigil/acs/acme">{nested}{body}</samlp:Response>').encode()
+    with pytest.raises(SamlError, match="status is not Success"):
+        _verify(xml)
+
+
+@pytest.mark.parametrize("restrictions", [(("https://other-sp",), ("https://sp.vigil/acme",)),
+                                          (("https://sp.vigil/acme",), ("https://other-sp",)),
+                                          (("https://sp.vigil/acme",), ())],
+                         ids=["first-names-another-sp", "second-names-another-sp", "second-is-empty"])
+def test_our_sp_must_be_in_each_audience_restriction(restrictions):
+    # SAML core 2.5.1.4: EVERY AudienceRestriction must be met — one that does not name our SP refuses the assertion
+    with pytest.raises(SamlError, match="every AudienceRestriction"):
+        _verify(_response(restrictions=restrictions))
+    # same-shape control: two restrictions that BOTH name our SP (one among others) verify
+    ok = (("https://other-sp", "https://sp.vigil/acme"), ("https://sp.vigil/acme",))
+    assert _verify(_response(restrictions=ok)).name_id == "user@acme"
+
+
+def test_no_audience_restriction_at_all_is_refused():
+    a = _assertion().replace(
+        '<saml:AudienceRestriction><saml:Audience>https://sp.vigil/acme</saml:Audience></saml:AudienceRestriction>', '')
+    with pytest.raises(SamlError, match="every AudienceRestriction"):
+        _verify(_response(assertions=a))
+
+
+@pytest.mark.parametrize("cm", ["urn:oasis:names:tc:SAML:2.0:cm:holder-of-key",
+                                "urn:oasis:names:tc:SAML:2.0:cm:sender-vouches", "", "urn:x:bearer"],
+                         ids=["holder-of-key", "sender-vouches", "blank", "lookalike"])
+def test_only_a_bearer_subject_confirmation_is_accepted(cm):
+    with pytest.raises(SamlError, match="no bearer <SubjectConfirmation>"):
+        _verify(_response(cm=cm))
+    assert _verify(_response()).name_id == "user@acme"          # same-shape control: the bearer method verifies
+
+
+def test_the_recipient_is_read_from_the_bearer_confirmation_not_another_one():
+    # a holder-of-key confirmation naming our ACS beside a bearer one naming another ACS: the bearer one decides
+    hok = ('<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:holder-of-key">'
+           '<saml:SubjectConfirmationData Recipient="https://app.vigil/acs/acme" NotOnOrAfter="2001-09-14T00:00:00Z"/>'
+           '</saml:SubjectConfirmation>')
+    a = _assertion(rcpt="https://elsewhere/acs").replace("</saml:NameID>", "</saml:NameID>" + hok, 1)
+    with pytest.raises(SamlError, match="Recipient does not match"):
+        _verify(_response(assertions=a))
+    a = _assertion().replace("</saml:NameID>", "</saml:NameID>" + hok.replace("acs/acme", "acs/other"), 1)
+    assert _verify(_response(assertions=a)).name_id == "user@acme"   # control: the bearer one names our ACS

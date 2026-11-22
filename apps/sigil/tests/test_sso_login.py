@@ -197,14 +197,17 @@ def _saml_response(aid="s1", aud="https://sp/acme", rcpt="https://app/acs/acme",
     grp = "".join(f'<saml:AttributeValue>{g}</saml:AttributeValue>' for g in groups)
     a = (f'<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{aid}">'
          f'<saml:Issuer>{issuer}</saml:Issuer><saml:Subject><saml:NameID>{nameid}</saml:NameID>'
-         f'<saml:SubjectConfirmation><saml:SubjectConfirmationData Recipient="{rcpt}" '
+         f'<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
+         f'<saml:SubjectConfirmationData Recipient="{rcpt}" '
          f'NotOnOrAfter="2001-09-14T00:00:00Z"/></saml:SubjectConfirmation></saml:Subject>'
          f'<saml:Conditions NotBefore="2001-09-13T00:00:00Z" NotOnOrAfter="2001-09-14T00:00:00Z">'
          f'<saml:AudienceRestriction><saml:Audience>{aud}</saml:Audience></saml:AudienceRestriction></saml:Conditions>'
          f'<saml:AttributeStatement><saml:Attribute Name="groups">{grp}</saml:Attribute></saml:AttributeStatement>'
          f'</saml:Assertion>')
     return (f'<?xml version="1.0"?><samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="r1" '
-            f'Destination="https://app/acs/acme">{a}</samlp:Response>').encode()
+            f'Destination="https://app/acs/acme">'
+            f'<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>'
+            f'{a}</samlp:Response>').encode()
 
 
 def test_sso_login_saml_mints_capped_membership(env):
@@ -481,6 +484,7 @@ def test_scim_on_sign_in_clamps_a_role_above_the_current_config_and_gives_back_o
 
 def test_scim_on_sign_in_leaves_a_role_the_owner_set_outside_the_ceiling(env):
     orgreg, _ = env
+    _second_admin(env)            # another administrator exists, so the last-admin guard cannot be what holds dana
     _, dana = _scim(env, "POST", "/scim/v2/Users", {"userName": "dana@acme.test", "groups": [{"value": "sec"}]})
     orgreg.grant_membership("acme", dana["id"], "founder", issued_at=_issue())  # the owner's own hand-set grant
     audits: list = []
@@ -808,3 +812,20 @@ def test_the_clamp_never_demotes_the_orgs_last_administrator(env):
     _second_admin(env)                                                                # another administrator appears
     res = _saml_in(env, "fay@acme.test", audit=lambda *a: audits.append(a))
     assert res.role == "analyst" and audits == [("sso_role_clamp", fay["id"], "role=analyst was=org_admin")]
+
+
+def test_an_unchanged_config_after_a_clamp_mints_nothing_on_later_sign_ins(env):
+    # the give-back fires only when the config now allows MORE than the member holds: an unchanged config re-grants
+    # nothing and writes no audit row on any later sign-in
+    orgreg, _ = env
+    _second_admin(env)
+    _, bob = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@acme.test", "groups": [{"value": "admins"}]})
+    _resign_acme(env, group_role_map={"admins": "analyst", "sec": "analyst"}, role_cap="analyst")
+    audits: list = []
+    assert _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a)).role == "analyst"   # the clamp
+    assert len(audits) == 1 and audits[0][0] == "sso_role_clamp"
+    for _ in range(3):
+        res = _saml_in(env, "bob@acme.test", audit=lambda *a: audits.append(a))
+        assert res.role == "analyst" and res.seq is None
+    assert len(audits) == 1
+    assert orgreg.membership_role(bob["id"], "acme") == "analyst"
