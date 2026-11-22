@@ -637,9 +637,25 @@
       "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-report-pdf-renderer-unprovisioned",
+      "title": "The customer report's PDF download needs an owner-provisioned HTML-to-PDF renderer that lives outside the customer venv",
+      "summary": "PR-G (Area 6). The shareable assessment report is built in the sovereign venv as a deterministic, self-contained HTML document that is complete on its own (VIGIL_CUSTOMER_PDF_REPORT, default OFF). Its PDF form needs a headless HTML-to-PDF renderer: a large native dependency that must NOT be installed in the customer/sovereign venv (FATAL-2 and dependency hygiene), so providing it is an owner/ops step: install the reference wrapper tools/report_pdf/render_pdf.py with its library in a dedicated environment and set VIGIL_REPORT_PDF_RENDERER to its absolute path. Until then the PDF download REFUSES with a customer-safe message (fail-closed) and the HTML download is unaffected. The seam itself is built and tested with a stand-in renderer: the path must be absolute, a regular executable that no group/other may write, and outside the running venv; it runs with a fixed argv (no shell), a minimal environment (no secret reaches it), a private temporary directory, a wall-clock timeout that kills its whole process group, an output-size cap, and a %PDF-/%%EOF check on what it returns. No real renderer runs in CI, so the visual fidelity of the PDF is not claimed here.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/report_pdf.py",
+        "symbol": "renderer_path"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "tools/report_pdf/render_pdf.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
-  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
+  "honest_limit_sites_note":"The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
   "honest_limit_sites": [
     {
       "file": "engine/crucible/framework/v2/attest/__init__.py",

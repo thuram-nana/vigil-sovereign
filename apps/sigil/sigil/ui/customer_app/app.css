@@ -415,6 +415,10 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 /* "Sign in with a passkey" on the sign-in screen */
 .cust-passkey-block { margin-top: 16px; }
 .cust-passkey { width: 100%; justify-content: center; margin-top: 12px; }
+/* PR-G (Area 6) — Plans (the tier comparison) and Reports (download + the standards mapping) */
+.cust-plan-price { font-size: var(--fs-lg, 1.25rem); font-weight: 600; margin: 4px 0 8px; }
+#cust-compliance .cust-kv .k { white-space: normal; }
+
 /* Connect (VIGIL_CUSTOMER_CONNECT): the three tiles, the proof panel, copyable values, the live re-check status */
 .cust-connect-tiles { align-items: start; }
 .cust-connect-tile h3 { margin-top: 0; }

@@ -61,6 +61,9 @@ def build_mirror() -> dict:
         "standard_versions": dict(sorted(S.STANDARD_VERSIONS.items())),
         "frameworks": list(S._FRAMEWORKS),
         "ocsf_class_names": dict(sorted(S.OCSF_CLASS_NAMES.items())),
+        # PR-G (Area 6): the OWASP Top 10:2021 category names, so the consumer's compliance view names every category
+        # (A01..A10) exactly as the engine's report does — display data only, never a coverage assertion.
+        "owasp_names": dict(sorted(S.OWASP_2021_NAMES.items())),
         "priority": {
             "severity_rank": dict(P.SEVERITY_RANK),
             "severity_impact": dict(P._SEVERITY_IMPACT),

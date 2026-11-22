@@ -21,6 +21,13 @@ already established):
     field is absent (honest absence, never a synthesised "clean").
   * NO ALIASING: the surfaced block is a deep copy, so a caller mutating a read never corrupts the spine record
     or a later read.
+  * FOLD-CACHE IDENTITY: each gating flag is part of the cached findings index's identity. Flipping a flag between
+    two reads of one spine under the fold cache gives each read exactly the uncached read for its own value
+    (test_each_gate_flips_between_two_reads_under_the_fold_cache); the index is folded under the values its read
+    keyed it by, never a flag re-read mid-fold
+    (test_the_cached_index_is_projected_under_the_values_its_read_keyed_it_by); and a flag-OFF cached read drops
+    that block even from an index built with it ON, a second independent refusal
+    (test_a_flag_off_cached_read_drops_the_block_even_from_an_index_built_on).
 """
 from __future__ import annotations
 
@@ -300,6 +307,103 @@ def test_only_a_proven_finding_carries_the_blocks(monkeypatch):
                  payload={"finding_ref": "ghost", "attack_path": _attack_path(), "oob_attestation": _oob()})
     out = _assess.assessment_findings(store, "acme", now=NOW)
     assert out["count"] == 0 and "attack_path" not in repr(out)
+
+
+# ---- the fold-cache path: every gating flag is part of the cached index's identity -----------------------------
+_GATE_FLAGS = (("attack_path", ATTACK_FLAG), ("oob_attestation", BLIND_FLAG))
+_GATE_IDS = [f for f, _flag in _GATE_FLAGS]
+
+
+def _chained_store():
+    """One org whose finding carries all three gated blocks (attack path, out-of-band attestation, presentation)."""
+    store = _store()
+    p = _prov(store, ensure_owner_keypair())
+    pres = {"schema": 1, "plain_impact": {"what": "x", "category_consequence": "", "established": "",
+                                          "description_on_file": True}, "remediation": "fix", "priority": {}}
+    _org_with_finding(p, iter(range(1, 10_000)), attack_path=_attack_path(), oob=_oob(), presentation=pres)
+    return store
+
+
+def _identity(entry) -> "dict[str, bool]":
+    """The gating-flag values an assessments index entry is keyed by (the tail of its cache key)."""
+    return dict(entry.key[-len(_assess._GATED_FIELDS):])
+
+
+@pytest.mark.parametrize("first", [True, False], ids=["on-then-off", "off-then-on"])
+@pytest.mark.parametrize("field,flag", _GATE_FLAGS, ids=_GATE_IDS)
+def test_each_gate_flips_between_two_reads_under_the_fold_cache(monkeypatch, field, flag, first):
+    """REGRESSION (the "fold cache ON" CI leg's bug class, for PR-L's flags). The cached findings index projects each
+    finding under the gating flags; were a flag left out of the index's cache identity, an index built with it ON
+    would keep surfacing the block after it went OFF, and one built OFF would keep hiding it after it came back ON.
+    With the fold cache forced ON (so every CI leg runs this), starting from each value: every cached read equals the
+    UNCACHED read for its own value, a second read under the same value reuses the entry (the cache still caches),
+    and each entry is keyed by — and its view folded under — its read's own value."""
+    from sigil.spine import fold_cache
+    for _f, other in _GATE_FLAGS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.delenv("VIGIL_APEX_PRESENTATION", raising=False)
+    store = _chained_store()
+
+    def read(on: bool, *, cached: bool) -> dict:
+        monkeypatch.setenv(flag, "1" if on else "")
+        monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1" if cached else "")
+        return _assess.assessment_findings(store, "acme", now=NOW)
+
+    truth = {on: read(on, cached=False) for on in (False, True)}              # the uncached scan, per value
+    assert field in truth[True]["findings"][0] and field not in truth[False]["findings"][0]
+    fold_cache.clear_all()
+    built = []
+    for on in (first, not first, first, not first):   # ON -> OFF: a stale index LEAKS the block; OFF -> ON: LOSES it
+        assert read(on, cached=True) == truth[on], f"{flag} {'ON' if on else 'OFF'}"
+        (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()                    # the cached path answered
+        assert read(on, cached=True) == truth[on]
+        (again,) = _assess._ASSESSMENTS_FOLD._entries.values()
+        assert again is entry                                                     # ... and reused its entry
+        built.append((on, entry))
+    for on, entry in built:                             # each entry keyed by, and folded under, its read's own value
+        assert _identity(entry)[field] is on and entry.state.gates[field] is on
+
+
+@pytest.mark.parametrize("field", _GATE_IDS)
+def test_the_cached_index_is_projected_under_the_values_its_read_keyed_it_by(monkeypatch, field):
+    """Every gating flag is read ONCE per fold-cache read and bound into the view the index is folded into
+    (``_AssessmentsView.gates``), never re-read while folding: a flag that changes mid-fold cannot leave an entry whose
+    rows disagree with the values in its cache identity (every later read under those values reuses them)."""
+    from sigil.spine import fold_cache
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    fold_cache.clear_all()
+    store = _chained_store()
+    looks = iter([True])                                       # ON for the read's own look, OFF for any later one
+    monkeypatch.setitem(_assess._GATED_FIELDS, field, lambda: next(looks, False))
+    assert field in _only_finding(store)
+    (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    assert _identity(entry)[field] is True and entry.state.gates[field] is True
+    assert all(field in j for rows in entry.state.findings.values() for _seq, j in rows)
+
+
+@pytest.mark.parametrize("field,flag", _GATE_FLAGS, ids=_GATE_IDS)
+def test_a_flag_off_cached_read_drops_the_block_even_from_an_index_built_on(monkeypatch, field, flag):
+    """The second, independent refusal: a fold-cache read drops, from every row it returns, each gated block whose
+    flag is OFF for it — so even an index built with the flag ON, were the flags ever lost from its cache identity
+    (simulated here), cannot surface that block while its flag is off. The other block, whose flag stays on, is
+    still served (the refusal is per block)."""
+    from sigil.spine import fold_cache
+    monkeypatch.setenv("VIGIL_FOLD_CACHE_ENABLED", "1")
+    monkeypatch.setenv(ATTACK_FLAG, "1")
+    monkeypatch.setenv(BLIND_FLAG, "1")
+    fold_cache.clear_all()
+    store = _chained_store()
+    real = _assess.cached_unsigned_read
+    monkeypatch.setattr(_assess, "cached_unsigned_read", lambda *a, identity=(), **kw: real(*a, **kw))
+    assert field in _only_finding(store)
+    (entry,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    monkeypatch.delenv(flag)
+    (other,) = [f for f, _flag in _GATE_FLAGS if f != field]
+    for rows in (_assess.assessment_findings(store, "acme", now=NOW)["findings"],
+                 _assess.all_findings_for_org(store, "acme", now=NOW)):
+        assert rows and all(field not in f and other in f for f in rows), rows
+    (again,) = _assess._ASSESSMENTS_FOLD._entries.values()
+    assert again is entry and entry.state.gates[field] is True      # served from the flag-ON index, and refused
 
 
 if __name__ == "__main__":

@@ -258,6 +258,21 @@ assert "strix" not in _m, "governor.fair_queue must not import strix at module s
 import sigil.governor.shard_on_signup  # PR-F: the SOVEREIGN owner-side shard-placement-on-signup policy
 assert "framework" not in _m, "governor.shard_on_signup must not import framework at module scope (owner-signed, no engine)"
 assert "strix" not in _m, "governor.shard_on_signup must not import strix at module scope"
+import sigil.governor.plan_change  # PR-G: the self-serve credit-plan change (processor-side only; the drain still mints)
+assert "framework" not in _m, "governor.plan_change must not import framework at module scope"
+assert "strix" not in _m, "governor.plan_change must not import strix at module scope"
+import sigil.ui.plans  # PR-G: the Plans screen read (a pure projection of the owner catalog + the org's own plan)
+assert "framework" not in _m, "ui.plans must not import framework at module scope"
+assert "strix" not in _m, "ui.plans must not import strix at module scope"
+import sigil.ui.compliance_view  # PR-G: the OWASP/PCI/SOC2 roll-up of PROVEN findings (renders via the mirror)
+assert "framework" not in _m, "ui.compliance_view must not import framework at module scope"
+assert "strix" not in _m, "ui.compliance_view must not import strix at module scope"
+import sigil.ui.report_export  # PR-G: the deterministic, self-contained HTML report of PROVEN findings
+assert "framework" not in _m, "ui.report_export must not import framework at module scope"
+assert "strix" not in _m, "ui.report_export must not import strix at module scope"
+import sigil.ui.report_pdf  # PR-G: the PDF seam — the owner's renderer runs OUT of this venv, never imported
+assert "framework" not in _m, "ui.report_pdf must not import framework at module scope"
+assert "strix" not in _m, "ui.report_pdf must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
