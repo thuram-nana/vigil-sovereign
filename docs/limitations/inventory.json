@@ -576,6 +576,38 @@
       "w16_issue": null
     },
     {
+      "id": "LIMIT-cloud-connect-gcp-azure-verdict",
+      "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
+      "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/cloud_connect.py",
+        "symbol": "_VERIFIABLE_PROVIDERS"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-customer-cloud-posture-run",
+      "title": "A customer's connected cloud account is recorded read-only, but no gated posture run consumes the grant yet",
+      "summary": "Consumer PR-C records an owner-signed READ-ONLY cloud grant and exposes CloudConnectRegistry.assume_target, the default-deny read a later cloud-posture engagement consumes (the role + external id of an active, unexpired, owner-signed grant of a verifiable provider, for exactly that org/account). The engine-side consumer is not built: the existing live cloud sensor (engine/crucible/framework/v2/sensors/cloud_live.py) reads the HOST's own ambient identity, not a customer's cross-account role. Running posture for a customer is an engagement with the same owner go-live bar as live external targets (owner-signed authority + the posture gate + VIGIL_CUSTOMER_PROD_EXECUTION) and must pass build_offense_gate -> conjunctive_decide. Until it lands a connected account is an owner-verified asset record only: nothing reads the customer's cloud beyond the three STS calls of the connect proof itself, and a grant authorizes no offense.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/cloud_connect.py",
+        "symbol": "CloudConnectRegistry.assume_target"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
       "id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
       "title": "The customer proof badge covers the positive finding certificate only: a remediation's signed negative clearance certificate is not surfaced to the customer",
       "summary": "The customer proof badge and per-finding PCF export (consumer PR-I, Area 8) surface the governance-signed POSITIVE finding certificate only. A remediation's signed NEGATIVE clearance certificate (vigil-remediation-cert-v2, minted offense-side by the APEX PCR close-the-loop and the prove driver) does not reach the customer (sovereign) plane: nothing carries it across the offense-to-sovereign seam until the Area 10 fix-it wiring (consumer PR-K) dispatches the fix worker and carries its certificate, which then surfaces through this same export (plan Area 10, step 2). Fail-closed meanwhile: the badge and the bundle assert nothing about a fix, and a retest's 'fixed' verdict is shown as the retest's own result, never as a signed clearance.",

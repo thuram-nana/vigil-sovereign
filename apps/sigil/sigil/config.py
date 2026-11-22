@@ -618,6 +618,82 @@ def customer_retest_reproof_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_connect_enabled() -> bool:
+    """True iff the unified customer CONNECT surface is ON (`VIGIL_CUSTOMER_CONNECT` affirmative; consumer PR-C).
+    OFF by default (mirrors `redpen_enabled`): with it off EVERY connect action is absent (404 exactly as an
+    unknown route) — the one-screen connect overview, the single-asset ownership poll, and the read-only cloud-grant
+    connect / verify / disconnect all refuse, nothing is minted and no cloud grant is recorded — so the server is
+    byte-identical to a build without PR-C.
+
+    This flag gates only the one-screen connect site/repo/cloud SURFACE; it never changes how an asset is TESTED.
+    CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER BY ITSELF AUTHORIZES LIVE OFFENSE: a live customer run
+    still rides the UNCHANGED `vigil_core.posture.customer_prod_execution_enabled()` (VIGIL_CUSTOMER_PROD_EXECUTION)
+    owner gate PLUS a current host-ownership proof PLUS the owner-signed EngagementAuthority, and a cloud grant is
+    READ-ONLY (running cloud posture against it is a separate, separately-gated engagement — not unlocked here).
+
+    The cloud leg has its OWN flag on top of this one (`customer_cloud_connect_enabled`). Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_cloud_connect_enabled() -> bool:
+    """True iff the connect surface's CLOUD leg is ON: `VIGIL_CUSTOMER_CLOUD_CONNECT` affirmative AND the master
+    `customer_connect_enabled()` (the cloud leg is part of the connect surface and can never be on without it).
+    OFF by default: the cloud routes are absent (404 exactly as an unknown route), the connect overview carries no
+    cloud leg, and no cloud challenge / grant can be recorded.
+
+    Even when ON, connecting an account still fails CLOSED until the owner provisions VIGIL's own read-only AWS
+    connector identity (`cloud_connect_fetcher` / `cloud_connect_aws_principal_arn` below) — the identity the
+    customer's role trusts. A grant is READ-ONLY and authorizes no offense. Read at call time."""
+    if not customer_connect_enabled():
+        return False
+    return (os.environ.get("VIGIL_CUSTOMER_CLOUD_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-C — the connect surface's durable limiters (their own marker dirs under SIGIL_HOME, never shared with
+# the login limiter). CONNECT_CHECK = the per-(org, host) automatic ownership re-check CADENCE; CONNECT_ORG = the
+# per-org ceiling on ownership fetches across all hosts; CLOUD_CONNECT = the per-org ceiling on cloud verifications
+# (each one is three STS calls under VIGIL's connector identity).
+CONNECT_CHECK_RATELIMIT_DIR = _customer / "connect_check_ratelimit"
+CONNECT_ORG_RATELIMIT_DIR = _customer / "connect_org_ratelimit"
+CLOUD_CONNECT_RATELIMIT_DIR = _customer / "cloud_connect_ratelimit"
+
+# --- AWS STS OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) -----------------------
+# The ONLY host the cloud-connect fetcher (`ui.cloud_fetch`) may reach, enforced BEFORE any socket opens (mirrors
+# GITHUB_APP_EGRESS_ALLOWLIST). No endpoint override: the credential-holding egress can only ever reach AWS STS
+# (the global endpoint, SigV4 region us-east-1). A customer supplies only a role ARN — a PARAMETER of the signed
+# request, never a URL — so the customer can never steer this egress anywhere.
+AWS_STS_EGRESS_ALLOWLIST = frozenset({"sts.amazonaws.com"})
+
+# VIGIL's connector principal (an IAM role or user in the aws partition) — the exact `Principal` a customer's
+# read-only role trusts. Validated so a malformed value can never be printed into a customer's trust policy.
+_AWS_PRINCIPAL_ARN_RE = re.compile(r"arn:aws:iam::[0-9]{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,512}")
+
+
+def cloud_connect_aws_principal_arn() -> str:
+    """VIGIL's AWS connector principal ARN (`VIGIL_CLOUD_CONNECT_AWS_PRINCIPAL_ARN`), format-checked, or "" when
+    unset/malformed (the cloud leg then offers nothing — fail closed, never a trust policy naming a bad principal)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_PRINCIPAL_ARN") or "").strip()
+    return raw if _AWS_PRINCIPAL_ARN_RE.fullmatch(raw) else ""
+
+
+def cloud_connect_fetcher():
+    """The live AWS cloud-connect fetcher (``ui.cloud_fetch.AwsStsConnectFetcher``: assume the customer's role with
+    the issued external id, read the caller identity, and run the same-shape negative control) when the cloud leg is
+    ON and the owner has provisioned VIGIL's connector credentials + principal, else None (fail closed: the
+    provisioner then offers and verifies nothing). Credentials: `VIGIL_CLOUD_CONNECT_AWS_ACCESS_KEY_ID` +
+    `VIGIL_CLOUD_CONNECT_AWS_SECRET_ACCESS_KEY` (+ optional `VIGIL_CLOUD_CONNECT_AWS_SESSION_TOKEN`) — an identity
+    whose only permission is `sts:AssumeRole`. Lazily imports the stdlib-only fetcher so `config` stays import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_aws_principal_arn():
+        return None
+    key_id = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_ACCESS_KEY_ID") or "").strip()
+    secret = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_SECRET_ACCESS_KEY") or "").strip()
+    token = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_SESSION_TOKEN") or "").strip()
+    if not key_id or not secret:
+        return None
+    from .ui.cloud_fetch import AwsStsConnectFetcher
+    return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
+
+
 def customer_posture_enabled() -> bool:
     """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
     Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of
