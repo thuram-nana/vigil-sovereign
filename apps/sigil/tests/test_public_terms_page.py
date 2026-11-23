@@ -5,8 +5,8 @@ Load-bearing invariants:
     cookie, like every other public page;
   * every public-site footer that links Privacy also links Terms, and the sitemap lists ``/terms``;
   * the page loads nothing off-site (no script, no external stylesheet or image), every internal link it names is
-    served by pubui, and its only off-site links are to the public source repository's licensing / acceptable-use
-    documents;
+    served by pubui, and its only off-site links are the public source repository's licensing / acceptable-use
+    documents, the company site and the legal contact mailbox;
   * the page carries the visible "reviewed on" notice at the top and no "draft" banner;
   * ``test_terms_page_has_no_owner_placeholders`` FAILS while any ``[[OWNER: ...]]`` marker remains. It is meant to
     keep the page un-mergeable until the owner supplies the facts only the owner can supply (registered address,
@@ -29,6 +29,8 @@ from sigil.ui.pubui import build_public_server
 ROOT = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
 TERMS = ROOT / "terms" / "index.html"
 REPO_DOCS = "https://github.com/thuram-nana/vigil-sovereign/blob/main/"
+COMPANY_SITE = "https://sigilsovereign.com"
+LEGAL_MAILTO = "mailto:info@sigilsovereign.com"
 
 # An owner placeholder: "[[OWNER:" in any case, with any whitespace inside the brackets.
 _OWNER_MARKER = re.compile(r"\[\[\s*owner\s*:[^\]]*\]\]|\[\[\s*owner\s*:", re.IGNORECASE)
@@ -144,12 +146,15 @@ def test_terms_page_loads_nothing_off_site_and_runs_no_script():
 def test_terms_page_links_resolve():
     refs = _refs(TERMS.read_text(encoding="utf-8"))
     off_site = [h for h in refs.anchors if re.match(r"(?i)[a-z][a-z0-9+.-]*:|//", h)]
-    assert off_site, "the page should link LICENSING.md and ACCEPTABLE-USE.md in the source repository"
+    repo_links = [h for h in off_site if h.startswith(REPO_DOCS)]
+    assert sorted(set(repo_links)) == [REPO_DOCS + "ACCEPTABLE-USE.md", REPO_DOCS + "LICENSING.md"], repo_links
     for h in off_site:
-        assert h in (REPO_DOCS + "LICENSING.md", REPO_DOCS + "ACCEPTABLE-USE.md"), f"unexpected off-site link {h}"
-    # the documents those links name exist in this repository
+        assert h in (REPO_DOCS + "LICENSING.md", REPO_DOCS + "ACCEPTABLE-USE.md", COMPANY_SITE, LEGAL_MAILTO), \
+            f"unexpected off-site link {h}"
+    assert LEGAL_MAILTO in off_site and COMPANY_SITE in off_site
+    # the repository documents those links name exist in this repository
     repo = Path(__file__).resolve().parents[3]
-    for h in off_site:
+    for h in repo_links:
         assert (repo / h[len(REPO_DOCS):]).is_file(), h
     # in-page anchors point at an element of the page
     for h in refs.anchors:
