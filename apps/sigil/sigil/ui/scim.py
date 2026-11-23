@@ -260,7 +260,8 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
                      directory_registry=None, audit: Optional[AuditFn] = None) -> ProvisionResult:
     """Resolve a VERIFIED sign-in to the member it admits. SCIM off ⇒ JIT. SCIM on ⇒ directory-managed: link the
     subject to the org's directory user (userName by letter case only, or externalId exactly — also via the extra
-    immutable `link_ids`), and admit only an ACTIVE user holding a live membership. A subject no directory user
+    immutable `link_ids`; identifiers that reach more than one directory user are AMBIGUOUS and refused, never
+    settled by picking one), and admit only an ACTIVE user holding a live membership. A subject no directory user
     matches is REFUSED: a derived `sso_username(subject)` is never looked up instead, since a directory user's id is
     derived from the userName / externalId it had when it was CREATED — after a rename that id belongs to a
     DIFFERENT person than the one now carrying the old name. Mints nothing in that mode except the CLAMP and its
@@ -278,16 +279,15 @@ def _login_principal(org_registry, config: SsoConfig, *, subject: str, link_ids=
         return _provision_from_identity(org_registry, config, external_id=subject, groups=groups,
                                         issued_at=issued_at, audit=audit)
     d = _directory_registry(directory_registry, org_registry).directory(config.org_id)
-    u = d.user_by_name(subject)
-    if u is None:
-        for key in (subject, *link_ids):
-            matches = d.users_by_external_id(key)
-            if len(matches) > 1:          # two directory users carry it: which person signed in is unknowable
-                raise SsoLoginError("more than one person in this organization's directory carries this identifier "
-                                    "(ambiguous, refused); the organization's IT administrator must correct it")
-            if matches:
-                u = matches[0]
-                break
+    # EVERY directory user this sign-in's identifiers reach (the subject by userName or externalId, each link id by
+    # externalId): two or more ⇒ which person signed in is unknowable, so it is refused rather than one picked
+    reached = {x.id: x for x in d.users_linked_by(subject)}
+    for key in link_ids:
+        reached.update((x.id, x) for x in d.users_by_external_id(key))
+    if len(reached) > 1:
+        raise SsoLoginError("more than one person in this organization's directory carries this sign-in's "
+                            "identifiers (ambiguous, refused); the organization's IT administrator must correct it")
+    u = next(iter(reached.values()), None)
     if u is None:
         raise SsoLoginError("this organization adds members through its directory (SCIM) and this person is not in "
                             "it; the organization's IT administrator must assign VIGIL to them")
@@ -645,10 +645,16 @@ def _put_user(req: _Req, uid: str, st: dict) -> None:
     other = req.dir.user_by_name(st["user_name"])
     if other is not None and other.id != uid:
         raise _ScimFail(409, "a user with this userName already exists", "uniqueness")
-    if st["external_id"] and any(o.id != uid for o in req.dir.users_by_external_id(st["external_id"])):
-        # a sign-in links a person by externalId, so two users carrying one would make that link ambiguous
-        raise _ScimFail(409, "a user with this externalId already exists", "uniqueness")
     cur = req.dir.user(uid)
+    # A sign-in links a person by userName (letter case only) or externalId (exactly), so a write that would let ONE
+    # sign-in identifier reach this user AND another one is refused. Only a clash the write INTRODUCES counts: one this
+    # user already had (a directory written before this rule) never blocks its own update — above all its deactivation.
+    clash = req.dir.users_sharing_a_sign_in_identifier(uid, user_name=st["user_name"], external_id=st["external_id"])
+    if cur is not None:
+        clash -= req.dir.users_sharing_a_sign_in_identifier(uid, user_name=cur.user_name, external_id=cur.external_id)
+    if clash:
+        raise _ScimFail(409, "another user of this organization already carries this userName or externalId as a "
+                             "sign-in identifier", "uniqueness")
     try:
         req.dir.put_user(uid, user_name=st["user_name"], external_id=st["external_id"],
                          display_name=st["display_name"], active=st["active"], selectors=st["selectors"],

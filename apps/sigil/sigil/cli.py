@@ -2894,7 +2894,7 @@ def _stage_owner_secret_file(dest: str, secret: str, *, overwrite: bool):
     except FileNotFoundError:
         st = None
     if st is not None:
-        if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+        if not _stat.S_ISREG(st.st_mode):                 # lstat: a symlink is never a regular file here
             raise ValueError("the token file must be a regular file path (no symlink, device or directory)")
         if not overwrite:
             raise FileExistsError("the token file already exists (pass --overwrite to replace it)")

@@ -281,6 +281,32 @@ class OrgDirectory:
             return []
         return [u for u in self.users() if u.external_id == want]
 
+    def users_linked_by(self, identifier: str) -> "list[DirectoryUser]":
+        """EVERY user a sign-in presenting `identifier` links to: the one whose userName it equals up to letter case
+        only, and each whose externalId it equals exactly (the matching of `user_by_name` / `user_by_external_id`; a
+        blank or padded identifier links nobody). A caller that admits a person must treat more than one as
+        AMBIGUOUS, never pick one of them."""
+        want = _exact_key(identifier)
+        if not want:
+            return []
+        key = username_key(want)
+        return [u for u in self.users() if username_key(u.user_name) == key or u.external_id == want]
+
+    def users_sharing_a_sign_in_identifier(self, user_id: str, *, user_name: str,
+                                           external_id: str = "") -> "frozenset[str]":
+        """The ids of the OTHER users (never `user_id`) that one sign-in identifier would link to together with a
+        user carrying `user_name` / `external_id` (`users_linked_by`): another user whose userName equals this
+        userName or this externalId up to letter case, whose externalId equals this userName up to letter case, or
+        whose externalId equals this externalId exactly. Any of them makes such a sign-in ambiguous."""
+        out = {u.id for u in self.users_linked_by(external_id)}
+        name = _exact_key(user_name)
+        if name:
+            key = username_key(name)
+            out.update(u.id for u in self.users()
+                       if username_key(u.user_name) == key or (u.external_id and username_key(u.external_id) == key))
+        out.discard(str(user_id or ""))
+        return frozenset(out)
+
     def groups(self) -> "list[DirectoryGroup]":
         return [self._groups[k] for k in sorted(self._groups)]
 

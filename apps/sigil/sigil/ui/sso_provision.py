@@ -63,7 +63,9 @@ def _registries(p):
 
 
 def _org(org_id) -> str:
-    oid = str(org_id or "").strip()
+    """The org id EXACTLY as relayed when it is a well-formed tenant id, else "" (selects no config, so every leg
+    refuses): never trimmed into a well-formed one."""
+    oid = str(org_id or "")
     return oid if _TENANT_RE.fullmatch(oid) else ""
 
 
@@ -147,12 +149,12 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
 
 
 def _oidc_transport(p, cfg):
-    """The token-exchange + JWKS transport: the test-injected hooks, else the HOST-ALLOWLISTED https transport over
-    the owner-signed `oidc_egress_hosts` (an empty allowlist refuses every egress — fail-closed)."""
+    """The token-exchange + JWKS transport, leg by leg: a test-injected hook where one is set, else that leg of the
+    HOST-ALLOWLISTED https transport over the owner-signed `oidc_egress_hosts` (an empty allowlist refuses every
+    egress — fail-closed). A leg without a hook is never left to the unpinned stdlib default."""
     from .oidc import host_allowlisted_transport
-    if p.sso_oidc_http_post is None and p.sso_oidc_jwks_fetcher is None:
-        return host_allowlisted_transport(cfg.oidc_egress_hosts)
-    return p.sso_oidc_http_post, p.sso_oidc_jwks_fetcher
+    post, fetch = host_allowlisted_transport(cfg.oidc_egress_hosts)
+    return (p.sso_oidc_http_post or post), (p.sso_oidc_jwks_fetcher or fetch)
 
 
 def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str, ip: str = "",
