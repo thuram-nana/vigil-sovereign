@@ -1533,7 +1533,7 @@ class Handler(BaseHTTPRequestHandler):
         this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
         proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
         from .. import config as _config
-        from .provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited,
+        from .provision import (ProvisionBusy, ProvisionDenied, ProvisionError, ProvisionRateLimited,
                                 ProvisionStepUpRequired, build_provisioner)
         action = path[len("/api/provision/"):]
         principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
@@ -1571,6 +1571,8 @@ class Handler(BaseHTTPRequestHandler):
                               sso_oidc_jwks_fetcher=self.server.sso_oidc_jwks_fetcher)
         try:
             result = self._provision_dispatch(p, action, principal, body)
+        except ProvisionBusy as e:
+            return self._deny(503, f"busy; retry after {e.retry_after:.0f}s")
         except ProvisionRateLimited as e:
             return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
         except ProvisionStepUpRequired as e:

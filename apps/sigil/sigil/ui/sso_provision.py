@@ -101,18 +101,70 @@ _HANDOFF_S = 0.005
 #: How long a sign-in waits for its org's sign-in lock (another sign-in of the SAME org being resolved) before a
 #: customer-safe refusal.
 _SIGNIN_LOCK_WAIT_S = 10.0
-#: How many times a write re-folds outside the shared section when its org's state changed meanwhile, before it
-#: folds under the section instead.
+#: How many times a request re-folds outside the shared section when its org's state changed meanwhile, before it
+#: gives up with a retryable refusal (a fold never runs under the section).
 _FOLD_ATTEMPTS = 3
 
 
+#: How long an unauthenticated SSO leg waits for a slot of the provisioner's SSO work bound before a 503.
+_SSO_GATE_WAIT_S = 5.0
+_SSO_GATES: "dict[int, threading.BoundedSemaphore]" = {}
+_SSO_GATES_GUARD = threading.Lock()
+
+
+def _sso_gate_semaphore() -> "threading.BoundedSemaphore":
+    """The process-wide bound on concurrent unauthenticated SSO work (`VIGIL_SSO_CONCURRENCY` slots)."""
+    from .. import config
+    n = max(1, int(config.SSO_CONCURRENCY))
+    with _SSO_GATES_GUARD:
+        return _SSO_GATES.setdefault(n, threading.BoundedSemaphore(n))
+
+
+@contextmanager
+def _sso_gate() -> Iterator[None]:
+    """One slot of the provisioner's bound on concurrent UNAUTHENTICATED SSO work (the CPU of a sign-in start, an
+    assertion / id_token verification): a short wait (`_SSO_GATE_WAIT_S`, blocked — not polling), then
+    `ProvisionBusy` (503 + Retry-After). A network wait (the OIDC code exchange) never holds a slot."""
+    from .provision import ProvisionBusy
+    gate = _sso_gate_semaphore()
+    if not gate.acquire(timeout=_SSO_GATE_WAIT_S):
+        raise ProvisionBusy(_SSO_GATE_WAIT_S)
+    try:
+        yield
+    finally:
+        gate.release()
+
+
+def _count_unauthenticated_leg(p, ip: str, *, now: float) -> None:
+    """GUARD-AND-COUNT one unauthenticated SSO leg (start, ACS, OIDC callback) for the client IP, successes included
+    (`VIGIL_SSO_REQUESTS_PER_IP_PER_MIN`): over it ⇒ `ProvisionRateLimited`, before any spine read. No limiter
+    wired ⇒ refused (fail-closed)."""
+    from .provision import ProvisionRateLimited
+    lim = getattr(p, "sso_ip_limiter", None)
+    wait = lim.admit(f"sso:leg:{ip}", now=now) if lim is not None else 60.0
+    if wait is not None:
+        raise ProvisionRateLimited(wait)
+
+
 def _registries(p):
-    """The owner-signed SSO config registry + the SCIM directory, over the provisioner's spine and owner key."""
+    """The owner-signed SSO config registry + the SCIM directory, over the provisioner's spine and owner key. The
+    config registry reads through the verified incremental fold cache (`cached=True`): an unauthenticated sign-in
+    start, ACS, OIDC callback or SCIM request then costs the records appended since the last read, never a fold of
+    the whole spine (with its owner-key-history scan)."""
     from ..governor.scim_directory import ScimDirectoryRegistry
     from ..governor.sso_config import SsoConfigRegistry
-    cfg = SsoConfigRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey)
+    cfg = SsoConfigRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey, cached=True)
     directory = ScimDirectoryRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey)
     return cfg, directory
+
+
+def _orgs(p):
+    """The org + membership registry the SSO / SCIM paths read: the provisioner's, through the verified incremental
+    fold cache (`force_cache`), so the org and membership folds cost the records appended since the last read."""
+    from ..governor.orgs import OrgRegistry
+    orgs = OrgRegistry(p.orgs.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey)
+    orgs.force_cache = True
+    return orgs
 
 
 def _org(org_id) -> str:
@@ -124,10 +176,11 @@ def _org(org_id) -> str:
 
 @contextmanager
 def _membership_section(p) -> Iterator[None]:
-    """The critical section of every membership change (`ui.provision`'s order): the process-wide spine lock, then
-    the cross-process membership flock (`_members_lock`; a bounded wait, then `LockBusy` with nothing written)."""
-    from .provision import _members_lock
-    with p._lock, _members_lock(p.store):
+    """The critical section of every membership change (`ui.provision._members_section`): the process-wide spine
+    lock, then the cross-process membership flock — never waiting on the flock while holding the spine lock (a
+    bounded wait without it, then `LockBusy` with nothing written; a nested entry is refused at once)."""
+    from .provision import _members_section
+    with _members_section(p._lock, p.store):
         yield
 
 
@@ -171,9 +224,10 @@ def _handoff() -> None:
     time.sleep(_HANDOFF_S)
 
 
-def _org_state_changed(store, org_id: str, since_seq: int) -> bool:
-    """True iff a record after `since_seq` can change what a request of `org_id` folded: a membership, org, SSO-config
-    or SCIM-directory record of that org, or an owner-key-history record (it moves every signature window)."""
+def _org_state_changed(store, org_id: str, since_seq: int, member_ok=None) -> bool:
+    """True iff a record after `since_seq` can change what a request of `org_id` folded: an org, SSO-config or
+    SCIM-directory record of that org, a membership record of that org (only one `member_ok(username, payload)`
+    calls relevant, when given), or an owner-key-history record (it moves every signature window)."""
     from ..governor.key_history import KEY_HISTORY_KIND
     from ..governor.orgs import MEMBERSHIP_SIGNAL, ORG_SIGNAL
     from ..governor.scim_directory import SCIM_DIRECTORY_SIGNAL
@@ -183,9 +237,19 @@ def _org_state_changed(store, org_id: str, since_seq: int) -> bool:
         if r.kind == KEY_HISTORY_KIND:
             return True
         pl = r.payload
-        if isinstance(pl, dict) and pl.get("signal") in signals and pl.get("org_id") == org_id:
-            return True
+        if not (isinstance(pl, dict) and pl.get("signal") in signals and pl.get("org_id") == org_id):
+            continue
+        if pl.get("signal") == MEMBERSHIP_SIGNAL and member_ok is not None \
+                and not member_ok(str(pl.get("username") or ""), pl):
+            continue
+        return True
     return False
+
+
+def _scim_member(username: str, _payload: dict) -> bool:
+    """A SCIM request only ever acts on directory users (their ids are `sso_...`), so a membership record of another
+    member of the org (a Team-screen act on a password or Google member) cannot change what it folded."""
+    return username.startswith("sso_")
 
 
 class _SharedSection:
@@ -203,12 +267,16 @@ class _SharedSection:
     The caller holds its org's own lock (`_org_lock`) throughout, so no other SCIM write of the org runs between two
     holds; `holds` counts the holds taken (tests read it)."""
 
-    def __init__(self, p, org_id: str) -> None:
+    def __init__(self, p, org_id: str, *, member_filter=None) -> None:
         self.p = p
         self.org_id = org_id
         self.records = 0                       # what the request appended (ui.scim sets it)
         self.holds = 0
         self._flock = None
+        # `member_filter(folded value) -> member_ok(username, payload)`: which membership records of the org can change
+        # what this request folded (None: all of them)
+        self._member_filter = member_filter
+        self._member_ok = None
 
     @property
     def held(self) -> bool:
@@ -217,31 +285,26 @@ class _SharedSection:
     def _enter(self) -> None:
         from vigil_integration.live.seam_lock import LockBusy
 
-        from .provision import _members_lock
+        from .provision import _members_section
         from .scim import SectionLost
-        self.p._lock.acquire()
+        cm = _members_section(self.p._lock, self.p.store)
         try:
-            cm = _members_lock(self.p.store)
             cm.__enter__()
         except LockBusy as e:
-            self.p._lock.release()
             raise SectionLost("the membership critical section is busy") from e
-        except BaseException:
-            self.p._lock.release()
-            raise
         self._flock = cm
         self.holds += 1
 
     def _exit(self) -> None:
         cm, self._flock = self._flock, None
-        if cm is None:
-            return
-        try:
+        if cm is not None:
             cm.__exit__(None, None, None)
-        finally:
-            self.p._lock.release()
 
     def fold(self, fn):
+        """Run `fn` (the folds) OUTSIDE the section, take it, and return the result while HOLDING it — only when
+        nothing of this org's state was appended since the fold began; else fold again, up to `_FOLD_ATTEMPTS`
+        times, then `SectionLost` (a retryable refusal). A fold never runs under the section."""
+        from .scim import SectionLost
         store = self.p.store
         for _attempt in range(_FOLD_ATTEMPTS):
             t0 = store.disk_tip()
@@ -250,12 +313,12 @@ class _SharedSection:
             for _r in store.iter_records(since_seq=t0):    # builds the store's seq index OUTSIDE the section
                 pass
             value = fn()
+            self._member_ok = self._member_filter(value) if self._member_filter is not None else None
             self._enter()
-            if not _org_state_changed(store, self.org_id, t0):
+            if not _org_state_changed(store, self.org_id, t0, self._member_ok):
                 return value
             self._exit()
-        self._enter()
-        return fn()
+        raise SectionLost("this organization's state kept changing while the request read it; retry")
 
     def slice(self) -> None:
         from .scim import SectionLost
@@ -263,7 +326,7 @@ class _SharedSection:
         self._exit()
         _handoff()
         self._enter()
-        if tip is None or _org_state_changed(self.p.store, self.org_id, tip):
+        if tip is None or _org_state_changed(self.p.store, self.org_id, tip, self._member_ok):
             raise SectionLost("this organization's membership state changed while the request was paused")
 
     def close(self) -> None:
@@ -284,11 +347,14 @@ def _resume_pending_jobs(p, org_id: str, cfgreg, directory, *, now: float) -> No
     the job itself), and best effort: whatever it cannot do, the sign-in's own clamp still keeps the person at or
     below the role the directory implies."""
     from . import scim as uiscim
+    from .provision import members_section_held
+    if members_section_held():          # never nested inside a held section (its flock would wait on itself)
+        return
     try:
         with _org_lock(p, org_id, "write", wait_s=0.0):
-            section = _SharedSection(p, org_id)
+            section = _SharedSection(p, org_id, member_filter=lambda _v: _scim_member)
             try:
-                uiscim.resume_directory_jobs(org_id=org_id, config_registry=cfgreg, org_registry=p.orgs, now=now,
+                uiscim.resume_directory_jobs(org_id=org_id, config_registry=cfgreg, org_registry=_orgs(p), now=now,
                                              directory_registry=directory, issued_at_fn=p._next_issued,
                                              audit=_critical_audit(p, org_id), section=section)
             finally:
@@ -305,10 +371,13 @@ def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None
     from .provision import ProvisionDenied
     t = p._now() if now is None else float(now)
     p._rate_guard(f"sso:ip:{ip}", now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     cfgreg, _ = _registries(p)
-    cfg = cfgreg.config(oid) if oid else None
-    if cfg is None or p.orgs.org(oid) is None:
+    with _sso_gate():
+        cfg = cfgreg.config(oid) if oid else None
+        active = cfg is not None and _orgs(p).org(oid) is not None
+    if not active:
         raise ProvisionDenied("single sign-on is not set up for this organization")
     if cfg.protocol == "saml":
         if not cfg.idp_sso_url:
@@ -341,6 +410,7 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     from .provision import ProvisionDenied, ProvisionError
     t = p._now() if now is None else float(now)
     p._rate_guard(f"sso:ip:{ip}", now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     if p.saml_replay is None:
         raise ProvisionError("SAML sign-in is not available on this deployment (no replay ledger)")
@@ -349,9 +419,11 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     try:
         if not oid or not str(request_id or ""):
             raise ValueError("no org / AuthnRequest to bind the response to")
-        xml = _decode_saml_response(saml_response)
-        signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg, replay_ledger=p.saml_replay,
-                                            now=t, expected_request_id=str(request_id))
+        with _sso_gate():
+            xml = _decode_saml_response(saml_response)
+            signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg,
+                                                replay_ledger=p.saml_replay, now=t,
+                                                expected_request_id=str(request_id))
     except (uiscim.SsoLoginError, ValueError):
         p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="saml")
@@ -379,6 +451,26 @@ def _sign_in_budget_open(p, org_id: str, *, now: float, reason: str) -> None:
         raise ProvisionDenied("too many sign-ins to this organization right now; try again in a minute")
 
 
+def _sign_in_member_filter(org_id: str):
+    """Which membership records of the org can change what a sign-in folded: the SSO members (the person signing in
+    is one) and any record that can change who administers the org (the clamp's last-administrator rule) — a record
+    granting a role that manages members, or re-roling / revoking someone the fold saw holding one."""
+    from vigil_core.rbac import role_can
+
+    def make(value):
+        orgs = value[1]
+
+        def ok(username: str, payload: dict) -> bool:
+            if username.startswith("sso_"):
+                return True
+            if payload.get("state") != "active" or role_can(str(payload.get("role") or ""), "manage_members"):
+                return True
+            held = orgs.membership_role(username, org_id)
+            return bool(held) and role_can(held, "manage_members")
+        return ok
+    return make
+
+
 def _admit_sign_in(p, org_id: str, signin, cfgreg, directory, *, now: float, reason: str):
     """Mint (or link) the member a VERIFIED sign-in names, bounded so one org's sign-ins cannot stall another org:
       * the org's sign-in budget is SPENT here, after verification (guard-and-count, `VIGIL_SSO_SIGNINS_PER_MIN` per
@@ -401,10 +493,10 @@ def _admit_sign_in(p, org_id: str, signin, cfgreg, directory, *, now: float, rea
         p._audit("sso_login", org_id=org_id, outcome="denied", reason=f"{reason}:org_busy")
         raise ProvisionDenied(busy)
     with lock:
-        section = _SharedSection(p, org_id)
+        section = _SharedSection(p, org_id, member_filter=_sign_in_member_filter(org_id))
         try:
             return uiscim.admit_verified_sign_in(
-                signin, config_registry=cfgreg, org_registry=p.orgs, issued_at=p._next_issued(),
+                signin, config_registry=cfgreg, org_registry=_orgs(p), issued_at=p._next_issued(),
                 directory_registry=directory, audit=_critical_audit(p, org_id), section=section,
                 resume=lambda: _resume_pending_jobs(p, org_id, cfgreg, directory, now=now))
         except uiscim.SectionLost:
@@ -430,13 +522,16 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     from . import oidc as _oidc
     from . import scim as uiscim
     from .provision import ProvisionDenied
+    from .provision import ProvisionRateLimited
     t = p._now() if now is None else float(now)
     p._rate_guard(f"sso:ip:{ip}", now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     _sign_in_budget_open(p, oid, now=t, reason="oidc")
     cfgreg, directory = _registries(p)
     try:
-        cfg = cfgreg.config(oid) if oid else None
+        with _sso_gate():
+            cfg = cfgreg.config(oid) if oid else None
         if cfg is None or cfg.protocol != "oidc":
             raise uiscim.SsoLoginError("no active enterprise-OIDC config for this organization")
         poster, fetcher = _oidc_transport(p, cfg)
@@ -447,8 +542,11 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
                               clock_skew_seconds=cfg.clock_skew_seconds)
         tokens = _oidc.exchange_code(oc, code, code_verifier=code_verifier, http_post=poster)
         keys = _oidc.JwksProvider(oc.jwks_uri, fetcher=fetcher).keys(now=t)
-        signin = uiscim.verify_oidc_sign_in(tokens["id_token"], org_id=oid, config_registry=cfgreg,
-                                            jwks_keys=keys, expected_nonce=str(nonce or ""), now=t)
+        with _sso_gate():
+            signin = uiscim.verify_oidc_sign_in(tokens["id_token"], org_id=oid, config_registry=cfgreg,
+                                                jwks_keys=keys, expected_nonce=str(nonce or ""), now=t)
+    except ProvisionRateLimited:        # the SSO work bound (busy): retryable, not a failed sign-in
+        raise
     except Exception:  # noqa: BLE001 — a refused token or an IdP/network fault: one fail-closed denial
         p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="oidc")
@@ -489,8 +587,10 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
         bounded holds of the shared section (`_SharedSection`, `ui.scim.MAX_RECORDS_PER_HOLD` records per hold),
         and is charged in a `finally` for every further record it appended, also when it fails part-way.
 
-    FAILED authentications count against (org, client IP) and, past the limit, that pair's further INVALID
-    attempts are refused 429 without another audit row. A VALID bearer is never refused by that lock: an IdP's
+    FAILED authentications count against (org, client IP) AND against the client IP across every org id; past either
+    limit, further INVALID attempts are refused 429 without another audit row. A failure is audited on the spine
+    only for an org that has a SCIM bearer — so the spine grows by at most the per-IP limit's failures per window and
+    per address, and never for an org id with no SCIM config (answered the same 401). A VALID bearer is never refused by that lock: an IdP's
     SCIM egress addresses are shared by every tenant of that IdP, so a lock that also stopped the valid token
     would let anyone with an account at the same IdP stall this org's DEPROVISIONING (an offboarded employee
     keeping access) by spraying wrong tokens from the shared address. A success therefore does not clear the
@@ -508,25 +608,31 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
             or reads is None or None in caps:
         return _scim_refusal(503, "SCIM is not available on this deployment")
     oid = _org(org_id)
-    key = f"scim:auth:{oid}:{ip}"
     cfgreg, directory = _registries(p)
     cfg = cfgreg.config(oid) if oid else None
     if not authenticate_scim(cfg, bearer_from_authorization_header(authorization)):
-        locked = p.scim_auth_limiter.locked(key, now=t)
+        # per (org, client IP) AND per client IP across EVERY org id: rotating the org id in the path never escapes
+        keys = (f"scim:auth:{oid}:{ip}", f"scim:auth-ip:{ip}")
+        locked = p.scim_auth_limiter.check(*keys, now=t)
         if locked is not None:
             return _scim_refusal(429, "too many failed SCIM authentications; wait and retry", retry_after=locked)
-        p.scim_auth_limiter.record_failure(key, now=t)
-        p._audit("scim_auth", org_id=oid, outcome="denied")
+        for k in keys:
+            p.scim_auth_limiter.record_failure(k, now=t)
+        if cfg is not None and cfg.scim_enabled:
+            # audited only for an org that HAS a SCIM bearer, and at most the per-IP limit's failures per window
+            # before that address is locked out — an org id with no SCIM config gets no spine record at all (and the
+            # same 401: the answer never tells whether the org exists)
+            p._audit("scim_auth", org_id=oid, outcome="denied")
         return _scim_refusal(401, "SCIM authentication failed")
     over = uiscim.request_bound_refusal(m, path, body)
     if over is not None:                   # refused on its body alone: no lock taken, no budget spent
         return {"status": over.status, "body": over.body, "deactivated": []}
 
-    def dispatch(section) -> "uiscim.ScimResult":
+    def dispatch(section, lower_only: bool = False) -> "uiscim.ScimResult":
         return uiscim.scim_dispatch(m, path, body, authorization, org_id=oid, config_registry=cfgreg,
-                                    org_registry=p.orgs, now=t, query=str(query or ""),
+                                    org_registry=_orgs(p), now=t, query=str(query or ""),
                                     directory_registry=directory, issued_at_fn=p._next_issued,
-                                    audit=_critical_audit(p, oid), section=section)
+                                    audit=_critical_audit(p, oid), section=section, lower_only=lower_only)
     busy = _scim_refusal(429, "another SCIM request of this organization is in progress; retry shortly",
                          retry_after=_ORG_LOCK_WAIT_S)
     if m not in _SCIM_WRITES:
@@ -554,22 +660,34 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
                 if floor is not None:
                     return _scim_refusal(429, "this organization's deprovisioning rate is exceeded; retry shortly",
                                          retry_after=min(wait, floor))
-        else:                                # checked AND (below) charged inside the org's lock
-            wait = p.scim_write_limiter.admit(budget, now=t)
-            if wait is not None:
-                return _scim_refusal(429, "this organization's SCIM write rate is exceeded; retry shortly",
-                                     retry_after=wait)
-        section = _SharedSection(p, oid)
-        try:
-            r = dispatch(section)
-        finally:
-            section.close()
-            owed = section.records - (0 if lowers else 1)        # `admit` counted one unit
-            if owed > 0:
-                p.scim_write_limiter.charge(budget, owed, now=t)
-            if lowers:                       # at least one unit per request, also one that appended nothing
-                caps[0].charge(deprov, max(1, section.records), now=t)
+            try:                             # held to LOWERING ONLY (`ui.scim.lowers_only`)
+                r = _charged_write(p, oid, dispatch, lower_only=True, now=t)
+                return {"status": r.status, "body": r.body, "deactivated": list(r.deactivated)}
+            except uiscim.NeedsWriteBudget:
+                pass                         # it authors more than a deactivation: the write budget decides
+        wait = p.scim_write_limiter.admit(budget, now=t)       # checked AND (below) charged inside the org's lock
+        if wait is not None:
+            return _scim_refusal(429, "this organization's SCIM write rate is exceeded; retry shortly",
+                                 retry_after=wait)
+        r = _charged_write(p, oid, dispatch, lower_only=False, now=t)
     return {"status": r.status, "body": r.body, "deactivated": list(r.deactivated)}
+
+
+def _charged_write(p, oid: str, dispatch, *, lower_only: bool, now: float):
+    """Run one SCIM write in bounded holds of the shared section and charge — in a `finally`, so also when it fails
+    part-way — every record it appended to the write budget (beyond the one unit `admit` counted for a budgeted
+    write), and, for a deprovisioning request (`lower_only`, admitted without the write budget), also to the
+    deprovisioning cap (at least one unit, also when it appended nothing)."""
+    section = _SharedSection(p, oid, member_filter=lambda _v: _scim_member)
+    try:
+        return dispatch(section, lower_only)
+    finally:
+        section.close()
+        owed = section.records - (0 if lower_only else 1)       # a budgeted write's `admit` counted one unit
+        if owed > 0:
+            p.scim_write_limiter.charge(f"scim:writes:{oid}", owed, now=now)
+        if lower_only:
+            p.scim_deprov_limiter.charge(f"scim:deprov:{oid}", max(1, section.records), now=now)
 
 
 @contextmanager

@@ -202,6 +202,7 @@ AuditFn = Callable[[str, str, str], None]
 class _RequestOrgs(OrgRegistry):
     def __init__(self, base: OrgRegistry, org_id: str) -> None:
         super().__init__(base.store, owner_key=base.owner_key, trusted_pubkey=base.trusted_pubkey)
+        self.force_cache = bool(getattr(base, "force_cache", False))
         self._oid = org_id
         self._org = base.org(org_id)
         self._mems: "dict[str, Membership]" = {m.username: m for m in base.memberships(org_id)}
@@ -493,7 +494,8 @@ def admit_verified_sign_in(signin: VerifiedSignIn, *, config_registry, org_regis
     this org's state since the fold began — so the section is held only for the at most 3 records a sign-in appends
     (an audit row, a grant, a directory clamp note). The config folded must be the one the assertion verified under
     (else refused: the owner re-signed it in between). `resume()` (optional) runs when the folded directory has an
-    open pending group job, before the fold is redone (the provisioner finishes the job there)."""
+    open pending group job: the section is released first, the job finished OUTSIDE any section (the provisioner
+    takes its own), and the fold redone once. Only the fold DETECTS jobs; it never runs one."""
     sec = section if section is not None else _NoSection()
     oid = signin.config.org_id
     dreg = _directory_registry(directory_registry, org_registry)
@@ -501,11 +503,15 @@ def admit_verified_sign_in(signin: VerifiedSignIn, *, config_registry, org_regis
     def fold():
         cfg = config_registry.config(oid)
         d = dreg.directory(oid) if signin.config.scim_enabled else None
-        if d is not None and d.jobs() and resume is not None:
-            resume()
-            d = dreg.directory(oid)
         return cfg, _RequestOrgs(org_registry, oid), d
     config, orgs, d = sec.fold(fold)
+    if d is not None and d.jobs() and resume is not None:
+        # an open pending group job: released FIRST, finished outside any section, then folded again
+        close = getattr(sec, "close", None)
+        if close is not None:
+            close()
+        resume()
+        config, orgs, d = sec.fold(fold)
     if config != signin.config:
         raise SsoLoginError("the organization's sign-in configuration changed during the sign-in; sign in again")
     return _login_principal(orgs, config, subject=signin.subject, link_ids=signin.link_ids, groups=signin.groups,
@@ -669,6 +675,10 @@ class _Req:
         self._dreg_base = dreg.appended if dreg is not None else 0
         self.section = section if section is not None else _NoSection()
         self._hold_base = 0                    # `written()` when the current hold of the section began
+        # A request admitted under the deprovisioning exemption (`lowers_only`): it may only LOWER roles or revoke;
+        # every raise it would cause is deferred (`deferred` counts them) to the org's next budgeted write
+        self.lower_only = False
+        self.deferred = 0
 
     def audit(self, action: str, target: str, outcome: str) -> None:
         if self._audit is not None:
@@ -742,6 +752,9 @@ def _target(req: _Req, uid: str, *, create: bool) -> str:
 def _apply(req: _Req, uid: str, target: str) -> None:
     """Land one `_target` outcome: the critical audit row FIRST, then the owner-signed revoke / ceiling-gated grant
     (both within one hold of the section)."""
+    if target != _KEEP and target != _REVOKE and req.lower_only and not _lowers(req, uid, target):
+        req.deferred += 1                  # a raise inside a deprovisioning request: left to a budgeted write
+        return
     if target != _KEEP:
         req.pace(2)
     if target == _REVOKE:
@@ -795,12 +808,20 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
     lowering = [(uid, t) for uid, t in plan if _lowers(req, uid, t)]
     lowered = {uid for uid, _t in lowering}
     raising = [(uid, t) for uid, t in plan if uid not in lowered and t != _KEEP]
+    if req.lower_only and resume is not None:
+        # a pending job resumed inside a DEPROVISIONING request: only its lowering steps; the directory commit and
+        # the raises wait, with the job open, for the org's next budgeted write
+        for uid, t in lowering:
+            _apply(req, uid, t)
+        return
     cost = 2 * len(lowering) + staged.journaled() + 2 * len(raising)
     job = resume
-    if job is None and cost > req.room():
-        if cost <= MAX_RECORDS_PER_HOLD:
+    defer = req.lower_only and any(t != _REVOKE for _uid, t in raising)
+    if job is None and (defer or cost > req.room()):
+        if cost <= MAX_RECORDS_PER_HOLD and not defer:
             req.pace(cost)                                     # a fresh hold takes it whole
         else:
+            # a durable pending job: it spans holds, or it carries raises a deprovisioning request may not land
             job = _job_spec(real, staged, gid)
             req.pace(1)
             real.put_job(gid, job, now=req.at())
@@ -808,8 +829,8 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
         _apply(req, uid, t)
     real.commit(staged, before_each=lambda: req.pace(1))
     for uid, t in raising:
-        _apply(req, uid, t)
-    if job is not None:
+        _apply(req, uid, t)                                    # deferred (not applied) in a deprovisioning request
+    if job is not None and not defer:
         req.pace(1)
         real.finish_job(gid, now=req.at())
 
@@ -984,10 +1005,32 @@ def _user_create(req: _Req, body: object) -> ScimResult:
     return ScimResult(201, _user_resource(req, req.dir.user(uid)))  # type: ignore[arg-type]
 
 
+class NeedsWriteBudget(Exception):
+    """A request admitted under the deprovisioning exemption turned out to author more than a deactivation (a PUT
+    that also rewrites the user's identifiers, selectors or profile): nothing of its own was written, and the
+    provisioner re-admits it under the org's write budget."""
+
+
+def _only_deactivates(cur: DirectoryUser, st: dict) -> bool:
+    """True iff writing `st` over `cur` changes nothing but `active` (compared as the directory would store it)."""
+    from ..governor.scim_directory import _clean_profile, _clean_selectors, _clean_str
+    try:
+        return (_clean_str(st["user_name"], "userName") == cur.user_name
+                and _clean_str(st["external_id"], "externalId") == cur.external_id
+                and _clean_str(st["display_name"], "displayName") == cur.display_name
+                and _clean_selectors(st["selectors"]) == list(cur.selectors)
+                and _clean_profile(st["profile"]) == dict(cur.profile))
+    except DirectoryError:
+        return False
+
+
 def _user_replace(req: _Req, uid: str, body: object) -> ScimResult:
-    if req.dir.user(uid) is None:
+    cur = req.dir.user(uid)
+    if cur is None:
         raise _ScimFail(404, "no such user in this organization")
     st = _user_state_from(_expect_object(body))
+    if req.lower_only and not _only_deactivates(cur, st):
+        raise NeedsWriteBudget("this replacement changes more than the user's active state")
     req.pace(3)                    # the user record and its membership change (audit + grant / revoke) in ONE hold
     _put_user(req, uid, st)
     _reconcile(req, uid, create=True)
@@ -1499,12 +1542,15 @@ def request_bound_refusal(method: str, path: str, body: object) -> Optional[Scim
 
 
 def lowers_only(method: str, path: str, body: object) -> bool:
-    """True iff the request can only TAKE privilege away, judged from its shape alone: a user or group DELETE, a user
-    PATCH whose every operation sets `active` false (the Okta and Entra deactivation shapes), a user PUT with `active`
-    false, or a group PATCH whose every operation removes members. Such a request never grants a role (a member
-    leaving a group, a deactivated or deleted user resolves no higher role), so the provisioner admits it even while the
-    org's write budget is overdrawn — an offboarding never waits out the debt of an earlier sync. It is still paced in
-    bounded holds, serialized per org, and charged for what it appended."""
+    """True iff the request's SHAPE is a deprovisioning one: a user or group DELETE, a user PATCH whose every operation
+    sets `active` false (the Okta and Entra deactivation shapes), a user PUT with `active` false, or a group PATCH
+    whose every operation removes members. The provisioner admits such a request even while the org's write budget is
+    overdrawn — an offboarding never waits out the debt of an earlier sync — and the dispatcher then holds it to
+    LOWERING ONLY (`lower_only`): a role it would raise (a removed member whose hand-lowered role the directory still
+    implies higher; a pending job's raises) is deferred to the org's next budgeted write, never applied; a pending job
+    is resumed only for its lowering steps; and a PUT that would also rewrite the user's identifiers, selectors or
+    profile is not exempt (`NeedsWriteBudget`: re-admitted under the write budget). It is still paced in bounded holds,
+    serialized per org, and charged to its own deprovisioning cap."""
     parsed = _parse_resource_path(path)
     m = str(method or "").upper()
     if parsed is None or parsed[1] is None or parsed[0] not in ("Users", "Groups"):
@@ -1563,7 +1609,7 @@ def _open_request(section, config_registry, org_registry, org_id: str, dreg: Sci
 def scim_dispatch(method: str, path: str, body: object, authorization: object, *, org_id: str,
                   config_registry, org_registry, now: float, query: str = "", directory_registry=None,
                   issued_at: Optional[float] = None, issued_at_fn: "Optional[Callable[[], float]]" = None,
-                  audit: Optional[AuditFn] = None, section=None) -> ScimResult:
+                  audit: Optional[AuditFn] = None, section=None, lower_only: bool = False) -> ScimResult:
     """Handle one SCIM 2.0 request for `org_id`. FAIL-CLOSED order: resolve the org's OWNER-SIGNED config;
     authenticate the bearer (constant-time fingerprint compare, org-scoped) — uniformly BEFORE revealing anything
     about routing; then route Users / Groups / discovery. `issued_at_fn` (default: a strictly increasing clock from
@@ -1603,6 +1649,7 @@ def scim_dispatch(method: str, path: str, body: object, authorization: object, *
         dreg = _directory_registry(directory_registry, org_registry)
         config, req = _open_request(sec, config_registry, org_registry, config.org_id, dreg, presented=presented,
                                     authenticate=True, at=issued_at_fn or _clock(issued_at, now), audit=audit)
+        req.lower_only = bool(lower_only)
         if req.orgs.org(config.org_id) is None and m in _MUTATING:
             raise _ScimFail(404, "this organization is not active")
         if m in _MUTATING:

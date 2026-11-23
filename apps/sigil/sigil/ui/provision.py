@@ -43,8 +43,10 @@ import hashlib
 import json
 import math
 import secrets
+import threading
 import time
-from typing import Any, Callable, NoReturn, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -278,6 +280,12 @@ class ProvisionRateLimited(ProvisionError):
         self.retry_after = retry_after
 
 
+class ProvisionBusy(ProvisionRateLimited):
+    """The provisioner is at its bound of concurrent unauthenticated work (SSO): retry after `retry_after` seconds.
+    The HTTP layer answers 503 + Retry-After (a ProvisionRateLimited, so a caller that does not know it still backs
+    off)."""
+
+
 class ProvisionStepUpRequired(ProvisionError):
     """E3c — a sensitive op needs a FRESH step-up second factor (the session's `mfa_at` is absent/stale and
     step-up enforcement is ON). The HTTP layer maps it to 401 with `step_up_required=True` so the SPA prompts
@@ -420,7 +428,7 @@ def _member_target(username) -> str:
 _MEMBERS_LOCK_WAIT_S = 10.0
 
 
-def _members_lock(store):
+def _members_lock(store, *, wait_s: "Optional[float]" = None):
     """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
     ``<spine dir>/<stem>.members.lock`` (a ``*.lock`` transient the backups skip), taken with the same hardened
     ``locked_file`` as the settle lock. Every member verb that applies the last-admin rule holds it around that
@@ -435,7 +443,56 @@ def _members_lock(store):
         raise ValueError("the membership lock needs a spine store with a path")
     sp = Path(raw)
     path = sp.parent / f"{sp.stem or sp.name}.members.lock"
-    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S, create=False, chown_like=path.parent)
+    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S if wait_s is None else float(wait_s), create=False,
+                       chown_like=path.parent)
+
+
+_MEMBERS_SECTION = threading.local()                  # this thread's depth inside `_members_section`
+
+
+def members_section_held() -> bool:
+    """True iff THIS thread is inside `_members_section` (it holds the spine lock and the membership flock)."""
+    return getattr(_MEMBERS_SECTION, "depth", 0) > 0
+
+
+@contextmanager
+def _members_section(lock, store) -> "Iterator[None]":
+    """The membership critical section — `lock` (the process-wide re-entrant spine lock), then the cross-process
+    membership flock (`_members_lock`) — taken so that this thread NEVER WAITS ON THE FLOCK WHILE HOLDING `lock`
+    (every spine append of the process waits on `lock`): the flock is only ever TRIED under `lock`; when another
+    holder has it, `lock` is released, the wait happens without it, and both are tried again — up to
+    `_MEMBERS_LOCK_WAIT_S`, then `LockBusy` with nothing held. A thread that already holds the section (a nested
+    entry: its own flock would conflict with itself), or that holds `lock` from an outer frame (releasing it would
+    not free it), gets ONE try and then `LockBusy` at once, never a wait."""
+    from vigil_integration.live.seam_lock import POLL_S, LockBusy
+    if members_section_held():
+        raise LockBusy("the membership critical section is already held by this thread (nested entry refused)")
+    outer = bool(getattr(lock, "_is_owned", lambda: False)())
+    deadline = time.monotonic() + _MEMBERS_LOCK_WAIT_S
+    while True:
+        lock.acquire()
+        try:
+            cm = _members_lock(store, wait_s=0.0)
+            cm.__enter__()
+        except LockBusy:
+            lock.release()
+            if outer or time.monotonic() >= deadline:
+                raise
+            time.sleep(POLL_S)
+            continue
+        except BaseException:
+            lock.release()
+            raise
+        break
+    _MEMBERS_SECTION.depth = getattr(_MEMBERS_SECTION, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _MEMBERS_SECTION.depth -= 1
+        try:
+            cm.__exit__(None, None, None)
+        finally:
+            lock.release()
 
 
 def _member_admins(orgs, org_id: str) -> "set[str]":
@@ -487,7 +544,7 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
         raise ValueError("a reason is required (it is recorded in the audit)")
     orgs = orgs if orgs is not None else OrgRegistry(store)
     customers = customers if customers is not None else CustomerRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         prev = orgs.membership_role(u, oid)
@@ -514,7 +571,7 @@ def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Opti
         raise ValueError("a reason is required (it is recorded in the audit)")
     oid = _check_org_id(org_id) if org_id is not None else None
     orgs = orgs if orgs is not None else OrgRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if oid is not None and orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         founders = [m for m in orgs.memberships(oid)
@@ -545,6 +602,7 @@ class Provisioner:
                  shard_assignments=None,
                  saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
                  scim_deprov_limiter=None, scim_deprov_floor_limiter=None, sso_signin_limiter=None,
+                 sso_ip_limiter=None,
                  sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -664,6 +722,8 @@ class Provisioner:
         self.scim_deprov_limiter = scim_deprov_limiter
         self.scim_deprov_floor_limiter = scim_deprov_floor_limiter
         self.sso_signin_limiter = sso_signin_limiter
+        # every unauthenticated SSO leg, guard-and-counted per client IP (successes included); None ⇒ refused
+        self.sso_ip_limiter = sso_ip_limiter
         self.sso_oidc_http_post = sso_oidc_http_post
         self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -1700,7 +1760,7 @@ class Provisioner:
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
         member_username = _member_target(member_username)
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
@@ -1747,7 +1807,7 @@ class Provisioner:
         so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
         member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
@@ -1817,7 +1877,7 @@ class Provisioner:
             email_l = _check_email(email)
         except ValueError:
             raise ProvisionError(_ADD_BAD_EMAIL) from None
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("add_member", requester=requester, org_id=requester_org_id, outcome="denied")
@@ -4656,4 +4716,6 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
                                                      window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_signin_limiter": limiter_cls(config.SSO_SIGNIN_RATELIMIT_DIR, max_fails=config.SSO_SIGNINS_PER_MIN,
                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_ip_limiter": limiter_cls(config.SSO_REQUEST_RATELIMIT_DIR, max_fails=config.SSO_REQUESTS_PER_IP_PER_MIN,
+                                          window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

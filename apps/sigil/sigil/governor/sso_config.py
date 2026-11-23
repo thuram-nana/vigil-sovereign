@@ -72,6 +72,8 @@ assert_no_offense()
 from . import key_history as _kh  # noqa: E402  (owner-key-succession-aware resolver, mirrors orgs._fold_*)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402  (the verified incremental fold cache)
+from ..spine.fold_cache import FoldCache  # noqa: E402
 
 # Dedicated payload signal under the enforced generic `kind="event"` governor record (mirrors orgs' signals) so
 # no new write-path kind must be registered; the signal disambiguates the fold.
@@ -457,11 +459,33 @@ def _as_int(v, default: int) -> int:
 # The registry — owner-signed config grants on the spine (construction mirrors OrgRegistry / AccountsRegistry).
 # ---------------------------------------------------------------------------------------------------
 
+class _ConfigView:
+    """The cached config fold: exactly `SsoConfigRegistry._fold_active`'s (state, issued, configs)."""
+
+    __slots__ = ("state", "issued", "configs")
+
+    def __init__(self) -> None:
+        self.state: "dict[str, str]" = {}
+        self.issued: "dict[str, float]" = {}
+        self.configs: "dict[str, SsoConfig]" = {}
+
+
+def _config_step(view: _ConfigView, r, resolver) -> None:
+    _apply_config_record(r, resolver, view.state, view.issued, view.configs)
+
+
+_CONFIG_FOLD = FoldCache("governor.sso_config", step=_config_step)
+
+
 class SsoConfigRegistry:
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
+    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None, cached: bool = False):
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        # True ⇒ reads go through the verified incremental fold cache (`fold_read.cached_read(force=True)`) even
+        # while VIGIL_FOLD_CACHE_ENABLED is off: a read then costs the records appended since the last one, not a
+        # fold of the whole spine (the SSO / SCIM provisioner paths, which an unauthenticated client reaches)
+        self.cached = bool(cached)
 
     # -- owner mutations --------------------------------------------------------------------------------
     def set_saml_config(self, org_id: str, *, idp_entity_id: str, idp_certs_pem, sp_entity_id: str, acs_url: str,
@@ -622,6 +646,12 @@ class SsoConfigRegistry:
     # -- reads (owner-key-succession-aware full genesis fold; see HARD-PRUNE RESIDUAL note) -------------
     def _fold_active(self) -> dict[str, SsoConfig]:
         """Every org's current ACTIVE config, BEFORE the cross-org exclusivity filter (`_fold`)."""
+        if self.cached:
+            hit = cached_read(_CONFIG_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
+                              seed=lambda snap: (_ConfigView(), -1), live_window=True, force=True,
+                              reader=lambda v: {o: c for o, c in v.configs.items() if v.state.get(o) == "active"})
+            if hit is not _UNCACHED:
+                return hit
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: dict[str, str] = {}
         issued: dict[str, float] = {}
