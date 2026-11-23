@@ -247,17 +247,24 @@ def _group_from(org_id: str, rid: str, data: dict, at: float) -> Optional[Direct
 def _job_from(data: object) -> Optional[dict]:
     """A pending group job's END STATE, normalized, or None for a malformed record (inert): {"delete": True}, or
     {"delete": False, "name", "ext"} plus either "members" (the final member list) or "add" / "remove" (the member
-    delta against the group as it stands)."""
+    delta against the group as it stands) — and, optionally, "touch": users whose role a deprovisioning request left
+    to a budgeted write (re-resolved when the job is finished)."""
     if not isinstance(data, dict):
         return None
     if data.get("delete") is True:
-        return {"delete": True}
+        touch = data.get("touch")
+        if touch is None:
+            return {"delete": True}
+        if not isinstance(touch, list) or len(touch) > MAX_JOB_MEMBERS \
+                or any(not isinstance(x, str) or not _USER_ID_RE.fullmatch(x) for x in touch):
+            return None
+        return {"delete": True, "touch": sorted(set(touch))}
     try:
         out: dict = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
                      "ext": _clean_str(data.get("ext"), "ext")}
     except (DirectoryError, TypeError):
         return None
-    for k in ("members", "add", "remove"):
+    for k in ("members", "add", "remove", "touch"):
         v = data.get(k)
         if v is None:
             continue

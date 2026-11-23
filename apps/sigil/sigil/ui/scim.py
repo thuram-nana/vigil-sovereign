@@ -794,8 +794,27 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
     first opens the group's durable pending job (its end state, `_job_spec`), and closes it once the last record
     landed; the order above holds across holds, so no state between two holds — nor after a crash — has a member
     above the role the directory then implies, and an open job is finished by the org's next write or sign-in
-    (`_resume_jobs`; `resume` is that job's end state when this call is its resumption)."""
+    (`_resume_jobs`; `resume` is that job's end state when this call is its resumption).
+
+    In a DEPROVISIONING request (`req.lower_only`) the raises are not applied: they are recorded in the group's
+    pending job (`touch`) for the org's next budgeted write. A group whose open job still has directory changes to land
+    (a budgeted change cut short) is not changed by such a request (`NeedsWriteBudget`); a job that only carries
+    deferred raises is extended."""
     real = req.dir
+    carried: set = set()
+    if req.lower_only and resume is None and gid in real.jobs():
+        old = real.jobs()[gid]
+        scratch = req.dir = real.staged()
+        try:
+            _apply_job(req, gid, old)
+            pending = scratch.journaled()
+        except (_ScimFail, ScimError, DirectoryError):
+            pending = 1
+        finally:
+            req.dir = real
+        if pending:
+            raise NeedsWriteBudget("a pending change of this group must land before it is changed again")
+        carried = set(old.get("touch", ()))
     staged = req.dir = real.staged()
     try:
         affected = change()
@@ -816,13 +835,15 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
         return
     cost = 2 * len(lowering) + staged.journaled() + 2 * len(raising)
     job = resume
-    defer = req.lower_only and any(t != _REVOKE for _uid, t in raising)
+    defer = req.lower_only and (bool(carried) or any(t != _REVOKE for _uid, t in raising))
     if job is None and (defer or cost > req.room()):
         if cost <= MAX_RECORDS_PER_HOLD and not defer:
             req.pace(cost)                                     # a fresh hold takes it whole
         else:
             # a durable pending job: it spans holds, or it carries raises a deprovisioning request may not land
             job = _job_spec(real, staged, gid)
+            if defer:
+                job["touch"] = sorted(carried | {uid for uid, t in raising if t != _REVOKE})
             req.pace(1)
             real.put_job(gid, job, now=req.at())
     for uid, t in lowering:
@@ -856,9 +877,10 @@ def _job_spec(real: OrgDirectory, staged: OrgDirectory, gid: str) -> dict:
 def _apply_job(req: _Req, gid: str, job: dict) -> set:
     """Re-stage a pending job's end state onto `req.dir` (a staged copy of the directory as it stands now); returns
     EVERY member before and after, so each one is re-resolved (what is already in step costs nothing)."""
+    touch = set(job.get("touch", ()))                 # users a deprovisioning request left to a budgeted write
     if job.get("delete"):
-        return set(req.dir.delete_group(gid, now=req.at()))
-    before = set(req.dir.members(gid))
+        return set(req.dir.delete_group(gid, now=req.at())) | touch
+    before = set(req.dir.members(gid)) | touch
     _rename_group(req, gid, job["name"])
     _set_group_external_id(req, gid, job.get("ext", ""))
     touched: set = set()
