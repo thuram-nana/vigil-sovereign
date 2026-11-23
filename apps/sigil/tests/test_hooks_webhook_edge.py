@@ -150,6 +150,8 @@ def test_caddy_hooks_site_forwards_exactly_post_to_the_two_webhooks(name):
     wh = _brace_block(site, re.search(r"^\s*handle @provider_webhook \{", site, re.M).start())
     assert re.search(r"request_body \{\s*max_size 1MB\s*\}", wh)
     assert re.findall(r"reverse_proxy (\S+)", wh) == ["127.0.0.1:8770"]
+    # the edge buffers the whole (capped) body before dialling the proxy: a stalled client never pins a proxy thread
+    assert re.search(r"reverse_proxy 127\.0\.0\.1:8770 \{\s*request_buffers 1MB\s*\}", wh), wh
     assert "header_up" not in wh and "rewrite" not in wh and "uri " not in wh
     rest = _brace_block(site, re.search(r"^\s*handle \{", site, re.M).start())
     assert f"@badhost not host {host}" in rest and "respond @badhost 421" in rest

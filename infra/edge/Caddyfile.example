@@ -55,7 +55,11 @@ hooks.vigil.example.com {
 		}
 		# Host and every client header (Stripe-Signature included) are forwarded unchanged; the proxy's webhook
 		# routes are Host-ungated and answer before its routing, so nothing else of the console is reachable.
-		reverse_proxy 127.0.0.1:8770
+		# Buffer the (≤1 MB) body at the edge before dialling the proxy, so a slow or stalled client
+		# never holds a proxy thread or file descriptor.
+		reverse_proxy 127.0.0.1:8770 {
+			request_buffers 1MB
+		}
 	}
 
 	# Everything else on this host: nothing here.

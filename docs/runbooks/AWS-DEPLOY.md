@@ -300,7 +300,7 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      ```
      This purges exactly the public site: the rules in item 5 make the public site the only host this zone
      caches (`app` and `hooks` are Bypass, `console` has no public record, and the `www` redirect carries no
-   Cache-Control),
+     Cache-Control),
      so nothing else is in the cache. It reaches every page, which a list of URLs cannot: `/privacy`, `/careers`,
      every `/vs/…`, `/tools/…`, `/blog/…` and `/cve/…` page, and each query-string variant (`?utm_…`), which
      Cloudflare keeps under its own cache key. A purged object is fetched from the origin again on its next
@@ -314,8 +314,10 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    host. EXTERNAL (Cloudflare behaviour — check your plan's options): a JavaScript or managed challenge, "I'm
    Under Attack" mode or a bot-blocking setting that applies to `hooks.vigilguard.net` turns a delivery into a
    challenge page Stripe cannot pass; where your plan allows, add a WAF custom rule
-   `(http.host eq "hooks.vigilguard.net" and http.request.uri.path in {"/webhooks/stripe" "/webhooks/billing"})`
-   that **skips** those features, and otherwise keep them off for the zone. Confirm with a test event sent by
+   `(http.host eq "hooks.vigilguard.net" and http.request.method eq "POST" and http.request.uri.path in
+   {"/webhooks/stripe" "/webhooks/billing"})` that **skips** only the browser challenges, bot blocking and "I'm
+   Under Attack" mode for those two requests — never rate limiting or the managed WAF rules. If your plan cannot
+   express that rule, leave those features off for `hooks` only; do not turn them off for the whole zone. Confirm with a test event sent by
    Stripe to the endpoint (Dashboard or Stripe CLI; EXTERNAL): the delivery must show `202` (the proxy spooled
    it). A `401` means the signing secret differs from `VIGIL_STRIPE_WEBHOOK_SECRET`; a `403` or an HTML page means
    Cloudflare challenged it; a `404` means a path other than the exact one (or the Stripe lane is not mounted on
