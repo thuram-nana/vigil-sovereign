@@ -30,6 +30,7 @@ from sigil.ui.pubui import build_public_server
 ROOT = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
 TERMS = ROOT / "terms" / "index.html"
 PRIVACY = ROOT / "privacy" / "index.html"
+COOKIES = ROOT / "cookies" / "index.html"
 SECURITY_TXT = ROOT / ".well-known" / "security.txt"
 REPO_DOCS = "https://github.com/thuram-nana/vigil-sovereign/blob/main/"
 COMPANY_SITE = "https://sigilsovereign.com"
@@ -138,12 +139,15 @@ def test_terms_is_in_the_sitemap():
 
 # --- self-contained and every link resolves ------------------------------------------------------------------------
 
-def test_terms_page_loads_nothing_off_site_and_runs_no_script():
-    refs = _refs(TERMS.read_text(encoding="utf-8"))
-    assert refs.scripts == 0
-    assert refs.inline_styles == 0                    # the strict CSP blocks inline styles; use site.css classes
-    for tag, url in refs.loads:
-        assert url.startswith("/") and not url.startswith("//"), f"<{tag}> loads an off-site resource: {url}"
+def test_legal_pages_load_nothing_off_site_and_run_no_script():
+    # the terms, the privacy notice and the cookie notice: no script, no inline style, nothing loaded off-site
+    for page in (TERMS, PRIVACY, COOKIES):
+        name = page.parent.name
+        refs = _refs(page.read_text(encoding="utf-8"))
+        assert refs.scripts == 0, f"/{name} runs a script"
+        assert refs.inline_styles == 0, f"/{name} has an inline style (the strict CSP blocks it; use site.css)"
+        for tag, url in refs.loads:
+            assert url.startswith("/") and not url.startswith("//"), f"/{name}: <{tag}> loads off-site: {url}"
 
 
 def test_terms_page_links_resolve():
@@ -220,7 +224,8 @@ _OVERCLAIM_WORDS = re.compile(r"\b(protected|secure)\b")
 _OVERCLAIM_ALLOWED = (
     re.compile(r"data-protection"),                       # the name of a body of law / an authority
     re.compile(r"secure checkout page"),                  # Stripe's page, not ours
-    re.compile(r"\bkeep\b[^.;]{0,80}?\bsecure\b"),       # a duty to keep something secure, not a claim that it is
+    re.compile(r"keep your sign-in credentials and authenticator app secure"),   # the customer's duty
+    re.compile(r"work to keep the service available and secure"),               # an effort, with no SLA (section 9)
     re.compile(r"not a statement that a system is secure"),   # the disclaimer that DENIES the claim
     re.compile(r"provide, secure, support"),              # "secure" the verb, in the list of permitted purposes
 )
@@ -241,9 +246,11 @@ def test_overclaim_check_catches_protected_and_secure_but_allows_duties():
     assert overclaims("<p>The Service is secure.</p>") == ["secure"]
     assert overclaims("<p>We guarantee results.</p>") == ["guarantee"]
     assert overclaims("<p>Keep your sign-in credentials and authenticator app secure.</p>") == []
+    assert overclaims("<p>We work to keep the Service available and secure.</p>") == []
+    assert overclaims("<p>We keep your data secure.</p>") == ["secure"]     # only the two exact phrases are allowed
     assert overclaims("<p>on its own secure checkout page</p>") == []
     assert overclaims("<p>applicable data-protection laws</p>") == []
-    assert overclaims("<p>We keep the logs. Our systems are secure.</p>") == ["secure"]   # no reach across a sentence
+    assert overclaims("<p>We keep the logs. Our systems are secure.</p>") == ["secure"]   # a bare claim is still caught
     assert overclaims("<p>It is a statement that a system is secure.</p>") == ["secure"]  # only the denial is allowed
 
 
@@ -259,7 +266,7 @@ def test_privacy_page_makes_no_overclaim():
 
 # The production processors and providers of the hosted service (owner-supplied; Flutterwave is paused in code and
 # is not a current processor). Both legal pages must name every one, and the same contact.
-PROVIDERS = ("AWS", "Amazon SES", "Cloudflare", "Stripe", "Google", "Anthropic")
+PROVIDERS = ("AWS", "Amazon SES", "Cloudflare", "Stripe", "Google", "GitHub", "Anthropic")
 CONTACT = "info@sigilsovereign.com"
 
 

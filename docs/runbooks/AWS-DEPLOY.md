@@ -289,6 +289,17 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      request. If a later rule ever makes another host cacheable on this zone, purge by host name instead where
      the plan offers it (`--data '{"hosts":["vigilguard.net"]}'`; EXTERNAL: Cloudflare plan feature).
      Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
+7. **Required — turn OFF every Cloudflare feature that rewrites pages or injects a script.** The public Privacy
+   and Cookie notices say our pages load no third-party scripts; these zone settings would make that false at the
+   edge, and the strict `default-src 'self'` CSP would also break or block what they inject. In the zone
+   `vigilguard.net` (EXTERNAL: Cloudflare's labels may be worded slightly differently):
+   - **Scrape Shield → Email Address Obfuscation: Off** (it rewrites `mailto:` links and injects a decode script).
+   - **Speed → Optimization → Rocket Loader: Off** (it rewrites every `<script>` and injects its loader).
+   - **Web Analytics / Real User Monitoring (RUM): Off**, including **automatic setup / JS snippet injection**
+     for this zone and each host name (it injects the `beacon.min.js` script).
+
+   Check after each change: `curl -s https://vigilguard.net/privacy | grep -iE 'cdn-cgi|beacon|rocket|email-decode'`
+   prints nothing.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare
