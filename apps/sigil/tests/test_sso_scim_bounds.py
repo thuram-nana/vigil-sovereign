@@ -445,6 +445,33 @@ def test_a_deprovisioning_request_resumes_only_the_lowering_steps_of_a_pending_j
     assert {roles[u] for u in uids} == {"org_admin"} and _jobs(stack, ORG_A) == {}
 
 
+def test_a_deprovisioning_change_never_overwrites_a_jobs_unlanded_directory_change(stack, monkeypatch):
+    """A rename AWAY from a mapping cut short while it was still lowering (its rename not yet committed); then, over
+    budget, a deprovisioning removal on that same group: it is not exempt (it would overwrite the job's end state),
+    so the write budget refuses it — and the job, intact, still finishes the rename at the next budgeted write."""
+    monkeypatch.setattr(uiscim, "MAX_RECORDS_PER_HOLD", 16)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    gid, uids = _seed(stack, ORG_A, 60, group="Admins", role="org_admin")
+    shutil.rmtree(config.SCIM_WRITE_RATELIMIT_DIR, ignore_errors=True)
+    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 10)
+    cut = _cut_after(monkeypatch, 2)
+    r = _scim(stack, ORG_A, "PATCH", f"/Groups/{gid}", {"Operations": [
+        {"op": "replace", "path": "displayName", "value": "Staff"}]})
+    assert r["status"] == 503 and list(_jobs(stack, ORG_A)) == [gid]
+    cut["on"] = False
+    spec = _jobs(stack, ORG_A)[gid]
+    assert ScimDirectoryRegistry(stack.store()).directory(ORG_A).group(gid).display_name == "Admins"
+    removal = _scim(stack, ORG_A, "PATCH", f"/Groups/{gid}", {"Operations": [
+        {"op": "remove", "path": f'members[value eq "{uids[-1]}"]'}]})
+    assert removal["status"] == 429 and _jobs(stack, ORG_A) == {gid: spec}
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("z@acme.com", "00u-z"))["status"] == 201
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert d.group(gid).display_name == "Staff" and _jobs(stack, ORG_A) == {}
+    roles = _roles(stack, ORG_A)
+    assert {roles[u] for u in uids} == {"viewer"}
+
+
 def test_a_put_with_active_false_that_rewrites_identity_is_not_exempt(stack, monkeypatch):
     stack.saml_org(ORG_A, scim_token=TOKEN_A)
     _gid, ids = _seed(stack, ORG_A, 3)

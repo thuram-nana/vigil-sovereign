@@ -559,14 +559,13 @@ def test_build_provisioner_wires_the_sso_ledgers_only_with_the_flag(monkeypatch,
     from sigil import config
     from sigil.ui.provision import build_provisioner
     for attr in ("CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR",
-                 "SCIM_READ_RATELIMIT_DIR", "SCIM_DEPROV_RATELIMIT_DIR", "SSO_SIGNIN_RATELIMIT_DIR",
-                 "SSO_REQUEST_RATELIMIT_DIR"):
+                 "SCIM_READ_RATELIMIT_DIR", "SCIM_DEPROV_RATELIMIT_DIR", "SSO_SIGNIN_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     monkeypatch.delenv("VIGIL_CUSTOMER_SSO", raising=False)
     off = build_provisioner(_store())
     assert off.saml_replay is None and off.scim_auth_limiter is None and off.scim_write_limiter is None
     assert off.scim_read_limiter is None and off.scim_deprov_limiter is None and off.sso_signin_limiter is None
-    assert off.scim_deprov_floor_limiter is None and off.sso_ip_limiter is None
+    assert off.scim_deprov_floor_limiter is None
     monkeypatch.setenv("VIGIL_CUSTOMER_SSO", "1")
     on = build_provisioner(_store())
     assert on.saml_replay is not None and on.scim_auth_limiter is not None and on.scim_write_limiter is not None
@@ -575,9 +574,8 @@ def test_build_provisioner_wires_the_sso_ledgers_only_with_the_flag(monkeypatch,
     assert on.scim_deprov_limiter.max_fails == config.SCIM_DEPROVISIONS_PER_MIN == 6000
     assert on.scim_deprov_floor_limiter.max_fails == 1
     assert on.sso_signin_limiter.max_fails == config.SSO_SIGNINS_PER_MIN == 600
-    assert on.sso_ip_limiter.max_fails == config.SSO_REQUESTS_PER_IP_PER_MIN == 300
     for lim in (on.scim_write_limiter, on.scim_read_limiter, on.scim_deprov_limiter, on.scim_deprov_floor_limiter,
-                on.sso_signin_limiter, on.sso_ip_limiter):          # every budget is a one-minute window
+                on.sso_signin_limiter):                             # every budget is a one-minute window
         assert (lim.window_s, lim.base_lock_s, lim.max_lock_s) == (60.0, 60.0, 60.0)
     assert config.SCIM_READS_PER_MIN == 1800 and config.SSO_CONCURRENCY == 4
     assert not any((tmp_path / a.lower()).exists() for a in ("CUSTOMER_SAML_REPLAY_DIR",))   # created lazily

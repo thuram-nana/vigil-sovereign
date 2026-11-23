@@ -497,8 +497,8 @@ SSO_SIGNINS_PER_MIN = _int_env("VIGIL_SSO_SIGNINS_PER_MIN", 600)
 # Every UNAUTHENTICATED SSO leg (sign-in start, SAML ACS, OIDC callback) is guard-and-counted per client IP,
 # successes included (VIGIL_SSO_REQUESTS_PER_IP_PER_MIN, default 300 a minute: a sign-in is two legs, and a company
 # behind one NAT address signs many people in), and at most VIGIL_SSO_CONCURRENCY of them do CPU work at once in the
-# provisioner (default 4; over it, a short wait, then 503 + Retry-After).
-SSO_REQUEST_RATELIMIT_DIR = _customer / "sso_request_ratelimit"
+# provisioner (default 4; over it, a short wait, then 503 + Retry-After). The per-IP count is kept in the provisioner
+# process's memory (`ui.sso_provision._LegCounter`).
 SSO_REQUESTS_PER_IP_PER_MIN = _int_env("VIGIL_SSO_REQUESTS_PER_IP_PER_MIN", 300)
 SSO_CONCURRENCY = _int_env("VIGIL_SSO_CONCURRENCY", 4)
 

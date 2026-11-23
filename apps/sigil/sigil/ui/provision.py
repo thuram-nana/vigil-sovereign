@@ -602,7 +602,6 @@ class Provisioner:
                  shard_assignments=None,
                  saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
                  scim_deprov_limiter=None, scim_deprov_floor_limiter=None, sso_signin_limiter=None,
-                 sso_ip_limiter=None,
                  sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -722,8 +721,6 @@ class Provisioner:
         self.scim_deprov_limiter = scim_deprov_limiter
         self.scim_deprov_floor_limiter = scim_deprov_floor_limiter
         self.sso_signin_limiter = sso_signin_limiter
-        # every unauthenticated SSO leg, guard-and-counted per client IP (successes included); None ⇒ refused
-        self.sso_ip_limiter = sso_ip_limiter
         self.sso_oidc_http_post = sso_oidc_http_post
         self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -4716,6 +4713,4 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
                                                      window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_signin_limiter": limiter_cls(config.SSO_SIGNIN_RATELIMIT_DIR, max_fails=config.SSO_SIGNINS_PER_MIN,
                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
-            "sso_ip_limiter": limiter_cls(config.SSO_REQUEST_RATELIMIT_DIR, max_fails=config.SSO_REQUESTS_PER_IP_PER_MIN,
-                                          window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

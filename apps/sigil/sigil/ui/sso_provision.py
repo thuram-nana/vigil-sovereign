@@ -135,13 +135,50 @@ def _sso_gate() -> Iterator[None]:
         gate.release()
 
 
+class _LegCounter:
+    """Guard-and-count per key in MEMORY: at most `limit` per fixed `window_s` window, O(1) per call and per key, and
+    at most `max_keys` keys (the least recently seen is forgotten first). The unauthenticated SSO legs are counted
+    here rather than on disk: an on-disk limiter sweeps its whole directory on every count, and a flood from many
+    addresses would make that sweep — serialized for every caller — the cost of every other organization's
+    sign-in."""
+
+    def __init__(self, *, window_s: float = 60.0, max_keys: int = 65536) -> None:
+        from collections import OrderedDict
+        self.window_s = float(window_s)
+        self.max_keys = int(max_keys)
+        self._lock = threading.Lock()
+        self._keys: "OrderedDict[tuple, list]" = OrderedDict()
+
+    def admit(self, key: tuple, *, limit: int, now: float) -> "Optional[float]":
+        with self._lock:
+            slot = self._keys.get(key)
+            if slot is None or now - slot[0] >= self.window_s or now < slot[0]:
+                slot = [now, 0]
+            self._keys[key] = slot
+            self._keys.move_to_end(key)
+            while len(self._keys) > self.max_keys:
+                self._keys.popitem(last=False)
+            if slot[1] >= max(0, int(limit)):
+                return max(1.0, slot[0] + self.window_s - now)
+            slot[1] += 1
+            return None
+
+
+_LEGS = _LegCounter()
+
+
 def _count_unauthenticated_leg(p, ip: str, *, now: float) -> None:
     """GUARD-AND-COUNT one unauthenticated SSO leg (start, ACS, OIDC callback) for the client IP, successes included
-    (`VIGIL_SSO_REQUESTS_PER_IP_PER_MIN`): over it ⇒ `ProvisionRateLimited`, before any spine read. No limiter
-    wired ⇒ refused (fail-closed)."""
+    (`VIGIL_SSO_REQUESTS_PER_IP_PER_MIN` per minute, per spine): over it ⇒ `ProvisionRateLimited`, before any spine
+    read. Counted in this process's memory (`_LegCounter`; the provisioner process is the only one serving these
+    legs, and a restart only forgets the current minute)."""
+    from .. import config
     from .provision import ProvisionRateLimited
-    lim = getattr(p, "sso_ip_limiter", None)
-    wait = lim.admit(f"sso:leg:{ip}", now=now) if lim is not None else 60.0
+    try:
+        ident = str(Path(p.store.path).resolve())
+    except Exception:  # noqa: BLE001 — a store without a path still gets one bucket per address
+        ident = ""
+    wait = _LEGS.admit((ident, str(ip or "")), limit=config.SSO_REQUESTS_PER_IP_PER_MIN, now=now)
     if wait is not None:
         raise ProvisionRateLimited(wait)
 

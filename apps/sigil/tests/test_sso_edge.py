@@ -232,8 +232,7 @@ class Stack:
             monkeypatch.delenv("VIGIL_CUSTOMER_SSO", raising=False)
         for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
                      "CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR",
-                     "SCIM_READ_RATELIMIT_DIR", "SCIM_DEPROV_RATELIMIT_DIR", "SSO_SIGNIN_RATELIMIT_DIR",
-                     "SSO_REQUEST_RATELIMIT_DIR"):
+                     "SCIM_READ_RATELIMIT_DIR", "SCIM_DEPROV_RATELIMIT_DIR", "SSO_SIGNIN_RATELIMIT_DIR"):
             monkeypatch.setattr(config, attr, tmp_path / attr.lower())
         self.tmp = tmp_path
         self.spine = str(tmp_path / "spine.jsonl")
