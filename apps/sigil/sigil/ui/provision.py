@@ -544,6 +544,7 @@ class Provisioner:
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  shard_assignments=None,
                  saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
+                 scim_deprov_limiter=None, scim_deprov_floor_limiter=None, sso_signin_limiter=None,
                  sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
@@ -658,6 +659,11 @@ class Provisioner:
         self.scim_auth_limiter = scim_auth_limiter
         self.scim_write_limiter = scim_write_limiter
         self.scim_read_limiter = scim_read_limiter
+        # The per-org deprovisioning cap + its one-per-minute floor (either None ⇒ SCIM refused, 503) and the per-org
+        # enterprise sign-in budget (None ⇒ every SSO sign-in refused).
+        self.scim_deprov_limiter = scim_deprov_limiter
+        self.scim_deprov_floor_limiter = scim_deprov_floor_limiter
+        self.sso_signin_limiter = sso_signin_limiter
         self.sso_oidc_http_post = sso_oidc_http_post
         self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -4627,8 +4633,9 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
     assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
     then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per
     minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); the per-org
-    SCIM read budget (VIGIL_SCIM_READS_PER_MIN reads per minute, guard-and-count); and the enterprise-OIDC egress
-    hooks a test injects."""
+    SCIM read budget (VIGIL_SCIM_READS_PER_MIN reads per minute, guard-and-count); the per-org deprovisioning cap
+    (VIGIL_SCIM_DEPROVISIONS_PER_MIN) and its one-a-minute floor; the per-org enterprise sign-in budget
+    (VIGIL_SSO_SIGNINS_PER_MIN verified sign-ins a minute); and the enterprise-OIDC egress hooks a test injects."""
     if not config.customer_sso_enabled():
         return {}
     from .saml import SamlReplayLedger
@@ -4641,4 +4648,12 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "scim_read_limiter": limiter_cls(config.SCIM_READ_RATELIMIT_DIR, max_fails=config.SCIM_READS_PER_MIN,
                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_deprov_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR,
+                                               max_fails=config.SCIM_DEPROVISIONS_PER_MIN,
+                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            # the floor: ONE deprovisioning a minute is admitted even while the cap above is spent (its own keys)
+            "scim_deprov_floor_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR, max_fails=1,
+                                                     window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_signin_limiter": limiter_cls(config.SSO_SIGNIN_RATELIMIT_DIR, max_fails=config.SSO_SIGNINS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

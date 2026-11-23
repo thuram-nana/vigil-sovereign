@@ -412,15 +412,23 @@ def _regrant(org_registry, config: SsoConfig, d: OrgDirectory, u: DirectoryUser,
     return ProvisionResult(org_id=config.org_id, username=u.id, role=role, external_id=str(subject), seq=seq)
 
 
-def sso_login_saml(xml_bytes: bytes, *, org_id: str, config_registry, org_registry, replay_ledger,
-                   now: float, sig_verifier=None, issued_at: Optional[float] = None,
-                   expected_request_id: Optional[str] = None, directory_registry=None,
-                   audit: Optional[AuditFn] = None) -> ProvisionResult:
+@dataclass(frozen=True)
+class VerifiedSignIn:
+    """A sign-in whose assertion / id_token VERIFIED under `config` (the org's owner-signed SSO config at
+    verification time): the subject exactly as signed, the extra immutable link ids (OIDC `oid`), the asserted
+    groups (role SELECTION only). Nothing is minted yet — `admit_verified_sign_in` resolves the member."""
+    config: SsoConfig
+    subject: str
+    link_ids: tuple = ()
+    groups: tuple = ()
+
+
+def verify_saml_sign_in(xml_bytes: bytes, *, org_id: str, config_registry, replay_ledger, now: float,
+                        sig_verifier=None, expected_request_id: Optional[str] = None) -> VerifiedSignIn:
     """Verify a SAML Response for `org_id` (`ui.saml.verify_saml_response` — structural/XSW/temporal/audience/
     replay sound, and bound to `expected_request_id`'s AuthnRequest when given; the crypto backend fail-closes
-    without a vetted XML-DSig lib), then resolve the member (JIT or directory-linked). FAIL-CLOSED on no active
-    SAML config, a protocol mismatch, or any verification failure. The role comes from the OWNER-SIGNED config,
-    never the assertion's attributes."""
+    without a vetted XML-DSig lib). FAIL-CLOSED on no active SAML config, a protocol mismatch, or any verification
+    failure. It reads only the org's config (no membership or directory fold) and takes no lock."""
     from . import saml as _saml
     config = config_registry.config(org_id)
     if config is None or config.protocol != "saml":
@@ -431,19 +439,16 @@ def sso_login_saml(xml_bytes: bytes, *, org_id: str, config_registry, org_regist
                                               expected_in_response_to=expected_request_id)
     except _saml.SamlError as e:
         raise SsoLoginError(f"SAML verification failed: {e}") from e
-    return _login_principal(org_registry, config, subject=identity.name_id, groups=identity.groups,
-                            issued_at=now if issued_at is None else issued_at,
-                            directory_registry=directory_registry, audit=audit)
+    return VerifiedSignIn(config=config, subject=identity.name_id, groups=tuple(identity.groups))
 
 
-def sso_login_oidc(id_token: str, *, org_id: str, config_registry, org_registry, jwks_keys, expected_nonce: str,
-                   now: float, issued_at: Optional[float] = None, directory_registry=None,
-                   audit: Optional[AuditFn] = None) -> ProvisionResult:
+def verify_oidc_sign_in(id_token: str, *, org_id: str, config_registry, jwks_keys, expected_nonce: str,
+                        now: float) -> VerifiedSignIn:
     """Verify an enterprise-OIDC id_token for `org_id` (reusing the airtight `ui.oidc.verify_id_token` —
-    signature-first, asymmetric-only, iss/aud/exp/nbf/nonce) against the org's OWNER-SIGNED OIDC config, then
-    resolve the member (JIT or directory-linked). FAIL-CLOSED on no active OIDC config or any verification
-    failure. The subject is the IMMUTABLE `sub`; groups come from the `groups` claim (role SELECTION only — the
-    role itself is the owner-signed config's)."""
+    signature-first, asymmetric-only, iss/aud/exp/nbf/nonce) against the org's OWNER-SIGNED OIDC config. FAIL-CLOSED
+    on no active OIDC config or any verification failure. The subject is the IMMUTABLE `sub`; groups come from the
+    `groups` claim (role SELECTION only — the role itself is the owner-signed config's). No membership or directory
+    fold, no lock."""
     from . import oidc as _oidc
     config = config_registry.config(org_id)
     if config is None or config.protocol != "oidc":
@@ -463,9 +468,75 @@ def sso_login_oidc(id_token: str, *, org_id: str, config_registry, org_registry,
     oid = claims.get(_OIDC_OBJECT_ID_CLAIM)
     link_ids = (oid,) if isinstance(oid, str) and oid.strip() else ()
     # `sub` / `oid` pass on EXACTLY as signed (never trimmed): `_login_principal` refuses a padded one
-    return _login_principal(org_registry, config, subject=sub, link_ids=link_ids, groups=groups,
-                            issued_at=now if issued_at is None else issued_at,
-                            directory_registry=directory_registry, audit=audit)
+    return VerifiedSignIn(config=config, subject=sub, link_ids=link_ids, groups=groups)
+
+
+class _FoldedDirectory:
+    """A directory registry stand-in that answers the ONE org's directory already folded (writes still go to the
+    real registry the view was folded from)."""
+
+    def __init__(self, view: Optional[OrgDirectory], base: ScimDirectoryRegistry) -> None:
+        self._view, self._base = view, base
+
+    def directory(self, org_id: str) -> OrgDirectory:
+        if self._view is not None and org_id == self._view.org_id:
+            return self._view
+        return self._base.directory(org_id)
+
+
+def admit_verified_sign_in(signin: VerifiedSignIn, *, config_registry, org_registry, issued_at: float,
+                           directory_registry=None, audit: Optional[AuditFn] = None, section=None,
+                           resume: "Optional[Callable[[], None]]" = None) -> ProvisionResult:
+    """Resolve a VERIFIED sign-in to the member it admits (`_login_principal`: JIT, or linked to the SCIM directory,
+    with the clamp / give-back). The org's config, memberships and directory are folded through `section.fold` —
+    OUTSIDE the caller's shared membership critical section, which is then taken and re-checked for any change of
+    this org's state since the fold began — so the section is held only for the at most 3 records a sign-in appends
+    (an audit row, a grant, a directory clamp note). The config folded must be the one the assertion verified under
+    (else refused: the owner re-signed it in between). `resume()` (optional) runs when the folded directory has an
+    open pending group job, before the fold is redone (the provisioner finishes the job there)."""
+    sec = section if section is not None else _NoSection()
+    oid = signin.config.org_id
+    dreg = _directory_registry(directory_registry, org_registry)
+
+    def fold():
+        cfg = config_registry.config(oid)
+        d = dreg.directory(oid) if signin.config.scim_enabled else None
+        if d is not None and d.jobs() and resume is not None:
+            resume()
+            d = dreg.directory(oid)
+        return cfg, _RequestOrgs(org_registry, oid), d
+    config, orgs, d = sec.fold(fold)
+    if config != signin.config:
+        raise SsoLoginError("the organization's sign-in configuration changed during the sign-in; sign in again")
+    return _login_principal(orgs, config, subject=signin.subject, link_ids=signin.link_ids, groups=signin.groups,
+                            issued_at=issued_at, directory_registry=_FoldedDirectory(d, dreg), audit=audit)
+
+
+def sso_login_saml(xml_bytes: bytes, *, org_id: str, config_registry, org_registry, replay_ledger,
+                   now: float, sig_verifier=None, issued_at: Optional[float] = None,
+                   expected_request_id: Optional[str] = None, directory_registry=None,
+                   audit: Optional[AuditFn] = None) -> ProvisionResult:
+    """Verify a SAML Response for `org_id` (`verify_saml_sign_in`), then resolve the member (JIT or directory-linked,
+    `admit_verified_sign_in`). FAIL-CLOSED on no active SAML config, a protocol mismatch, or any verification
+    failure. The role comes from the OWNER-SIGNED config, never the assertion's attributes."""
+    signin = verify_saml_sign_in(xml_bytes, org_id=org_id, config_registry=config_registry,
+                                 replay_ledger=replay_ledger, now=now, sig_verifier=sig_verifier,
+                                 expected_request_id=expected_request_id)
+    return admit_verified_sign_in(signin, config_registry=config_registry, org_registry=org_registry,
+                                  issued_at=now if issued_at is None else issued_at,
+                                  directory_registry=directory_registry, audit=audit)
+
+
+def sso_login_oidc(id_token: str, *, org_id: str, config_registry, org_registry, jwks_keys, expected_nonce: str,
+                   now: float, issued_at: Optional[float] = None, directory_registry=None,
+                   audit: Optional[AuditFn] = None) -> ProvisionResult:
+    """Verify an enterprise-OIDC id_token for `org_id` (`verify_oidc_sign_in`), then resolve the member (JIT or
+    directory-linked, `admit_verified_sign_in`). FAIL-CLOSED on no active OIDC config or any verification failure."""
+    signin = verify_oidc_sign_in(id_token, org_id=org_id, config_registry=config_registry, jwks_keys=jwks_keys,
+                                 expected_nonce=expected_nonce, now=now)
+    return admit_verified_sign_in(signin, config_registry=config_registry, org_registry=org_registry,
+                                  issued_at=now if issued_at is None else issued_at,
+                                  directory_registry=directory_registry, audit=audit)
 
 
 # ---------------------------------------------------------------------------------------------------

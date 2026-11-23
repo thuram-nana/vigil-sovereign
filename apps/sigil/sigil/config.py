@@ -483,6 +483,17 @@ SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
 SCIM_READ_RATELIMIT_DIR = _customer / "scim_read_ratelimit"
 SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 1800)
 SCIM_READS_PER_MIN = _int_env("VIGIL_SCIM_READS_PER_MIN", 1800)
+# The per-org DEPROVISIONING cap (VIGIL_SCIM_DEPROVISIONS_PER_MIN units per org per minute; a deprovisioning request
+# costs the records it appended, at least one): a request that can only take privilege away skips the write budget,
+# and this is its own, much higher, count bound. Never refuses while the org is under it, and even an org over it
+# gets one deprovisioning admitted per minute, so an offboarding always makes progress.
+SCIM_DEPROV_RATELIMIT_DIR = _customer / "scim_deprov_ratelimit"
+SCIM_DEPROVISIONS_PER_MIN = _int_env("VIGIL_SCIM_DEPROVISIONS_PER_MIN", 6000)
+# The per-org enterprise sign-in budget (VIGIL_SSO_SIGNINS_PER_MIN VERIFIED sign-ins per org per minute, beside the
+# per-client-IP limiter): an org's own IdP can mint valid assertions without limit and from any address, and each
+# resolved sign-in folds the spine.
+SSO_SIGNIN_RATELIMIT_DIR = _customer / "sso_signin_ratelimit"
+SSO_SIGNINS_PER_MIN = _int_env("VIGIL_SSO_SIGNINS_PER_MIN", 600)
 
 
 def apex_impact_enabled() -> bool:

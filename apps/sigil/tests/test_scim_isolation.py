@@ -646,3 +646,210 @@ def test_an_over_bound_body_spends_no_budget(stack, monkeypatch):
         for _ in range(3):
             assert _scim(stack, ORG_A, "POST", "/Groups", big)["status"] == 400
     assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("a@acme.com", "00u-a"))["status"] == 201
+
+
+# =====================================================================================================================
+# SIGN-INS — verified first, then a per-org budget, resolved one at a time per org, with the folds outside the
+# shared section; one org's sign-in flood never stalls another org
+# =====================================================================================================================
+def _assertion_b64(stack, org: str, name_id: str, *, key=None) -> str:
+    import base64
+    u = stack.urls(org)
+    xml = edge._sign(edge._saml_response(request_id="_req1", audience=u["saml_sp_entity_id"],
+                                         recipient=u["saml_acs_url"], name_id=name_id), key or edge.IDP_KEY)
+    return base64.b64encode(xml).decode()
+
+
+def _sign_in(stack, org: str, name_id: str = "", *, b64: str = "", ip: str = "198.51.100.1", key=None) -> dict:
+    """One SAML ACS tail through a FRESH provisioner (the edge's login state already named `org` and `_req1`)."""
+    return sso_provision.sso_saml_acs(build_provisioner(stack.store()), org,
+                                      b64 or _assertion_b64(stack, org, name_id, key=key), request_id="_req1", ip=ip)
+
+
+def test_the_sign_in_budget_and_lock_defaults_are_pinned():
+    assert config.SSO_SIGNINS_PER_MIN == 600 and config.SCIM_DEPROVISIONS_PER_MIN == 6000
+    assert sso_provision._SIGNIN_LOCK_WAIT_S == 10.0
+
+
+def test_a_sign_in_never_folds_while_holding_the_spine_lock(stack, signed, meter, monkeypatch):
+    """A directory-managed sign-in that CLAMPS (the member holds org_admin, the directory implies viewer): every fold
+    — memberships and directory — runs without the spine lock, and the hold that lands the clamp appends at most its
+    3 records (audit row, grant, directory note)."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    _gid, uids = _seed(stack, ORG_A, 2, role="org_admin")
+    seen = _watch_folds(monkeypatch, meter)
+    dirs: list = []
+    orig = ScimDirectoryRegistry.directory
+
+    def directory(self, org_id):
+        dirs.append(meter._is_owned())
+        return orig(self, org_id)
+    monkeypatch.setattr(ScimDirectoryRegistry, "directory", directory)
+    t, out = _in_thread("sign-in", lambda: _sign_in(stack, ORG_A, f"s0@{ORG_A}.example"))
+    t.join(60)
+    assert out["r"]["username"] == uids[0], out
+    assert stack.role(uids[0], ORG_A) == "viewer" and stack.audits("sso_role_clamp")
+    assert seen and not any(seen) and dirs and not any(dirs), (seen, dirs)
+    assert 1 <= meter.max_hold("sign-in") <= 3
+
+
+def test_the_per_org_sign_in_budget_refuses_with_nothing_minted(stack, signed, monkeypatch):
+    """Over `VIGIL_SSO_SIGNINS_PER_MIN` verified sign-ins a minute, the org's next sign-in is refused BEFORE its
+    assertion is verified or spent: nothing minted, the client IP not counted as a failure, and once the budget is
+    repaid the very same assertion still signs in (it was never consumed)."""
+    from sigil.ui.provision import ProvisionDenied
+    monkeypatch.setattr(config, "SSO_SIGNINS_PER_MIN", 2)
+    stack.saml_org(ORG_A)                                       # just-in-time: a sign-in mints the membership
+    stack.saml_org(ORG_B)
+    assert _sign_in(stack, ORG_A, "ann@acme.example")["org_id"] == ORG_A
+    assert _sign_in(stack, ORG_A, "bob@acme.example")["org_id"] == ORG_A
+    before, n0 = _roles(stack, ORG_A), _n(stack)
+    held = _assertion_b64(stack, ORG_A, "cat@acme.example")
+    with pytest.raises(ProvisionDenied, match="too many sign-ins"):
+        _sign_in(stack, ORG_A, b64=held, ip="198.51.100.77")
+    assert _roles(stack, ORG_A) == before and len(before) == 2
+    assert _n(stack) == n0 + 1 and stack.audits("sso_login")[-1]["reason"] == "saml:org_rate"   # one audit row
+    p = build_provisioner(stack.store())
+    assert p.rate_limiter.locked("sso:ip:198.51.100.77") is None and not p.rate_limiter._marker(
+        "sso:ip:198.51.100.77").exists()
+    assert _sign_in(stack, ORG_B, "dan@beta.example")["org_id"] == ORG_B           # another org's budget is its own
+    import shutil
+    shutil.rmtree(config.SSO_SIGNIN_RATELIMIT_DIR, ignore_errors=True)            # the budget repaid
+    assert _sign_in(stack, ORG_A, b64=held, ip="198.51.100.77")["org_id"] == ORG_A
+    assert len(_roles(stack, ORG_A)) == 3
+
+
+def test_assertions_that_fail_verification_never_spend_the_orgs_sign_in_budget(stack, signed, monkeypatch):
+    from sigil.ui.provision import ProvisionDenied
+    monkeypatch.setattr(config, "SSO_SIGNINS_PER_MIN", 2)
+    stack.saml_org(ORG_A)
+    for i in range(5):                                          # forged by someone without the IdP's key
+        with pytest.raises(ProvisionDenied, match="could not be verified"):
+            _sign_in(stack, ORG_A, f"x{i}@acme.example", key=edge.ATTACKER_KEY, ip=f"203.0.113.{i + 1}")
+    assert _roles(stack, ORG_A) == {}
+    assert _sign_in(stack, ORG_A, "ann@acme.example")["org_id"] == ORG_A
+    assert _sign_in(stack, ORG_A, "bob@acme.example")["org_id"] == ORG_A
+
+
+def test_the_per_org_sign_in_budget_covers_enterprise_oidc(stack, monkeypatch):
+    """Over the budget an enterprise-OIDC sign-in is refused before its code is even exchanged (no IdP egress)."""
+    from sigil.ui import oidc as uioidc
+    monkeypatch.setattr(config, "SSO_SIGNINS_PER_MIN", 1)
+    exchanges: list = []
+    orig = uioidc.exchange_code
+
+    def exchange(*a, **kw):
+        exchanges.append(1)
+        return orig(*a, **kw)
+    monkeypatch.setattr(uioidc, "exchange_code", exchange)
+    stack.oidc_org(ORG_A, client_id="cid-acme")
+    ok = edge._oidc_sign_in(stack, ORG_A, sub="00u-ann")
+    assert ok.location == "/" and len(exchanges) == 1, (ok.status, ok.location)
+    refused = edge._oidc_sign_in(stack, ORG_A, sub="00u-bob")
+    assert refused.location == "/#sso=err" and len(_roles(stack, ORG_A)) == 1
+    assert len(exchanges) == 1 and stack.audits("sso_login")[-1]["reason"] == "oidc:org_rate"
+
+
+def test_one_orgs_sign_ins_are_resolved_one_at_a_time(stack, signed, monkeypatch):
+    """While a sign-in of org A is being resolved (its sign-in lock held), the next one of org A waits the bounded
+    time and is refused with nothing minted — and org B's sign-in is answered at once."""
+    from sigil.ui.provision import ProvisionDenied
+    monkeypatch.setattr(sso_provision, "_SIGNIN_LOCK_WAIT_S", 0.3)
+    stack.saml_org(ORG_A)
+    stack.saml_org(ORG_B)
+    p = build_provisioner(stack.store())
+    with sso_provision._org_lock(p, ORG_A, "signin"):
+        with pytest.raises(ProvisionDenied, match="too many sign-ins"):
+            _sign_in(stack, ORG_A, "ann@acme.example")
+        assert _roles(stack, ORG_A) == {}
+        t0 = time.time()
+        assert _sign_in(stack, ORG_B, "dan@beta.example")["org_id"] == ORG_B
+        assert time.time() - t0 < 5.0
+    assert _sign_in(stack, ORG_A, "ann@acme.example")["org_id"] == ORG_A
+
+
+def test_a_config_re_signed_between_verification_and_resolution_refuses_the_sign_in(stack, signed, monkeypatch):
+    """The member is resolved only under the config the assertion verified under: a config the owner re-signed in
+    between (e.g. a rotated IdP certificate) refuses the sign-in, nothing minted."""
+    from sigil.ui.provision import ProvisionDenied
+    stack.saml_org(ORG_A)
+    orig = uiscim.verify_saml_sign_in
+
+    def verify(*a, **kw):
+        out = orig(*a, **kw)
+        u = stack.urls(ORG_A)
+        stack.cfg().set_saml_config(ORG_A, idp_entity_id=edge.IDP_ENTITY, idp_certs_pem=[edge.IDP_CERT],
+                                    idp_sso_url=edge.IDP_SSO_URL, sp_entity_id=u["saml_sp_entity_id"],
+                                    acs_url=u["saml_acs_url"], default_role="viewer",
+                                    group_role_map={"Admins": "org_admin"}, role_cap="analyst",
+                                    scim_enabled=False, scim_token="", issued_at=time.time())
+        return out
+    monkeypatch.setattr(uiscim, "verify_saml_sign_in", verify)
+    with pytest.raises(ProvisionDenied, match="could not be verified"):
+        _sign_in(stack, ORG_A, "ann@acme.example")
+    assert _roles(stack, ORG_A) == {}
+
+
+def test_a_sign_in_flood_from_one_org_does_not_stall_another_orgs_write_or_sign_in(stack, signed):
+    """A hostile tenant's IdP signs its own users in, in a loop, from many addresses (8 threads, a fresh client IP
+    each time) over a large directory. Org B's SCIM write and org B's sign-in stay within 5x their calm time."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B, scim_token=TOKEN_B)
+    _seed(stack, ORG_A, 1500)
+    _seed(stack, ORG_B, 1, prefix="b")
+    b_user = f"b0@{ORG_B}.example"
+
+    def b_write(tag: str) -> float:
+        t0 = time.time()
+        assert _scim(stack, ORG_B, "POST", "/Users", _okta_user(f"{tag}@beta.com", f"00u-{tag}"))["status"] == 201
+        return time.time() - t0
+
+    def b_sign_in() -> float:
+        t0 = time.time()
+        assert _sign_in(stack, ORG_B, b_user, ip="192.0.2.200")["org_id"] == ORG_B
+        return time.time() - t0
+    calm_w, calm_s = b_write("calm"), b_sign_in()
+    stop = threading.Event()
+    done = [0]
+    counter = iter(range(10 ** 6))
+
+    def flood():
+        while not stop.is_set():
+            k = next(counter)
+            try:
+                _sign_in(stack, ORG_A, f"s{k % 1500}@{ORG_A}.example", ip=f"10.{k // 65536 % 256}.{k // 256 % 256}."
+                                                                         f"{k % 256}")
+                done[0] += 1
+            except Exception:  # noqa: BLE001 — refusals (busy / budget) are part of the flood
+                pass
+    ths = [threading.Thread(target=flood, daemon=True) for _ in range(8)]
+    for t in ths:
+        t.start()
+    time.sleep(2)
+    busy_w, busy_s = b_write("busy"), b_sign_in()
+    stop.set()
+    for t in ths:
+        t.join(120)
+    print(f"\norg A sign-ins resolved during the flood: {done[0]}; org B write {calm_w:.2f}s -> {busy_w:.2f}s, "
+          f"sign-in {calm_s:.2f}s -> {busy_s:.2f}s")
+    assert done[0] > 0
+    assert busy_w < 5 * max(calm_w, 1.0), (calm_w, busy_w)
+    assert busy_s < 5 * max(calm_s, 1.0), (calm_s, busy_s)
+
+
+# =====================================================================================================================
+# DEPROVISIONING — its own high per-org cap, with a one-a-minute floor
+# =====================================================================================================================
+def test_deprovisioning_has_its_own_cap_and_always_makes_progress(stack, monkeypatch):
+    """Under the cap a deprovisioning is never refused; each costs at least one unit (also one that appended nothing);
+    over it, one more is still admitted in the minute, then 429 + Retry-After. The write budget is not involved."""
+    monkeypatch.setattr(config, "SCIM_DEPROVISIONS_PER_MIN", 3)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B, scim_token=TOKEN_B)
+    gone = [f"/Users/sso_{i:024x}" for i in range(6)]
+    assert [_scim(stack, ORG_A, "DELETE", g)["status"] for g in gone[:3]] == [404, 404, 404]   # under the cap
+    assert _scim(stack, ORG_A, "DELETE", gone[3])["status"] == 404                              # the floor
+    over = _scim(stack, ORG_A, "DELETE", gone[4])
+    assert over["status"] == 429 and 1 <= over["retry_after"] <= 60
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("a@acme.com", "00u-a"))["status"] == 201
+    assert _scim(stack, ORG_B, "DELETE", gone[5])["status"] == 404                              # B's cap is its own
