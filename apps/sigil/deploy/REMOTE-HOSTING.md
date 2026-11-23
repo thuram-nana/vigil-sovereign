@@ -223,6 +223,22 @@ unset. The SSE endpoints (`/sovereign/api/stream`, `/offense/api/events`,
 `/offense/api/blackboard`) get buffering-off + a long read timeout in both
 templates.
 
+**Payment webhooks — the console vhost's one exception.** Restrict the console
+vhost to your admin/VPN range (the allow-list in `infra/edge/Caddyfile.example`,
+commented and ready in `vigil.Caddyfile` / `vigil.nginx.conf`). The payment
+processor cannot be on that list, so every console template forwards exactly
+`POST /webhooks/stripe` (and Flutterwave's `POST /webhooks/billing`) from any
+source IP, ahead of the allow-list: exact path only (a raw request line that
+merely normalises onto it, a trailing slash or a query string is not forwarded),
+POST only, a 1 MB body cap, `Host` and `Stripe-Signature` forwarded unchanged.
+Register the webhook in Stripe as `https://<console host>/webhooks/stripe`
+(live: `https://console.vigilguard.net/webhooks/stripe`). This is safe because
+the body never credits anything: the proxy checks the `Stripe-Signature` HMAC,
+and the billing drain re-verifies it and re-fetches every object from Stripe
+with the restricted key before the owner catalog mints. The cockpit-only
+templates (`Caddyfile`, `cockpit.nginx.conf`) front `sigil serve`, which serves
+no webhook, and carry no such exception.
+
 > The single URL includes `?token=<token>` (the sovereign cockpit's session
 > token, kept to the terminal/journal — never embedded where a cross-origin page
 > can read it). Keep it private, exactly like the standalone cockpit token.
@@ -265,6 +281,8 @@ app.vigil.example.com     →  custui    127.0.0.1:8734   (tenant app; its own v
       forwarded as `Host`, SSE paths (`/sovereign/api/stream`, `/offense/api/events`,
       `/offense/api/blackboard`) buffering-off + long read timeout, and
       `CRUCIBLE_API_KEY` set when the offense api is internet-fronted.
+- [ ] Console vhost IP-restricted to your admin/VPN range, with the single exact-path
+      `POST /webhooks/stripe` (and `/webhooks/billing`) exception for the payment processor.
 - [ ] Public site (`sigil serve-public`) on its **own** public origin, loopback bind,
       TLS at the edge (`vigil-public.Caddyfile`/`vigil-public.nginx.conf`) — never
       sharing the operator cockpit's hostname.

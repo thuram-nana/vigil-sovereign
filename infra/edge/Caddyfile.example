@@ -7,7 +7,8 @@
 #
 # SECURITY MODEL: the three app ports (8735 / 8734 / 8770) bind to 127.0.0.1 ONLY on the box and are never
 # in a security group. Caddy is the one public listener; it terminates TLS and proxies to the loopback
-# ports. The console is the owner control plane — keep its allow-list tight.
+# ports. The console is the owner control plane — keep its allow-list tight. Its ONE exception is the
+# payment-provider webhook (`POST /webhooks/stripe`, `POST /webhooks/billing`, exact path), explained below.
 
 # --- the public / marketing site -> pubui (:8735) ---
 vigil.example.com {
@@ -24,8 +25,46 @@ app.vigil.example.com {
 # --- the operator console -> vigil-up (:8770). Owner control plane: restrict by source IP. ---
 console.vigil.example.com {
 	encode zstd gzip
-	# Replace with YOUR office / VPN CIDR(s). Everything else gets a flat 403 before it reaches the console.
-	@blocked not remote_ip 203.0.113.0/24
-	respond @blocked "forbidden" 403
-	reverse_proxy 127.0.0.1:8770
+
+	# --- The ONE exception to the admin IP allow-list: payment-provider webhooks --------------------------
+	# Stripe (and Flutterwave, while that adapter is in use) deliver from their own servers, which are never on
+	# your admin/VPN list, so EXACTLY `POST /webhooks/stripe` and `POST /webhooks/billing` are forwarded from any
+	# source IP. Everything else, including any other method on these two paths, falls through to the
+	# allow-listed `handle` below. The `handle` blocks are mutually exclusive and this one is tried first.
+	#
+	# Why this is safe: the request body is untrusted and is never what credits an account.
+	#   * The `vigil up` proxy verifies `Stripe-Signature` (HMAC-SHA256 over the raw body with the endpoint's
+	#     signing secret, 300 s tolerance) and refuses anything else before it writes a byte; it only spools the
+	#     delivery as an inert file (integration/vigil_integration/uiproxy.py `_webhooks_stripe`).
+	#   * The billing drain re-verifies the same signature, then RE-FETCHES every Checkout Session / Invoice /
+	#     Subscription from Stripe with the restricted API key; only those fetched objects, mapped through the
+	#     owner catalog, can mint. No credit is ever taken from the webhook body.
+	#   * `/webhooks/billing` (Flutterwave) has the same shape: a constant-time `verif-hash` check at the proxy,
+	#     then a server-side transaction re-verify in the drain before any mint.
+	# So a forged or replayed delivery is refused or inert whatever IP it comes from.
+	#
+	# Exact path only. `path` alone matches a cleaned, case-insensitive path, so the `expression` also requires
+	# the RAW request URI to be byte-identical: `/webhooks/x/../stripe`, `/webhooks//stripe`, `/WEBHOOKS/stripe`,
+	# `/webhooks/%73tripe`, `/webhooks/stripex` or an added query string do not match and meet the allow-list.
+	# Caddy forwards Host and every client header, `Stripe-Signature` included, unchanged. Bodies are capped at
+	# 1 MB here; the proxy itself refuses more than 128 KiB.
+	@provider_webhook {
+		method POST
+		path /webhooks/stripe /webhooks/billing
+		expression `{http.request.uri} in ["/webhooks/stripe", "/webhooks/billing"]`
+	}
+	handle @provider_webhook {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8770
+	}
+
+	# Everything else on the console: the admin IP allow-list.
+	handle {
+		# Replace with YOUR office / VPN CIDR(s). Everything else gets a flat 403 before it reaches the console.
+		@blocked not remote_ip 203.0.113.0/24
+		respond @blocked "forbidden" 403
+		reverse_proxy 127.0.0.1:8770
+	}
 }

@@ -83,6 +83,9 @@ console.vigil.<you>    A   <EIP>
 ```
 Copy `infra/edge/Caddyfile.example` to `/etc/caddy/Caddyfile`, set the three hostnames and the console
 allow-list CIDR, then `sudo systemctl reload caddy`. Caddy fetches + renews certificates automatically.
+The console site keeps one exception to that allow-list: exactly `POST /webhooks/stripe` (and
+`POST /webhooks/billing`) from any source IP, so Stripe can deliver to `https://console.vigil.<you>/webhooks/stripe`
+(the URL to register in Stripe; go-live quickstart §9b). Every other console path stays IP-restricted.
 
 ### A5. Secrets
 Set the real secrets as the go-live quickstart describes (owner Ed25519 key, Stripe keys, provisioning hop

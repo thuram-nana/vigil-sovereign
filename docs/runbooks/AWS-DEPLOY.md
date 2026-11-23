@@ -289,6 +289,29 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      request. If a later rule ever makes another host cacheable on this zone, purge by host name instead where
      the plan offers it (`--data '{"hosts":["vigilguard.net"]}'`; EXTERNAL: Cloudflare plan feature).
      Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
+7. **Stripe webhook: the URL, the console's one exception, and how Stripe reaches it.** Stripe delivers to
+   exactly `https://console.vigilguard.net/webhooks/stripe` (`POST`, no trailing slash, no query string;
+   `GO-LIVE-quickstart.md` §9b). The console vhost (`vigil.nginx.conf`) carries **one** exception to its admin
+   IP allow-list for this: `location = /webhooks/stripe` (and `location = /webhooks/billing` for Flutterwave)
+   is forwarded from any source IP, `POST` only, byte-exact on the raw request line, with a 1 MB body cap and
+   `Host` / `Stripe-Signature` unchanged. Every other path and method on the console stays restricted to the
+   allow-list. That opening is safe because the body never credits anything: the `vigil up` proxy checks the
+   `Stripe-Signature` HMAC before it spools a byte, and the billing drain re-verifies it and re-fetches every
+   Checkout Session / Invoice / Subscription from Stripe with the restricted key before the owner catalog mints.
+
+   **Reachability is an owner decision this runbook does not make.** Under the profile above, Stripe cannot
+   deliver: item 3 publishes no `console` record and the security group admits 443 only from Cloudflare. Until
+   one of these is chosen, Stripe's deliveries fail and no payment is credited:
+   - **(a)** publish a DNS-only `console` record, admit Stripe's published webhook source addresses (EXTERNAL:
+     Stripe's IP-address list) on 443 in the security group, and uncomment the admin allow-list in
+     `vigil.nginx.conf`, so the console answers only your admin range plus the exact webhook `POST`. This
+     relaxes item 3's "no public `console` record" for that name; the security group cannot tell vhosts apart,
+     so those addresses also reach the other vhosts on the host (the public vhost still refuses them once the
+     per-zone AOP of item 4a is enforced); or
+   - **(b)** run the console on the EC2 + Caddy profile (`AWS-EC2-DEPLOY.md`), which already publishes the
+     `console` name behind the allow-list in `infra/edge/Caddyfile.example`, with the same exception.
+
+   Do not solve it by proxying `console` through Cloudflare: §topology keeps the operator host off Cloudflare.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare

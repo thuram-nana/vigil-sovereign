@@ -252,6 +252,9 @@ app.vigil.example.com     → vigil-customer.nginx.conf  → 127.0.0.1:8734  (cu
 console.vigil.example.com → vigil.nginx.conf           → 127.0.0.1:8770  (vigil up; keep private)
 ```
 
+The console vhost is IP-restricted except for one exact-path exception: `POST /webhooks/stripe` and
+`POST /webhooks/billing` from any source, for the payment processor's webhook deliveries (§9b).
+
 Edit each vhost's `server_name` + cert paths, obtain certs (`certbot certonly --nginx -d <host>`), then
 `nginx -t && systemctl reload nginx`. Forward `Host`, `Origin`, `Referer` **unchanged** on the customer
 vhost (done in the template) or its gates fail closed. Confirm every listener is loopback/private
@@ -390,9 +393,20 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    `adaptive_pricing` setting: every session VIGIL creates turns it off). Turn **Adaptive Pricing off** in the
    Dashboard as well (the charge must be in the catalog currency). Stripe checkout charges only currencies whose
    Stripe minor unit is confirmed to match the catalog's (USD today), and a plan (subscription) checkout accepts
-   card only. Add a webhook endpoint at `https://<operator ingress>/webhooks/stripe`
-   subscribed to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   card only. Add a webhook endpoint at exactly `https://<console host>/webhooks/stripe` (the console vhost of
+   §7, e.g. `https://console.vigil.example.com/webhooks/stripe`; the live deployment uses
+   `https://console.vigilguard.net/webhooks/stripe`): no trailing slash, no query string, no other path.
+   Subscribe it to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed`.
+   **The console vhost carries one exception to its admin IP allow-list for this:** `POST /webhooks/stripe`
+   (and Flutterwave's `POST /webhooks/billing`), exact path only, is forwarded from any source IP with a 1 MB
+   body cap and `Host` / `Stripe-Signature` unchanged; every other path and method on the console stays
+   IP-restricted (`vigil.nginx.conf`, `vigil.Caddyfile`, `infra/edge/Caddyfile.example`; pinned by
+   `apps/sigil/tests/test_console_webhook_edge.py`). It is safe to open because the body never credits
+   anything: the proxy checks the `Stripe-Signature` HMAC, and the drain re-verifies it and re-fetches every
+   object from Stripe with the restricted key. Stripe must still be able to *reach* the host: the console name
+   needs a public DNS record and port 443 open to Stripe (see `AWS-DEPLOY.md` §3.7 for the Cloudflare profile,
+   where it is not by default).
 2. **Proxy route.** Set `VIGIL_STRIPE_WEBHOOK_SPOOL` (e.g. `$SIGIL_HOME/stripe-billing-spool`) and
    `VIGIL_STRIPE_WEBHOOK_SECRET` (the endpoint's signing secret; it must differ from the Flutterwave one).
 3. **Drain.** Install `infra/systemd/vigil-billing-drain-stripe.{service,timer}` with its env file:
