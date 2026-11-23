@@ -79,7 +79,7 @@ deploy it commercially pay for a commercial license. The revenue funds continued
 
 Contact the Licensor:
 
-- **Web:** https://thuramnana.com
+- **Web:** https://sigilsovereign.com
 - **Email:** info@sigilsovereign.com
 - **Subject:** `VIGIL commercial license`
 - Please include: your company, the product / use case, deployment model (internal /
