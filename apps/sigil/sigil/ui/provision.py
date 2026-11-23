@@ -4266,6 +4266,206 @@ class Provisioner:
                 "environment": result["environment"], "not_before": result["not_before"],
                 "not_after": result["not_after"]}
 
+    # ---- PR-G (Area 6): the Plans screen + plan change, the report export, the compliance view ---------------------
+    # Each is absent (unknown action -> 404 at the cockpit dispatch) unless its OWN flag is on, and refuses here too
+    # (defence in depth). requester + org are the hop-bound session principal, never a body field; every read is the
+    # session org's own (``admit_customer``, no global leg), and none of them mints, grants or moves a credit.
+    _REPORT_MAX = 20                 # report exports per org (and per requester) per window; a PDF spawns a renderer
+    _REPORT_WINDOW_S = 3600.0
+
+    def _report_limiter(self):
+        lim = getattr(self, "_report_limiter_obj", None)
+        if lim is None:
+            from .. import config
+            from .login_ratelimit import LoginRateLimiter
+            lim = LoginRateLimiter(config.REPORT_RATELIMIT_DIR, max_fails=self._REPORT_MAX,
+                                   window_s=self._REPORT_WINDOW_S, base_lock_s=self._REPORT_WINDOW_S,
+                                   max_lock_s=self._REPORT_WINDOW_S)
+            self._report_limiter_obj = lim
+        return lim
+
+    def _plan_change_ledger(self):
+        """The owner-signed plan-change DISPLAY ledger + per-org change lock, under the deployment owner identity."""
+        led = getattr(self, "_plan_change_ledger_obj", None)
+        if led is None:
+            from .. import config
+            from ..governor.plan_change import PlanChangeLedger
+            led = PlanChangeLedger(config.PLAN_CHANGE_DIR, owner_key=getattr(self.orgs, "owner_key", None),
+                                   trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None))
+            self._plan_change_ledger_obj = led
+        return led
+
+    def _plan_changer(self):
+        """The Stripe plan changer, or None unless Stripe is the configured processor AND provisioned exactly as Stripe
+        checkout needs it (the drain that will mint the renewal must be able to verify it). Every call it makes is
+        bounded by ``plan_change.EGRESS_TIMEOUT_S`` per socket operation. Overridable (tests inject a fake)."""
+        from .. import config
+        if config.billing_provider() != "stripe" or self._stripe_checkout_provider() is None:
+            return None
+        from ..governor import stripe_egress as se
+        from ..governor.plan_change import EGRESS_TIMEOUT_S, StripePlanChanger
+        bounded = se.with_timeout(EGRESS_TIMEOUT_S)
+        return StripePlanChanger(fetch=se.make_object_fetcher(transport=bounded),
+                                 update_subscription=se.make_subscription_updater(transport=bounded),
+                                 create_product=se.make_product_creator(transport=bounded),
+                                 livemode=se.stripe_key_mode() == "live")
+
+    def customer_billing_plans(self, requester: str, requester_org_id: str, *, ip: str = "",
+                               now: "Optional[float]" = None) -> dict:
+        """PR-G — the session org's Plans screen (``ui/plans.plans_view``): the owner catalog's tiers, the current plan,
+        a change scheduled for its renewal and which actions this member may take. ``admit_customer(view_billing)``;
+        the upgrade and change offers appear only for a member who may also spend money (``manage_billing``). Reads
+        only — no processor call, no write."""
+        from .. import config
+        if not config.customer_plans_enabled():
+            raise ProvisionDenied("the plans screen is not enabled")
+        t = self._now() if now is None else float(now)
+
+        def project(store, org: str) -> dict:
+            from . import plans as _plans
+            can_manage = self.orgs.admit_customer(username=requester, org_id=org, permission="manage_billing")
+            checkout_on = config.customer_checkout_enabled() and config.customer_plan_checkout_enabled()
+            change_on = (checkout_on and config.customer_plan_change_enabled()
+                         and self._plan_changer() is not None)
+            pending = bool(checkout_on and can_manage and (self.pending_checkouts is None
+                                                           or self.pending_checkouts.pending(org, now=t)))
+            return _plans.plans_view(store, org, now=t, can_manage=can_manage,
+                                     preview_locked=self._preview_locked(org), checkout_on=checkout_on,
+                                     change_on=change_on, plan_checkout_pending=pending,
+                                     trial_credits=self.trial_credits, ledger=self._plan_change_ledger())
+        return self._customer_read(requester, requester_org_id, "view_billing", project)
+
+    def billing_plan_change(self, requester: str, requester_org_id: str, *, price_id: str = "", cancel: bool = False,
+                            ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """PR-G — change the session org's CREDIT plan at its next renewal (``price_id``: another offered plan, or the
+        current one to undo a scheduled change or cancellation), or end it at the end of its period (``cancel``). See
+        ``governor/plan_change``: the change is written to the processor's subscription only — no mid-period charge,
+        no refund, no credit moved — and the renewal is then minted by the EXISTING verified drain through the EXISTING
+        owner catalog. Gated like checkout: every plan flag, the owner's checkout latch, ``admit_customer
+        (manage_billing)``, a fresh step-up and the checkout rate limit; then one change per org at a time."""
+        from .. import config
+        if not (config.customer_plans_enabled() and config.customer_plan_change_enabled()
+                and config.customer_checkout_enabled() and config.customer_plan_checkout_enabled()):
+            raise ProvisionDenied("changing plans is not enabled")
+        paused = self._latch_refusal("checkout")          # the owner's latch: no new money action of any kind
+        if paused is not None:
+            raise ProvisionDenied(paused)
+        t = self._now() if now is None else float(now)
+        org = requester_org_id
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=org, permission="manage_billing"):
+                self._audit("billing_plan_change", requester=requester, org_id=org, outcome="denied")
+                raise ProvisionDenied("requester may not manage billing for this org")
+            self._require_stepup(mfa_at, now=t)
+            if not self._checkout_rate_ok(requester, org, t):
+                self._audit("billing_plan_change", requester=requester, org_id=org, outcome="rate_limited")
+                raise ProvisionDenied("too many billing changes — try again later")
+        changer = self._plan_changer()
+        if changer is None:
+            self._audit("billing_plan_change", requester=requester, org_id=org, outcome="unconfigured")
+            raise ProvisionDenied("plan changes are not available (the owner has not provisioned the payment "
+                                  "processor)")
+        from ..governor import plan_change as _pc
+        from ..governor.invoices import InvoiceRegistry
+        from ..governor.subscription import SubscriptionRegistry
+        ledger = self._plan_change_ledger()
+        want = "cancel" if cancel else str(price_id or "")[:64]
+        try:
+            with ledger.exclusive(org):
+                cur = _pc.current_plan(SubscriptionRegistry(self.store).subscription(org),
+                                       InvoiceRegistry(self.store).invoices(org), now=t)
+                sub = changer.locate(cur.invoice_id, org)
+                decision = _pc.decide(cur, sub, target_price_id=str(price_id or ""), cancel=bool(cancel))
+                try:
+                    after = changer.apply(sub, decision, org, nonce=secrets.token_urlsafe(18))
+                except _pc.PlanChangeUnconfirmed as exc:
+                    self._audit("billing_plan_change", requester=requester, org_id=org, target=want,
+                                outcome="unconfirmed", reason=f"{_pc.subscription_ref(sub.sub_id)} {exc}",
+                                critical=True)
+                    raise ProvisionDenied("the payment processor did not confirm the change; check your plan in a "
+                                          "minute before trying again, or contact support") from None
+                to_price = decision.target.price_id if decision.target is not None else ""
+                ref = _pc.subscription_ref(sub.sub_id)
+                note = ""
+                try:
+                    ledger.record(org, kind=decision.kind, from_price_id=cur.entry.price_id, to_price_id=to_price,
+                                  period_end=cur.period_end, subscription_ref=ref, issued_at=t)
+                except OSError:
+                    note = " (display record not written)"
+                self._audit("billing_plan_change", requester=requester, org_id=org, target=want,
+                            outcome=f"scheduled_{decision.kind}",
+                            reason=f"{ref} effective_at={int(cur.period_end)}{note}", critical=True)
+        except _pc.PlanChangeRefused as exc:
+            self._audit("billing_plan_change", requester=requester, org_id=org, target=want, outcome=exc.code)
+            raise ProvisionDenied(str(exc)) from None
+        target = decision.target
+        return {"org_id": org, "kind": decision.kind, "effective_at": cur.period_end,
+                "price_id": to_price, "name": target.display_name if target is not None else "",
+                "cancel_at_period_end": after.cancel_at_period_end}
+
+    def customer_compliance(self, requester: str, requester_org_id: str, *, ip: str = "",
+                            now: "Optional[float]" = None) -> dict:
+        """PR-G — the session org's compliance view (``ui/compliance_view``): the OWASP Top 10 / PCI DSS / SOC 2
+        controls its PROVEN findings implicate — never a statement that a control is met. ``admit_customer
+        (view_assessments)``. Carries no proof and no fix, so a trial-preview org sees nothing its locked rows hide."""
+        from .. import config
+        if not config.customer_compliance_map_enabled():
+            raise ProvisionDenied("the compliance view is not enabled")
+        t = self._now() if now is None else float(now)
+        retests = config.customer_retest_ui_enabled()
+        from . import compliance_view as _cv
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _cv.compliance_view(s, o, now=t, retests=retests))
+
+    def customer_report_export(self, requester: str, requester_org_id: str, *, fmt: str = "html", ip: str = "",
+                               now: "Optional[float]" = None) -> dict:
+        """PR-G — the session org's shareable report (``ui/report_export``): the deterministic HTML document, or (``fmt
+        == "pdf"``) the same document through the owner-provisioned renderer (``ui/report_pdf``; refused while none is
+        provisioned). ``admit_customer(view_assessments)``; a trial-preview org is refused (the full report is what
+        its first purchase unlocks); rate-limited per org and per requester. Audited (non-critical)."""
+        from .. import config
+        if not config.customer_report_export_enabled():
+            raise ProvisionDenied("the report export is not enabled")
+        if fmt not in ("html", "pdf"):
+            raise ProvisionError("unknown report format")
+        t = self._now() if now is None else float(now)
+        org = requester_org_id
+        if not self.orgs.admit_customer(username=requester, org_id=org, permission="view_assessments"):
+            self._audit("report_export", requester=requester, org_id=org, target=fmt, outcome="denied")
+            raise ProvisionDenied("requester may not read this org (view_assessments)")
+        if self._preview_locked(org):
+            self._audit("report_export", requester=requester, org_id=org, target=fmt, outcome="preview_locked")
+            raise ProvisionDenied("the full report unlocks with your first purchase: buy credits to download it")
+        try:
+            locked = self._report_limiter().admit(f"report:org:{org}", f"report:user:{requester}", now=t)
+        except Exception:  # noqa: BLE001 — limiter state that cannot be read or written refuses (fail-closed)
+            locked = self._REPORT_WINDOW_S
+        if locked is not None:
+            self._audit("report_export", requester=requester, org_id=org, target=fmt, outcome="rate_limited")
+            raise ProvisionRateLimited(locked)
+        from . import report_export as _rx
+        o = self.orgs.org(org)
+        rep = _rx.build_report(self.store, org, now=t, org_name=getattr(o, "name", "") or "",
+                               retests=config.customer_retest_ui_enabled())
+        if fmt == "html":
+            self._audit("report_export", requester=requester, org_id=org, target="html", outcome="exported",
+                        reason=rep["fingerprint"])
+            return rep
+        from . import report_pdf as _pdf
+        try:
+            pdf = _pdf.render_pdf(rep["html"])
+        except _pdf.ReportPdfUnavailable as exc:
+            self._audit("report_export", requester=requester, org_id=org, target="pdf", outcome="pdf_unavailable",
+                        reason=str(exc))
+            raise ProvisionDenied(str(exc)) from None
+        self._audit("report_export", requester=requester, org_id=org, target="pdf", outcome="exported",
+                    reason=rep["fingerprint"])
+        return {"schema": rep["schema"], "org_id": org, "format": "pdf", "content_type": _pdf.PDF_CONTENT_TYPE,
+                "filename": _rx.safe_filename(org, t, "pdf"), "generated_at": rep["generated_at"],
+                "fingerprint": rep["fingerprint"], "findings_total": rep["findings_total"],
+                "sha256": hashlib.sha256(pdf).hexdigest(), "bytes": len(pdf),
+                "pdf_b64": base64.b64encode(pdf).decode("ascii")}
+
 
 def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time,
                       customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,

@@ -1843,6 +1843,58 @@ def apex_oob_enabled() -> bool:
     return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+# ---- consumer PR-G (Area 6): the Plans screen + plan change, the report export, the compliance view ----------
+# Each capability is default-OFF and read at CALL time (mirrors `redpen_enabled`): with a flag off its edge routes and
+# cockpit actions are absent (404 exactly as an unknown route), the page writes "0" for it, and nothing else changes.
+PLAN_CHANGE_DIR = _customer / "plan_change"             # owner-signed scheduled plan-change records (display only)
+REPORT_RATELIMIT_DIR = _customer / "report_ratelimit"   # the per-org/per-requester report-export limiter's markers
+
+
+def customer_plans_enabled() -> bool:
+    """True iff the customer Plans screen is ON (`VIGIL_CUSTOMER_PLANS` affirmative). OFF by default: the
+    ``api/customer/billing/plans`` read and its ``billing_plans`` cockpit action are absent (404 exactly as an unknown
+    route) and the page writes data-plans="0" (no tab). ON, the screen compares the OWNER CATALOG's credit plans (price,
+    credits per period, period) with the trial and pay-as-you-go, marks the workspace's current plan and offers the
+    one-click upgrade through the EXISTING hosted checkout (which still needs VIGIL_CUSTOMER_CHECKOUT_ENABLED +
+    VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED). A pure read: it mints nothing and never decides money."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLANS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_plan_change_enabled() -> bool:
+    """True iff a customer may CHANGE or CANCEL their credit plan self-serve (`VIGIL_CUSTOMER_PLAN_CHANGE`
+    affirmative). OFF by default: the ``api/customer/billing/plan-change`` route and its ``billing_plan_change`` action
+    are absent (404). Effective only together with the Plans screen and the base + plan checkout flags. ON, a change is
+    scheduled on the processor's subscription to take effect AT THE NEXT RENEWAL (no mid-period charge or refund — the
+    renewal invoice is then exactly the new catalog price, which the EXISTING verified webhook drain credits through the
+    EXISTING owner catalog); a cancel ends the plan at the end of the period it already paid for. Stripe only."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHANGE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_report_export_enabled() -> bool:
+    """True iff the shareable assessment REPORT export is ON (`VIGIL_CUSTOMER_PDF_REPORT` affirmative). OFF by default:
+    the ``api/customer/report`` / ``api/customer/report/pdf`` reads and their cockpit actions are absent (404) and the
+    page writes data-report-export="0". ON, a member who may read assessments downloads a deterministic, self-contained
+    HTML report of the workspace's PROVEN findings (no script, no external reference, every value escaped); the PDF of
+    the same report additionally needs the owner's renderer (`report_pdf_renderer`), and fails closed without it."""
+    return (os.environ.get("VIGIL_CUSTOMER_PDF_REPORT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_compliance_map_enabled() -> bool:
+    """True iff the customer COMPLIANCE view is ON (`VIGIL_CUSTOMER_COMPLIANCE_MAP` affirmative). OFF by default: the
+    ``api/customer/compliance`` read and its ``compliance_view`` action are absent (404) and the page writes
+    data-compliance="0". ON, the OWASP Top 10 / PCI DSS / SOC 2 controls the workspace's PROVEN findings implicate are
+    rolled up per framework — it never states that a control is met, covered or compliant."""
+    return (os.environ.get("VIGIL_CUSTOMER_COMPLIANCE_MAP") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def report_pdf_renderer() -> str:
+    """The owner/ops-provisioned HTML→PDF renderer (`VIGIL_REPORT_PDF_RENDERER`): the ABSOLUTE path of an executable
+    that reads the report's HTML on stdin and writes a PDF to stdout. It must live OUTSIDE the customer venv (a headless
+    renderer is an ops-layer dependency, never a sovereign one). Unset (the default) = no PDF: the PDF export refuses
+    and the HTML report stays available. Read at call time."""
+    return (os.environ.get("VIGIL_REPORT_PDF_RENDERER") or "").strip()
+
+
 def customer_proof_badge_enabled() -> bool:
     """True iff the customer PROOF BADGE + per-finding PCF export (consumer PR-I, Area 8) are ON
     (`VIGIL_CUSTOMER_PROOF_BADGE` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the edge

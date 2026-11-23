@@ -39,7 +39,10 @@ behaviour; it only observes.
 Hands-on: sign in, click every tab, press the main control on each screen, and confirm each loads, every button does
 something, and every refusal says why. The walk asserts the same for each merged screen: its own heading and reads
 (never the "being wired" placeholder, a load error, or a silent fall-back to the Overview), its real controls on the
-page, and no dead button.
+page, each live (wired and enabled) exactly as many times as the walk's data renders it, and no dead or disabled
+button. It counts: a label still on the page does not stand in for one of a same-label pair that stopped rendering, a
+label a screen shows more than once is always one the walk counts, and a control left disabled is not live even while
+it keeps its click handler.
 
 | Screen | Route | Acceptance | Check |
 |---|---|---|---|
@@ -51,14 +54,16 @@ page, and no dead button.
 | Billing | `#/billing` | credits, wallet, subscription; the credit top-up offer with its Buy button | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` a Stripe test-mode purchase |
 | Payment return | `#/billing/return` | "Payment received" and Back to Billing | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` the real return from Stripe |
 | Invoices | `#/invoices` | the invoice table (or its empty state) | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
-| Assets | `#/assets` | Request ownership challenge, Re-check now, Re-issue challenge | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` publish a real DNS or HTTP proof |
-| Assessments | `#/assessments` | Launch (Quick / Deep, no number), Pause on a running assessment, View findings | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` a real run |
+| Assets | `#/assets` | Request ownership challenge; Re-check now on a pending host; Re-issue challenge on every host | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` publish a real DNS or HTTP proof |
+| Assessments | `#/assessments` | Launch (Quick / Deep, no number), Pause on a running assessment, View findings on every assessment | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` a real run |
 | Team | `#/team` | Add member, Change role, Remove; the founder's row read-only | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
 | Connect | `#/connect` | one place to connect what you own — Website: Connect a website, Continue a half-finished proof, Prove again a lapsed one; Code repository: Connect GitHub, Open Code; Cloud account (its leg on): Connect an AWS account, Continue / Cancel one not finished, Connect again / Disconnect | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · the proof, its automatic re-check and the cloud steps: `AUTOMATED` `test_customer_connect_screen.py` · `OWNER` a real proof flipping to Verified on its own; a real AWS account connected read-only (needs VIGIL's connector identity) |
 | Monitoring (AEGIS) | `#/monitoring` | Turn on Observe / Respond, Switch to Respond, Turn off | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` real traffic through the gateway |
 | Fix first | `#/fix-first` | the 0-100 posture with its twelve-week trend, then the open findings worst first, each with its standards and, where signed, its plain-language impact and exact fix; Retest where retests are on | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `OWNER` a real FACT's signed fix shown, then retested to Fixed |
 | Attack path | `#/attack-path` | the SVG narrative of how proven findings chain into impact, each node a confirmed step; View findings (Area 11, behind `VIGIL_CUSTOMER_ATTACK_PATH`) | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
-| Guide | `#/guide` | the whole-app guide; Replay the welcome tour | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
+| Guide | `#/guide` | the whole-app guide; Mark as done on each step of the open chapter; Replay the welcome tour | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` |
+| Plans | `#/plans` | the trial, pay as you go and every plan the owner sells compared (price, credits each period, period); the workspace's plan; Choose (the existing checkout), Upgrade / Downgrade at renewal, Cancel plan, Keep my current plan | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `test_customer_plans.py` (a scheduled change rides the real drain at renewal) · `test_customer_area6_ui.py` · `OWNER` a Stripe test-mode switch and its renewal invoice |
+| Reports | `#/reports` | Download report (HTML), Download PDF (only where the owner provisioned a renderer), the standards mapping of proven findings, never a claim that a control is met | `AUTOMATED` `test_every_merged_screen_renders_its_own_live_screen_with_no_dead_button` · `test_customer_report_export.py` · `test_compliance_rollup.py` · `OWNER` a PDF from the provisioned renderer, read by a person |
 | Top bar | every tab | each tab, clicked, lands on a real route showing that route's screen | `AUTOMATED` `test_every_top_bar_tab_clicked_lands_on_its_own_screen` |
 
 The screens still to come — each a skipped stage (`-rs` shows why) that becomes a real check when it merges:
@@ -84,6 +89,7 @@ showing the Overview, until you do); a new route no stage claims fails `test_the
 | a billing role is refused a testing read (403) and still reads billing | `AUTOMATED` `test_a_billing_role_is_honestly_refused_a_testing_read` |
 | the walk boots exactly the scripts the page loads, and makes no network call | `AUTOMATED` `test_the_walk_boots_every_script_the_page_loads` |
 | every route is walked or claimed by a pending stage | `AUTOMATED` `test_the_screen_map_matches_app_routes` |
+| the screen check counts and refuses disabled controls: one of a same-label pair dropped, a listed control disabled with its click handler kept, one rendered twice, any other button disabled, or a same-label group no list counts, fails that screen (probed on every screen of `_SCREENS` and `_PREAUTH`, and as real regressions of `app.js`; `#/security` and `#/code` are covered by their stage tests and the tab walk) | `AUTOMATED` `test_dropping_or_disabling_any_control_reds_its_screen` · `test_a_real_regression_in_app_js_reds_the_census` |
 | the per-screen census, bound to the sha256 of every script walked, as evidence | `AUTOMATED` `test_the_census_accounts_for_every_screen_and_is_saved_as_evidence` |
 
 ## C. The §13.2 wallet journey: buy, launch, pause, resume, settle, reconcile

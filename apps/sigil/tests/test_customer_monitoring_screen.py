@@ -625,4 +625,5 @@ process.stdout.write(JSON.stringify(out));
     assert "shown: routeShown" in _fn(src, "viewGuideScreen")
     assert re.search(r'function routeShown\(route\) \{ return \(route !== "#/monitoring" \|\| MONITORING_ON\) '
                      r'&& \(route !== "#/code" \|\| CODE_ON\) && \(route !== "#/connect" \|\| CONNECT_ON\) '
-                     r'&& \(route !== "#/fix-first" \|\| POSTURE_ON\); \}', src)
+                     r'&& \(route !== "#/fix-first" \|\| POSTURE_ON\)'
+                     r'( && [^;]*)?; \}', src)   # (PR-G appends Plans/Reports after PR-B's Fix first)

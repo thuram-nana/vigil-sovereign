@@ -102,6 +102,11 @@ _SLOW_HOP_TIMEOUTS_S = {
     # PR-H SCIM: one request may re-role up to a thousand group members (each an owner-signed grant + its critical
     # audit row); a hop that gave up first would tell the IdP "failed" for a change that landed.
     "scim_request": 45.0,
+    # PR-G: a plan change makes up to 4 Stripe calls (2 reads + 2 writes), each bounded per blocking socket op by
+    # plan_change.EGRESS_TIMEOUT_S (connect + read) -> 48 s + margin. Pinned by test_customer_plans.py.
+    "billing_plan_change": 55.0,
+    # PR-G: the report PDF runs the owner's renderer for at most report_pdf.RENDER_TIMEOUT_S, after building the report.
+    "report_export_pdf": 35.0,
 }
 
 
@@ -238,6 +243,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # standards chips / remediation) is on — the same VIGIL_APEX_PRESENTATION that serves its route; a non-secret
     # on/off value written into the page, counting in the build id.
     presentation = _config.presentation_enabled()
+    # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
+    # routes, a non-secret on/off value written into the page and counting in the build id.
+    area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
+             "__VIGIL_REPORT_EXPORT__": "1" if _config.customer_report_export_enabled() else "0",
+             "__VIGIL_COMPLIANCE__": "1" if _config.customer_compliance_map_enabled() else "0"}
     # PR-I: whether each finding card may show the "Independently verifiable" proof badge (the same
     # VIGIL_CUSTOMER_PROOF_BADGE that serves its download route); a non-secret on/off value counting in the build id.
     proof_badge = _config.customer_proof_badge_enabled()
@@ -271,7 +281,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PRESENTATION__": "1" if presentation else "0",
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
-                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0"})
+                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -716,6 +726,12 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("posture_trend")
         if path == "/api/customer/assessments/posture" and _presentation_on():   # PR-A (flag OFF -> unknown-route 404)
             return self._customer_read_relay("assessment_posture")
+        if path == "/api/customer/billing/plans" and _plans_on():       # PR-G Plans (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("billing_plans")
+        if path in ("/api/customer/report", "/api/customer/report/pdf") and _report_export_on():   # PR-G (OFF -> 404)
+            return self._customer_read_relay("report_export_pdf" if path.endswith("/pdf") else "report_export")
+        if path == "/api/customer/compliance" and _compliance_on():     # PR-G compliance view (flag OFF -> 404)
+            return self._customer_read_relay("compliance_view")
         if path == "/api/customer/assessments/proof" and _proof_badge_on():    # PR-I (flag OFF -> unknown-route 404)
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
@@ -1177,6 +1193,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
             return self._auto_topup_set(body)
+        if action == "billing/plan-change" and _plan_change_on():    # PR-G (flag OFF -> unknown-action 404)
+            return self._plan_change(body)
         if action == "onboarding" and _onboarding_on():              # the tour closed (flag OFF -> unknown-action 404)
             return self._onboarding(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
@@ -1322,6 +1340,21 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                                       "monthly_cap_credits": body.get("monthly_cap_credits"),
                                       "ip": self._ip(), "mfa_at": rec.get("mfa_at")}
         c, r = self._provision("billing_auto_topup_set", requester, payload)
+        return self._json(r, c)
+
+    def _plan_change(self, body: dict):
+        """PR-G — change, keep or end the session org's credit plan at its next renewal. REQUESTER + ORG + the step-up
+        stamp from the SERVER-side session, never the body (a body org_id is ignored): a customer can only change THEIR
+        bound org's plan. The body carries ONLY the plan choice — a catalog ``price_id`` or ``cancel: true`` — never an
+        amount; the provisioner validates it against the owner catalog and the processor's subscription."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""),
+                                      "price_id": str(body.get("price_id") or "")[:64],
+                                      "cancel": body.get("cancel") is True, "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("billing_plan_change", str(rec.get("username") or ""), payload)
         return self._json(r, c)
 
     def _monitoring(self, action: str, body: dict):
@@ -1617,6 +1650,25 @@ def _presentation_on() -> bool:
     return _config.presentation_enabled()
 
 
+# PR-G (Area 6) — each read at call time, the same flag the cockpit action re-checks.
+def _plans_on() -> bool:
+    from .. import config as _config
+    return _config.customer_plans_enabled()
+
+
+def _plan_change_on() -> bool:
+    from .. import config as _config
+    return _config.customer_plans_enabled() and _config.customer_plan_change_enabled()
+
+
+def _report_export_on() -> bool:
+    from .. import config as _config
+    return _config.customer_report_export_enabled()
+
+
+def _compliance_on() -> bool:
+    from .. import config as _config
+    return _config.customer_compliance_map_enabled()
 def _proof_badge_on() -> bool:
     # PR-I — the proof badge + per-finding proof-bundle download (the same flag the cockpit proof_export action reads).
     from .. import config as _config

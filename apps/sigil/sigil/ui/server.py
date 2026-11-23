@@ -1887,6 +1887,40 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        # PR-G (Area 6) — Plans + plan change, the report export, the compliance view. Each absent (unknown action ->
+        # 404) unless its own flag is on (the same flag that serves its edge route); org from the edge SESSION.
+        if action in self._AREA6_ACTIONS:
+            return self._area6_dispatch(p, action, requester, body, ip)
+        return None
+
+    _AREA6_ACTIONS = frozenset({"billing_plans", "billing_plan_change", "report_export", "report_export_pdf",
+                                "compliance_view"})
+
+    @staticmethod
+    def _area6_dispatch(p, action: str, requester: str, body: dict, ip: str):
+        """PR-G — the Area-6 provisioner actions over a CLOSED exact-match set, each behind its own flag (off -> None ->
+        404). The org is the edge SESSION's; the only body fields read are the plan choice (``price_id`` / ``cancel``,
+        validated against the owner catalog sovereign-side) and the session's step-up stamp."""
+        from .. import config as _config
+        org = str(body.get("org_id", ""))
+        if action == "billing_plans":
+            if not _config.customer_plans_enabled():
+                return None
+            return p.customer_billing_plans(requester, org, ip=ip)
+        if action == "billing_plan_change":
+            if not (_config.customer_plans_enabled() and _config.customer_plan_change_enabled()):
+                return None
+            return p.billing_plan_change(requester, org, price_id=str(body.get("price_id") or ""),
+                                         cancel=body.get("cancel") is True, ip=ip, mfa_at=body.get("mfa_at"))
+        if action in ("report_export", "report_export_pdf"):
+            if not _config.customer_report_export_enabled():
+                return None
+            return p.customer_report_export(requester, org, fmt="pdf" if action == "report_export_pdf" else "html",
+                                            ip=ip)
+        if action == "compliance_view":
+            if not _config.customer_compliance_map_enabled():
+                return None
+            return p.customer_compliance(requester, org, ip=ip)
         return None
 
     @staticmethod
