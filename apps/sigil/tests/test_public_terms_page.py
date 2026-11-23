@@ -185,12 +185,16 @@ def test_terms_page_states_the_decided_billing_behaviour():
     text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
     # disputes: removed when the dispute opens, restored automatically when won
     assert "removed when the dispute opens" in text and "restored automatically" in text
-    # refunds are discretionary, never promised beyond the law
-    assert "any refund is at SIGIL SARL's discretion" in text and "Except where the law requires otherwise" in text
+    # refunds are discretionary beyond the law and the one stated case: discontinuation, or closing the account over
+    # a material change the customer does not accept, refunds unused purchased credits on request
+    assert "any other refund is at SIGIL SARL's discretion" in text and "Except where the law requires otherwise" in text
+    assert ("If we discontinue the Service, or you close your account because you do not accept a material change, "
+            "we will refund unused purchased credits on request.") in text
     # a cancelled plan runs to the end of the paid period
     assert "runs to the end of the period you have already paid for" in text
-    # USD pricing plus taxes, and the seat
-    assert "US dollars (USD)" in text and "USD 25 per month plus applicable taxes" in text
+    # USD pricing plus taxes; no seat price, because no seat is sold (governor/catalog.py has no seat entry)
+    assert "US dollars (USD)" in text
+    assert "USD 25" not in text and "a seat will not include credits" in text
     # partial results during a trial; no SLA unless agreed in writing
     assert "may be shown in part" in text
     assert "no service-level agreement" in text and "signed written agreement" in text
