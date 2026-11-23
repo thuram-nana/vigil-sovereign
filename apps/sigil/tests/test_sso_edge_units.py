@@ -431,6 +431,40 @@ def test_production_enterprise_oidc_egress_is_pinned_to_the_signed_allowlist():
         post0("https://login.acme-idp.example/token", {})              # an empty allowlist allows nothing
 
 
+def test_a_transport_leg_without_a_hook_is_still_the_pinned_allowlisted_one():
+    """The test hooks replace a transport leg one by one: the leg left without a hook is the HOST-ALLOWLISTED one,
+    never None (which would fall back to the unpinned stdlib default)."""
+    from sigil.ui.oidc import OidcError
+    cfg = SimpleNamespace(oidc_egress_hosts=("login.acme-idp.example",))
+
+    def hook_post(url, form):
+        return {"hooked": url}
+
+    def hook_fetch(url):
+        return {"keys": []}
+    post, fetch = sso_provision._oidc_transport(_P(sso_oidc_http_post=hook_post, sso_oidc_jwks_fetcher=None), cfg)
+    assert post is hook_post
+    with pytest.raises(OidcError):
+        fetch("https://169.254.169.254/latest/meta-data")              # refused BEFORE any connection
+    post, fetch = sso_provision._oidc_transport(_P(sso_oidc_http_post=None, sso_oidc_jwks_fetcher=hook_fetch), cfg)
+    assert fetch is hook_fetch
+    with pytest.raises(OidcError):
+        post("https://169.254.169.254/latest/meta-data", {"code": "c"})
+
+
+@pytest.mark.parametrize("raw", [" org_abc", "org_abc ", "org_abc\n", "\torg_abc", "", None, "../org_abc"])
+def test_a_relayed_org_id_is_used_exactly_never_trimmed(raw):
+    # a padded org id selects NO config (every leg refuses) rather than being trimmed into a well-formed one
+    assert sso_provision._org(raw) == ""
+    assert sso_provision._org("org_abc") == "org_abc"                  # control
+
+
+@pytest.mark.parametrize("wait,want", [(0.2, 1), (1.0, 1), (1.2, 2), (59.01, 60)])
+def test_a_scim_refusal_rounds_retry_after_up_to_whole_seconds(wait, want):
+    assert sso_provision._scim_refusal(429, "x", retry_after=wait)["retry_after"] == want
+    assert "retry_after" not in sso_provision._scim_refusal(401, "x")
+
+
 def test_saml_acs_without_a_replay_ledger_is_refused():
     from sigil.ui.provision import ProvisionError
     calls = []
@@ -442,6 +476,9 @@ def test_saml_acs_without_a_replay_ledger_is_refused():
 def test_scim_request_fails_closed_without_limiters_and_on_non_scim_methods():
     p = _P(scim_auth_limiter=None, scim_write_limiter=None, _now=lambda: 1.0)
     assert sso_provision.scim_request(p, "org_abc", method="GET", path="/Users")["status"] == 503
+    for half in (_P(scim_auth_limiter=object(), scim_write_limiter=None, _now=lambda: 1.0),
+                 _P(scim_auth_limiter=None, scim_write_limiter=object(), _now=lambda: 1.0)):
+        assert sso_provision.scim_request(half, "org_abc", method="POST", path="/Users")["status"] == 503
     for m in ("HEAD", "OPTIONS", "TRACE", "", "CONNECT"):
         r = sso_provision.scim_request(p, "org_abc", method=m, path="/Users")
         assert r["status"] == 405 and r["deactivated"] == []

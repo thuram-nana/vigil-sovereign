@@ -679,8 +679,10 @@ def test_the_bounded_assertion_lifetime_is_twenty_four_hours():
 
 @pytest.mark.parametrize("code", ["urn:oasis:names:tc:SAML:2.0:status:Responder",
                                   "urn:oasis:names:tc:SAML:2.0:status:Requester",
-                                  "urn:oasis:names:tc:SAML:2.0:status:AuthnFailed", "", None],
-                         ids=["responder", "requester", "authn-failed", "blank", "no-status"])
+                                  "urn:oasis:names:tc:SAML:2.0:status:AuthnFailed", "", None,
+                                  "urn:x:status:Success", " urn:oasis:names:tc:SAML:2.0:status:Success "],
+                         ids=["responder", "requester", "authn-failed", "blank", "no-status", "suffix-lookalike",
+                              "padded"])
 def test_a_response_whose_status_is_not_success_is_refused(code):
     # a signed assertion wrapped in a Response that reports a non-Success status (or none) is not a sign-in
     with pytest.raises(SamlError, match="status is not Success"):
@@ -722,8 +724,9 @@ def test_no_audience_restriction_at_all_is_refused():
 
 
 @pytest.mark.parametrize("cm", ["urn:oasis:names:tc:SAML:2.0:cm:holder-of-key",
-                                "urn:oasis:names:tc:SAML:2.0:cm:sender-vouches", "", "urn:x:bearer"],
-                         ids=["holder-of-key", "sender-vouches", "blank", "lookalike"])
+                                "urn:oasis:names:tc:SAML:2.0:cm:sender-vouches", "", "urn:x:bearer",
+                                "URN:OASIS:NAMES:TC:SAML:2.0:CM:BEARER", " urn:oasis:names:tc:SAML:2.0:cm:bearer "],
+                         ids=["holder-of-key", "sender-vouches", "blank", "lookalike", "upper-case", "padded"])
 def test_only_a_bearer_subject_confirmation_is_accepted(cm):
     with pytest.raises(SamlError, match="no bearer <SubjectConfirmation>"):
         _verify(_response(cm=cm))

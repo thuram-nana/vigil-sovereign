@@ -609,6 +609,10 @@ def test_sso_login_start_gates(stack):
     for org in ("org_" + "c" * 24, "", "../etc", "a" * 80):            # unknown / malformed org: no oracle
         r = stack.get(f"/api/customer/sso/login?org={urllib.parse.quote(org)}")
         assert r.status == 302 and r.location == "/#sso=err" and r.cookie(SSO_SID_COOKIE) is None, org
+    stack.saml_org(ORG_B)
+    stack.orgs().revoke_org(ORG_B)                                    # a revoked org keeps its config, signs in nobody
+    r = stack.get(f"/api/customer/sso/login?org={ORG_B}")
+    assert r.status == 302 and r.location == "/#sso=err" and r.cookie(SSO_SID_COOKIE) is None
     assert stack.get(f"/api/customer/sso/login?org={ORG_A}", host="evil.example").status == 403   # anti-rebinding
     # an IdP app tile / bookmark is a cross-site top-level navigation: a foreign Referer must NOT block it
     tile = _call(stack.port, "GET", f"/api/customer/sso/login?org={ORG_A}",
@@ -855,12 +859,18 @@ def test_scim_write_budget_answers_429_with_retry_after(stack, monkeypatch):
     monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 2)
     stack.saml_org(ORG_A, scim_token=TOKEN_A)
     base = f"/scim/v2/{ORG_A}"
-    assert [stack.scim("POST", f"{base}/Users", _okta_user(f"u{i}@acme.com", f"00u{i}")).status
-            for i in range(3)] == [201, 201, 429]
+    made = [stack.scim("POST", f"{base}/Users", _okta_user(f"u{i}@acme.com", f"00u{i}")) for i in range(3)]
+    assert [r.status for r in made] == [201, 201, 429]
     over = stack.scim("POST", f"{base}/Users", _okta_user("u9@acme.com", "00u9"))
     assert over.status == 429 and int(over.headers.get("Retry-After")) > 0
     assert over.json()["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:Error"]
     assert stack.scim("GET", f"{base}/Users").json()["totalResults"] == 2   # reads are not budgeted
+    # every write verb is budgeted, DELETE included
+    uid = made[0].json()["id"]
+    for method, body in (("DELETE", None), ("PUT", _okta_user("u0@acme.com", "00u0")),
+                         ("PATCH", {"Operations": [{"op": "replace", "path": "active", "value": False}]})):
+        assert stack.scim(method, f"{base}/Users/{uid}", body).status == 429, method
+    assert stack.role(uid, ORG_A) == "viewer"
 
 
 def test_scim_protocol_hygiene_over_http(stack):
@@ -945,3 +955,93 @@ def test_scim_bearer_rotation_retires_the_old_token_at_once(stack):
     assert stack.scim("GET", f"/scim/v2/{ORG_A}/Users", token=fresh).status == 200
     stack.cfg().disable_scim(ORG_A, issued_at=time.time())
     assert stack.scim("GET", f"/scim/v2/{ORG_A}/Users", token=fresh).status == 401
+
+
+# =====================================================================================================================
+# COMMITTED IMPLIES AUDITED — through the real provisioner wiring (`sso_provision._critical_audit`)
+# =====================================================================================================================
+class _FailingAudit:
+    """Makes the spine refuse every `provision.audit` row whose action is in `actions` while `on` (an unwritable audit
+    store), recording each refused attempt — every other spine write (the owner-signed grants included) is untouched.
+    Patched on the class, so it reaches the cockpit's provisioner in its server thread."""
+
+    def __init__(self, monkeypatch, actions):
+        self.on, self.actions, self.attempts = True, frozenset(actions), []
+        orig = SpineStore.append
+        failing = self
+
+        def append(store, *a, **kw):
+            payload = kw.get("payload")
+            if (failing.on and isinstance(payload, dict) and payload.get("signal") == "provision.audit"
+                    and payload.get("action") in failing.actions):
+                failing.attempts.append(payload["action"])
+                raise OSError("the audit store is unavailable (test)")
+            return orig(store, *a, **kw)
+        monkeypatch.setattr(SpineStore, "append", append)
+
+
+@pytest.mark.parametrize("protocol", ["saml", "oidc"])
+def test_a_sign_in_grant_whose_critical_audit_fails_never_lands(stack, signed, monkeypatch, protocol):
+    """Every just-in-time sign-in grant is committed only once its CRITICAL `provision.audit` row is written: with the
+    audit store failing, the verified sign-in is refused, no membership is minted and no session is issued."""
+    fail = _FailingAudit(monkeypatch, {"sso_jit_grant"})
+    if protocol == "saml":
+        u = stack.saml_org(ORG_A)
+        r, sid = stack.start(ORG_A)
+        req, relay = _authn_request(r.location)
+        xml = _sign(_saml_response(request_id=req.get("ID"), audience=u["saml_sp_entity_id"],
+                                   recipient=u["saml_acs_url"], name_id="ann@acme.com"), IDP_KEY)
+        refused = stack.post_acs(xml, relay)
+        assert refused.location == "/#sso=err" and refused.cookie(CUSTOMER_COOKIE) is None, (refused.status,
+                                                                                            refused.location)
+    else:
+        stack.oidc_org(ORG_A, client_id="cid-acme")
+        refused = _oidc_sign_in(stack, ORG_A, sub="00u-ann")
+        assert refused.location == "/#sso=err" and not _session_cookie(refused), (refused.status, refused.location)
+    assert fail.attempts == ["sso_jit_grant"]                  # the grant WAS reached, and its audit write failed
+    assert stack.orgs().memberships(ORG_A) == []               # … so the grant never landed
+    assert stack.audits("sso_jit_grant") == []
+    # same-shape control: the identical sign-in with a working audit store lands, audited
+    fail.on = False
+    if protocol == "saml":
+        _cookie, who = _saml_sign_in(stack, ORG_A, name_id="ann@acme.com")
+    else:
+        ok = _oidc_sign_in(stack, ORG_A, sub="00u-ann")
+        assert ok.location == "/", (ok.status, ok.location)
+        who = stack.get("/api/customer/whoami", cookie=_session_cookie(ok)).json()["username"]
+    assert stack.role(who, ORG_A) == "viewer"
+    assert [a["target"] for a in stack.audits("sso_jit_grant")] == [who]
+
+
+def test_a_scim_grant_or_revoke_whose_critical_audit_fails_never_lands(stack, monkeypatch):
+    """Every SCIM membership grant and revoke is committed only once its CRITICAL `provision.audit` row is written:
+    with the audit store failing, the IdP's write is answered with an error and the membership is left unchanged
+    (the IdP retries, and the retry lands)."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    fail = _FailingAudit(monkeypatch, {"scim_grant", "scim_deactivate"})
+    grant = stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann"))
+    assert grant.status >= 500, (grant.status, grant.body)
+    assert fail.attempts == ["scim_grant"] and stack.orgs().memberships(ORG_A) == []
+    fail.on = False                                            # the IdP retries once the store is back
+    # the refused create kept its directory record (holding NO membership — the fail-safe side): the IdP's re-POST is
+    # a 409, and its update of the existing user mints the audited grant
+    again = stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann"))
+    assert again.status == 409, (again.status, again.body)
+    (listed,) = stack.scim("GET", f"{base}/Users").json()["Resources"]
+    uid = listed["id"]
+    assert stack.scim("PUT", f"{base}/Users/{uid}", _okta_user("ann@acme.com", "00u-ann")).status == 200
+    assert stack.role(uid, ORG_A) == "viewer" and len(stack.audits("scim_grant")) == 1
+    # revoke: a deactivation and a delete whose audit write fails leave the member's grant in place
+    fail.on = True
+    deact = stack.scim("PATCH", f"{base}/Users/{uid}",
+                       {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                        "Operations": [{"op": "replace", "value": {"active": False}}]})
+    assert deact.status >= 500, (deact.status, deact.body)
+    delete = stack.scim("DELETE", f"{base}/Users/{uid}")
+    assert delete.status >= 500, (delete.status, delete.body)
+    assert fail.attempts == ["scim_grant", "scim_deactivate", "scim_deactivate"]
+    assert stack.role(uid, ORG_A) == "viewer" and stack.audits("scim_deactivate") == []
+    fail.on = False                                            # control: the same delete, audited, revokes
+    assert stack.scim("DELETE", f"{base}/Users/{uid}").status == 204
+    assert stack.role(uid, ORG_A) is None and [a["target"] for a in stack.audits("scim_deactivate")] == [uid]

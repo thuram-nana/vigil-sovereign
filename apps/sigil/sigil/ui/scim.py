@@ -801,8 +801,11 @@ def _user_patch(req: _Req, uid: str, body: object) -> ScimResult:
 def _user_delete(req: _Req, uid: str) -> ScimResult:
     if req.dir.user(uid) is None:
         raise _ScimFail(404, "no such user in this organization")
-    req.dir.delete_user(uid, now=req.at())
+    # the membership is revoked BEFORE the directory record goes: a revoke whose critical audit write fails then
+    # leaves the user (and the grant) exactly as they were, so the IdP's retry of this DELETE finds the user and
+    # completes the deprovisioning — never a deleted directory user whose membership lives on unreachable
     _revoke(req, uid)
+    req.dir.delete_user(uid, now=req.at())
     return ScimResult(204, None)
 
 

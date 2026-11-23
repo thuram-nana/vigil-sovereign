@@ -870,3 +870,78 @@ def test_a_sign_in_whose_external_id_two_directory_users_share_is_refused(env):
         _saml_in(env, "E-1", audit=lambda *a: audits.append(a))
     assert audits == []
     assert _saml_in(env, "bz@acme.test").username == bz["id"]            # a userName match is still unambiguous
+
+
+def _legacy_put(env, uid, **changes):
+    """Write a directory user straight through the owner-keyed registry — a record written before the SCIM edge
+    refused sign-in-identifier clashes (the edge never writes one now)."""
+    d = _directory(env)
+    cur = d.user(uid)
+    f = {"user_name": cur.user_name, "external_id": cur.external_id, "display_name": cur.display_name,
+         "active": cur.active, "selectors": cur.selectors, "profile": cur.profile, **changes}
+    d.put_user(cur.id, now=_issue(), **f)
+
+
+def test_a_sign_in_whose_identifiers_reach_two_directory_users_is_refused(env):
+    """Whatever the KEY: the subject reaching one user while an immutable link id reaches another, or one identifier
+    matching one user's userName and another user's externalId — which person signed in is unknowable, so it is
+    refused (never settled by the lookup order) and nothing is minted."""
+    orgreg, cfgreg = env
+    cfg = cfgreg.config("acme")
+    _, bz = _scim(env, "POST", "/scim/v2/Users", {"userName": "bz@acme.test", "externalId": "SUB-1"})
+    _, cz = _scim(env, "POST", "/scim/v2/Users", {"userName": "cz@acme.test", "externalId": "OID-1",
+                                                 "groups": [{"value": "admins"}]})
+
+    def sign_in(subject, *link_ids, audit=None):
+        return uiscim._login_principal(orgreg, cfg, subject=subject, link_ids=link_ids, groups=(),
+                                       issued_at=_issue(), audit=audit)
+    audits: list = []
+    with pytest.raises(SsoLoginError, match="more than one person"):
+        sign_in("SUB-1", "OID-1", audit=lambda *a: audits.append(a))           # subject → bz, link id → cz
+    # same-shape controls: each identifier on its own, and both naming ONE person, admit that person
+    assert sign_in("SUB-1").username == bz["id"] and sign_in("OID-1").username == cz["id"]
+    assert sign_in("cz@acme.test", "OID-1").username == cz["id"]
+    # cross-field: dz's userName is bz's externalId (letter case aside) — a directory written before the edge refused it
+    _, dz = _scim(env, "POST", "/scim/v2/Users", {"userName": "dz@acme.test"})
+    _legacy_put(env, dz["id"], user_name="sub-1")
+    with pytest.raises(SsoLoginError, match="more than one person"):
+        sign_in("SUB-1", audit=lambda *a: audits.append(a))
+    assert audits == []
+    assert orgreg.membership_role(cz["id"], "acme") == "org_admin" and orgreg.membership_role(bz["id"], "acme") == "viewer"
+
+
+@pytest.mark.parametrize("clash", ["ext-is-another-username", "username-is-another-ext", "ext-is-another-ext"])
+def test_a_scim_write_that_lets_one_sign_in_identifier_reach_two_users_is_a_409(env, clash):
+    st, _al = _scim(env, "POST", "/scim/v2/Users", {"userName": "al@acme.test", "externalId": "E-1"})
+    assert st == 201
+    body = {"ext-is-another-username": {"userName": "bz@acme.test", "externalId": "AL@acme.test"},
+            "username-is-another-ext": {"userName": "e-1", "externalId": "E-2"},
+            "ext-is-another-ext": {"userName": "bz@acme.test", "externalId": "E-1"}}[clash]
+    st, err = _scim(env, "POST", "/scim/v2/Users", body)
+    assert st == 409 and err.get("scimType") == "uniqueness", (st, err)
+    assert [u.user_name for u in _directory(env).users()] == ["al@acme.test"]
+    # same-shape control: an externalId differing from al's only by letter case reaches nobody else (exact match)
+    st, _ = _scim(env, "POST", "/scim/v2/Users", {"userName": "bz@acme.test", "externalId": "e-1"})
+    assert st == 201
+
+
+@pytest.mark.parametrize("verb", ["PATCH", "PUT"])
+def test_a_user_already_sharing_an_identifier_can_still_be_deactivated(env, verb):
+    """A clash a directory already holds (written before the edge refused it) never blocks that user's own update —
+    above all its deactivation: only a clash the write INTRODUCES is a 409."""
+    orgreg, _ = env
+    _, al = _scim(env, "POST", "/scim/v2/Users", {"userName": "al@acme.test", "externalId": "E-1",
+                                                 "groups": [{"value": "admins"}]})
+    _, bz = _scim(env, "POST", "/scim/v2/Users", {"userName": "bz@acme.test", "externalId": "E-2"})
+    _legacy_put(env, bz["id"], external_id="E-1")
+    off = (_DEACTIVATE if verb == "PATCH" else
+           {"userName": "al@acme.test", "externalId": "E-1", "active": False, "groups": [{"value": "admins"}]})
+    st, body = _scim(env, verb, f"/scim/v2/Users/{al['id']}", off)
+    assert st == 200 and body["active"] is False, (st, body)
+    assert orgreg.membership_role(al["id"], "acme") is None
+    # … while a write that introduces a NEW clash (with a third user) on the other legacy user is still refused
+    _, cz = _scim(env, "POST", "/scim/v2/Users", {"userName": "cz@acme.test"})
+    st, err = _scim(env, "PATCH", f"/scim/v2/Users/{bz['id']}",
+                    {"Operations": [{"op": "replace", "path": "externalId", "value": "CZ@acme.test"}]})
+    assert st == 409 and err.get("scimType") == "uniqueness"
+    assert _directory(env).user(bz["id"]).external_id == "E-1"
