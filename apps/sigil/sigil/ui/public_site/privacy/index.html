@@ -25,7 +25,7 @@
 <main id="main" class="section">
   <div class="wrap prose">
     <p class="eyebrow">Privacy</p>
-    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">Privacy</h1>
+    <h1>Privacy</h1>
     <p class="muted">VIGIL is offered in two ways with genuinely different privacy stories: the hosted service at
       <code>app.vigilguard.net</code>, and VIGIL running on your own hardware. We describe both plainly.</p>
 
@@ -60,6 +60,7 @@
       <li><strong>Stripe</strong> — card payments in US dollars. Card data is processed by Stripe, not stored by
         us.</li>
       <li><strong>Google</strong> — sign-in, only if you choose "Continue with Google".</li>
+      <li><strong>GitHub</strong> — only if you connect a repository for code review.</li>
       <li><strong>Anthropic</strong> (Claude API) — the AI features. To provide them, relevant content (for
         example, responses from your hosts and the findings drawn from them) is sent to Anthropic under an API key
         VIGIL holds.</li>
@@ -76,9 +77,10 @@
     <ul>
       <li>While your account is open, we keep your data so the Service can show it to you. It does not expire on a
         timer.</li>
-      <li>When a workspace is closed, it and its memberships are revoked and its plan is cancelled, so it can no
-        longer be used. A member who belongs to no other workspace has their account and sign-in methods revoked
-        too.</li>
+      <li>When a workspace is closed, it and its memberships are revoked and its plan stops being honoured, so it
+        can no longer be used. Cancel any plan first (<a href="/terms#termination">Terms, section 14</a>) so that
+        the payment processor does not renew it. A member who belongs to no other workspace has their account
+        and sign-in methods revoked too.</li>
       <li>The workspace's billing records (its credit ledger, invoices and usage records) are kept as append-only,
         signed history, so that they cannot be silently changed; no customer can read them through the Service any
         more. Other records
@@ -95,9 +97,9 @@
     <h3>Your rights</h3>
     <p>You can ask us for access to, correction of, or deletion of your personal data at
       <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a>. Depending on where you are, you may
-      have further rights, including the right to complain to a data-protection authority. Where we process
-      personal data on your behalf in the data you give the Service (as defined in section 12 of our Terms of
-      Service), our data processing addendum, available on request, applies.</p>
+      have further rights, including the right to complain to a data-protection authority. If you need a data
+      processing agreement for personal data in Customer Data (as defined in section 12 of our Terms of Service),
+      write to <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a> and we will agree one with you.</p>
 
     <h3>Governing law</h3>
     <p>This notice, like our Terms of Service, is governed by the laws of the Republic of Cameroon, including the
@@ -109,12 +111,14 @@
     <p>You can also run VIGIL on your own hardware with your own keys. SIGIL SARL does not receive your data in
       this mode:</p>
     <ul>
-      <li><strong>Your data never leaves your machine.</strong> Scan targets, findings, and evidence stay on
-        your infrastructure.</li>
+      <li><strong>Your data stays on your infrastructure</strong>, except what you send to the model backend you
+        configure. If that backend is a cloud provider, prompt content (which can include responses from your
+        targets and your findings) goes to that provider; see
+        <a href="https://github.com/thuram-nana/vigil-sovereign/blob/main/ACCEPTABLE-USE.md">ACCEPTABLE-USE.md section 6</a>.</li>
       <li><strong>No telemetry, no analytics, no advertising, no auto-update.</strong> There is no phone-home
-        and every outbound path is source-audited and off by default.</li>
-      <li><strong>No third-party processor.</strong> VIGIL talks only to the LLM backend <em>you</em>
-        configure — which can be a model running entirely on your own hardware.</li>
+        and every outbound path is source-audited.</li>
+      <li><strong>No SIGIL SARL processor.</strong> VIGIL talks only to the LLM backend <em>you</em> configure,
+        which can be a model running entirely on your own hardware.</li>
       <li><strong>Only strictly-necessary cookies</strong> for an operator/console session. No consent banner
         is required because there is nothing non-essential to consent to. <a href="/cookies">Cookie details →</a></li>
       <li><strong>Erasure</strong> is by cryptographic shredding: destroy the keys, and the evidence is
