@@ -17,9 +17,23 @@ the path and must present THAT org's bearer. A proof for org A can therefore nev
 Each action is fail-closed and rate-limited:
   * sign-in: the per-IP login limiter guards start / ACS / finish; a refused verification counts as a failure;
   * SCIM: failed bearer authentications are counted per (org, client IP) and lock out that pair's further
-    INVALID attempts (a valid bearer is never refused by it — see `scim_request`); authenticated writes are
-    counted per org (`VIGIL_SCIM_OPS_PER_MIN`, guard-and-count) so even a valid token cannot flood the spine;
-    both limiters are on disk (the provisioner is rebuilt per request).
+    INVALID attempts (a valid bearer is never refused by it — see `scim_request`); both limiters are on disk (the
+    provisioner is rebuilt per request).
+  * SCIM writes are bounded per REQUEST and charged per RECORD, so even a valid token cannot flood the spine or
+    hold the shared critical section for long:
+      - a body over a per-request bound (more than `ui.scim.MAX_PATCH_OPS` = 1000 PATCH operations, or more than
+        `ui.scim.MAX_MEMBER_VALUES` = 1000 member references SUMMED over every operation of a group write) is
+        refused 400 `tooMany` before the write budget and before the critical section is entered;
+      - a group write that would author more than `ui.scim.MAX_DIRECTORY_WRITES` (= 1016) directory records is
+        refused whole, before any record is written. Only removing state already on the spine is exempt (a group
+        DELETE or a removal of every member, of a group of any size, still deprovisions) — that state was itself
+        written, and charged, by earlier requests;
+      - the per-org write budget (`VIGIL_SCIM_OPS_PER_MIN`) admits a write only while the org is not over budget
+        (guard-and-count, one unit), then charges every further spine record the request appended (directory
+        records, membership grants / revokes, their critical audit rows). A request that overdraws the budget
+        holds the org's next write off until the budget has repaid it (a minute per `VIGIL_SCIM_OPS_PER_MIN`
+        records), so over time one org's token appends at most about `VIGIL_SCIM_OPS_PER_MIN` records a minute,
+        plus what one request may write. The cost of an overdraft lands on that org alone.
 
 Every membership grant / revoke writes a CRITICAL `provision.audit` row FIRST (a failed audit write aborts the
 change — committed implies audited), and the whole read-modify-write of a request runs inside the SAME critical
@@ -208,7 +222,8 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
     """One SCIM 2.0 request for the org in the edge's path, answered as {status, body, deactivated[,
     retry_after]} — the edge returns `status`/`body` to the IdP verbatim and severs the sessions of every username
     in `deactivated`. Authentication is the org's owner-signed bearer fingerprint (constant-time); an authenticated
-    write counts against the org's write budget.
+    write counts against the org's write budget — one unit to be admitted, then one per further spine record it
+    appended (see the module docstring for the per-request bounds, refused before the critical section).
 
     FAILED authentications count against (org, client IP) and, past the limit, that pair's further INVALID
     attempts are refused 429 without another audit row. A VALID bearer is never refused by that lock: an IdP's
@@ -236,8 +251,12 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
         p.scim_auth_limiter.record_failure(key, now=t)
         p._audit("scim_auth", org_id=oid, outcome="denied")
         return _scim_refusal(401, "SCIM authentication failed")
+    over = uiscim.request_bound_refusal(m, path, body)
+    if over is not None:                   # refused on its body alone: no budget spent, the critical section untouched
+        return {"status": over.status, "body": over.body, "deactivated": []}
+    budget = f"scim:writes:{oid}"
     if m in _SCIM_WRITES:
-        wait = p.scim_write_limiter.admit(f"scim:writes:{oid}", now=t)
+        wait = p.scim_write_limiter.admit(budget, now=t)
         if wait is not None:
             return _scim_refusal(429, "this organization's SCIM write rate is exceeded; retry shortly",
                                  retry_after=wait)
@@ -245,4 +264,6 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
         r = uiscim.scim_dispatch(m, path, body, authorization, org_id=oid, config_registry=cfgreg,
                                  org_registry=p.orgs, now=t, query=str(query or ""), directory_registry=directory,
                                  issued_at_fn=p._next_issued, audit=_critical_audit(p, oid))
+    if r.records > 1:                      # `admit` counted one unit; every further record it appended is charged
+        p.scim_write_limiter.charge(budget, r.records - 1, now=t)
     return {"status": r.status, "body": r.body, "deactivated": list(r.deactivated)}

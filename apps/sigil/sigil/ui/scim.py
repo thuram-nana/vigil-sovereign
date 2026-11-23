@@ -105,10 +105,16 @@ _OIDC_GROUPS_CLAIM = "groups"
 # user-editable claim such as `email`), tried after `sub` when linking a sign-in to a SCIM directory user.
 _OIDC_OBJECT_ID_CLAIM = "oid"
 
-# Bounds on one SCIM request (the bodies are IdP-authored; a request is handled under the spine lock).
+# Bounds on one SCIM request (the bodies are IdP-authored; a request is handled under the spine lock, so what one
+# request may write is bounded here, not only how many requests an org may send — see `ui.sso_provision`).
 MAX_RESULTS = 1000            # filter.maxResults advertised in ServiceProviderConfig
 MAX_PATCH_OPS = 1000          # Operations per PATCH
-MAX_MEMBER_VALUES = 1000      # member references per request
+MAX_MEMBER_VALUES = 1000      # member references per request, SUMMED over every operation of a PATCH
+# Directory records one group write may AUTHOR (`OrgDirectory.authored_writes`: everything but the first removal of
+# state already on the spine): one full member list plus the group's own record a few times. Over it the whole
+# request is refused before any record is written. Removing existing state is never capped here — a group DELETE,
+# or a removal of every member, of a group of any size still deprovisions (that state was paid for when written).
+MAX_DIRECTORY_WRITES = MAX_MEMBER_VALUES + 16
 
 _RESOURCES = ("Users", "Groups", "ServiceProviderConfig", "ResourceTypes", "Schemas")
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -139,6 +145,7 @@ class ScimResult:
     status: int
     body: Optional[dict]
     deactivated: tuple = ()
+    records: int = 0       # spine records this request appended (directory + membership + critical audit rows)
 
 
 class _ScimFail(Exception):
@@ -165,6 +172,7 @@ class _RequestOrgs(OrgRegistry):
         self._oid = org_id
         self._org = base.org(org_id)
         self._mems: "dict[str, Membership]" = {m.username: m for m in base.memberships(org_id)}
+        self.writes = 0                        # owner-signed membership records this request appended
 
     def org(self, org_id: str):
         return self._org if org_id == self._oid else super().org(org_id)
@@ -184,6 +192,7 @@ class _RequestOrgs(OrgRegistry):
 
     def grant_membership(self, org_id: str, username: str, role: str, *, issued_at: float) -> int:
         seq = super().grant_membership(org_id, username, role, issued_at=issued_at)
+        self.writes += 1
         if org_id == self._oid:
             u = str(username).strip()
             self._mems[u] = Membership(org_id=org_id, username=u, role=str(role).strip(),
@@ -192,6 +201,7 @@ class _RequestOrgs(OrgRegistry):
 
     def revoke_membership(self, org_id: str, username: str) -> int:
         seq = super().revoke_membership(org_id, username)
+        self.writes += 1
         if org_id == self._oid:
             self._mems.pop(str(username).strip(), None)
         return seq
@@ -530,10 +540,20 @@ class _Req:
         self.at = at
         self._audit = audit
         self.deactivated: "list[str]" = []
+        self.audits = 0                        # critical audit rows the hook wrote (one spine row each)
+        self.member_refs = 0                   # member references named so far, over the whole request
 
     def audit(self, action: str, target: str, outcome: str) -> None:
         if self._audit is not None:
             self._audit(action, target, outcome)
+            self.audits += 1
+
+    def count_member_refs(self, n: int) -> None:
+        """Count `n` more member references against the request's bound (`MAX_MEMBER_VALUES`, summed over every
+        operation — a PATCH cannot multiply it by repeating an operation)."""
+        self.member_refs += int(n)
+        if self.member_refs > MAX_MEMBER_VALUES:
+            raise _ScimFail(400, f"at most {MAX_MEMBER_VALUES} member references per request", "tooMany")
 
     def role(self, uid: str) -> Optional[str]:
         return self.orgs.membership_role(uid, self.config.org_id)
@@ -610,6 +630,9 @@ def _group_change(req: _Req, change: "Callable[[], set]") -> None:
     staged = req.dir = real.staged()
     try:
         affected = change()
+        if staged.authored_writes() > MAX_DIRECTORY_WRITES:   # refused WHOLE, before a single record is written
+            raise _ScimFail(400, f"one request may change at most {MAX_DIRECTORY_WRITES} directory records",
+                            "tooMany")
         plan = [(uid, _target(req, uid, create=False)) for uid in sorted(affected)]
     finally:
         req.dir = real
@@ -928,17 +951,23 @@ def _group_resource(req: _Req, gid: str, *, members: bool = True) -> dict:
     return out
 
 
-def _member_ids(value: object) -> "list[str]":
-    """The user ids named by a SCIM `members` value (a list of {value: id} or one such object)."""
-    items = value if isinstance(value, list) else ([value] if isinstance(value, dict) else [])
-    if len(items) > MAX_MEMBER_VALUES:
-        raise _ScimFail(400, f"at most {MAX_MEMBER_VALUES} member references per request", "tooMany")
+def _member_items(value: object) -> list:
+    """The member references a SCIM `members` value carries (a list of {value: id}, or one such object)."""
+    return value if isinstance(value, list) else ([value] if isinstance(value, dict) else [])
+
+
+def _member_ids(req: _Req, value: object) -> "list[str]":
+    """The user ids named by a SCIM `members` value, each reference counted against the request's bound."""
+    items = _member_items(value)
+    req.count_member_refs(len(items))
     out: "list[str]" = []
+    seen: "set[str]" = set()
     for it in items:
         v = it.get("value") if isinstance(it, dict) else None
         if not isinstance(v, str) or not v.strip():
             raise _ScimFail(400, "each member needs a string value (the user id)", "invalidValue")
-        if v.strip() not in out:
+        if v.strip() not in seen:
+            seen.add(v.strip())
             out.append(v.strip())
     return out
 
@@ -988,7 +1017,8 @@ def _remove_members(req: _Req, gid: str, uids, touched: set) -> None:
 def _replace_members(req: _Req, gid: str, uids, touched: set) -> None:
     want = set(uids)
     _remove_members(req, gid, [u for u in req.dir.members(gid) if u not in want], touched)
-    _add_members(req, gid, [u for u in uids if u not in set(req.dir.members(gid))], touched)
+    present = set(req.dir.members(gid))                       # read ONCE: linear, never refs x edges
+    _add_members(req, gid, [u for u in uids if u not in present], touched)
 
 
 def _group_create(req: _Req, body: object) -> ScimResult:
@@ -1007,7 +1037,7 @@ def _group_create(req: _Req, body: object) -> ScimResult:
         except DirectoryError as e:
             raise _ScimFail(400, str(e), "invalidValue") from e
         touched: set = set()
-        _add_members(req, gid, _member_ids(b.get("members") or []), touched)
+        _add_members(req, gid, _member_ids(req, b.get("members") or []), touched)
         return touched
     _group_change(req, change)
     return ScimResult(201, _group_resource(req, gid))
@@ -1023,7 +1053,7 @@ def _group_replace(req: _Req, gid: str, body: object) -> ScimResult:
         _rename_group(req, gid, b.get("displayName"))
         _set_group_external_id(req, gid, str(b.get("externalId") or ""))
         touched: set = set()
-        _replace_members(req, gid, _member_ids(b.get("members") or []), touched)
+        _replace_members(req, gid, _member_ids(req, b.get("members") or []), touched)
         return before | touched                               # a rename re-roles every member
     _group_change(req, change)
     return ScimResult(200, _group_resource(req, gid))
@@ -1050,17 +1080,18 @@ def _group_patch_ops(req: _Req, gid: str, ops: list) -> set:
         if m and m.group(1).lower() == "members" and m.group(2).lower() == "value" and not m.group(4):
             if kind != "remove":
                 raise _ScimFail(400, "only remove is supported on a filtered members path", "invalidPath")
+            req.count_member_refs(1)
             try:
                 _remove_members(req, gid, [str(json.loads(m.group(3)))], touched)
             except ValueError:
                 raise _ScimFail(400, "malformed members path filter", "invalidPath")
         elif a == "members":
             if kind == "add":
-                _add_members(req, gid, _member_ids(value), touched)
+                _add_members(req, gid, _member_ids(req, value), touched)
             elif kind == "replace":
-                _replace_members(req, gid, _member_ids(value), touched)
+                _replace_members(req, gid, _member_ids(req, value), touched)
             else:
-                ids = _member_ids(value) if value is not None else req.dir.members(gid)
+                ids = _member_ids(req, value) if value is not None else req.dir.members(gid)
                 _remove_members(req, gid, ids, touched)
         elif a == "displayname":
             if kind == "remove":
@@ -1082,7 +1113,7 @@ def _group_patch_ops(req: _Req, gid: str, ops: list) -> set:
                 elif kk == "externalid":
                     _set_group_external_id(req, gid, str(v or ""))
                 elif kk == "members":
-                    (_replace_members if kind == "replace" else _add_members)(req, gid, _member_ids(v), touched)
+                    (_replace_members if kind == "replace" else _add_members)(req, gid, _member_ids(req, v), touched)
         # any other attribute is accepted and not stored (see _user_apply)
     return (before | touched) if renamed else touched
 
@@ -1199,6 +1230,50 @@ def _discovery(resource: str, rid: Optional[str], method: str) -> ScimResult:
 # The entry points.
 # ---------------------------------------------------------------------------------------------------
 
+def _patch_op_member_refs(op: object) -> int:
+    """The member references ONE group PATCH operation names, read the way `_group_patch_ops` reads them."""
+    if not isinstance(op, dict):
+        return 0
+    path = op.get("path")
+    raw = _strip_schema(path.strip(), _SCHEMA_GROUP) if isinstance(path, str) else ""
+    value = op.get("value")
+    m = _PATH_FILTER_RE.match(raw)
+    if m and m.group(1).lower() == "members" and m.group(2).lower() == "value" and not m.group(4):
+        return 1
+    if raw.lower() == "members":
+        return len(_member_items(value)) if value is not None else 0
+    if not raw and isinstance(value, dict):
+        return sum(len(_member_items(v)) for k, v in value.items()
+                   if _strip_schema(str(k), _SCHEMA_GROUP).lower() == "members")
+    return 0
+
+
+def request_bound_refusal(method: str, path: str, body: object) -> Optional[ScimResult]:
+    """The refusal of a request whose BODY alone already exceeds a per-request bound (too many PATCH operations, or
+    more than `MAX_MEMBER_VALUES` member references summed over a group write), else None. Stateless and cheap, so
+    the provisioner runs it BEFORE the write budget and BEFORE entering the membership critical section: an
+    over-bound request never holds the lock other organizations' requests wait on. A malformed shape counts nothing
+    here (the dispatcher refuses it); `scim_dispatch` enforces the same bounds again as the authority."""
+    parsed = _parse_resource_path(path)
+    if parsed is None or parsed[0] != "Groups" or not isinstance(body, dict):
+        return None
+    m = str(method or "").upper()
+    if m in ("POST", "PUT"):
+        refs = len(_member_items(body.get("members")))
+    elif m == "PATCH":
+        ops = body.get("Operations")
+        if not isinstance(ops, list):
+            return None
+        if len(ops) > MAX_PATCH_OPS:
+            return ScimResult(400, _error(400, f"at most {MAX_PATCH_OPS} PATCH operations per request", "tooMany"))
+        refs = sum(_patch_op_member_refs(op) for op in ops)
+    else:
+        return None
+    if refs > MAX_MEMBER_VALUES:
+        return ScimResult(400, _error(400, f"at most {MAX_MEMBER_VALUES} member references per request", "tooMany"))
+    return None
+
+
 def scim_dispatch(method: str, path: str, body: object, authorization: object, *, org_id: str,
                   config_registry, org_registry, now: float, query: str = "", directory_registry=None,
                   issued_at: Optional[float] = None, issued_at_fn: "Optional[Callable[[], float]]" = None,
@@ -1208,7 +1283,9 @@ def scim_dispatch(method: str, path: str, body: object, authorization: object, *
     about routing; then route Users / Groups / discovery. The caller (the provisioner) holds the spine lock for
     the whole request, so a multi-record change is one serialized step. `issued_at_fn` (default: a strictly
     increasing clock from `issued_at`/`now`) stamps each owner-signed record; `audit(action, username, detail)`
-    is called BEFORE each membership grant / revoke (the provisioner makes it a critical, fail-closed audit)."""
+    is called BEFORE each membership grant / revoke (the provisioner makes it a critical, fail-closed audit).
+    The result's `records` is what the request appended to the spine — directory records, membership grants /
+    revokes, and one critical audit row per hook call — which the provisioner charges to the org's write budget."""
     config = config_registry.config(org_id)
     presented: Optional[BearerToken] = bearer_from_authorization_header(authorization)
     if not _scim.authenticate_scim(config, presented):
@@ -1216,9 +1293,15 @@ def scim_dispatch(method: str, path: str, body: object, authorization: object, *
     assert config is not None  # authenticate_scim returned True ⇒ config is present + scim_enabled
     m = str(method or "").upper()
     req: Optional[_Req] = None
+    dreg: Optional[ScimDirectoryRegistry] = None
+    dreg_base = 0
 
     def revoked() -> tuple:            # a revoke that already landed in this request must still reach the edge
         return tuple(req.deactivated) if req is not None else ()
+
+    def written() -> int:              # what this request appended — also on a refusal after a partial write
+        n = (dreg.appended - dreg_base) if dreg is not None else 0
+        return n + ((req.orgs.writes + req.audits) if req is not None else 0)
 
     try:
         parsed = _parse_resource_path(path)
@@ -1231,14 +1314,16 @@ def scim_dispatch(method: str, path: str, body: object, authorization: object, *
         orgs = _RequestOrgs(org_registry, config.org_id)
         if orgs.org(config.org_id) is None and m in _MUTATING:
             raise _ScimFail(404, "this organization is not active")
-        directory = _directory_registry(directory_registry, org_registry).directory(config.org_id)
+        dreg = _directory_registry(directory_registry, org_registry)
+        dreg_base = dreg.appended
+        directory = dreg.directory(config.org_id)
         req = _Req(config, orgs, directory, at=issued_at_fn or _clock(issued_at, now), audit=audit)
         res = (_users if resource == "Users" else _groups)(req, m, rid, body, q)
-        return ScimResult(res.status, res.body, revoked())
+        return ScimResult(res.status, res.body, revoked(), written())
     except _ScimFail as e:
-        return ScimResult(e.status, _error(e.status, e.detail, e.scim_type), revoked())
+        return ScimResult(e.status, _error(e.status, e.detail, e.scim_type), revoked(), written())
     except (ScimError, DirectoryError, SsoLoginError) as e:
-        return ScimResult(400, _error(400, str(e), "invalidValue"), revoked())
+        return ScimResult(400, _error(400, str(e), "invalidValue"), revoked(), written())
 
 
 def handle_scim_request(method: str, path: str, body: object, authorization: object, *, org_id: str,

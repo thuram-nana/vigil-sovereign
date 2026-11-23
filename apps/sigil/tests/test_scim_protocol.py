@@ -321,3 +321,159 @@ def test_discovery_endpoints(env):
     sch = env.call("GET", "/Schemas")
     assert sch.body["totalResults"] == 2
     assert env.call("POST", "/ServiceProviderConfig", {}).status == 405
+
+
+# --- per-request bounds: what ONE request may write is bounded, whatever its body repeats -------------------------
+
+def _spine(env) -> int:
+    return sum(1 for _ in env.store.iter_records())
+
+
+def _mk_users(env, n: int, prefix: str = "m") -> list:
+    out = []
+    for i in range(n):
+        r = env.call("POST", "/Users", _okta_user(f"{prefix}{i}@acme.com", f"00u-{prefix}{i}"))
+        assert r.status == 201, r.body
+        out.append(r.body["id"])
+    return out
+
+
+def test_member_references_are_bounded_over_the_whole_patch_not_per_operation(env):
+    """The member-reference bound is SUMMED over every operation: repeating an operation cannot multiply it. Re-adding
+    the same ten members 101 times writes no more than ten edges, so only that bound can refuse it."""
+    ids = _mk_users(env, 10)
+    gid = env.call("POST", "/Groups", {"displayName": "Plain"}).body["id"]
+    refs = [{"value": u} for u in ids]
+    ops = [{"op": "add", "path": "members", "value": refs}] * (uiscim.MAX_MEMBER_VALUES // len(refs) + 1)
+    before = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", {"Operations": ops})
+    assert r.status == 400 and r.body["scimType"] == "tooMany", r.body
+    assert _spine(env) == before and r.records == 0                  # refused whole: not one record written
+    assert env.call("GET", f"/Groups/{gid}").body["members"] == []
+    # the stateless pre-check the provisioner runs before its critical section refuses the same body
+    pre = uiscim.request_bound_refusal("PATCH", f"/Groups/{gid}", {"Operations": ops})
+    assert pre is not None and pre.status == 400 and pre.body["scimType"] == "tooMany"
+    # exactly at the bound passes (and the pre-check counts each shape the dispatcher counts)
+    at = ops[:-1] + [{"op": "remove", "path": f'members[value eq "{ids[0]}"]'}]
+    assert uiscim.request_bound_refusal("PATCH", f"/Groups/{gid}", {"Operations": at + [at[-1]]}) is not None
+    assert uiscim.request_bound_refusal("PATCH", f"/Groups/{gid}", {"Operations": at[1:] + [at[-1]]}) is None
+    assert uiscim.request_bound_refusal("PATCH", f"/Groups/{gid}",
+                                        {"Operations": [{"op": "add", "value": {"members": refs}}] * 101}) is not None
+    ok = env.call("PATCH", f"/Groups/{gid}", {"Operations": at[1:]})               # 1000 references
+    assert ok.status == 200 and len(ok.body["members"]) == 9
+
+
+def test_an_alternating_add_remove_flood_is_refused_with_nothing_written(env):
+    """add-N / remove-all repeated: every repetition would write N edges and remove them again. Refused whole."""
+    ids = _mk_users(env, 20)
+    gid = env.call("POST", "/Groups", {"displayName": "Plain"}).body["id"]
+    refs = [{"value": u} for u in ids]
+    ops: list = []
+    while len(ops) < uiscim.MAX_PATCH_OPS:
+        ops += [{"op": "add", "path": "members", "value": refs}, {"op": "remove", "path": "members"}]
+    before = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", {"Operations": ops})
+    assert r.status == 400 and r.body["scimType"] == "tooMany" and _spine(env) == before and r.records == 0
+
+
+def test_a_group_write_authoring_more_than_the_directory_bound_is_refused_before_any_record(env, monkeypatch):
+    """Within the reference bound, a change can still author more records than it names (an add then a replace that
+    takes the added members out again): it is refused WHOLE before a single record lands. Removing state that was
+    already there is never capped — a DELETE or a remove-all of a group larger than the bound still deprovisions."""
+    monkeypatch.setattr(uiscim, "MAX_DIRECTORY_WRITES", 20)
+    ids = _mk_users(env, 12)
+    refs = [{"value": u} for u in ids]
+    gid = env.call("POST", "/Groups", {"displayName": "Plain"}).body["id"]
+    churn = {"Operations": [{"op": "add", "path": "members", "value": refs},
+                            {"op": "replace", "path": "members", "value": []},
+                            {"op": "add", "path": "members", "value": refs}]}        # 36 records, 24 references
+    before = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", churn)
+    assert r.status == 400 and r.body["scimType"] == "tooMany", r.body
+    assert _spine(env) == before and env.call("GET", f"/Groups/{gid}").body["members"] == []
+    # an ordinary change under the bound lands; so does removing more existing state than the bound allows
+    admins = env.call("POST", "/Groups", {"displayName": "Admins", "members": refs})       # 13 records
+    assert admins.status == 201 and all(env.role(u) == "org_admin" for u in ids)
+    env.call("PATCH", f"/Groups/{gid}", {"Operations": [{"op": "add", "path": "members", "value": refs}]})
+    assert env.call("PATCH", f"/Groups/{gid}", {"Operations": [{"op": "remove", "path": "members"}]}).status == 200
+    assert env.call("GET", f"/Groups/{gid}").body["members"] == []
+    more = _mk_users(env, 10, prefix="x")
+    env.call("PATCH", f"/Groups/{admins.body['id']}",
+             {"Operations": [{"op": "add", "path": "members", "value": [{"value": u} for u in more]}]})
+    d = env.call("DELETE", f"/Groups/{admins.body['id']}")                                 # 22 members, 23 records
+    assert d.status == 204 and d.records > 20
+    assert all(env.role(u) == "viewer" for u in ids + more)                  # every member deprovisioned to default
+
+
+def test_a_replace_reads_the_group_once_not_once_per_reference(env, monkeypatch):
+    """`replace members` of many ids (even ids that exist nowhere) is linear: the group is read a fixed number of
+    times, never once per named reference."""
+    from sigil.governor.scim_directory import OrgDirectory
+    gid = env.call("POST", "/Groups", {"displayName": "T"}).body["id"]
+    calls = {"n": 0}
+    real = OrgDirectory.members
+
+    def counted(self, group_id):
+        calls["n"] += 1
+        return real(self, group_id)
+    monkeypatch.setattr(OrgDirectory, "members", counted)
+    junk = [{"value": f"x{i}"} for i in range(uiscim.MAX_MEMBER_VALUES)]
+    r = env.call("PATCH", f"/Groups/{gid}", {"Operations": [{"op": "replace", "path": "members", "value": junk}]})
+    assert r.status == 200 and r.records == 0
+    assert calls["n"] < 10, calls
+
+
+def test_records_reports_exactly_what_the_request_appended(env):
+    """`ScimResult.records` (what the provisioner charges to the write budget) is every spine record the request
+    appended: directory records, membership grants / revokes and one critical audit row per hook call."""
+    def audit(action, target, outcome):
+        env.store.append(kind="event", source="provision", actor="WARDEN",
+                         payload={"signal": "provision.audit", "action": action, "target": target})
+
+    def call(*a, **kw):
+        before = _spine(env)
+        r = env.call(*a, audit=audit, **kw)
+        assert r.records == _spine(env) - before, (a[:2], r.records, _spine(env) - before)
+        return r
+    a = call("POST", "/Users", _okta_user("a@acme.com", "00u-a"))
+    b = call("POST", "/Users", _okta_user("b@acme.com", "00u-b"))
+    assert a.records == 3                                                    # user record + audit + grant
+    g = call("POST", "/Groups", {"displayName": "Admins", "members": [{"value": a.body["id"]},
+                                                                       {"value": b.body["id"]}]})
+    assert g.records == 7                                                    # group + 2 edges + 2 x (audit + grant)
+    assert call("PUT", f"/Users/{a.body['id']}", _okta_user("a@acme.com", "00u-a")).records == 0   # a no-op re-sync
+    call("PATCH", f"/Groups/{g.body['id']}", {"Operations": [{"op": "remove", "path": "members",
+                                                               "value": [{"value": b.body["id"]}]}]})
+    call("DELETE", f"/Users/{a.body['id']}")
+    call("DELETE", f"/Groups/{g.body['id']}")
+    assert call("PATCH", "/Groups/grp_" + "0" * 24, {"Operations": [{"op": "remove", "path": "members"}]}).records == 0
+
+
+def _seed_users(env, n: int) -> list:
+    """`n` directory users with their default (viewer) membership, written in one view (fast setup only — the bound
+    under test is on the GROUP requests that follow, which go through the dispatcher)."""
+    from sigil.governor.scim_directory import ScimDirectoryRegistry
+    d = ScimDirectoryRegistry(env.store, owner_key=OWNER, trusted_pubkey=OP).directory("acme")
+    ids = []
+    for i in range(n):
+        uid = "sso_" + f"{i:024x}"
+        d.put_user(uid, user_name=f"s{i}@acme.com", external_id=f"00u-s{i}", active=True, now=_issue())
+        env.orgs.grant_membership("acme", uid, "viewer", issued_at=_issue())
+        ids.append(uid)
+    return ids
+
+
+def test_a_realistic_group_sync_of_a_few_hundred_members_passes(env):
+    """Ordinary IdP traffic is untouched: a few hundred members created, moved and replaced in single requests."""
+    ids = _seed_users(env, 300)
+    refs = [{"value": u} for u in ids]
+    g = env.call("POST", "/Groups", {"displayName": "Security", "members": refs[:250]})
+    assert g.status == 201 and len(g.body["members"]) == 250
+    p = env.call("PATCH", f"/Groups/{g.body['id']}",
+                 {"Operations": [{"op": "add", "path": "members", "value": refs[250:]},
+                                 {"op": "remove", "path": "members", "value": refs[:100]}]})
+    assert p.status == 200 and len(p.body["members"]) == 200
+    put = env.call("PUT", f"/Groups/{g.body['id']}", {"displayName": "Security", "members": refs})
+    assert put.status == 200 and len(put.body["members"]) == 300
+    roles = {m.username: m.role for m in OrgRegistry(env.store, owner_key=OWNER, trusted_pubkey=OP).memberships("acme")}
+    assert all(roles[u] == "analyst" for u in ids)

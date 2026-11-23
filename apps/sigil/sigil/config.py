@@ -471,8 +471,9 @@ def customer_sso_enabled() -> bool:
 
 # Consumer PR-H — the provisioner-side SSO/SCIM ledgers (written only while VIGIL_CUSTOMER_SSO is on): the durable
 # single-use SAML assertion-ID ledger (replay guard), the per-(org, client IP) failed-SCIM-authentication limiter
-# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN authenticated writes per org per minute — bounds how
-# fast even a valid token can grow the spine).
+# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per org per minute: a write is admitted
+# while the org is within budget and then charged one unit per record it appended — bounds how fast even a valid
+# token can grow the spine; see ui.sso_provision for the per-request bounds).
 CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
 SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
 SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"

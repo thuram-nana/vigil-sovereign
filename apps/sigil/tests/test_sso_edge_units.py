@@ -792,3 +792,26 @@ def test_a_failed_commit_keeps_the_signed_bearer_where_the_error_says(tmp_path, 
     # control: with the rename working the bearer lands at dest and the result is sign()'s
     assert cli._sign_then_deliver_owner_file(str(dest), "s3cret-bearer", overwrite=False, sign=lambda: 7) == 7
     assert dest.read_text() == "s3cret-bearer\n"
+
+
+def test_the_write_budget_charge_repays_every_unit_before_the_next_admit(tmp_path):
+    """`charge` counts the further cost of an ADMITTED request after the fact: below the budget it joins the window;
+    past it the key is locked for as long as the budget takes to repay everything (`base_lock_s` per `max_fails`
+    units), from the end of any lock already running. It never escalates, and a corrupt marker is never trusted."""
+    from sigil.ui.login_ratelimit import LoginRateLimiter
+    lim = LoginRateLimiter(tmp_path / "w", max_fails=10, window_s=60.0, base_lock_s=60.0, max_lock_s=60.0)
+    t = 1000.0
+    assert lim.admit("k", now=t) is None
+    assert lim.charge("k", 4, now=t) is None                        # 5 units in the window: under the budget
+    assert lim.admit("k", now=t + 1) is None                        # 6
+    assert lim.charge("k", 0, now=t + 1) is None and lim.charge("k", -3, now=t + 1) is None
+    wait = lim.charge("k", 13, now=t + 1)                           # 19 units: 1.9 budgets to repay
+    assert wait == pytest.approx(114.0)
+    assert lim.admit("k", now=t + 2) == pytest.approx(113.0)       # the next write waits the whole debt out
+    assert lim.charge("k", 20, now=t + 2) == pytest.approx(113.0 + 120.0)   # stacked onto the running lock
+    assert lim.admit("k", now=t + 1 + 114 + 120 + 1) is None        # repaid: admitted again, no escalation
+    rec = json.loads(lim._marker("k").read_text())
+    assert rec["lock_count"] == 0
+    lim._marker("k").write_text("{not json")
+    assert lim.charge("k", 1, now=t + 500) == 60.0                  # corrupt state locks, never resets to zero
+    assert lim.admit("k", now=t + 501) is not None

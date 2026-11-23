@@ -247,6 +247,16 @@ class OrgDirectory:
         self._groups: "dict[str, DirectoryGroup]" = groups
         self._edges: "set[tuple[str, str]]" = edges
         self._hw: "dict[tuple[str, str], float]" = highwater
+        self._index()
+
+    def _index(self) -> None:
+        """The edges indexed both ways, so a group's members / a user's groups are read in time proportional to
+        THEIR edges, never to every edge of the org (a request touching many members stays linear)."""
+        self._by_group: "dict[str, set[str]]" = {}
+        self._by_user: "dict[str, set[str]]" = {}
+        for g, u in self._edges:
+            self._by_group.setdefault(g, set()).add(u)
+            self._by_user.setdefault(u, set()).add(g)
 
     # -- reads --------------------------------------------------------------------------------------------
     def users(self) -> "list[DirectoryUser]":
@@ -321,11 +331,14 @@ class OrgDirectory:
 
     def members(self, group_id: str) -> "list[str]":
         """The ids of the users in `group_id` (edges to a deleted user/group are never counted)."""
-        return sorted(u for g, u in self._edges if g == group_id and u in self._users and g in self._groups)
+        if group_id not in self._groups:
+            return []
+        return sorted(u for u in self._by_group.get(group_id, ()) if u in self._users)
 
     def groups_of(self, user_id: str) -> "list[DirectoryGroup]":
-        return [self._groups[g] for g in sorted({g for g, u in self._edges if u == user_id})
-                if g in self._groups and user_id in self._users]
+        if user_id not in self._users:
+            return []
+        return [self._groups[g] for g in sorted(self._by_user.get(user_id, ())) if g in self._groups]
 
     # -- writes (owner-signed; in-memory view kept in step) --------------------------------------------------
     def _fresh(self, rtype: str, rid: str, now: float) -> float:
@@ -364,9 +377,8 @@ class OrgDirectory:
         """Delete user `user_id` and CASCADE-delete every edge to it. Returns True iff the user existed."""
         if user_id not in self._users:
             return False
-        for g, u in sorted(self._edges):
-            if u == user_id:
-                self.remove_member(g, u, now=now)
+        for g in sorted(self._by_user.get(user_id, ())):
+            self.remove_member(g, user_id, now=now)
         self._write("user", user_id, "deleted", {}, now=now)
         del self._users[user_id]
         return True
@@ -388,9 +400,8 @@ class OrgDirectory:
         if group_id not in self._groups:
             return []
         was = self.members(group_id)
-        for g, u in sorted(self._edges):
-            if g == group_id:
-                self.remove_member(g, u, now=now)
+        for u in sorted(self._by_group.get(group_id, ())):
+            self.remove_member(group_id, u, now=now)
         self._write("group", group_id, "deleted", {}, now=now)
         del self._groups[group_id]
         return was
@@ -402,6 +413,8 @@ class OrgDirectory:
             return False
         self._write("member", edge_id(group_id, user_id), "active", {}, now=now)
         self._edges.add((group_id, user_id))
+        self._by_group.setdefault(group_id, set()).add(user_id)
+        self._by_user.setdefault(user_id, set()).add(group_id)
         return True
 
     def remove_member(self, group_id: str, user_id: str, *, now: float) -> bool:
@@ -409,6 +422,8 @@ class OrgDirectory:
             return False
         self._write("member", edge_id(group_id, user_id), "deleted", {}, now=now)
         self._edges.discard((group_id, user_id))
+        self._by_group.get(group_id, set()).discard(user_id)
+        self._by_user.get(user_id, set()).discard(group_id)
         return True
 
     # -- staging (a multi-record change is applied to a scratch copy, then committed in one step) ---------------
@@ -430,8 +445,28 @@ class OrgDirectory:
             self._reg._append(org_id, rtype, rid, state, data, issued_at=at)
             self._hw[(rtype, rid)] = at
         self._users, self._groups, self._edges = dict(staged._users), dict(staged._groups), set(staged._edges)
+        self._index()
         journal.records = []
         journal.base_hw = dict(self._hw)
+
+    def authored_writes(self) -> int:
+        """For a `staged()` copy: how many of the records it has journaled AUTHOR state — every record except the
+        first write, in this change, of a record that DELETES it. Such a delete undoes state that was already on the
+        spine before the change (a delete is only ever journaled for a live record, so a key's first write being a
+        delete means it was live in the view staged from); it is bounded by what earlier, separately budgeted writes
+        put there. Everything else — a new edge, a rename, or a delete of something this same change wrote — is
+        authored by the request itself. 0 for a view that is not staged."""
+        journal = self._reg
+        if not isinstance(journal, _Journal):
+            return 0
+        seen: "set[tuple[str, str]]" = set()
+        authored = 0
+        for _org, rtype, rid, state, _data, _at in journal.records:
+            key = (rtype, rid)
+            if key in seen or state != "deleted":
+                authored += 1
+            seen.add(key)
+        return authored
 
 
 class _Journal:
@@ -465,6 +500,7 @@ class ScimDirectoryRegistry:
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        self.appended = 0                  # owner-signed records this registry has appended (a request's cost)
 
     def _check_record(self, org_id: str, rtype: str, rid: str, state: str) -> None:
         if self.owner_key is None:
@@ -479,7 +515,9 @@ class ScimDirectoryRegistry:
                 "issued_at": float(issued_at), "data": dict(data)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto", "reason": f"SCIM directory {rtype} {state} (owner-signed)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        self.appended += 1
+        return seq
 
     def directory(self, org_id: str) -> OrgDirectory:
         """Fold the spine into ONE org's directory view (owner-key-succession-aware, LWW high-water per

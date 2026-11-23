@@ -4423,16 +4423,17 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
     """Consumer PR-H — the SSO / SCIM ledgers, ONLY while VIGIL_CUSTOMER_SSO is on (off ⇒ {} ⇒ the Provisioner is
     built exactly as before, and its SSO/SCIM methods are unreachable: the dispatch 404s them). The durable SAML
     assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
-    then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN per minute,
-    guard-and-count); and the enterprise-OIDC egress hooks a test injects."""
+    then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per
+    minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); and the
+    enterprise-OIDC egress hooks a test injects."""
     if not config.customer_sso_enabled():
         return {}
     from .saml import SamlReplayLedger
     return {"saml_replay": SamlReplayLedger(config.CUSTOMER_SAML_REPLAY_DIR),
             "scim_auth_limiter": limiter_cls(config.SCIM_AUTH_RATELIMIT_DIR, max_fails=10, window_s=300.0,
                                              base_lock_s=300.0, max_lock_s=3600.0),
-            # a BUDGET, not a penalty: an over-budget burst waits out the rest of the minute (no escalation), so a
-            # large initial IdP sync slows down rather than locking itself out
+            # a BUDGET, not a penalty: an over-budget burst waits until the budget has repaid it (no escalation),
+            # so a large initial IdP sync slows down rather than locking itself out
             "scim_write_limiter": limiter_cls(config.SCIM_WRITE_RATELIMIT_DIR, max_fails=config.SCIM_OPS_PER_MIN,
                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

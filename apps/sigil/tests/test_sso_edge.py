@@ -856,7 +856,7 @@ def test_scim_role_escalation_never_reaches_founder_or_owner(stack):
 
 def test_scim_write_budget_answers_429_with_retry_after(stack, monkeypatch):
     from sigil import config
-    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 2)
+    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 6)     # spine records: each create writes 3 (user, audit, grant)
     stack.saml_org(ORG_A, scim_token=TOKEN_A)
     base = f"/scim/v2/{ORG_A}"
     made = [stack.scim("POST", f"{base}/Users", _okta_user(f"u{i}@acme.com", f"00u{i}")) for i in range(3)]
@@ -871,6 +871,86 @@ def test_scim_write_budget_answers_429_with_retry_after(stack, monkeypatch):
                          ("PATCH", {"Operations": [{"op": "replace", "path": "active", "value": False}]})):
         assert stack.scim(method, f"{base}/Users/{uid}", body).status == 429, method
     assert stack.role(uid, ORG_A) == "viewer"
+
+
+def _flood_body(ids: list) -> dict:
+    """One PATCH repeating add-every-member / remove-every-member up to the operation bound."""
+    refs = [{"value": u} for u in ids]
+    ops: list = []
+    while len(ops) < 1000:
+        ops += [{"op": "add", "path": "members", "value": refs}, {"op": "remove", "path": "members"}]
+    return {"Operations": ops}
+
+
+def _spine_len(stack) -> int:
+    return sum(1 for _ in stack.store().iter_records())
+
+
+def test_an_over_bound_scim_body_is_refused_before_the_membership_critical_section(stack):
+    """A group write naming more member references than one request may is refused on its BODY, before the write
+    budget and before the critical section every org's membership change shares: it answers 400 tooMany even while
+    another process holds that section, and writes nothing."""
+    from sigil.ui.provision import _members_lock
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    ids = [stack.scim("POST", f"{base}/Users", _okta_user(f"f{i}@acme.com", f"00u-f{i}")).json()["id"]
+           for i in range(5)]
+    gid = stack.scim("POST", f"{base}/Groups", {"displayName": "Plain"}).json()["id"]
+    before = _spine_len(stack)
+    out: dict = {}
+    with _members_lock(stack.store()):
+        t = threading.Thread(target=lambda: out.update(r=stack.scim("PATCH", f"{base}/Groups/{gid}",
+                                                                     _flood_body(ids))))
+        t.start()
+        t.join(10)
+        assert "r" in out, "an over-bound request waited on the shared critical section"
+    r = out["r"]
+    assert r.status == 400 and r.json()["scimType"] == "tooMany"
+    assert _spine_len(stack) == before
+    assert stack.scim("GET", f"{base}/Groups/{gid}").json()["members"] == []
+
+
+def test_a_flood_patch_from_one_org_never_stalls_another_orgs_scim(stack):
+    """The amplification shape (one budgeted PATCH repeating add-N / remove-all) is refused with nothing written, and
+    a second organization's SCIM request made while it is in flight is answered at once."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B, scim_token=TOKEN_B)
+    base = f"/scim/v2/{ORG_A}"
+    ids = [stack.scim("POST", f"{base}/Users", _okta_user(f"g{i}@acme.com", f"00u-g{i}")).json()["id"]
+           for i in range(20)]
+    gid = stack.scim("POST", f"{base}/Groups", {"displayName": "Plain"}).json()["id"]
+    before = _spine_len(stack)
+    out: dict = {}
+    t0 = time.time()
+    th = threading.Thread(target=lambda: out.update(r=stack.scim("PATCH", f"{base}/Groups/{gid}",
+                                                                  _flood_body(ids))))
+    th.start()
+    time.sleep(0.2)
+    t1 = time.time()
+    other = stack.scim("GET", f"/scim/v2/{ORG_B}/Users", token=TOKEN_B)
+    other_s = time.time() - t1
+    th.join(300)
+    assert other.status == 200 and other_s < 5.0, other_s
+    assert out["r"].status == 400 and out["r"].json()["scimType"] == "tooMany" and time.time() - t0 < 10.0
+    assert _spine_len(stack) == before
+
+
+def test_the_scim_write_budget_is_charged_per_record_not_per_request(stack, monkeypatch):
+    """One admitted request that appends many records spends that many units: the org's next write waits until the
+    budget has repaid them (longer than the one-minute lock a single unit could arm). Reads are never budgeted."""
+    from sigil import config
+    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 10)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    a = stack.scim("POST", f"{base}/Users", _okta_user("a@acme.com", "00u-a")).json()["id"]
+    b = stack.scim("POST", f"{base}/Users", _okta_user("b@acme.com", "00u-b")).json()["id"]
+    before = _spine_len(stack)
+    g = stack.scim("POST", f"{base}/Groups", {"displayName": "Admins", "members": [{"value": a}, {"value": b}]})
+    assert g.status == 201 and _spine_len(stack) - before == 7     # group + 2 edges + 2 x (audit + grant)
+    # 3 + 3 + 7 = 13 units against a budget of 10: locked for 13/10 of the budget period
+    nxt = stack.scim("POST", f"{base}/Users", _okta_user("c@acme.com", "00u-c"))
+    assert nxt.status == 429 and int(nxt.headers.get("Retry-After")) > 60
+    assert stack.scim("GET", f"{base}/Users").json()["totalResults"] == 2
 
 
 def test_scim_protocol_hygiene_over_http(stack):
