@@ -411,6 +411,43 @@ class OrgDirectory:
         self._edges.discard((group_id, user_id))
         return True
 
+    # -- staging (a multi-record change is applied to a scratch copy, then committed in one step) ---------------
+    def staged(self) -> "OrgDirectory":
+        """A scratch copy of this view: it reads and writes exactly like this view, but its writes only JOURNAL the
+        owner-signed records they would append (nothing reaches the spine) until `commit` replays them here. A
+        caller computes what a change WILL make of the directory, acts on that first (e.g. lowers a role, with its
+        audit), and only then commits — so a failure before the commit leaves the directory exactly as it was."""
+        return OrgDirectory(_Journal(self._reg, self), self.org_id, users=dict(self._users),
+                            groups=dict(self._groups), edges=set(self._edges), highwater=dict(self._hw))
+
+    def commit(self, staged: "OrgDirectory") -> None:
+        """Append, in order, every record `staged` (a `staged()` copy of THIS view, with no write here since)
+        journaled — each with the issued_at it was stamped with — then adopt its state."""
+        journal = staged._reg
+        if not isinstance(journal, _Journal) or journal.origin is not self or journal.base_hw != self._hw:
+            raise DirectoryError("a staged directory change commits only onto the unchanged view it was staged from")
+        for org_id, rtype, rid, state, data, at in journal.records:
+            self._reg._append(org_id, rtype, rid, state, data, issued_at=at)
+            self._hw[(rtype, rid)] = at
+        self._users, self._groups, self._edges = dict(staged._users), dict(staged._groups), set(staged._edges)
+        journal.records = []
+        journal.base_hw = dict(self._hw)
+
+
+class _Journal:
+    """The registry stand-in of a `staged()` directory: records the owner-signed appends it is asked for (after the
+    same record-key checks the real append makes) instead of writing them."""
+
+    def __init__(self, base: "ScimDirectoryRegistry", origin: OrgDirectory) -> None:
+        self.base, self.origin = base, origin
+        self.base_hw = dict(origin._hw)
+        self.records: "list[tuple]" = []
+
+    def _append(self, org_id: str, rtype: str, rid: str, state: str, data: dict, *, issued_at: float) -> int:
+        self.base._check_record(org_id, rtype, rid, state)
+        self.records.append((org_id, rtype, rid, state, dict(data), float(issued_at)))
+        return 0
+
 
 def _user_data(u: DirectoryUser) -> dict:
     data = {"userName": u.user_name, "externalId": u.external_id, "displayName": u.display_name,
@@ -429,12 +466,15 @@ class ScimDirectoryRegistry:
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
 
-    def _append(self, org_id: str, rtype: str, rid: str, state: str, data: dict, *, issued_at: float) -> int:
+    def _check_record(self, org_id: str, rtype: str, rid: str, state: str) -> None:
         if self.owner_key is None:
             raise DirectoryError("a SCIM directory write requires the owner signing key")
         if not _TENANT_RE.fullmatch(str(org_id or "")) or rtype not in RTYPES or state not in _STATES \
                 or not _id_ok(rtype, rid):
             raise DirectoryError("malformed SCIM directory record key")
+
+    def _append(self, org_id: str, rtype: str, rid: str, state: str, data: dict, *, issued_at: float) -> int:
+        self._check_record(org_id, rtype, rid, state)
         core = {"signal": SCIM_DIRECTORY_SIGNAL, "org_id": org_id, "rtype": rtype, "rid": rid, "state": state,
                 "issued_at": float(issued_at), "data": dict(data)}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",

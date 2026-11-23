@@ -1024,12 +1024,16 @@ def test_a_scim_grant_or_revoke_whose_critical_audit_fails_never_lands(stack, mo
     assert grant.status >= 500, (grant.status, grant.body)
     assert fail.attempts == ["scim_grant"] and stack.orgs().memberships(ORG_A) == []
     fail.on = False                                            # the IdP retries once the store is back
-    # the refused create kept its directory record (holding NO membership — the fail-safe side): the IdP's re-POST is
-    # a 409, and its update of the existing user mints the audited grant
+    # the refused create kept its directory record (holding NO membership — the fail-safe side): the IdP's re-POST of
+    # the same user completes the create with the audited grant (never a 409 that strands the user grant-less)
     again = stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann"))
-    assert again.status == 409, (again.status, again.body)
+    assert again.status == 201, (again.status, again.body)
     (listed,) = stack.scim("GET", f"{base}/Users").json()["Resources"]
     uid = listed["id"]
+    assert again.json()["id"] == uid and again.json()["roles"] == [{"value": "viewer"}]
+    assert stack.role(uid, ORG_A) == "viewer" and [a["target"] for a in stack.audits("scim_grant")] == [uid]
+    # a create of a user that now holds its membership is a 409 again; an update is a no-op (nothing re-granted)
+    assert stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann")).status == 409
     assert stack.scim("PUT", f"{base}/Users/{uid}", _okta_user("ann@acme.com", "00u-ann")).status == 200
     assert stack.role(uid, ORG_A) == "viewer" and len(stack.audits("scim_grant")) == 1
     # revoke: a deactivation and a delete whose audit write fails leave the member's grant in place
@@ -1045,3 +1049,115 @@ def test_a_scim_grant_or_revoke_whose_critical_audit_fails_never_lands(stack, mo
     fail.on = False                                            # control: the same delete, audited, revokes
     assert stack.scim("DELETE", f"{base}/Users/{uid}").status == 204
     assert stack.role(uid, ORG_A) is None and [a["target"] for a in stack.audits("scim_deactivate")] == [uid]
+
+
+def test_a_scim_re_post_completes_only_an_unfinished_create(stack):
+    """Only a directory user the failed create left behind — same identity, active, no membership — is completed by a
+    re-POST: a deactivated user (also holding no membership) and a different person reusing the userName stay 409s."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    uid = stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann")).json()["id"]
+    off = stack.scim("PATCH", f"{base}/Users/{uid}", {"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                                                     "Operations": [{"op": "replace", "value": {"active": False}}]})
+    assert off.status == 200 and stack.role(uid, ORG_A) is None
+    assert stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann")).status == 409
+    assert stack.scim("POST", f"{base}/Users", _okta_user("ANN@acme.com", "00u-other")).status == 409
+    assert stack.role(uid, ORG_A) is None and stack.scim("GET", f"{base}/Users/{uid}").json()["active"] is False
+
+
+def _scim_group_with_admins(stack) -> "tuple[str, str, list]":
+    """ORG_A (SCIM on) with two directory users in its `Admins` group — each org_admin through it."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    uids = [stack.scim("POST", f"{base}/Users", _okta_user(n, x)).json()["id"]
+            for n, x in (("ann@acme.com", "00u-ann"), ("bob@acme.com", "00u-bob"))]
+    g = stack.scim("POST", f"{base}/Groups", {"displayName": "Admins", "members": [{"value": u} for u in uids]})
+    assert g.status == 201 and [stack.role(u, ORG_A) for u in uids] == ["org_admin", "org_admin"], g.body
+    return base, g.json()["id"], uids
+
+
+def _downgrades(stack, since: int) -> list:
+    """The members a `role=viewer` grant audit row was written for after the first `since` grant rows."""
+    return sorted(a["target"] for a in stack.audits("scim_grant")[since:] if a.get("outcome") == "role=viewer")
+
+
+def test_a_group_delete_whose_downgrade_audit_fails_leaves_the_group_and_the_retry_lands(stack, monkeypatch):
+    """A group DELETE lowers its members' roles BEFORE the group record goes: with the audit store failing, the IdP's
+    DELETE is an error, the group (and every member's place in it) is still there and nobody's role moved, so the
+    IdP's retry finds the group and lands every downgrade, each with its audit row."""
+    base, gid, uids = _scim_group_with_admins(stack)
+    n0 = len(stack.audits("scim_grant"))
+    fail = _FailingAudit(monkeypatch, {"scim_grant"})
+    refused = stack.scim("DELETE", f"{base}/Groups/{gid}")
+    assert refused.status >= 500, (refused.status, refused.body)
+    assert fail.attempts == ["scim_grant"]                     # the downgrade WAS reached, and its audit write failed
+    still = stack.scim("GET", f"{base}/Groups/{gid}")
+    assert still.status == 200 and sorted(m["value"] for m in still.json()["members"]) == sorted(uids)
+    assert [stack.role(u, ORG_A) for u in uids] == ["org_admin", "org_admin"] and _downgrades(stack, n0) == []
+    fail.on = False                                            # the IdP retries once the store is back
+    assert stack.scim("DELETE", f"{base}/Groups/{gid}").status == 204
+    assert stack.scim("GET", f"{base}/Groups/{gid}").status == 404
+    assert [stack.role(u, ORG_A) for u in uids] == ["viewer", "viewer"] and _downgrades(stack, n0) == sorted(uids)
+
+
+_PATCH = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+
+
+@pytest.mark.parametrize("how", ["patch-filtered-remove", "patch-remove", "patch-replace", "put", "put-rename"])
+def test_a_group_member_removal_whose_downgrade_audit_fails_changes_nothing_and_the_retry_lands(stack, monkeypatch,
+                                                                                                  how):
+    """A group PATCH / PUT that takes a member out of (or renames away from) a mapped group lowers that member's role
+    BEFORE the directory changes: with the audit store failing the IdP's write is an error, the directory still has
+    the member in the group (under its name) and the role is untouched; the IdP's retry of the same write lands the
+    downgrade with its audit row, and the directory change with it."""
+    base, gid, (ann, bob) = _scim_group_with_admins(stack)
+    method, body = {
+        "patch-filtered-remove": ("PATCH", {"schemas": [_PATCH], "Operations": [
+            {"op": "remove", "path": f'members[value eq "{ann}"]'}]}),
+        "patch-remove": ("PATCH", {"schemas": [_PATCH], "Operations": [
+            {"op": "remove", "path": "members", "value": [{"value": ann}]}]}),
+        "patch-replace": ("PATCH", {"schemas": [_PATCH], "Operations": [
+            {"op": "replace", "path": "members", "value": [{"value": bob}]}]}),
+        "put": ("PUT", {"displayName": "Admins", "members": [{"value": bob}]}),
+        "put-rename": ("PUT", {"displayName": "Staff", "members": [{"value": ann}, {"value": bob}]}),
+    }[how]
+    lowered = sorted([ann, bob]) if how == "put-rename" else [ann]
+    n0 = len(stack.audits("scim_grant"))
+    fail = _FailingAudit(monkeypatch, {"scim_grant"})
+    refused = stack.scim(method, f"{base}/Groups/{gid}", body)
+    assert refused.status >= 500, (refused.status, refused.body)
+    assert fail.attempts == ["scim_grant"]
+    g = stack.scim("GET", f"{base}/Groups/{gid}").json()
+    assert g["displayName"] == "Admins" and sorted(m["value"] for m in g["members"]) == sorted([ann, bob])
+    assert [x["display"] for x in stack.scim("GET", f"{base}/Users/{ann}").json()["groups"]] == ["Admins"]
+    assert [stack.role(u, ORG_A) for u in (ann, bob)] == ["org_admin", "org_admin"] and _downgrades(stack, n0) == []
+    fail.on = False                                            # the IdP retries the same write
+    again = stack.scim(method, f"{base}/Groups/{gid}", body)
+    assert again.status == 200, (again.status, again.body)
+    assert {u: stack.role(u, ORG_A) for u in (ann, bob)} == {u: ("viewer" if u in lowered else "org_admin")
+                                                              for u in (ann, bob)}
+    assert _downgrades(stack, n0) == lowered
+    g = stack.scim("GET", f"{base}/Groups/{gid}").json()
+    if how == "put-rename":
+        assert g["displayName"] == "Staff" and sorted(m["value"] for m in g["members"]) == sorted([ann, bob])
+    else:
+        assert [m["value"] for m in g["members"]] == [bob]
+
+
+def test_a_group_add_whose_raise_audit_fails_grants_nothing_extra_and_the_retry_lands(stack, monkeypatch):
+    """A raise caused by a group add is committed directory-first: a failed grant audit leaves the member in the group
+    at the LOWER role it held (never extra privilege), and the IdP's retry of the same add — the member already in the
+    group — still re-resolves it and lands the audited raise."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    base = f"/scim/v2/{ORG_A}"
+    uid = stack.scim("POST", f"{base}/Users", _okta_user("ann@acme.com", "00u-ann")).json()["id"]
+    gid = stack.scim("POST", f"{base}/Groups", {"displayName": "Admins"}).json()["id"]
+    add = {"schemas": [_PATCH], "Operations": [{"op": "add", "path": "members", "value": [{"value": uid}]}]}
+    fail = _FailingAudit(monkeypatch, {"scim_grant"})
+    refused = stack.scim("PATCH", f"{base}/Groups/{gid}", add)
+    assert refused.status >= 500 and fail.attempts == ["scim_grant"], (refused.status, refused.body)
+    assert stack.role(uid, ORG_A) == "viewer"                  # the fail-safe side: no raise without its audit
+    fail.on = False
+    assert stack.scim("PATCH", f"{base}/Groups/{gid}", add).status == 200
+    assert stack.role(uid, ORG_A) == "org_admin"
+    assert [a["target"] for a in stack.audits("scim_grant") if a.get("outcome") == "role=org_admin"] == [uid]

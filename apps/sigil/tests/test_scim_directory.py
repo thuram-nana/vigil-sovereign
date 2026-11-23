@@ -243,3 +243,46 @@ def test_the_sign_in_clamp_note_round_trips_and_a_malformed_one_is_no_note():
                                                    "clamp": {"from": "org_admin", "at": "soon"}}, issued_at=_now())
     u = _reg(s).directory("acme").user(U2)
     assert u is not None and u.user_name == "y@acme.test" and u.clamp == ()
+
+
+def test_a_staged_change_reaches_the_spine_only_on_commit_and_then_exactly():
+    """`staged()` journals a multi-record change without writing it (the caller acts on the post-change state first);
+    `commit` appends exactly those records, in order, and the result folds back identical to the staged view."""
+    s = _store()
+    d = _reg(s).directory("acme")
+    d.put_user(U1, user_name="ann@acme.test", active=True, now=_now())
+    d.put_user(U2, user_name="bob@acme.test", active=True, now=_now())
+    d.put_group(G1, display_name="Admins", now=_now())
+    d.add_member(G1, U1, now=_now())
+    n = len(_records(s))
+    st = d.staged()
+    assert st.delete_group(G1, now=_now()) == [U1] and st.put_group(G2, display_name="Staff", now=_now())
+    st.add_member(G2, U2, now=_now())
+    assert len(_records(s)) == n                                       # nothing written yet …
+    assert d.group(G1) is not None and d.members(G1) == [U1] and d.group(G2) is None   # … nor seen by the view
+    assert st.group(G1) is None and st.members(G2) == [U2]
+    d.commit(st)
+    assert len(_records(s)) == n + 4                                   # edge + group delete, group + edge put
+    for view in (d, _reg(s).directory("acme")):                        # the in-memory view and a fresh fold agree
+        assert view.group(G1) is None and view.members(G2) == [U2] and [g.id for g in view.groups_of(U1)] == []
+
+
+def test_a_staged_change_commits_only_onto_the_unchanged_view_it_came_from():
+    s = _store()
+    d = _reg(s).directory("acme")
+    d.put_group(G1, display_name="Admins", now=_now())
+    st = d.staged()
+    st.put_group(G1, display_name="Staff", now=_now())
+    other = _reg(s).directory("acme")
+    with pytest.raises(DirectoryError):
+        other.commit(st)                                               # a different view
+    d.put_group(G2, display_name="Ops", now=_now())
+    with pytest.raises(DirectoryError):
+        d.commit(st)                                                   # the view moved since it was staged
+    assert _reg(s).directory("acme").group(G1).display_name == "Admins"
+
+
+def test_a_staged_write_is_refused_like_a_real_one_without_the_owner_key():
+    d = ScimDirectoryRegistry(_store(), owner_key=None, trusted_pubkey=OP).directory("acme")
+    with pytest.raises(DirectoryError):
+        d.staged().put_group(G1, display_name="Admins", now=_now())

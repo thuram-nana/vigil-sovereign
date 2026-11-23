@@ -552,27 +552,74 @@ def _revoke(req: _Req, uid: str) -> None:
         req.deactivated.append(uid)
 
 
-def _reconcile(req: _Req, uid: str, *, create: bool) -> None:
-    """Make `uid`'s membership match the directory: inactive/deleted ⇒ revoke; active ⇒ the role the owner-signed
-    config resolves for its selectors + group names (minted only when it changes). `create` is True for a
-    user-level write (the user is being provisioned) and False for a group change (which re-roles existing members
-    but never creates one). An owner-set role outside the ceiling is never re-granted here."""
+_KEEP, _REVOKE = "keep", "revoke"
+
+
+def _target(req: _Req, uid: str, *, create: bool) -> str:
+    """What `uid`'s membership must become to match the directory (`req.dir`): `_REVOKE` (inactive/deleted), `_KEEP`
+    (unchanged), or the role to grant — the role the owner-signed config resolves for its selectors + group names.
+    `create` is True for a user-level write (the user is being provisioned) and False for a group change (which
+    re-roles existing members but never creates one). An owner-set role outside the ceiling is never re-granted."""
     u = req.dir.user(uid)
     if u is None or not u.active:
-        _revoke(req, uid)
-        return
+        return _REVOKE
     current = req.role(uid)
     if current is not None and current not in _scim.SCIM_PROVISIONABLE_ROLES:
-        return
+        return _KEEP
     if current is None and not create:
-        return
+        return _KEEP
     role = _directory_role(req.config, req.dir, u)
     if role is None:
         raise _ScimFail(400, "no provisionable role resolves for this user (fail-closed)", "invalidValue")
-    if role == current:
-        return
-    req.audit("scim_grant", uid, f"role={role}")
-    _scim.provision_membership(req.orgs, req.config, username=uid, role=role, issued_at=req.at())
+    return _KEEP if role == current else role
+
+
+def _apply(req: _Req, uid: str, target: str) -> None:
+    """Land one `_target` outcome: the critical audit row FIRST, then the owner-signed revoke / ceiling-gated grant."""
+    if target == _REVOKE:
+        _revoke(req, uid)
+    elif target != _KEEP:
+        req.audit("scim_grant", uid, f"role={target}")
+        _scim.provision_membership(req.orgs, req.config, username=uid, role=target, issued_at=req.at())
+
+
+def _lowers(req: _Req, uid: str, target: str) -> bool:
+    """True iff landing `target` takes authority away from `uid` (a revoke of a live membership, or a lower role)."""
+    current = req.role(uid)
+    if target == _KEEP or current is None:
+        return False
+    return target == _REVOKE or _scim._provision_rank(target) < _scim._provision_rank(current)
+
+
+def _reconcile(req: _Req, uid: str, *, create: bool) -> None:
+    """Make `uid`'s membership match the directory (see `_target`)."""
+    _apply(req, uid, _target(req, uid, create=create))
+
+
+def _group_change(req: _Req, change: "Callable[[], set]") -> None:
+    """Run a group write so that it lands WHOLE or leaves the directory as it was. `change()` writes a STAGED copy of
+    the directory (`OrgDirectory.staged`) and returns the members whose role it may move; every new role is resolved
+    from that post-change state first (a refusal changes nothing), then every change that LOWERS a role (a member
+    leaving a mapped group, a rename away from a mapping, a deleted group) lands — each with its critical audit row —
+    BEFORE the directory record is committed. An audit write that fails therefore leaves the directory unchanged
+    (the member still in the group, the group still there), so the IdP's retry of the same request finds it and
+    completes the downgrade, instead of a 404 / a no-op while the higher role lives on. Raises come AFTER the commit
+    (directory first, then the grant): a failed grant leaves the member at the LOWER role it held (the fail-safe
+    side), and the IdP's retry re-resolves every member it names, so the raise still lands."""
+    real = req.dir
+    staged = req.dir = real.staged()
+    try:
+        affected = change()
+        plan = [(uid, _target(req, uid, create=False)) for uid in sorted(affected)]
+    finally:
+        req.dir = real
+    lowering = [(uid, t) for uid, t in plan if _lowers(req, uid, t)]
+    for uid, t in lowering:
+        _apply(req, uid, t)
+    real.commit(staged)
+    for uid, t in plan:
+        if (uid, t) not in lowering:
+            _apply(req, uid, t)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -664,19 +711,30 @@ def _put_user(req: _Req, uid: str, st: dict) -> None:
         raise _ScimFail(400, str(e), "invalidValue") from e
 
 
+def _unfinished_create(req: _Req, uid: str, st: dict) -> bool:
+    """True iff this POST re-sends a create that wrote its directory user but never landed the grant (its critical
+    audit write failed): the same identity (userName up to letter case, externalId exactly), still active, holding
+    no membership. The retried POST then completes it (201) instead of a 409 — it can grant nothing an update of that
+    user would not grant too. A deactivated user, or one holding any membership, stays a 409."""
+    u = req.dir.user(uid)
+    return (u is not None and u.active and req.role(uid) is None
+            and username_key(u.user_name) == username_key(st["user_name"]) and u.external_id == st["external_id"])
+
+
 def _user_create(req: _Req, body: object) -> ScimResult:
     st = _user_state_from(_expect_object(body))
     if not st["user_name"] and st["external_id"]:
         st["user_name"] = st["external_id"]               # lenient: an externalId-only push still names the user
     if not st["user_name"]:
         raise _ScimFail(400, "userName is required", "invalidValue")
-    if req.dir.user_by_name(st["user_name"]) is not None:
-        raise _ScimFail(409, "a user with this userName already exists", "uniqueness")
     uid = _scim.sso_username(req.config, st["external_id"] or st["user_name"])
-    if not uid:
-        raise _ScimFail(400, "the user has no usable identifier", "invalidValue")
-    if req.dir.user(uid) is not None:
-        raise _ScimFail(409, "a user with this externalId already exists", "uniqueness")
+    if not (uid and _unfinished_create(req, uid, st)):
+        if req.dir.user_by_name(st["user_name"]) is not None:
+            raise _ScimFail(409, "a user with this userName already exists", "uniqueness")
+        if not uid:
+            raise _ScimFail(400, "the user has no usable identifier", "invalidValue")
+        if req.dir.user(uid) is not None:
+            raise _ScimFail(409, "a user with this externalId already exists", "uniqueness")
     _put_user(req, uid, st)
     _reconcile(req, uid, create=True)
     return ScimResult(201, _user_resource(req, req.dir.user(uid)))  # type: ignore[arg-type]
@@ -914,8 +972,11 @@ def _set_group_external_id(req: _Req, gid: str, ext: str) -> None:
 
 def _add_members(req: _Req, gid: str, uids, touched: set) -> None:
     for uid in uids:
-        if req.dir.add_member(gid, uid, now=req.at()):        # an id not in THIS org's directory adds nothing
-            touched.add(uid)
+        req.dir.add_member(gid, uid, now=req.at())            # an id not in THIS org's directory adds nothing
+    # every named user now in the group is re-resolved — also one already in it, so the IdP's retry of an add whose
+    # grant failed after the directory write still lands the raise
+    present = set(req.dir.members(gid))
+    touched.update(uid for uid in uids if uid in present)
 
 
 def _remove_members(req: _Req, gid: str, uids, touched: set) -> None:
@@ -938,14 +999,17 @@ def _group_create(req: _Req, body: object) -> ScimResult:
     if req.dir.group_by_name(name) is not None:
         raise _ScimFail(409, "a group with this displayName already exists", "uniqueness")
     gid = "grp_" + secrets.token_hex(12)
-    try:
-        req.dir.put_group(gid, display_name=name.strip(), external_id=str(b.get("externalId") or ""), now=req.at())
-    except DirectoryError as e:
-        raise _ScimFail(400, str(e), "invalidValue") from e
-    touched: set = set()
-    _add_members(req, gid, _member_ids(b.get("members") or []), touched)
-    for uid in sorted(touched):
-        _reconcile(req, uid, create=False)
+
+    def change() -> set:
+        try:
+            req.dir.put_group(gid, display_name=name.strip(), external_id=str(b.get("externalId") or ""),
+                              now=req.at())
+        except DirectoryError as e:
+            raise _ScimFail(400, str(e), "invalidValue") from e
+        touched: set = set()
+        _add_members(req, gid, _member_ids(b.get("members") or []), touched)
+        return touched
+    _group_change(req, change)
     return ScimResult(201, _group_resource(req, gid))
 
 
@@ -953,23 +1017,33 @@ def _group_replace(req: _Req, gid: str, body: object) -> ScimResult:
     if req.dir.group(gid) is None:
         raise _ScimFail(404, "no such group in this organization")
     b = _expect_object(body)
-    before = set(req.dir.members(gid))
-    _rename_group(req, gid, b.get("displayName"))
-    _set_group_external_id(req, gid, str(b.get("externalId") or ""))
-    touched: set = set()
-    _replace_members(req, gid, _member_ids(b.get("members") or []), touched)
-    for uid in sorted(before | touched):                      # a rename re-roles every member
-        _reconcile(req, uid, create=False)
+
+    def change() -> set:
+        before = set(req.dir.members(gid))
+        _rename_group(req, gid, b.get("displayName"))
+        _set_group_external_id(req, gid, str(b.get("externalId") or ""))
+        touched: set = set()
+        _replace_members(req, gid, _member_ids(b.get("members") or []), touched)
+        return before | touched                               # a rename re-roles every member
+    _group_change(req, change)
     return ScimResult(200, _group_resource(req, gid))
 
 
 def _group_patch(req: _Req, gid: str, body: object, q: "dict[str, str]") -> ScimResult:
     if req.dir.group(gid) is None:
         raise _ScimFail(404, "no such group in this organization")
+    ops = _patch_ops(body)
+    _group_change(req, lambda: _group_patch_ops(req, gid, ops))
+    members = "members" not in _excluded(q)
+    return ScimResult(200, _group_resource(req, gid, members=members))
+
+
+def _group_patch_ops(req: _Req, gid: str, ops: list) -> set:
+    """Apply a group PATCH's operations to `req.dir`; returns the members whose role they may move."""
     before = set(req.dir.members(gid))
     touched: set = set()
     renamed = False
-    for kind, path, value in _patch_ops(body):
+    for kind, path, value in ops:
         raw = _strip_schema(path, _SCHEMA_GROUP)
         a = raw.lower()
         m = _PATH_FILTER_RE.match(raw)
@@ -1010,18 +1084,15 @@ def _group_patch(req: _Req, gid: str, body: object, q: "dict[str, str]") -> Scim
                 elif kk == "members":
                     (_replace_members if kind == "replace" else _add_members)(req, gid, _member_ids(v), touched)
         # any other attribute is accepted and not stored (see _user_apply)
-    for uid in sorted((before | touched) if renamed else touched):
-        _reconcile(req, uid, create=False)
-    members = "members" not in _excluded(q)
-    return ScimResult(200, _group_resource(req, gid, members=members))
+    return (before | touched) if renamed else touched
 
 
 def _group_delete(req: _Req, gid: str) -> ScimResult:
     if req.dir.group(gid) is None:
         raise _ScimFail(404, "no such group in this organization")
-    was = req.dir.delete_group(gid, now=req.at())
-    for uid in was:
-        _reconcile(req, uid, create=False)
+    # staged: every member's downgrade (with its audit) lands BEFORE the group record goes, so a failed audit leaves
+    # the group in place and the IdP's retry of this DELETE finds it and completes the deprovisioning
+    _group_change(req, lambda: set(req.dir.delete_group(gid, now=req.at())))
     return ScimResult(204, None)
 
 
