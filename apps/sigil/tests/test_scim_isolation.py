@@ -774,20 +774,24 @@ def test_a_config_re_signed_between_verification_and_resolution_refuses_the_sign
     from sigil.ui.provision import ProvisionDenied
     stack.saml_org(ORG_A)
     orig = uiscim.verify_saml_sign_in
+    resigned: list = []
 
     def verify(*a, **kw):
         out = orig(*a, **kw)
         u = stack.urls(ORG_A)
-        stack.cfg().set_saml_config(ORG_A, idp_entity_id=edge.IDP_ENTITY, idp_certs_pem=[edge.IDP_CERT],
-                                    idp_sso_url=edge.IDP_SSO_URL, sp_entity_id=u["saml_sp_entity_id"],
-                                    acs_url=u["saml_acs_url"], default_role="viewer",
-                                    group_role_map={"Admins": "org_admin"}, role_cap="analyst",
-                                    scim_enabled=False, scim_token="", issued_at=time.time())
+        resigned.append(stack.cfg().set_saml_config(
+            ORG_A, idp_entity_id=edge.IDP_ENTITY, idp_certs_pem=[edge.IDP_CERT], idp_sso_url=edge.IDP_SSO_URL,
+            sp_entity_id=u["saml_sp_entity_id"], acs_url=u["saml_acs_url"], default_role="viewer",
+            group_role_map={"Admins": "analyst"}, role_cap="analyst", scim_enabled=False, scim_token="",
+            issued_at=time.time()))
         return out
     monkeypatch.setattr(uiscim, "verify_saml_sign_in", verify)
     with pytest.raises(ProvisionDenied, match="could not be verified"):
         _sign_in(stack, ORG_A, "ann@acme.example")
+    assert len(resigned) == 1 and stack.cfg().config(ORG_A).role_cap == "analyst"     # the re-sign really landed
     assert _roles(stack, ORG_A) == {}
+    monkeypatch.setattr(uiscim, "verify_saml_sign_in", orig)       # control: under the config now in force it lands
+    assert _sign_in(stack, ORG_A, "ann@acme.example")["org_id"] == ORG_A
 
 
 def test_a_sign_in_flood_from_one_org_does_not_stall_another_orgs_write_or_sign_in(stack, signed):
