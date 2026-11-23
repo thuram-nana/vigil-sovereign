@@ -743,3 +743,24 @@ def test_the_recipient_is_read_from_the_bearer_confirmation_not_another_one():
         _verify(_response(assertions=a))
     a = _assertion().replace("</saml:NameID>", "</saml:NameID>" + hok.replace("acs/acme", "acs/other"), 1)
     assert _verify(_response(assertions=a)).name_id == "user@acme"   # control: the bearer one names our ACS
+
+
+# --- the time guards at their exact boundaries (skew 60 s; NOW = 2001-09-13T16:53:20Z) -----------------------------
+
+def test_an_assertion_not_yet_valid_beyond_the_skew_is_refused():
+    """Conditions NotBefore: refused only once it lies MORE than the skew after now."""
+    with pytest.raises(SamlError, match="not yet valid"):
+        _verify(_response(nb=_iso(NOW + 61)))
+    assert _verify(_response(nb=_iso(NOW + 60))).name_id == "user@acme"           # exactly at the skew: valid
+    assert _verify(_response(nb=_iso(NOW - 600))).name_id == "user@acme"
+
+
+def test_the_subject_confirmation_not_on_or_after_boundary_is_exact():
+    """SubjectConfirmationData NotOnOrAfter: refused from (NotOnOrAfter + skew) on, accepted one second before —
+    with the Conditions window still open, so this guard alone decides."""
+    later = "2001-09-14T00:00:00Z"
+    with pytest.raises(SamlError, match="SubjectConfirmationData NotOnOrAfter has passed"):
+        _verify(_response(scd_nooa=_iso(NOW - 60), cond_nooa=later))
+    assert _verify(_response(scd_nooa=_iso(NOW - 59), cond_nooa=later)).name_id == "user@acme"
+    with pytest.raises(SamlError, match="SubjectConfirmationData NotOnOrAfter has passed"):
+        _verify(_response(scd_nooa=_iso(NOW - 200), cond_nooa=later))

@@ -477,3 +477,83 @@ def test_a_realistic_group_sync_of_a_few_hundred_members_passes(env):
     assert put.status == 200 and len(put.body["members"]) == 300
     roles = {m.username: m.role for m in OrgRegistry(env.store, owner_key=OWNER, trusted_pubkey=OP).memberships("acme")}
     assert all(roles[u] == "analyst" for u in ids)
+
+
+# =====================================================================================================================
+# The per-request bounds, pinned at their REAL values (other tests monkeypatch them), each against a shape that a
+# weakened guard would let through.
+# =====================================================================================================================
+def _spine(env) -> int:
+    return sum(1 for _ in env.store.iter_records())
+
+
+def _plain_group(env) -> str:
+    return env.call("POST", "/Groups", {"displayName": "Plain"}).body["id"]
+
+
+def test_one_patch_adding_1000_members_then_removing_them_all_is_refused_whole(env):
+    """2,000 directory records AUTHORED by one request (1,000 new edges, then their deletion — a delete of an edge the
+    same request wrote is authored, not a removal of state already paid for): over `MAX_DIRECTORY_WRITES`, refused
+    400 tooMany with nothing written, although it names only 1,000 member references."""
+    ids = _seed_users(env, 1000)
+    gid = _plain_group(env)
+    body = {"Operations": [{"op": "add", "path": "members", "value": [{"value": u} for u in ids]},
+                           {"op": "remove", "path": "members"}]}
+    assert uiscim.request_bound_refusal("PATCH", f"/Groups/{gid}", body) is None
+    n0 = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", body)
+    assert r.status == 400 and r.body["scimType"] == "tooMany" and r.records == 0, (r.status, r.records)
+    assert _spine(env) == n0
+
+
+@pytest.mark.parametrize("extra,ok", [(16, True), (17, False)])
+def test_the_directory_write_bound_is_exactly_1016(env, extra, ok):
+    """1,000 new edges plus `extra` group records: 1,016 authored records pass, 1,017 are refused whole."""
+    ids = _seed_users(env, 1000)
+    gid = _plain_group(env)
+    ops = [{"op": "add", "path": "members", "value": [{"value": u} for u in ids]}]
+    ops += [{"op": "replace", "path": "displayName", "value": f"Plain{k}"} for k in range(extra)]
+    n0 = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", {"Operations": ops})
+    assert (r.status == 200) is ok, (r.status, 1000 + extra)
+    if not ok:
+        assert r.body["scimType"] == "tooMany" and _spine(env) == n0
+
+
+def test_the_dispatcher_counts_a_filtered_member_remove_as_a_reference(env):
+    """The dispatcher (the authority, not only the provisioner's pre-check) counts each `members[value eq "x"]`
+    remove: 501 of them plus 500 added references is 1,001 — refused, nothing written."""
+    ids = _seed_users(env, 1000)
+    gid = _plain_group(env)
+    assert env.call("PATCH", f"/Groups/{gid}", {"Operations": [
+        {"op": "add", "path": "members", "value": [{"value": u} for u in ids[:500]]}]}).status == 200
+    ops = [{"op": "remove", "path": f'members[value eq "{u}"]'} for u in [ids[999], *ids[:500]]]
+    ops += [{"op": "add", "path": "members", "value": [{"value": u} for u in ids[500:]]}]
+    n0 = _spine(env)
+    r = env.call("PATCH", f"/Groups/{gid}", {"Operations": ops})
+    assert r.status == 400 and r.body["scimType"] == "tooMany", r.status
+    assert _spine(env) == n0
+    ok = env.call("PATCH", f"/Groups/{gid}", {"Operations": ops[1:]})          # 1,000 references: within the bound
+    assert ok.status == 200, ok.body
+
+
+def test_the_pre_check_admits_exactly_the_member_reference_bound():
+    body = {"displayName": "G", "members": [{"value": f"sso_{i:024x}"} for i in range(1000)]}
+    assert uiscim.request_bound_refusal("POST", "/Groups", body) is None
+    body["members"].append({"value": "sso_" + "f" * 24})
+    assert uiscim.request_bound_refusal("POST", "/Groups", body).status == 400
+
+
+def test_the_pre_check_covers_patch_operations_and_post_put_member_lists():
+    gpath = "/Groups/grp_" + "1" * 24
+    ops = {"Operations": [{"op": "replace", "path": "externalId", "value": "x"}] * 1001}
+    r = uiscim.request_bound_refusal("PATCH", gpath, ops)
+    assert r is not None and r.status == 400 and r.body["scimType"] == "tooMany"
+    assert uiscim.request_bound_refusal("PATCH", gpath, {"Operations": ops["Operations"][:1000]}) is None
+    big = {"displayName": "G", "members": [{"value": f"sso_{i:024x}"} for i in range(1001)]}
+    for method, path in (("PUT", gpath), ("POST", "/Groups")):
+        r = uiscim.request_bound_refusal(method, path, big)
+        assert r is not None and r.status == 400 and r.body["scimType"] == "tooMany", method
+    summed = {"Operations": [{"op": "add", "path": "members", "value": big["members"][:600]},
+                             {"op": "add", "path": "members", "value": big["members"][600:]}]}
+    assert uiscim.request_bound_refusal("PATCH", gpath, summed).status == 400
