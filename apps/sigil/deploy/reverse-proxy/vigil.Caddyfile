@@ -30,66 +30,22 @@
 console.vigilguard.net {
 	encode zstd gzip
 
-	# --- The ONE exception to the admin IP allow-list: payment-provider webhooks --------------------------
-	# Stripe (and Flutterwave, while that adapter is in use) deliver from their own servers, which are never on
-	# your admin/VPN list, so EXACTLY `POST /webhooks/stripe` and `POST /webhooks/billing` are forwarded from any
-	# source IP. Everything else, including any other method on these two paths, falls through to the
-	# `handle` below (allow-listed once you set it). The `handle` blocks are mutually exclusive and this one is tried first.
-	#
-	# Why this is safe: the request body is untrusted and is never what credits an account.
-	#   * The `vigil up` proxy verifies `Stripe-Signature` (HMAC-SHA256 over the raw body with the endpoint's
-	#     signing secret, 300 s tolerance) and refuses anything else before it writes a byte; it only spools the
-	#     delivery as an inert file (integration/vigil_integration/uiproxy.py `_webhooks_stripe`).
-	#   * The billing drain re-verifies the same signature, then RE-FETCHES every Checkout Session / Invoice /
-	#     Subscription from Stripe with the restricted API key; only those fetched objects, mapped through the
-	#     owner catalog, can mint. No credit is ever taken from the webhook body.
-	#   * `/webhooks/billing` (Flutterwave) has the same shape: a constant-time `verif-hash` check at the proxy,
-	#     then a server-side transaction re-verify in the drain before any mint.
-	# So a forged or replayed delivery is refused or inert whatever IP it comes from.
-	#
-	# Exact path only. `path` alone matches a cleaned, case-insensitive path, so the `expression` also requires
-	# the RAW request URI to be byte-identical: `/webhooks/x/../stripe`, `/webhooks//stripe`, `/WEBHOOKS/stripe`,
-	# `/webhooks/%73tripe`, `/webhooks/stripex` or an added query string do not match and meet the allow-list.
-	# Caddy forwards Host and every client header, `Stripe-Signature` included, unchanged. Bodies are capped at
-	# 1 MB here; the proxy itself refuses more than 128 KiB.
-	@provider_webhook {
-		method POST
-		host console.vigilguard.net
-		path /webhooks/stripe /webhooks/billing
-		expression `{http.request.uri} in ["/webhooks/stripe", "/webhooks/billing"]`
-	}
-	handle @provider_webhook {
-		request_body {
-			max_size 1MB
-		}
-		reverse_proxy 127.0.0.1:8770
+	# Server-Sent Events: disable response buffering so events flush immediately and keep the
+	# connection long-lived. These are the live streams the UI subscribes to:
+	#   /sovereign/api/stream   — the sovereign cockpit's event stream
+	#   /offense/api/events     — the offense console's engagement/blackboard stream
+	#   /offense/api/blackboard — (reserved) the offense blackboard stream
+	@sse path /sovereign/api/stream /offense/api/events /offense/api/blackboard
+	reverse_proxy @sse 127.0.0.1:8770 {
+		flush_interval -1
 	}
 
-	# Everything else on the console.
-	handle {
-		# Belt-and-braces: only accept the exact host this site serves.
-		@badhost not host console.vigilguard.net
-		respond @badhost 421
+	# Everything else (the unified bundle + both federated read/action planes).
+	reverse_proxy 127.0.0.1:8770
 
-		# Admin IP allow-list. The console is not a public face (docs/runbooks/AWS-DEPLOY.md §topology): restrict
-		# it to your admin/VPN CIDR by UNCOMMENTING and setting the range below (left commented so this ships
-		# inert, like vigil.nginx.conf). The webhook `handle` above is the only path it does not cover.
-		# @blocked not remote_ip 203.0.113.0/24
-		# respond @blocked "forbidden" 403
-
-		# Server-Sent Events: disable response buffering so events flush immediately and keep the
-		# connection long-lived. These are the live streams the UI subscribes to:
-		#   /sovereign/api/stream   — the sovereign cockpit's event stream
-		#   /offense/api/events     — the offense console's engagement/blackboard stream
-		#   /offense/api/blackboard — (reserved) the offense blackboard stream
-		@sse path /sovereign/api/stream /offense/api/events /offense/api/blackboard
-		reverse_proxy @sse 127.0.0.1:8770 {
-			flush_interval -1
-		}
-
-		# Everything else (the unified bundle + both federated read/action planes).
-		reverse_proxy 127.0.0.1:8770
-	}
+	# Belt-and-braces: only accept the exact host this site serves.
+	@badhost not host console.vigilguard.net
+	respond @badhost 421
 
 	header {
 		# The backends already set their own strict 'self' CSP/nosniff/referrer headers; add HSTS at the edge.

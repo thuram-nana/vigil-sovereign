@@ -1,0 +1,55 @@
+# VIGIL PAYMENT WEBHOOKS — Caddy site for the dedicated webhook host (automatic HTTPS)
+# ====================================================================================
+# Stripe (and Flutterwave, while that adapter is in use) must reach the payment webhook routes of the `vigil up`
+# proxy (127.0.0.1:8770), but the operator console that proxy also serves stays private. So the webhooks get their
+# OWN host, and this site forwards EXACTLY two requests to the proxy:
+#
+#     POST /webhooks/stripe   → 127.0.0.1:8770   (register https://hooks.vigilguard.net/webhooks/stripe in Stripe)
+#     POST /webhooks/billing  → 127.0.0.1:8770   (Flutterwave, when the proxy mounts it)
+#
+# Everything else is 404 (421 for a foreign Host): other paths, other methods on these two paths, and raw request
+# lines that only normalise onto them. No console page, API or plane-control path is reachable here.
+#
+# WHY IT IS SAFE TO ACCEPT THESE FROM ANYONE: the body is untrusted and never credits an account. The proxy verifies
+# `Stripe-Signature` (HMAC-SHA256 over the raw body, 300 s tolerance) before it spools a byte; the billing drain
+# re-verifies it and RE-FETCHES every Checkout Session / Invoice / Subscription from Stripe with the restricted key,
+# and only those fetched objects, mapped through the owner catalog, can mint. Flutterwave's /webhooks/billing is the
+# same shape (constant-time verif-hash at the proxy, server-side transaction re-verify in the drain).
+#
+# Behind Cloudflare (docs/runbooks/AWS-DEPLOY.md), the real client IP is in CF-Connecting-IP. It does not matter to
+# the webhook routes; to log it, add to the GLOBAL options at the top of your Caddyfile:
+#     servers { trusted_proxies static <the Cloudflare ranges in vigil-hooks.nginx.conf>
+#               client_ip_headers CF-Connecting-IP }
+# The nginx twin of this site is vigil-hooks.nginx.conf.
+
+hooks.vigilguard.net {
+	# EXACTLY POST /webhooks/stripe and POST /webhooks/billing, byte-exact on the raw request URI (`path` alone
+	# matches a cleaned, case-insensitive path, so `/webhooks/x/../stripe`, `/webhooks//stripe`, `/WEBHOOKS/stripe`,
+	# `/webhooks/%73tripe`, a trailing slash or a query string would otherwise match and be forwarded raw).
+	@provider_webhook {
+		method POST
+		host hooks.vigilguard.net
+		path /webhooks/stripe /webhooks/billing
+		expression `{http.request.uri} in ["/webhooks/stripe", "/webhooks/billing"]`
+	}
+	handle @provider_webhook {
+		request_body {
+			max_size 1MB
+		}
+		# Host and every client header (Stripe-Signature included) are forwarded unchanged; the proxy's webhook
+		# routes are Host-ungated and answer before its routing, so nothing else of the console is reachable.
+		reverse_proxy 127.0.0.1:8770
+	}
+
+	# Everything else on this host: nothing here.
+	handle {
+		@badhost not host hooks.vigilguard.net
+		respond @badhost 421
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
