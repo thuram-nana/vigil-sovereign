@@ -55,7 +55,7 @@ warranty / indemnity / support / SLA.
 
 ### How to obtain a commercial license
 
-- **Web:** https://thuramnana.com
+- **Web:** https://sigilsovereign.com
 - **Email:** info@sigilsovereign.com  ·  **Subject:** `VIGIL commercial license`
 - Please include: your company, the product / use case, deployment model (internal / SaaS /
   distributed), and expected scale.
