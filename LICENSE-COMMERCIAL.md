@@ -79,13 +79,13 @@ deploy it commercially pay for a commercial license. The revenue funds continued
 Contact the Licensor:
 
 - **Web:** https://thuramnana.com
-- **Email:** thuram@thuramnana.com
+- **Email:** info@sigilsovereign.com
 - **Subject:** `VIGIL commercial license`
 - Please include: your company, the product / use case, deployment model (internal /
   SaaS / distributed), and expected scale.
 
 *(Maintainer: the Licensor entity is **SIGIL SARL** (founder & CEO: Junior Thuram Nana);
-confirm the copyright-holder line reflects that entity, and that `thuram@thuramnana.com` is a
+confirm the copyright-holder line reflects that entity, and that `info@sigilsovereign.com` is a
 monitored mailbox, before relying on this for commercial sales.)*
 
 ---

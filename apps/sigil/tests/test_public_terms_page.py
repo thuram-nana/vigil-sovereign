@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -298,6 +299,17 @@ def test_no_personal_mailbox_or_placeholder_domain_on_the_legal_pages():
     sec = SECURITY_TXT.read_text(encoding="utf-8")
     assert f"Contact: mailto:{CONTACT}" in sec
     assert "Canonical: https://vigilguard.net/.well-known/security.txt" in sec
+
+
+def test_security_txt_has_an_rfc9116_expires_in_the_future():
+    """RFC 9116 section 2.5.5: exactly one ``Expires`` field, an RFC 3339 timestamp, not yet passed. When this fails
+    because the date has passed, renew the field (at most a year ahead) rather than weakening the test."""
+    lines = [ln for ln in SECURITY_TXT.read_text(encoding="utf-8").splitlines() if ln.lower().startswith("expires:")]
+    assert len(lines) == 1, f"security.txt must carry exactly one Expires field, found {len(lines)}"
+    value = lines[0].split(":", 1)[1].strip()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})", value), value
+    expires = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert expires > datetime.now(timezone.utc), f"security.txt expired on {value}"
 
 
 # --- the owner-placeholder gate ------------------------------------------------------------------------------------
