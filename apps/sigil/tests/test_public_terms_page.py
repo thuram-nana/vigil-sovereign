@@ -28,6 +28,8 @@ from sigil.ui.pubui import build_public_server
 
 ROOT = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
 TERMS = ROOT / "terms" / "index.html"
+PRIVACY = ROOT / "privacy" / "index.html"
+SECURITY_TXT = ROOT / ".well-known" / "security.txt"
 REPO_DOCS = "https://github.com/thuram-nana/vigil-sovereign/blob/main/"
 COMPANY_SITE = "https://sigilsovereign.com"
 LEGAL_MAILTO = "mailto:info@sigilsovereign.com"
@@ -209,11 +211,93 @@ def test_terms_page_has_the_reviewed_notice_and_no_draft_banner():
     assert not re.search(r"\bdraft\b", text, re.I), "no draft banner or wording on the published terms"
 
 
+# Phrases a legal page must never use. "protected" and "secure" are checked as whole words after removing the
+# few uses that describe a duty or a third party's page rather than a promise about the Service.
+_OVERCLAIM_PHRASES = ("guarantee", "fully protected", "zero false positive", "100% secure", "unhackable",
+                      "bank-grade", "military-grade")
+_OVERCLAIM_WORDS = re.compile(r"\b(protected|secure)\b")
+_OVERCLAIM_ALLOWED = (
+    re.compile(r"data-protection"),                       # the name of a body of law / an authority
+    re.compile(r"secure checkout page"),                  # Stripe's page, not ours
+    re.compile(r"\bkeep\b[^.;]{0,80}?\bsecure\b"),       # a duty to keep something secure, not a claim that it is
+    re.compile(r"not a statement that a system is secure"),   # the disclaimer that DENIES the claim
+    re.compile(r"provide, secure, support"),              # "secure" the verb, in the list of permitted purposes
+)
+
+
+def overclaims(text: str) -> list[str]:
+    """Every overclaim in ``text`` (HTML): a banned phrase, or "protected" / "secure" outside the allowances."""
+    flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).lower()
+    found = [p for p in _OVERCLAIM_PHRASES if p in flat]
+    for allowed in _OVERCLAIM_ALLOWED:
+        flat = allowed.sub(" ", flat)
+    found += _OVERCLAIM_WORDS.findall(flat)
+    return found
+
+
+def test_overclaim_check_catches_protected_and_secure_but_allows_duties():
+    assert overclaims("<p>Your data is protected.</p>") == ["protected"]
+    assert overclaims("<p>The Service is secure.</p>") == ["secure"]
+    assert overclaims("<p>We guarantee results.</p>") == ["guarantee"]
+    assert overclaims("<p>Keep your sign-in credentials and authenticator app secure.</p>") == []
+    assert overclaims("<p>on its own secure checkout page</p>") == []
+    assert overclaims("<p>applicable data-protection laws</p>") == []
+    assert overclaims("<p>We keep the logs. Our systems are secure.</p>") == ["secure"]   # no reach across a sentence
+    assert overclaims("<p>It is a statement that a system is secure.</p>") == ["secure"]  # only the denial is allowed
+
+
 def test_terms_page_makes_no_overclaim():
-    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8")).lower()
-    for phrase in ("guarantee", "fully protected", "zero false positive", "100% secure", "unhackable",
-                   "bank-grade", "military-grade"):
-        assert phrase not in text, phrase
+    assert overclaims(TERMS.read_text(encoding="utf-8")) == []
+
+
+def test_privacy_page_makes_no_overclaim():
+    assert overclaims(PRIVACY.read_text(encoding="utf-8")) == []
+
+
+# --- the terms, the privacy notice and security.txt agree ----------------------------------------------------------
+
+# The production processors and providers of the hosted service (owner-supplied; Flutterwave is paused in code and
+# is not a current processor). Both legal pages must name every one, and the same contact.
+PROVIDERS = ("AWS", "Amazon SES", "Cloudflare", "Stripe", "Google", "Anthropic")
+CONTACT = "info@sigilsovereign.com"
+
+
+def _flat_text(path: Path) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", path.read_text(encoding="utf-8"))))
+
+
+def test_privacy_page_names_the_production_providers_and_contact():
+    text = _flat_text(PRIVACY)
+    for name in PROVIDERS:
+        assert name in text, f"/privacy does not name the provider {name}"
+    assert CONTACT in text
+    assert "Flutterwave" not in text, "Flutterwave is paused; it is not a current processor"
+    assert "in development" not in text.lower() and "finalised with counsel" not in text.lower()
+    assert "Republic of Cameroon" in text and "OHADA" in text          # the same governing law as the terms
+
+
+def test_terms_and_privacy_name_the_same_providers_and_contact():
+    terms, privacy = _flat_text(TERMS), _flat_text(PRIVACY)
+    for name in PROVIDERS:
+        assert name in terms, f"/terms does not name the provider {name}"
+        assert name in privacy, f"/privacy does not name the provider {name}"
+    assert "Flutterwave" not in terms
+    assert "AI model providers we use to run the Service, which are listed in our Privacy notice" in terms
+    assert CONTACT in terms and CONTACT in privacy
+
+
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def test_no_personal_mailbox_or_placeholder_domain_on_the_legal_pages():
+    for path in (TERMS, PRIVACY, SECURITY_TXT, ROOT / "sitemap.xml", ROOT / "robots.txt"):
+        raw = path.read_text(encoding="utf-8")
+        mailboxes = set(_EMAIL.findall(raw))
+        assert mailboxes <= {CONTACT}, f"{path.name} names a mailbox other than {CONTACT}"
+        assert "vigil.example" not in raw, f"{path.name} still uses the placeholder domain"
+    sec = SECURITY_TXT.read_text(encoding="utf-8")
+    assert f"Contact: mailto:{CONTACT}" in sec
+    assert "Canonical: https://vigilguard.net/.well-known/security.txt" in sec
 
 
 # --- the owner-placeholder gate ------------------------------------------------------------------------------------
