@@ -193,8 +193,10 @@ def test_redpen_cross_org_no_leak_into_other_tenant(env):
 # --- SSO login (SAML) end-to-end + SELF-RED-PEN #3: forge a SAML assertion --------------------------
 
 def _saml_response(aid="s1", aud="https://sp/acme", rcpt="https://app/acs/acme", issuer="https://idp",
-                   nameid="saml-user", groups=("sec",)):
+                   nameid="saml-user", groups=("sec",), extra_attrs=()):
     grp = "".join(f'<saml:AttributeValue>{g}</saml:AttributeValue>' for g in groups)
+    grp += "".join(f'</saml:Attribute><saml:Attribute Name="{n}"><saml:AttributeValue>{v}</saml:AttributeValue>'
+                   for n, v in extra_attrs)
     a = (f'<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{aid}">'
          f'<saml:Issuer>{issuer}</saml:Issuer><saml:Subject><saml:NameID>{nameid}</saml:NameID>'
          f'<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
@@ -945,3 +947,88 @@ def test_a_user_already_sharing_an_identifier_can_still_be_deactivated(env, verb
                     {"Operations": [{"op": "replace", "path": "externalId", "value": "CZ@acme.test"}]})
     assert st == 409 and err.get("scimType") == "uniqueness"
     assert _directory(env).user(bz["id"]).external_id == "E-1"
+
+
+# --- guards a mutation review found unpinned -------------------------------------------------------------------
+
+def test_a_group_add_naming_a_well_formed_id_outside_the_directory_writes_nothing_and_revokes_nobody(env):
+    """A SCIM group can only ever hold users of THIS org's directory: adding a well-formed `sso_` id that is not in
+    it (an owner-set founder, a just-in-time member) is a no-op — no edge record, and both keep their role."""
+    from sigil.governor.scim_directory import edge_id
+    orgreg, _ = env
+    founder, jit = "sso_" + "ab" * 12, "sso_" + "cd" * 12
+    orgreg.grant_membership("acme", founder, "founder", issued_at=_issue())
+    orgreg.grant_membership("acme", jit, "analyst", issued_at=_issue())
+    st, g = _scim(env, "POST", "/scim/v2/Groups", {"displayName": "plain"})
+    assert st == 201
+    before = sum(1 for _ in orgreg.store.iter_records())
+    st, body = _scim(env, "PATCH", f"/scim/v2/Groups/{g['id']}", {"Operations": [
+        {"op": "add", "path": "members", "value": [{"value": founder}, {"value": jit}]}]})
+    assert st == 200 and body["members"] == []
+    assert sum(1 for _ in orgreg.store.iter_records()) == before          # not one record: no edge was written
+    edges = {edge_id(g["id"], founder), edge_id(g["id"], jit)}
+    assert not any(isinstance(r.payload, dict) and r.payload.get("rid") in edges for r in orgreg.store.iter_records())
+    assert orgreg.membership_role(founder, "acme") == "founder"
+    assert orgreg.membership_role(jit, "acme") == "analyst"
+    # a later group change re-roling the group's members still never reaches them
+    st, _ = _scim(env, "PATCH", f"/scim/v2/Groups/{g['id']}", {"Operations": [
+        {"op": "replace", "path": "displayName", "value": "admins"}]})
+    assert st == 200 and orgreg.membership_role(founder, "acme") == "founder"
+    assert orgreg.membership_role(jit, "acme") == "analyst"
+
+
+def test_a_jit_sign_in_never_rewrites_a_role_the_owner_set_outside_the_ceiling(env):
+    """SCIM OFF (just-in-time): a person the owner made founder signs in through the IdP — even with a mapped group
+    — and stays founder; nothing is minted."""
+    from sigil.governor import scim as gscim
+    orgreg, cfgreg = env
+    cfgreg.disable_scim("acme", issued_at=_issue())
+    cfg = cfgreg.config("acme")
+    assert cfg is not None and not cfg.scim_enabled
+    uname = gscim.sso_username(cfg, "saml-founder")
+    orgreg.grant_membership("acme", uname, "founder", issued_at=_issue())
+    for groups in ((), ("admins",)):
+        res = uiscim._provision_from_identity(orgreg, cfg, external_id="saml-founder", groups=groups,
+                                              issued_at=_issue())
+        assert res.role == "founder" and res.seq is None
+        assert orgreg.membership_role(uname, "acme") == "founder"
+    res = uiscim.sso_login_saml(_saml_response(aid="sf1", nameid="saml-founder", groups=("admins",)), org_id="acme",
+                                config_registry=cfgreg, org_registry=orgreg, replay_ledger=saml_led(), now=NOW,
+                                sig_verifier=lambda b, c: frozenset({"sf1"}), issued_at=_issue())
+    assert res.username == uname and res.role == "founder" and res.seq is None
+    assert orgreg.membership_role(uname, "acme") == "founder"
+
+
+def test_a_group_put_rename_off_a_mapped_name_re_roles_existing_members_in_that_request(env):
+    """PUT renaming a mapped group ("admins" -> "plain") with the same member list moves every existing member to
+    what the new name maps to (the default, viewer) in that same request — not only the members it names anew."""
+    orgreg, _ = env
+    st, u = _scim(env, "POST", "/scim/v2/Users", {"userName": "bob@x", "externalId": "bob"})
+    assert st == 201
+    st, g = _scim(env, "POST", "/scim/v2/Groups", {"displayName": "admins", "members": [{"value": u["id"]}]})
+    assert st == 201 and orgreg.membership_role(u["id"], "acme") == "org_admin"
+    st, _ = _scim(env, "PUT", f"/scim/v2/Groups/{g['id']}", {"displayName": "plain", "members": [{"value": u["id"]}]})
+    assert st == 200 and orgreg.membership_role(u["id"], "acme") == "viewer"
+    st, _ = _scim(env, "PUT", f"/scim/v2/Groups/{g['id']}", {"displayName": "sec", "members": [{"value": u["id"]}]})
+    assert st == 200 and orgreg.membership_role(u["id"], "acme") == "analyst"     # and a rename ONTO a mapping raises
+
+
+def test_only_group_bearing_saml_attributes_select_a_role(env):
+    """A non-group SAML attribute whose VALUE happens to be a mapped group name (department=admins) is kept as an
+    attribute but never lands in the groups, so it can never raise the role."""
+    import xml.etree.ElementTree as ET
+    from sigil.ui import saml as uisaml
+    a = "urn:oasis:names:tc:SAML:2.0:assertion"
+    x = (f'<saml:Assertion xmlns:saml="{a}"><saml:AttributeStatement>'
+         f'<saml:Attribute Name="department"><saml:AttributeValue>admins</saml:AttributeValue></saml:Attribute>'
+         f'<saml:Attribute Name="groups"><saml:AttributeValue>sec</saml:AttributeValue></saml:Attribute>'
+         f'</saml:AttributeStatement></saml:Assertion>')
+    attrs, groups = uisaml._extract_attributes(ET.fromstring(x))
+    assert groups == ("sec",) and attrs["department"] == ["admins"]
+    orgreg, cfgreg = env
+    cfgreg.disable_scim("acme", issued_at=_issue())
+    res = uiscim.sso_login_saml(_saml_response(aid="sd1", nameid="dept-user", groups=(),
+                                               extra_attrs=(("department", "admins"), ("title", "sec"))),
+                                org_id="acme", config_registry=cfgreg, org_registry=orgreg, replay_ledger=saml_led(),
+                                now=NOW, sig_verifier=lambda b, c: frozenset({"sd1"}), issued_at=_issue())
+    assert res.role == "viewer" and orgreg.membership_role(res.username, "acme") == "viewer"
