@@ -543,7 +543,8 @@ class Provisioner:
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  shard_assignments=None,
-                 saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, sso_oidc_http_post=None,
+                 saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
+                 sso_oidc_http_post=None,
                  sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up
@@ -650,12 +651,13 @@ class Provisioner:
         self.trial_ip_limiter = trial_ip_limiter
         # Consumer PR-H — SSO / SCIM (VIGIL_CUSTOMER_SSO; wired by the factory only while the flag is on). The
         # durable single-use SAML assertion-ID ledger (None ⇒ SAML sign-in refused), the per-(org, IP) SCIM
-        # failed-authentication limiter and the per-org SCIM write limiter (either None ⇒ SCIM refused, 503), and
-        # the enterprise-OIDC egress hooks (both None ⇒ the owner-signed per-org host allowlist; a test injects a
+        # failed-authentication limiter and the per-org SCIM write and read budgets (any None ⇒ SCIM refused, 503),
+        # and the enterprise-OIDC egress hooks (both None ⇒ the owner-signed per-org host allowlist; a test injects a
         # local fake IdP).
         self.saml_replay = saml_replay
         self.scim_auth_limiter = scim_auth_limiter
         self.scim_write_limiter = scim_write_limiter
+        self.scim_read_limiter = scim_read_limiter
         self.sso_oidc_http_post = sso_oidc_http_post
         self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
@@ -4624,8 +4626,9 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
     built exactly as before, and its SSO/SCIM methods are unreachable: the dispatch 404s them). The durable SAML
     assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
     then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per
-    minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); and the
-    enterprise-OIDC egress hooks a test injects."""
+    minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); the per-org
+    SCIM read budget (VIGIL_SCIM_READS_PER_MIN reads per minute, guard-and-count); and the enterprise-OIDC egress
+    hooks a test injects."""
     if not config.customer_sso_enabled():
         return {}
     from .saml import SamlReplayLedger
@@ -4636,4 +4639,6 @@ def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) 
             # so a large initial IdP sync slows down rather than locking itself out
             "scim_write_limiter": limiter_cls(config.SCIM_WRITE_RATELIMIT_DIR, max_fails=config.SCIM_OPS_PER_MIN,
                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_read_limiter": limiter_cls(config.SCIM_READ_RATELIMIT_DIR, max_fails=config.SCIM_READS_PER_MIN,
+                                             window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
             "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

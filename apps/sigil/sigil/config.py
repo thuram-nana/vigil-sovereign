@@ -474,11 +474,15 @@ def customer_sso_enabled() -> bool:
 # and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per org per minute: a write is admitted
 # while the org is within budget and then charged one unit per record it appended — bounds how fast even a valid
 # token can grow the spine; see ui.sso_provision for the per-request bounds). The default, 1800 records a minute, keeps a
-# first user sync at about 600 users a minute (a user create writes 3 records: user, audit, grant).
+# first user sync at about 600 users a minute (a user create writes 3 records: user, audit, grant). The per-org SCIM
+# READ budget (VIGIL_SCIM_READS_PER_MIN reads per org per minute, guard-and-count) bounds how much spine folding one
+# org's token can ask for; its default matches a first sync's "does this user exist?" lookup before each create.
 CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
 SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
 SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
+SCIM_READ_RATELIMIT_DIR = _customer / "scim_read_ratelimit"
 SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 1800)
+SCIM_READS_PER_MIN = _int_env("VIGIL_SCIM_READS_PER_MIN", 1800)
 
 
 def apex_impact_enabled() -> bool:

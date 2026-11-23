@@ -19,29 +19,46 @@ Each action is fail-closed and rate-limited:
   * SCIM: failed bearer authentications are counted per (org, client IP) and lock out that pair's further
     INVALID attempts (a valid bearer is never refused by it — see `scim_request`); both limiters are on disk (the
     provisioner is rebuilt per request).
-  * SCIM writes are bounded per REQUEST and charged per RECORD, so even a valid token cannot flood the spine or
-    hold the shared critical section for long:
-      - a body over a per-request bound (more than `ui.scim.MAX_PATCH_OPS` = 1000 PATCH operations, or more than
-        `ui.scim.MAX_MEMBER_VALUES` = 1000 member references SUMMED over every operation of a group write) is
-        refused 400 `tooMany` before the write budget and before the critical section is entered;
-      - a group write that would author more than `ui.scim.MAX_DIRECTORY_WRITES` (= 1016) directory records is
-        refused whole, before any record is written. Only removing state already on the spine is exempt (a group
-        DELETE or a removal of every member, of a group of any size, still deprovisions) — that state was itself
-        written, and charged, by earlier requests;
-      - the per-org write budget (`VIGIL_SCIM_OPS_PER_MIN`) admits a write only while the org is not over budget
-        (guard-and-count, one unit), then charges every further spine record the request appended (directory
-        records, membership grants / revokes, their critical audit rows). A request that overdraws the budget
-        holds the org's next write off until the budget has repaid it (a minute per `VIGIL_SCIM_OPS_PER_MIN`
-        records), so over time one org's token appends at most about `VIGIL_SCIM_OPS_PER_MIN` records a minute,
-        plus what one request may write. The cost of an overdraft lands on that org alone.
+
+ONE ORG CANNOT STALL ANOTHER. Every membership change commits inside the SAME critical section — the process-wide
+spine lock (`p._lock`), then the cross-process membership flock the Team-screen verbs and the owner's `sigil org`
+verbs hold (`_membership_section`) — so a sign-in or a SCIM change never interleaves with an owner act in another
+process. That section is shared by every org, so what one org's token may make it do is bounded:
+  * PER-ORG SERIALIZATION: an org's SCIM writes take that org's own lock first (`_org_lock`, a cross-process flock
+    per org; a bounded wait, then 429 + Retry-After), and its SCIM reads a separate per-org read lock, so an org
+    has at most one write and one read in flight — and the write budget below is checked AND charged inside that
+    lock, so concurrent writes can never all be admitted before any is charged. Another org never waits on it.
+  * READS NEVER ENTER THE SHARED SECTION: a SCIM GET folds the spine lock-free (it appends nothing), under the
+    per-org read lock and a per-org read budget (`VIGIL_SCIM_READS_PER_MIN`, guard-and-count; 429 when spent).
+  * WRITES FOLD OUTSIDE IT: a write's folds (config, memberships, directory) run before the section is taken; on
+    entry the records appended since the fold began are checked, and if any changed this org's state (a membership,
+    org, SSO-config or directory record of this org, or an owner-key rotation) the fold is redone.
+  * BOUNDED HOLDS: inside, a request appends at most `ui.scim.MAX_RECORDS_PER_HOLD` (= 128) spine records per hold
+    of the section; past that it releases the section between two members' changes (or two directory records),
+    lets other requests run, and re-takes it — re-checking that nothing of this org changed meanwhile (else it
+    stops with a retryable 503, every record so far landed in the safe order). A group change too large for one hold
+    (a rename re-roling thousands of members, the delete of a large mapped group) first opens a durable pending job
+    on the spine (`governor.scim_directory`): it lowers every role first, then commits the directory, then raises,
+    so at no point — between holds or after a crash — is a member above the role the directory then implies, and
+    an open job is finished by the org's next SCIM write or sign-in.
+  * PER-REQUEST BOUNDS: a body over a per-request bound (more than `ui.scim.MAX_PATCH_OPS` = 1000 PATCH operations,
+    or more than `ui.scim.MAX_MEMBER_VALUES` = 1000 member references SUMMED over every operation of a group write)
+    is refused 400 `tooMany` before the org lock, the write budget and the critical section; a group write that
+    would author more than `ui.scim.MAX_DIRECTORY_WRITES` (= 1016) directory records is refused whole, before any
+    record is written. Removing state already on the spine is exempt (a group DELETE, or a removal of every member,
+    of a group of any size still deprovisions — that state was written, and charged, by earlier requests).
+  * WRITE BUDGET: the per-org budget (`VIGIL_SCIM_OPS_PER_MIN`) admits a write only while the org is not over budget
+    (guard-and-count, one unit), then charges — in a `finally`, so also when the request fails part-way — every
+    further spine record the request appended. An overdraft holds the org's next write off until the budget has
+    repaid it (a minute per `VIGIL_SCIM_OPS_PER_MIN` records). A request that can only take privilege away
+    (`ui.scim.lowers_only`: a user / group DELETE, a deactivation, a removal of group members) is admitted even
+    while the org is over budget — an offboarding never waits out an earlier sync's debt — and is still serialized,
+    paced and charged.
 
 Every membership grant / revoke writes a CRITICAL `provision.audit` row FIRST (a failed audit write aborts the
-change — committed implies audited), and the whole read-modify-write of a request runs inside the SAME critical
-section as every other membership change (`_membership_section`: the process-wide spine lock, then the
-cross-process membership flock the Team-screen verbs and the owner's `sigil org` verbs hold), so a sign-in or a
-SCIM change never interleaves with an owner act in another process. The enterprise-OIDC token exchange + JWKS fetch
-go out ONLY to the hosts in the owner-signed config's `oidc_egress_hosts` allowlist (https only), never to an
-arbitrary URL — and both happen BEFORE the critical section is entered (no network wait while it is held).
+change — committed implies audited). The enterprise-OIDC token exchange + JWKS fetch go out ONLY to the hosts in
+the owner-signed config's `oidc_egress_hosts` allowlist (https only), never to an arbitrary URL — and both happen
+BEFORE the critical section is entered (no network wait while it is held).
 
 FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix` (`assert_no_offense()` at import).
 """
@@ -49,9 +66,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import math
 import re
+import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator, Optional
 
 from ..reuse import assert_no_offense
@@ -65,6 +85,13 @@ OIDC_SCOPES = "openid email profile"
 MAX_SAML_RESPONSE_B64 = 512 * 1024
 _SCIM_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 _SCIM_WRITES = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+#: How long a SCIM request waits for its org's own lock (another request of the SAME org in flight) before a 429.
+_ORG_LOCK_WAIT_S = 10.0
+#: The pause between two holds of the shared section, so a request waiting for it is handed the lock.
+_HANDOFF_S = 0.005
+#: How many times a write re-folds outside the shared section when its org's state changed meanwhile, before it
+#: folds under the section instead.
+_FOLD_ATTEMPTS = 3
 
 
 def _registries(p):
@@ -92,11 +119,153 @@ def _membership_section(p) -> Iterator[None]:
         yield
 
 
+def _org_lock(p, org_id: str, kind: str, *, wait_s: float = _ORG_LOCK_WAIT_S):
+    """ONE org's own cross-process lock (`kind` "write" or "read"): an flock on
+    ``<spine dir>/<stem>.scim-orgs/<kind>-<sha256(org)>.lock`` (`*.lock` transients the backups skip), taken BEFORE
+    the shared section and never while holding it (lock order: this -> `spine_lock` -> the membership flock). A
+    bounded wait, then `LockBusy`. Another org's lock is a different file, so it never waits on this one."""
+    from vigil_integration.live.seam_lock import locked_file
+    raw = getattr(p.store, "path", None)
+    if not raw:
+        raise ValueError("the per-org SCIM lock needs a spine store with a path")
+    sp = Path(raw)
+    d = sp.parent / f"{sp.stem or sp.name}.scim-orgs"
+    d.mkdir(mode=0o700, exist_ok=True)
+    digest = hashlib.sha256(f"{kind}\x00{org_id}".encode("utf-8")).hexdigest()[:32]
+    return locked_file(d / f"{kind}-{digest}.lock", wait_s=wait_s, create=False, chown_like=d)
+
+
+def _handoff() -> None:
+    """The pause between two holds of the shared section: a request waiting for it is handed the lock."""
+    time.sleep(_HANDOFF_S)
+
+
+def _org_state_changed(store, org_id: str, since_seq: int) -> bool:
+    """True iff a record after `since_seq` can change what a request of `org_id` folded: a membership, org, SSO-config
+    or SCIM-directory record of that org, or an owner-key-history record (it moves every signature window)."""
+    from ..governor.key_history import KEY_HISTORY_KIND
+    from ..governor.orgs import MEMBERSHIP_SIGNAL, ORG_SIGNAL
+    from ..governor.scim_directory import SCIM_DIRECTORY_SIGNAL
+    from ..governor.sso_config import SSO_CONFIG_SIGNAL
+    signals = (MEMBERSHIP_SIGNAL, ORG_SIGNAL, SSO_CONFIG_SIGNAL, SCIM_DIRECTORY_SIGNAL)
+    for r in store.iter_records(since_seq=since_seq):
+        if r.kind == KEY_HISTORY_KIND:
+            return True
+        pl = r.payload
+        if isinstance(pl, dict) and pl.get("signal") in signals and pl.get("org_id") == org_id:
+            return True
+    return False
+
+
+class _SharedSection:
+    """The shared membership critical section (`_membership_section`: `p._lock`, then the membership flock) as a
+    SCIM request of one org uses it — entered in BOUNDED HOLDS (`ui.scim` paces the request: at most
+    `ui.scim.MAX_RECORDS_PER_HOLD` records per hold), with the request's folds run outside it:
+
+      * `fold(fn)`: note the spine tip, run `fn` (the folds) WITHOUT the section, take it, and keep the result only
+        if no record of this org's state was appended since the tip (`_org_state_changed`) — else re-fold (bounded),
+        finally under the section;
+      * `slice()`: between two holds — release, hand the lock over (`_HANDOFF_S`), re-take, and raise
+        `ui.scim.SectionLost` when it cannot be re-taken (the flock's bounded wait) or this org's state changed while
+        it was released (the request then stops in the safe order; see `ui.scim._group_change`).
+
+    The caller holds its org's own lock (`_org_lock`) throughout, so no other SCIM write of the org runs between two
+    holds; `holds` counts the holds taken (tests read it)."""
+
+    def __init__(self, p, org_id: str) -> None:
+        self.p = p
+        self.org_id = org_id
+        self.records = 0                       # what the request appended (ui.scim sets it)
+        self.holds = 0
+        self._flock = None
+
+    @property
+    def held(self) -> bool:
+        return self._flock is not None
+
+    def _enter(self) -> None:
+        from vigil_integration.live.seam_lock import LockBusy
+
+        from .provision import _members_lock
+        from .scim import SectionLost
+        self.p._lock.acquire()
+        try:
+            cm = _members_lock(self.p.store)
+            cm.__enter__()
+        except LockBusy as e:
+            self.p._lock.release()
+            raise SectionLost("the membership critical section is busy") from e
+        except BaseException:
+            self.p._lock.release()
+            raise
+        self._flock = cm
+        self.holds += 1
+
+    def _exit(self) -> None:
+        cm, self._flock = self._flock, None
+        if cm is None:
+            return
+        try:
+            cm.__exit__(None, None, None)
+        finally:
+            self.p._lock.release()
+
+    def fold(self, fn):
+        store = self.p.store
+        for _attempt in range(_FOLD_ATTEMPTS):
+            t0 = store.disk_tip()
+            if t0 is None:
+                break
+            for _r in store.iter_records(since_seq=t0):    # builds the store's seq index OUTSIDE the section
+                pass
+            value = fn()
+            self._enter()
+            if not _org_state_changed(store, self.org_id, t0):
+                return value
+            self._exit()
+        self._enter()
+        return fn()
+
+    def slice(self) -> None:
+        from .scim import SectionLost
+        tip = self.p.store.disk_tip()
+        self._exit()
+        _handoff()
+        self._enter()
+        if tip is None or _org_state_changed(self.p.store, self.org_id, tip):
+            raise SectionLost("this organization's membership state changed while the request was paused")
+
+    def close(self) -> None:
+        self._exit()
+
+
 def _critical_audit(p, org_id: str):
     """The audit hook `ui.scim` calls BEFORE each membership grant / revoke: a critical row (fail-closed)."""
     def audit(action: str, target: str, outcome: str) -> None:
         p._audit(action, requester="idp", org_id=org_id, target=target, outcome=outcome, critical=True)
     return audit
+
+
+def _resume_pending_jobs(p, org_id: str, cfgreg, directory, *, now: float) -> None:
+    """At a sign-in of a directory-managed org: finish the org's pending group jobs (`ui.scim.resume_directory_jobs`)
+    — in bounded holds, under the org's own lock, charged to its write budget — so a group change a crash cut short
+    does not wait for the IdP's next write. Only when that lock is FREE (a SCIM write of the org in flight finishes
+    the job itself), and best effort: whatever it cannot do, the sign-in's own clamp still keeps the person at or
+    below the role the directory implies."""
+    from . import scim as uiscim
+    try:
+        with _org_lock(p, org_id, "write", wait_s=0.0):
+            section = _SharedSection(p, org_id)
+            try:
+                uiscim.resume_directory_jobs(org_id=org_id, config_registry=cfgreg, org_registry=p.orgs, now=now,
+                                             directory_registry=directory, issued_at_fn=p._next_issued,
+                                             audit=_critical_audit(p, org_id), section=section)
+            finally:
+                section.close()
+                if section.records > 0 and p.scim_write_limiter is not None:
+                    p.scim_write_limiter.charge(f"scim:writes:{org_id}", section.records, now=now)
+    except Exception:  # noqa: BLE001 — best effort (busy lock, audit store down, ...): the sign-in decides alone
+        return
 
 
 def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None) -> dict:
@@ -148,6 +317,7 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
         if not oid or not str(request_id or ""):
             raise ValueError("no org / AuthnRequest to bind the response to")
         xml = _decode_saml_response(saml_response)
+        _resume_pending_jobs(p, oid, cfgreg, directory, now=t)
         with _membership_section(p):
             res = uiscim.sso_login_saml(xml, org_id=oid, config_registry=cfgreg, org_registry=p.orgs,
                                         replay_ledger=p.saml_replay, now=t, issued_at=p._next_issued(),
@@ -195,6 +365,7 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
                               clock_skew_seconds=cfg.clock_skew_seconds)
         tokens = _oidc.exchange_code(oc, code, code_verifier=code_verifier, http_post=poster)
         keys = _oidc.JwksProvider(oc.jwks_uri, fetcher=fetcher).keys(now=t)
+        _resume_pending_jobs(p, oid, cfgreg, directory, now=t)
         with _membership_section(p):
             res = uiscim.sso_login_oidc(tokens["id_token"], org_id=oid, config_registry=cfgreg,
                                         org_registry=p.orgs, jwks_keys=keys, expected_nonce=str(nonce or ""),
@@ -221,9 +392,16 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
                  ip: str = "", now: Optional[float] = None) -> dict:
     """One SCIM 2.0 request for the org in the edge's path, answered as {status, body, deactivated[,
     retry_after]} — the edge returns `status`/`body` to the IdP verbatim and severs the sessions of every username
-    in `deactivated`. Authentication is the org's owner-signed bearer fingerprint (constant-time); an authenticated
-    write counts against the org's write budget — one unit to be admitted, then one per further spine record it
-    appended (see the module docstring for the per-request bounds, refused before the critical section).
+    in `deactivated`. Authentication is the org's owner-signed bearer fingerprint (constant-time). Then (see the
+    module docstring for every bound):
+      * a body over a per-request bound is refused 400 before anything is taken;
+      * a READ takes the org's read lock (bounded wait, else 429), spends one unit of the org's read budget
+        (`VIGIL_SCIM_READS_PER_MIN`; 429 + Retry-After when spent) and folds lock-free — it never enters the shared
+        membership critical section;
+      * a WRITE takes the org's write lock (bounded wait, else 429), and INSIDE it is admitted by the org's write
+        budget (one unit; skipped for a request that can only take privilege away, `ui.scim.lowers_only`), runs in
+        bounded holds of the shared section (`_SharedSection`, `ui.scim.MAX_RECORDS_PER_HOLD` records per hold),
+        and is charged in a `finally` for every further record it appended, also when it fails part-way.
 
     FAILED authentications count against (org, client IP) and, past the limit, that pair's further INVALID
     attempts are refused 429 without another audit row. A VALID bearer is never refused by that lock: an IdP's
@@ -238,7 +416,8 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
     m = str(method or "").upper()
     if m not in _SCIM_METHODS:
         return _scim_refusal(405, f"{m or 'the method'} is not a SCIM method")
-    if p.scim_auth_limiter is None or p.scim_write_limiter is None:
+    reads = getattr(p, "scim_read_limiter", None)
+    if p.scim_auth_limiter is None or p.scim_write_limiter is None or reads is None:
         return _scim_refusal(503, "SCIM is not available on this deployment")
     oid = _org(org_id)
     key = f"scim:auth:{oid}:{ip}"
@@ -252,18 +431,62 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
         p._audit("scim_auth", org_id=oid, outcome="denied")
         return _scim_refusal(401, "SCIM authentication failed")
     over = uiscim.request_bound_refusal(m, path, body)
-    if over is not None:                   # refused on its body alone: no budget spent, the critical section untouched
+    if over is not None:                   # refused on its body alone: no lock taken, no budget spent
         return {"status": over.status, "body": over.body, "deactivated": []}
+
+    def dispatch(section) -> "uiscim.ScimResult":
+        return uiscim.scim_dispatch(m, path, body, authorization, org_id=oid, config_registry=cfgreg,
+                                    org_registry=p.orgs, now=t, query=str(query or ""),
+                                    directory_registry=directory, issued_at_fn=p._next_issued,
+                                    audit=_critical_audit(p, oid), section=section)
+    busy = _scim_refusal(429, "another SCIM request of this organization is in progress; retry shortly",
+                         retry_after=_ORG_LOCK_WAIT_S)
+    if m not in _SCIM_WRITES:
+        lock = _held(_org_lock(p, oid, "read"))
+        if lock is None:
+            return busy
+        with lock:
+            wait = reads.admit(f"scim:reads:{oid}", now=t)
+            if wait is not None:
+                return _scim_refusal(429, "this organization's SCIM read rate is exceeded; retry shortly",
+                                     retry_after=wait)
+            r = dispatch(None)               # lock-free: a read appends nothing and never enters the shared section
+        return {"status": r.status, "body": r.body, "deactivated": list(r.deactivated)}
     budget = f"scim:writes:{oid}"
-    if m in _SCIM_WRITES:
-        wait = p.scim_write_limiter.admit(budget, now=t)
-        if wait is not None:
-            return _scim_refusal(429, "this organization's SCIM write rate is exceeded; retry shortly",
-                                 retry_after=wait)
-    with _membership_section(p):
-        r = uiscim.scim_dispatch(m, path, body, authorization, org_id=oid, config_registry=cfgreg,
-                                 org_registry=p.orgs, now=t, query=str(query or ""), directory_registry=directory,
-                                 issued_at_fn=p._next_issued, audit=_critical_audit(p, oid))
-    if r.records > 1:                      # `admit` counted one unit; every further record it appended is charged
-        p.scim_write_limiter.charge(budget, r.records - 1, now=t)
+    lock = _held(_org_lock(p, oid, "write"))
+    if lock is None:
+        return busy
+    with lock:
+        lowers = uiscim.lowers_only(m, path, body)
+        if not lowers:                       # checked AND (below) charged inside the org's lock
+            wait = p.scim_write_limiter.admit(budget, now=t)
+            if wait is not None:
+                return _scim_refusal(429, "this organization's SCIM write rate is exceeded; retry shortly",
+                                     retry_after=wait)
+        section = _SharedSection(p, oid)
+        try:
+            r = dispatch(section)
+        finally:
+            section.close()
+            owed = section.records - (0 if lowers else 1)        # `admit` counted one unit
+            if owed > 0:
+                p.scim_write_limiter.charge(budget, owed, now=t)
     return {"status": r.status, "body": r.body, "deactivated": list(r.deactivated)}
+
+
+@contextmanager
+def _entered(cm) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        cm.__exit__(None, None, None)
+
+
+def _held(cm):
+    """`cm` (an `_org_lock`) entered, as a context manager that releases it — or None when it stayed busy."""
+    from vigil_integration.live.seam_lock import LockBusy
+    try:
+        cm.__enter__()
+    except LockBusy:
+        return None
+    return _entered(cm)

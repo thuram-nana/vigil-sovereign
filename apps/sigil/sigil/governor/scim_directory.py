@@ -29,6 +29,14 @@ string ever becomes a record key.
 DELETE CASCADES: deleting a user also deletes every edge to that user (its id is deterministic, so a later
 re-create must start in no group); deleting a group deletes its edges.
 
+PENDING GROUP JOBS (`job` records, keyed by the group id): a group change too large to land within one hold of the
+shared membership critical section (`ui.scim`) is announced by an owner-signed job record naming the change's
+END STATE (the group's name and externalId plus its final member list, or its member delta, or "deleted") BEFORE
+its first membership record, and closed by a deleted job record once every record of it has landed. A job still
+open after a crash, or after the request was cut short, is what the org's NEXT SCIM write or sign-in finishes
+(`ui.scim.resume_directory_jobs`). A job names only state the provisioner itself staged from an authenticated
+request; it is folded like every other record here (owner-signed, LWW), and a malformed one is inert.
+
 HARD-PRUNE RESIDUAL (the same honest boundary `governor.sso_config` documents): this fold scans from genesis with
 no snapshot seed, so a hard prune below these records would forget them. That residual can only make the
 directory FORGET users/groups (the IdP then re-creates them — SCIM is idempotent by design); it can never mint or
@@ -60,7 +68,7 @@ SCIM_DIRECTORY_SIGNAL = "governor.scim_directory"
 # attributes rewritten without breaking the signature.
 _DIR_CORE = ("signal", "org_id", "rtype", "rid", "state", "issued_at", "data")
 
-RTYPES = ("user", "group", "member")
+RTYPES = ("user", "group", "member", "job")
 _STATES = ("active", "deleted")
 
 # Charset-fixed ids (never an IdP-supplied string): the per-org user id is `governor.scim.sso_username`'s form.
@@ -74,6 +82,7 @@ _TENANT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_ATTR = 256                 # userName / externalId / displayName / one selector
 MAX_SELECTORS = 64             # role selectors (group / role names) carried on a User resource
 MAX_PROFILE_BYTES = 4096       # the echoed-back profile (name + emails), canonical JSON
+MAX_JOB_MEMBERS = 4096         # user ids one pending group job may list (the writer lists at most ~1000)
 
 
 class DirectoryError(ValueError):
@@ -87,6 +96,8 @@ def _id_ok(rtype: str, rid: str) -> bool:
         return bool(_GROUP_ID_RE.fullmatch(rid))
     if rtype == "member":
         return bool(_EDGE_ID_RE.fullmatch(rid))
+    if rtype == "job":                     # a pending group change, keyed by the group it changes
+        return bool(_GROUP_ID_RE.fullmatch(rid))
     return False
 
 
@@ -233,6 +244,32 @@ def _group_from(org_id: str, rid: str, data: dict, at: float) -> Optional[Direct
         return None
 
 
+def _job_from(data: object) -> Optional[dict]:
+    """A pending group job's END STATE, normalized, or None for a malformed record (inert): {"delete": True}, or
+    {"delete": False, "name", "ext"} plus either "members" (the final member list) or "add" / "remove" (the member
+    delta against the group as it stands)."""
+    if not isinstance(data, dict):
+        return None
+    if data.get("delete") is True:
+        return {"delete": True}
+    try:
+        out: dict = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
+                     "ext": _clean_str(data.get("ext"), "ext")}
+    except (DirectoryError, TypeError):
+        return None
+    for k in ("members", "add", "remove"):
+        v = data.get(k)
+        if v is None:
+            continue
+        if not isinstance(v, list) or len(v) > MAX_JOB_MEMBERS \
+                or any(not isinstance(x, str) or not _USER_ID_RE.fullmatch(x) for x in v):
+            return None
+        out[k] = sorted(set(v))
+    if "members" in out and ("add" in out or "remove" in out):
+        return None
+    return out
+
+
 class OrgDirectory:
     """ONE org's directory, folded once and then kept in step with this view's own (owner-signed) writes, so a
     multi-step SCIM request reads what it wrote without re-scanning the spine. Every write appends an
@@ -240,13 +277,14 @@ class OrgDirectory:
     fold) and SKIPS the append when nothing changed (a re-sync does not grow the spine)."""
 
     def __init__(self, registry: "ScimDirectoryRegistry", org_id: str, *, users: dict, groups: dict,
-                 edges: set, highwater: dict) -> None:
+                 edges: set, highwater: dict, jobs: Optional[dict] = None) -> None:
         self._reg = registry
         self.org_id = org_id
         self._users: "dict[str, DirectoryUser]" = users
         self._groups: "dict[str, DirectoryGroup]" = groups
         self._edges: "set[tuple[str, str]]" = edges
         self._hw: "dict[tuple[str, str], float]" = highwater
+        self._jobs: "dict[str, dict]" = dict(jobs or {})
         self._index()
 
     def _index(self) -> None:
@@ -340,6 +378,10 @@ class OrgDirectory:
             return []
         return [self._groups[g] for g in sorted(self._by_user.get(user_id, ())) if g in self._groups]
 
+    def jobs(self) -> "dict[str, dict]":
+        """The pending group jobs, {group id: end state} (see the module docstring)."""
+        return {g: dict(j) for g, j in sorted(self._jobs.items())}
+
     # -- writes (owner-signed; in-memory view kept in step) --------------------------------------------------
     def _fresh(self, rtype: str, rid: str, now: float) -> float:
         hw = self._hw.get((rtype, rid), NO_HIGHWATER)
@@ -373,12 +415,17 @@ class OrgDirectory:
         self._users[user_id] = _user_from(self.org_id, user_id, data, self._hw[("user", user_id)])  # type: ignore[assignment]
         return True
 
-    def delete_user(self, user_id: str, *, now: float) -> bool:
-        """Delete user `user_id` and CASCADE-delete every edge to it. Returns True iff the user existed."""
+    def delete_user(self, user_id: str, *, now: float, before_each=None) -> bool:
+        """Delete user `user_id` and CASCADE-delete every edge to it. Returns True iff the user existed.
+        `before_each()` (optional) is called before each record is appended."""
         if user_id not in self._users:
             return False
         for g in sorted(self._by_user.get(user_id, ())):
+            if before_each is not None:
+                before_each()
             self.remove_member(g, user_id, now=now)
+        if before_each is not None:
+            before_each()
         self._write("user", user_id, "deleted", {}, now=now)
         del self._users[user_id]
         return True
@@ -426,6 +473,26 @@ class OrgDirectory:
         self._by_user.get(user_id, set()).discard(group_id)
         return True
 
+    def put_job(self, group_id: str, spec: dict, *, now: float) -> bool:
+        """Open (or restate) the pending job of group `group_id` with end state `spec`. True iff a record was
+        appended (False ⇒ the same job is already open)."""
+        job = _job_from(spec)
+        if job is None or not _GROUP_ID_RE.fullmatch(str(group_id or "")):
+            raise DirectoryError("malformed pending group job")
+        if self._jobs.get(group_id) == job:
+            return False
+        self._write("job", group_id, "active", job, now=now)
+        self._jobs[group_id] = job
+        return True
+
+    def finish_job(self, group_id: str, *, now: float) -> bool:
+        """Close the pending job of group `group_id`. True iff one was open."""
+        if group_id not in self._jobs:
+            return False
+        self._write("job", group_id, "deleted", {}, now=now)
+        del self._jobs[group_id]
+        return True
+
     # -- staging (a multi-record change is applied to a scratch copy, then committed in one step) ---------------
     def staged(self) -> "OrgDirectory":
         """A scratch copy of this view: it reads and writes exactly like this view, but its writes only JOURNAL the
@@ -433,21 +500,31 @@ class OrgDirectory:
         caller computes what a change WILL make of the directory, acts on that first (e.g. lowers a role, with its
         audit), and only then commits — so a failure before the commit leaves the directory exactly as it was."""
         return OrgDirectory(_Journal(self._reg, self), self.org_id, users=dict(self._users),
-                            groups=dict(self._groups), edges=set(self._edges), highwater=dict(self._hw))
+                            groups=dict(self._groups), edges=set(self._edges), highwater=dict(self._hw),
+                            jobs=self._jobs)
 
-    def commit(self, staged: "OrgDirectory") -> None:
-        """Append, in order, every record `staged` (a `staged()` copy of THIS view, with no write here since)
-        journaled — each with the issued_at it was stamped with — then adopt its state."""
+    def commit(self, staged: "OrgDirectory", *, before_each=None) -> None:
+        """Append, in order, every record `staged` (a `staged()` copy of THIS view, with no directory write here
+        since — a pending-job record is not one) journaled — each with the issued_at it was stamped with — then adopt
+        its state. `before_each()` (optional) is called before each record is appended."""
         journal = staged._reg
-        if not isinstance(journal, _Journal) or journal.origin is not self or journal.base_hw != self._hw:
+        if not isinstance(journal, _Journal) or journal.origin is not self \
+                or _without_jobs(journal.base_hw) != _without_jobs(self._hw):
             raise DirectoryError("a staged directory change commits only onto the unchanged view it was staged from")
         for org_id, rtype, rid, state, data, at in journal.records:
+            if before_each is not None:
+                before_each()
             self._reg._append(org_id, rtype, rid, state, data, issued_at=at)
             self._hw[(rtype, rid)] = at
         self._users, self._groups, self._edges = dict(staged._users), dict(staged._groups), set(staged._edges)
         self._index()
         journal.records = []
         journal.base_hw = dict(self._hw)
+
+    def journaled(self) -> int:
+        """For a `staged()` copy: how many records `commit` would append (0 for a view that is not staged)."""
+        journal = self._reg
+        return len(journal.records) if isinstance(journal, _Journal) else 0
 
     def authored_writes(self) -> int:
         """For a `staged()` copy: how many of the records it has journaled AUTHOR state — every record except the
@@ -482,6 +559,10 @@ class _Journal:
         self.base._check_record(org_id, rtype, rid, state)
         self.records.append((org_id, rtype, rid, state, dict(data), float(issued_at)))
         return 0
+
+
+def _without_jobs(hw: dict) -> dict:
+    return {k: v for k, v in hw.items() if k[0] != "job"}
 
 
 def _user_data(u: DirectoryUser) -> dict:
@@ -547,11 +628,16 @@ class ScimDirectoryRegistry:
         users: dict = {}
         groups: dict = {}
         edges: set = set()
+        jobs: dict = {}
         for (rtype, rid), st in state.items():
             if st != "active":
                 continue
             d, at = data[(rtype, rid)]
-            if rtype == "user":
+            if rtype == "job":
+                j = _job_from(d)
+                if j is not None:
+                    jobs[rid] = j
+            elif rtype == "user":
                 u = _user_from(oid, rid, d, at)
                 if u is not None:
                     users[rid] = u
@@ -563,4 +649,4 @@ class ScimDirectoryRegistry:
                 m = _EDGE_ID_RE.fullmatch(rid)
                 if m:
                     edges.add((m.group(1), m.group(2)))
-        return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=hw)
+        return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=hw, jobs=jobs)

@@ -36,6 +36,12 @@ directory is BOOKKEEPING — the authority is still the ceiling-capped owner-sig
     member is refused by `admit_customer` — and the result names the revoked usernames so the edge also severs
     their sessions at once.
 
+BOUNDED WORK PER HOLD. The provisioner runs a write inside the membership critical section every org shares, in
+holds of at most `MAX_RECORDS_PER_HOLD` spine records (`_Req.pace`); a group change larger than one hold opens a
+durable pending job first and lands in the order "lower every role, commit the directory, raise", so neither a
+pause between two holds nor a crash ever leaves a member above the role the directory then implies, and the org's
+next SCIM write or sign-in finishes the job (`_group_change`, `_resume_jobs`, `resume_directory_jobs`).
+
 SIGN-IN SEMANTICS:
   * an org whose config has SCIM OFF provisions JUST-IN-TIME: a verified sign-in mints (or updates) the capped
     membership with the role the config resolves for the assertion's groups;
@@ -105,8 +111,9 @@ _OIDC_GROUPS_CLAIM = "groups"
 # user-editable claim such as `email`), tried after `sub` when linking a sign-in to a SCIM directory user.
 _OIDC_OBJECT_ID_CLAIM = "oid"
 
-# Bounds on one SCIM request (the bodies are IdP-authored; a request is handled under the spine lock, so what one
-# request may write is bounded here, not only how many requests an org may send — see `ui.sso_provision`).
+# Bounds on one SCIM request (the bodies are IdP-authored; a request's records land inside the membership critical
+# section every org shares, so what one request may write, and how long it may hold that section, is bounded here —
+# not only how many requests an org may send; see `ui.sso_provision`).
 MAX_RESULTS = 1000            # filter.maxResults advertised in ServiceProviderConfig
 MAX_PATCH_OPS = 1000          # Operations per PATCH
 MAX_MEMBER_VALUES = 1000      # member references per request, SUMMED over every operation of a PATCH
@@ -115,6 +122,13 @@ MAX_MEMBER_VALUES = 1000      # member references per request, SUMMED over every
 # request is refused before any record is written. Removing existing state is never capped here — a group DELETE,
 # or a removal of every member, of a group of any size still deprovisions (that state was paid for when written).
 MAX_DIRECTORY_WRITES = MAX_MEMBER_VALUES + 16
+# Spine records one request appends per HOLD of the shared membership critical section (the caller's `section`).
+# What a request appends beyond it lands in further holds: the section is released between two holds (other
+# organizations' requests run in between) and re-taken — never in the middle of one member's change. A group change
+# that cannot land within one hold first opens a durable pending job (`governor.scim_directory`), so a request cut
+# short (a crash, a concurrent change of this org's state detected on re-entry) is finished by the org's next SCIM
+# write or sign-in.
+MAX_RECORDS_PER_HOLD = 128
 
 _RESOURCES = ("Users", "Groups", "ServiceProviderConfig", "ResourceTypes", "Schemas")
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -148,6 +162,24 @@ class ScimResult:
     records: int = 0       # spine records this request appended (directory + membership + critical audit rows)
 
 
+class SectionLost(Exception):
+    """The shared critical section could not be re-taken for the next hold (busy), or this org's membership state
+    changed while it was released: the request stops where it is (every record so far landed in the safe order) and
+    answers a retryable error; an open pending group job is finished by the org's next write or sign-in."""
+
+
+class _NoSection:
+    """The section of a caller that holds no shared lock (a read, or a direct call that serializes on its own): the
+    fold runs as is and a hold never needs slicing."""
+    records = 0
+
+    def fold(self, fn):
+        return fn()
+
+    def slice(self) -> None:
+        return None
+
+
 class _ScimFail(Exception):
     def __init__(self, status: int, detail: str, scim_type: str = "") -> None:
         super().__init__(detail)
@@ -161,8 +193,9 @@ AuditFn = Callable[[str, str, str], None]
 
 # ---------------------------------------------------------------------------------------------------
 # A per-request view of the org registry (same spine + owner key), with this org's reads memoized for ONE request
-# handled under the spine lock and kept in step with the request's own grants / revokes — so a group change that
-# touches many members does not re-fold the spine once per member. Grants still go through the inherited,
+# (serialized per org by the provisioner, and re-checked on every entry of the shared section) and kept in step with
+# the request's own grants / revokes — so a group change that touches many members does not re-fold the spine once
+# per member. Grants still go through the inherited,
 # validating `OrgRegistry.grant_membership` (the owner-signed mint).
 # ---------------------------------------------------------------------------------------------------
 
@@ -172,6 +205,8 @@ class _RequestOrgs(OrgRegistry):
         self._oid = org_id
         self._org = base.org(org_id)
         self._mems: "dict[str, Membership]" = {m.username: m for m in base.memberships(org_id)}
+        self._sorted: "Optional[list[Membership]]" = None     # the sorted list, kept while no member joins / leaves
+        self._pos: "dict[str, int]" = {}
         self.writes = 0                        # owner-signed membership records this request appended
 
     def org(self, org_id: str):
@@ -179,8 +214,24 @@ class _RequestOrgs(OrgRegistry):
 
     def memberships(self, org_id: Optional[str] = None) -> "list[Membership]":
         if org_id == self._oid:
-            return [self._mems[u] for u in sorted(self._mems)]
+            if self._sorted is None:
+                names = sorted(self._mems)
+                self._sorted = [self._mems[u] for u in names]
+                self._pos = {u: i for i, u in enumerate(names)}
+            return list(self._sorted)
         return super().memberships(org_id)
+
+    def _remember(self, username: str, m: "Optional[Membership]") -> None:
+        if m is None:
+            self._mems.pop(username, None)
+            self._sorted = None
+            return
+        known = username in self._mems
+        self._mems[username] = m
+        if not known:
+            self._sorted = None
+        elif self._sorted is not None:                     # a re-role keeps the order: update it in place
+            self._sorted[self._pos[username]] = m
 
     def membership_role(self, username: str, org_id: str) -> Optional[str]:
         if org_id != self._oid:
@@ -195,15 +246,15 @@ class _RequestOrgs(OrgRegistry):
         self.writes += 1
         if org_id == self._oid:
             u = str(username).strip()
-            self._mems[u] = Membership(org_id=org_id, username=u, role=str(role).strip(),
-                                       issued_at=float(issued_at), state="active")
+            self._remember(u, Membership(org_id=org_id, username=u, role=str(role).strip(),
+                                         issued_at=float(issued_at), state="active"))
         return seq
 
     def revoke_membership(self, org_id: str, username: str) -> int:
         seq = super().revoke_membership(org_id, username)
         self.writes += 1
         if org_id == self._oid:
-            self._mems.pop(str(username).strip(), None)
+            self._remember(str(username).strip(), None)
         return seq
 
 
@@ -533,7 +584,8 @@ class _Req:
     directory view, a strictly increasing issued_at clock, the critical-audit hook, and the revoked usernames."""
 
     def __init__(self, config: SsoConfig, orgs: _RequestOrgs, directory: OrgDirectory, *,
-                 at: "Callable[[], float]", audit: Optional[AuditFn]) -> None:
+                 at: "Callable[[], float]", audit: Optional[AuditFn], dreg: Optional[ScimDirectoryRegistry] = None,
+                 section=None) -> None:
         self.config = config
         self.orgs = orgs
         self.dir = directory
@@ -542,11 +594,33 @@ class _Req:
         self.deactivated: "list[str]" = []
         self.audits = 0                        # critical audit rows the hook wrote (one spine row each)
         self.member_refs = 0                   # member references named so far, over the whole request
+        self._dreg = dreg
+        self._dreg_base = dreg.appended if dreg is not None else 0
+        self.section = section if section is not None else _NoSection()
+        self._hold_base = 0                    # `written()` when the current hold of the section began
 
     def audit(self, action: str, target: str, outcome: str) -> None:
         if self._audit is not None:
             self._audit(action, target, outcome)
             self.audits += 1
+
+    def written(self) -> int:
+        """The spine records this request has appended so far (directory, membership and critical audit rows)."""
+        d = (self._dreg.appended - self._dreg_base) if self._dreg is not None else 0
+        return d + self.orgs.writes + self.audits
+
+    def room(self) -> int:
+        """Records the current hold may still append (`MAX_RECORDS_PER_HOLD`)."""
+        return MAX_RECORDS_PER_HOLD - (self.written() - self._hold_base)
+
+    def pace(self, k: int) -> None:
+        """Called BEFORE a step that appends at most `k` records: when the current hold cannot take them, the section
+        is released and re-taken first (`section.slice`; it raises `SectionLost` when it cannot be re-taken or this
+        org's state changed meanwhile), so no hold appends more than `MAX_RECORDS_PER_HOLD` records."""
+        used = self.written() - self._hold_base
+        if used > 0 and used + int(k) > MAX_RECORDS_PER_HOLD:
+            self.section.slice()
+            self._hold_base = self.written()
 
     def count_member_refs(self, n: int) -> None:
         """Count `n` more member references against the request's bound (`MAX_MEMBER_VALUES`, summed over every
@@ -595,7 +669,10 @@ def _target(req: _Req, uid: str, *, create: bool) -> str:
 
 
 def _apply(req: _Req, uid: str, target: str) -> None:
-    """Land one `_target` outcome: the critical audit row FIRST, then the owner-signed revoke / ceiling-gated grant."""
+    """Land one `_target` outcome: the critical audit row FIRST, then the owner-signed revoke / ceiling-gated grant
+    (both within one hold of the section)."""
+    if target != _KEEP:
+        req.pace(2)
     if target == _REVOKE:
         _revoke(req, uid)
     elif target != _KEEP:
@@ -616,7 +693,7 @@ def _reconcile(req: _Req, uid: str, *, create: bool) -> None:
     _apply(req, uid, _target(req, uid, create=create))
 
 
-def _group_change(req: _Req, change: "Callable[[], set]") -> None:
+def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: Optional[dict] = None) -> None:
     """Run a group write so that it lands WHOLE or leaves the directory as it was. `change()` writes a STAGED copy of
     the directory (`OrgDirectory.staged`) and returns the members whose role it may move; every new role is resolved
     from that post-change state first (a refusal changes nothing), then every change that LOWERS a role (a member
@@ -625,24 +702,96 @@ def _group_change(req: _Req, change: "Callable[[], set]") -> None:
     (the member still in the group, the group still there), so the IdP's retry of the same request finds it and
     completes the downgrade, instead of a 404 / a no-op while the higher role lives on. Raises come AFTER the commit
     (directory first, then the grant): a failed grant leaves the member at the LOWER role it held (the fail-safe
-    side), and the IdP's retry re-resolves every member it names, so the raise still lands."""
+    side), and the IdP's retry re-resolves every member it names, so the raise still lands.
+
+    BOUNDED HOLDS: the change is paced through the caller's section (`_Req.pace`), at most `MAX_RECORDS_PER_HOLD`
+    records per hold, released only between two members' changes or two directory records. One that fits a single
+    hold runs in one. A larger one (a rename that re-roles thousands of members, the delete of a large mapped group)
+    first opens the group's durable pending job (its end state, `_job_spec`), and closes it once the last record
+    landed; the order above holds across holds, so no state between two holds — nor after a crash — has a member
+    above the role the directory then implies, and an open job is finished by the org's next write or sign-in
+    (`_resume_jobs`; `resume` is that job's end state when this call is its resumption)."""
     real = req.dir
     staged = req.dir = real.staged()
     try:
         affected = change()
-        if staged.authored_writes() > MAX_DIRECTORY_WRITES:   # refused WHOLE, before a single record is written
+        if resume is None and staged.authored_writes() > MAX_DIRECTORY_WRITES:   # refused WHOLE, nothing written
             raise _ScimFail(400, f"one request may change at most {MAX_DIRECTORY_WRITES} directory records",
                             "tooMany")
         plan = [(uid, _target(req, uid, create=False)) for uid in sorted(affected)]
     finally:
         req.dir = real
     lowering = [(uid, t) for uid, t in plan if _lowers(req, uid, t)]
+    lowered = {uid for uid, _t in lowering}
+    raising = [(uid, t) for uid, t in plan if uid not in lowered and t != _KEEP]
+    cost = 2 * len(lowering) + staged.journaled() + 2 * len(raising)
+    job = resume
+    if job is None and cost > req.room():
+        if cost <= MAX_RECORDS_PER_HOLD:
+            req.pace(cost)                                     # a fresh hold takes it whole
+        else:
+            job = _job_spec(real, staged, gid)
+            req.pace(1)
+            real.put_job(gid, job, now=req.at())
     for uid, t in lowering:
         _apply(req, uid, t)
-    real.commit(staged)
-    for uid, t in plan:
-        if (uid, t) not in lowering:
-            _apply(req, uid, t)
+    real.commit(staged, before_each=lambda: req.pace(1))
+    for uid, t in raising:
+        _apply(req, uid, t)
+    if job is not None:
+        req.pace(1)
+        real.finish_job(gid, now=req.at())
+
+
+def _job_spec(real: OrgDirectory, staged: OrgDirectory, gid: str) -> dict:
+    """The END STATE of a staged group change, as a pending job records it: deleted, or the group's name +
+    externalId and its final member list — or, for a group that ends with more members than one request may name,
+    the member delta (which is then within `MAX_MEMBER_VALUES`: only list adds / list removes keep a group that
+    large)."""
+    g = staged.group(gid)
+    if g is None:
+        return {"delete": True}
+    final = set(staged.members(gid))
+    spec: dict = {"delete": False, "name": g.display_name, "ext": g.external_id}
+    if len(final) <= MAX_MEMBER_VALUES:
+        spec["members"] = sorted(final)
+    else:
+        initial = set(real.members(gid))
+        spec["add"], spec["remove"] = sorted(final - initial), sorted(initial - final)
+    return spec
+
+
+def _apply_job(req: _Req, gid: str, job: dict) -> set:
+    """Re-stage a pending job's end state onto `req.dir` (a staged copy of the directory as it stands now); returns
+    EVERY member before and after, so each one is re-resolved (what is already in step costs nothing)."""
+    if job.get("delete"):
+        return set(req.dir.delete_group(gid, now=req.at()))
+    before = set(req.dir.members(gid))
+    _rename_group(req, gid, job["name"])
+    _set_group_external_id(req, gid, job.get("ext", ""))
+    touched: set = set()
+    if "members" in job:
+        _replace_members(req, gid, list(job["members"]), touched)
+    else:
+        _add_members(req, gid, list(job.get("add", ())), touched)
+        _remove_members(req, gid, list(job.get("remove", ())), touched)
+    return before | set(req.dir.members(gid)) | touched
+
+
+def _resume_jobs(req: _Req) -> None:
+    """Finish every pending group job of the org (`_group_change`, paced like any change) BEFORE the request's own
+    work. A job whose group no longer exists (a create cut short before its group record landed — the IdP retries its
+    create) or that can no longer be applied as recorded (a refusal) is closed as it stands: the order every change
+    lands in leaves no member above the role the directory implies at any point, so closing it never strands a
+    higher role."""
+    for gid, job in req.dir.jobs().items():
+        try:
+            if not job.get("delete") and req.dir.group(gid) is None:
+                raise _ScimFail(404, "the pending job's group does not exist")
+            _group_change(req, lambda gid=gid, job=job: _apply_job(req, gid, job), gid=gid, resume=job)
+        except (_ScimFail, ScimError, DirectoryError):
+            req.pace(1)
+            req.dir.finish_job(gid, now=req.at())
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -746,6 +895,7 @@ def _unfinished_create(req: _Req, uid: str, st: dict) -> bool:
 
 def _user_create(req: _Req, body: object) -> ScimResult:
     st = _user_state_from(_expect_object(body))
+    req.pace(3)                    # the user record and its membership change (audit + grant) land in ONE hold
     if not st["user_name"] and st["external_id"]:
         st["user_name"] = st["external_id"]               # lenient: an externalId-only push still names the user
     if not st["user_name"]:
@@ -767,6 +917,7 @@ def _user_replace(req: _Req, uid: str, body: object) -> ScimResult:
     if req.dir.user(uid) is None:
         raise _ScimFail(404, "no such user in this organization")
     st = _user_state_from(_expect_object(body))
+    req.pace(3)                    # the user record and its membership change (audit + grant / revoke) in ONE hold
     _put_user(req, uid, st)
     _reconcile(req, uid, create=True)
     return ScimResult(200, _user_resource(req, req.dir.user(uid)))  # type: ignore[arg-type]
@@ -874,6 +1025,7 @@ def _user_patch(req: _Req, uid: str, body: object) -> ScimResult:
                 _user_apply(st, kind, str(k), v)
         else:
             _user_apply(st, kind, path, value)
+    req.pace(3)                    # the user record and its membership change (audit + grant / revoke) in ONE hold
     _put_user(req, uid, st)
     _reconcile(req, uid, create=True)
     return ScimResult(200, _user_resource(req, req.dir.user(uid)))  # type: ignore[arg-type]
@@ -885,8 +1037,9 @@ def _user_delete(req: _Req, uid: str) -> ScimResult:
     # the membership is revoked BEFORE the directory record goes: a revoke whose critical audit write fails then
     # leaves the user (and the grant) exactly as they were, so the IdP's retry of this DELETE finds the user and
     # completes the deprovisioning — never a deleted directory user whose membership lives on unreachable
+    req.pace(2)
     _revoke(req, uid)
-    req.dir.delete_user(uid, now=req.at())
+    req.dir.delete_user(uid, now=req.at(), before_each=lambda: req.pace(1))
     return ScimResult(204, None)
 
 
@@ -1039,7 +1192,7 @@ def _group_create(req: _Req, body: object) -> ScimResult:
         touched: set = set()
         _add_members(req, gid, _member_ids(req, b.get("members") or []), touched)
         return touched
-    _group_change(req, change)
+    _group_change(req, change, gid=gid)
     return ScimResult(201, _group_resource(req, gid))
 
 
@@ -1055,7 +1208,7 @@ def _group_replace(req: _Req, gid: str, body: object) -> ScimResult:
         touched: set = set()
         _replace_members(req, gid, _member_ids(req, b.get("members") or []), touched)
         return before | touched                               # a rename re-roles every member
-    _group_change(req, change)
+    _group_change(req, change, gid=gid)
     return ScimResult(200, _group_resource(req, gid))
 
 
@@ -1063,7 +1216,7 @@ def _group_patch(req: _Req, gid: str, body: object, q: "dict[str, str]") -> Scim
     if req.dir.group(gid) is None:
         raise _ScimFail(404, "no such group in this organization")
     ops = _patch_ops(body)
-    _group_change(req, lambda: _group_patch_ops(req, gid, ops))
+    _group_change(req, lambda: _group_patch_ops(req, gid, ops), gid=gid)
     members = "members" not in _excluded(q)
     return ScimResult(200, _group_resource(req, gid, members=members))
 
@@ -1123,7 +1276,7 @@ def _group_delete(req: _Req, gid: str) -> ScimResult:
         raise _ScimFail(404, "no such group in this organization")
     # staged: every member's downgrade (with its audit) lands BEFORE the group record goes, so a failed audit leaves
     # the group in place and the IdP's retry of this DELETE finds it and completes the deprovisioning
-    _group_change(req, lambda: set(req.dir.delete_group(gid, now=req.at())))
+    _group_change(req, lambda: set(req.dir.delete_group(gid, now=req.at())), gid=gid)
     return ScimResult(204, None)
 
 
@@ -1274,34 +1427,99 @@ def request_bound_refusal(method: str, path: str, body: object) -> Optional[Scim
     return None
 
 
+def lowers_only(method: str, path: str, body: object) -> bool:
+    """True iff the request can only TAKE privilege away, judged from its shape alone: a user or group DELETE, a user
+    PATCH whose every operation sets `active` false (the Okta and Entra deactivation shapes), a user PUT with `active`
+    false, or a group PATCH whose every operation removes members. Such a request never grants a role (a member
+    leaving a group, a deactivated or deleted user resolves no higher role), so the provisioner admits it even while the
+    org's write budget is overdrawn — an offboarding never waits out the debt of an earlier sync. It is still paced in
+    bounded holds, serialized per org, and charged for what it appended."""
+    parsed = _parse_resource_path(path)
+    m = str(method or "").upper()
+    if parsed is None or parsed[1] is None or parsed[0] not in ("Users", "Groups"):
+        return False
+    resource = parsed[0]
+    if m == "DELETE":
+        return True
+    if not isinstance(body, dict):
+        return False
+    if resource == "Users" and m == "PUT":
+        return _as_bool(body.get("active", True)) is False
+    ops = body.get("Operations")
+    if m != "PATCH" or not isinstance(ops, list) or not ops or len(ops) > MAX_PATCH_OPS:
+        return False
+    for op in ops:
+        if not isinstance(op, dict):
+            return False
+        kind = str(op.get("op") or "").strip().lower()
+        path_ = op.get("path")
+        raw = path_.strip() if isinstance(path_, str) else ""
+        value = op.get("value")
+        if resource == "Users":
+            if kind not in ("add", "replace"):
+                return False
+            if raw:
+                ok = _strip_schema(raw, _SCHEMA_USER).lower() == "active" and _as_bool(value) is False
+            else:
+                ok = isinstance(value, dict) and bool(value) and all(
+                    _strip_schema(str(k), _SCHEMA_USER).lower() == "active" and _as_bool(v) is False
+                    for k, v in value.items())
+        else:
+            g = _strip_schema(raw, _SCHEMA_GROUP)
+            f = _PATH_FILTER_RE.match(g)
+            ok = kind == "remove" and (g.lower() == "members" or bool(
+                f and f.group(1).lower() == "members" and f.group(2).lower() == "value" and not f.group(4)))
+        if not ok:
+            return False
+    return True
+
+
+def _open_request(section, config_registry, org_registry, org_id: str, dreg: ScimDirectoryRegistry, *,
+                  presented: Optional[BearerToken], authenticate: bool,
+                  at: "Callable[[], float]", audit: Optional[AuditFn]) -> "tuple[SsoConfig, _Req]":
+    """The request's folded view — the org's owner-signed config, its memberships and its directory — through
+    `section.fold` (a shared-lock section folds OUTSIDE the lock and re-checks on entry that nothing of this org
+    changed since), re-authenticated against the config that was folded."""
+    def fold():
+        cfg = config_registry.config(org_id)
+        return cfg, _RequestOrgs(org_registry, org_id), dreg.directory(org_id)
+    config, orgs, directory = section.fold(fold)
+    if config is None or (authenticate and not _scim.authenticate_scim(config, presented)):
+        raise _ScimFail(401, "SCIM authentication failed")
+    return config, _Req(config, orgs, directory, at=at, audit=audit, dreg=dreg, section=section)
+
+
 def scim_dispatch(method: str, path: str, body: object, authorization: object, *, org_id: str,
                   config_registry, org_registry, now: float, query: str = "", directory_registry=None,
                   issued_at: Optional[float] = None, issued_at_fn: "Optional[Callable[[], float]]" = None,
-                  audit: Optional[AuditFn] = None) -> ScimResult:
+                  audit: Optional[AuditFn] = None, section=None) -> ScimResult:
     """Handle one SCIM 2.0 request for `org_id`. FAIL-CLOSED order: resolve the org's OWNER-SIGNED config;
     authenticate the bearer (constant-time fingerprint compare, org-scoped) — uniformly BEFORE revealing anything
-    about routing; then route Users / Groups / discovery. The caller (the provisioner) holds the spine lock for
-    the whole request, so a multi-record change is one serialized step. `issued_at_fn` (default: a strictly
-    increasing clock from `issued_at`/`now`) stamps each owner-signed record; `audit(action, username, detail)`
-    is called BEFORE each membership grant / revoke (the provisioner makes it a critical, fail-closed audit).
+    about routing; then route Users / Groups / discovery. `issued_at_fn` (default: a strictly increasing clock from
+    `issued_at`/`now`) stamps each owner-signed record; `audit(action, username, detail)` is called BEFORE each
+    membership grant / revoke (the provisioner makes it a critical, fail-closed audit).
+
+    `section` is the caller's shared membership critical section (the provisioner's: the spine lock + the membership
+    flock). The request's folds run through `section.fold` (outside it; re-checked on entry) and every record is paced
+    through `section.slice` in holds of at most `MAX_RECORDS_PER_HOLD` records (see `_group_change`); None is a
+    caller holding no shared lock (a read, a test). A write first finishes every pending group job of the org.
     The result's `records` is what the request appended to the spine — directory records, membership grants /
-    revokes, and one critical audit row per hook call — which the provisioner charges to the org's write budget."""
+    revokes, and one critical audit row per hook call — also on a refusal after a partial write; it is also left on
+    `section.records`, even when an exception escapes, so the provisioner charges the org's write budget for it."""
     config = config_registry.config(org_id)
     presented: Optional[BearerToken] = bearer_from_authorization_header(authorization)
     if not _scim.authenticate_scim(config, presented):
         return ScimResult(401, _error(401, "SCIM authentication failed"))
     assert config is not None  # authenticate_scim returned True ⇒ config is present + scim_enabled
     m = str(method or "").upper()
+    sec = section if section is not None else _NoSection()
     req: Optional[_Req] = None
-    dreg: Optional[ScimDirectoryRegistry] = None
-    dreg_base = 0
 
     def revoked() -> tuple:            # a revoke that already landed in this request must still reach the edge
         return tuple(req.deactivated) if req is not None else ()
 
     def written() -> int:              # what this request appended — also on a refusal after a partial write
-        n = (dreg.appended - dreg_base) if dreg is not None else 0
-        return n + ((req.orgs.writes + req.audits) if req is not None else 0)
+        return req.written() if req is not None else 0
 
     try:
         parsed = _parse_resource_path(path)
@@ -1311,19 +1529,48 @@ def scim_dispatch(method: str, path: str, body: object, authorization: object, *
         q = _query(query)
         if resource in ("ServiceProviderConfig", "ResourceTypes", "Schemas"):
             return _discovery(resource, rid, m)
-        orgs = _RequestOrgs(org_registry, config.org_id)
-        if orgs.org(config.org_id) is None and m in _MUTATING:
-            raise _ScimFail(404, "this organization is not active")
         dreg = _directory_registry(directory_registry, org_registry)
-        dreg_base = dreg.appended
-        directory = dreg.directory(config.org_id)
-        req = _Req(config, orgs, directory, at=issued_at_fn or _clock(issued_at, now), audit=audit)
+        config, req = _open_request(sec, config_registry, org_registry, config.org_id, dreg, presented=presented,
+                                    authenticate=True, at=issued_at_fn or _clock(issued_at, now), audit=audit)
+        if req.orgs.org(config.org_id) is None and m in _MUTATING:
+            raise _ScimFail(404, "this organization is not active")
+        if m in _MUTATING:
+            _resume_jobs(req)
         res = (_users if resource == "Users" else _groups)(req, m, rid, body, q)
         return ScimResult(res.status, res.body, revoked(), written())
     except _ScimFail as e:
         return ScimResult(e.status, _error(e.status, e.detail, e.scim_type), revoked(), written())
     except (ScimError, DirectoryError, SsoLoginError) as e:
         return ScimResult(400, _error(400, str(e), "invalidValue"), revoked(), written())
+    except SectionLost as e:
+        return ScimResult(503, _error(503, f"the request was interrupted and may be retried ({e})"), revoked(),
+                          written())
+    finally:
+        sec.records = written()
+
+
+def resume_directory_jobs(*, org_id: str, config_registry, org_registry, now: float, directory_registry=None,
+                          issued_at_fn: "Optional[Callable[[], float]]" = None, audit: Optional[AuditFn] = None,
+                          section=None) -> ScimResult:
+    """Finish the org's pending group jobs (`_resume_jobs`) outside any SCIM request — the provisioner runs it at a
+    sign-in of a directory-managed org, so a job a crash cut short does not wait for the IdP's next write. Nothing is
+    taken or written when no job is open. `records` / `section.records` as in `scim_dispatch`."""
+    sec = section if section is not None else _NoSection()
+    req: Optional[_Req] = None
+    try:
+        config = config_registry.config(org_id)
+        if config is None or not config.scim_enabled:
+            return ScimResult(204, None)
+        dreg = _directory_registry(directory_registry, org_registry)
+        if not dreg.directory(config.org_id).jobs():
+            return ScimResult(204, None)
+        config, req = _open_request(sec, config_registry, org_registry, config.org_id, dreg, presented=None,
+                                    authenticate=False, at=issued_at_fn or _clock(None, now), audit=audit)
+        if req.orgs.org(config.org_id) is not None and config.scim_enabled:
+            _resume_jobs(req)
+        return ScimResult(204, None, tuple(req.deactivated), req.written())
+    finally:
+        sec.records = req.written() if req is not None else 0
 
 
 def handle_scim_request(method: str, path: str, body: object, authorization: object, *, org_id: str,

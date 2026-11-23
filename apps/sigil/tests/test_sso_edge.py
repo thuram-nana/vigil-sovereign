@@ -231,7 +231,8 @@ class Stack:
         else:
             monkeypatch.delenv("VIGIL_CUSTOMER_SSO", raising=False)
         for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR",
-                     "CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR"):
+                     "CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR",
+                     "SCIM_READ_RATELIMIT_DIR"):
             monkeypatch.setattr(config, attr, tmp_path / attr.lower())
         self.tmp = tmp_path
         self.spine = str(tmp_path / "spine.jsonl")
@@ -864,13 +865,23 @@ def test_scim_write_budget_answers_429_with_retry_after(stack, monkeypatch):
     over = stack.scim("POST", f"{base}/Users", _okta_user("u9@acme.com", "00u9"))
     assert over.status == 429 and int(over.headers.get("Retry-After")) > 0
     assert over.json()["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:Error"]
-    assert stack.scim("GET", f"{base}/Users").json()["totalResults"] == 2   # reads are not budgeted
-    # every write verb is budgeted, DELETE included
-    uid = made[0].json()["id"]
-    for method, body in (("DELETE", None), ("PUT", _okta_user("u0@acme.com", "00u0")),
-                         ("PATCH", {"Operations": [{"op": "replace", "path": "active", "value": False}]})):
-        assert stack.scim(method, f"{base}/Users/{uid}", body).status == 429, method
+    assert stack.scim("GET", f"{base}/Users").json()["totalResults"] == 2   # reads have their own budget
+    # every write verb that can grant is budgeted: a PUT / PATCH that keeps the user active, a group write that adds
+    uid, other = made[0].json()["id"], made[1].json()["id"]
+    for method, path, body in (("PUT", f"/Users/{uid}", _okta_user("u0@acme.com", "00u0")),
+                               ("PATCH", f"/Users/{uid}", {"Operations": [{"op": "replace", "path": "displayName",
+                                                                          "value": "x"}]}),
+                               ("PATCH", f"/Users/{uid}", {"Operations": [
+                                   {"op": "replace", "path": "active", "value": False},
+                                   {"op": "replace", "path": "active", "value": True}]}),
+                               ("POST", "/Groups", {"displayName": "Admins", "members": [{"value": uid}]})):
+        assert stack.scim(method, f"{base}{path}", body).status == 429, (method, path)
     assert stack.role(uid, ORG_A) == "viewer"
+    # ... but a request that can only take privilege away is never held off by the org's write debt (offboarding)
+    off = stack.scim("PATCH", f"{base}/Users/{uid}", {"Operations": [{"op": "replace", "path": "active",
+                                                                      "value": False}]})
+    assert off.status == 200 and stack.role(uid, ORG_A) is None and off.json()["active"] is False
+    assert stack.scim("DELETE", f"{base}/Users/{other}").status == 204 and stack.role(other, ORG_A) is None
 
 
 def _flood_body(ids: list) -> dict:

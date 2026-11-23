@@ -474,11 +474,15 @@ def test_saml_acs_without_a_replay_ledger_is_refused():
 
 
 def test_scim_request_fails_closed_without_limiters_and_on_non_scim_methods():
-    p = _P(scim_auth_limiter=None, scim_write_limiter=None, _now=lambda: 1.0)
+    p = _P(scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None, _now=lambda: 1.0)
     assert sso_provision.scim_request(p, "org_abc", method="GET", path="/Users")["status"] == 503
-    for half in (_P(scim_auth_limiter=object(), scim_write_limiter=None, _now=lambda: 1.0),
-                 _P(scim_auth_limiter=None, scim_write_limiter=object(), _now=lambda: 1.0)):
-        assert sso_provision.scim_request(half, "org_abc", method="POST", path="/Users")["status"] == 503
+    for half in (_P(scim_auth_limiter=object(), scim_write_limiter=None, scim_read_limiter=object(), _now=lambda: 1.0),
+                 _P(scim_auth_limiter=None, scim_write_limiter=object(), scim_read_limiter=object(), _now=lambda: 1.0),
+                 _P(scim_auth_limiter=object(), scim_write_limiter=object(), _now=lambda: 1.0),
+                 _P(scim_auth_limiter=object(), scim_write_limiter=object(), scim_read_limiter=None,
+                    _now=lambda: 1.0)):
+        for m in ("GET", "POST"):
+            assert sso_provision.scim_request(half, "org_abc", method=m, path="/Users")["status"] == 503
     for m in ("HEAD", "OPTIONS", "TRACE", "", "CONNECT"):
         r = sso_provision.scim_request(p, "org_abc", method=m, path="/Users")
         assert r["status"] == 405 and r["deactivated"] == []
@@ -551,15 +555,18 @@ def test_provision_body_caps_grow_only_while_the_flag_is_on(monkeypatch):
 def test_build_provisioner_wires_the_sso_ledgers_only_with_the_flag(monkeypatch, tmp_path):
     from sigil import config
     from sigil.ui.provision import build_provisioner
-    for attr in ("CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR"):
+    for attr in ("CUSTOMER_SAML_REPLAY_DIR", "SCIM_AUTH_RATELIMIT_DIR", "SCIM_WRITE_RATELIMIT_DIR",
+                 "SCIM_READ_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     monkeypatch.delenv("VIGIL_CUSTOMER_SSO", raising=False)
     off = build_provisioner(_store())
     assert off.saml_replay is None and off.scim_auth_limiter is None and off.scim_write_limiter is None
+    assert off.scim_read_limiter is None
     monkeypatch.setenv("VIGIL_CUSTOMER_SSO", "1")
     on = build_provisioner(_store())
     assert on.saml_replay is not None and on.scim_auth_limiter is not None and on.scim_write_limiter is not None
     assert on.scim_write_limiter.max_fails == config.SCIM_OPS_PER_MIN
+    assert on.scim_read_limiter is not None and on.scim_read_limiter.max_fails == config.SCIM_READS_PER_MIN
     assert not any((tmp_path / a.lower()).exists() for a in ("CUSTOMER_SAML_REPLAY_DIR",))   # created lazily
 
 
