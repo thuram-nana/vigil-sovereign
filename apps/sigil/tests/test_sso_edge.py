@@ -691,7 +691,8 @@ def test_a_saml_answer_the_parser_cannot_decode_is_a_counted_audited_refusal(sta
         xml, relay = answer()
         undecodable = b'<?xml version="1.0" encoding="x-no-such-codec"?>' + xml
         assert stack.post_acs(undecodable, relay).location == "/#sso=err"
-    assert [a["outcome"] for a in stack.audits("sso_login")] == ["ok"] + ["denied"] * 5
+    # audited as denied — a refusal an unauthenticated client can provoke is audited at most once per org per minute
+    assert [a["outcome"] for a in stack.audits("sso_login")] == ["ok", "denied"]
     assert stack.start(ORG_A)[0].location == "/#sso=err"              # counted: the address is now locked out
 
 
