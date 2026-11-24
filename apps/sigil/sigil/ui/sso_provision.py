@@ -79,6 +79,7 @@ import math
 import re
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -120,16 +121,38 @@ def _sso_gate_semaphore() -> "threading.BoundedSemaphore":
         return _SSO_GATES.setdefault(n, threading.BoundedSemaphore(n))
 
 
-_SSO_ORG_GATES: "dict[tuple, threading.BoundedSemaphore]" = {}
+_SSO_ORG_GATES: "OrderedDict[tuple, list]" = OrderedDict()       # (org, n) -> [semaphore, holders + waiters]
+_SSO_ORG_GATES_MAX = 4096
+
+
+@contextmanager
+def _sso_org_semaphore_ref(org_id: str) -> "Iterator[threading.BoundedSemaphore]":
+    """One org's share of the SSO work bound (`VIGIL_SSO_ORG_CONCURRENCY` slots), referenced for the duration of the
+    `with`. At most `_SSO_ORG_GATES_MAX` are kept: the least recently used one nobody references is forgotten first, so
+    naming arbitrary org ids never grows this, and a share in use is never replaced."""
+    from .. import config
+    n = max(1, int(config.SSO_ORG_CONCURRENCY))
+    key = (str(org_id or ""), n)
+    with _SSO_GATES_GUARD:
+        entry = _SSO_ORG_GATES.get(key)
+        if entry is None:
+            entry = _SSO_ORG_GATES[key] = [threading.BoundedSemaphore(n), 0]
+        _SSO_ORG_GATES.move_to_end(key)
+        entry[1] += 1
+        if len(_SSO_ORG_GATES) > _SSO_ORG_GATES_MAX:
+            for k in [k for k, e in _SSO_ORG_GATES.items() if e[1] == 0][:len(_SSO_ORG_GATES) - _SSO_ORG_GATES_MAX]:
+                del _SSO_ORG_GATES[k]
+    try:
+        yield entry[0]
+    finally:
+        with _SSO_GATES_GUARD:
+            entry[1] -= 1
 
 
 def _sso_org_semaphore(org_id: str) -> "threading.BoundedSemaphore":
-    """One org's share of the SSO work bound (`VIGIL_SSO_ORG_CONCURRENCY` slots). Only an org with an SSO config ever
-    gets one (the callers check the config first), so their number is bounded by the orgs."""
-    from .. import config
-    n = max(1, int(config.SSO_ORG_CONCURRENCY))
-    with _SSO_GATES_GUARD:
-        return _SSO_ORG_GATES.setdefault((str(org_id or ""), n), threading.BoundedSemaphore(n))
+    """The org's share (tests take it directly)."""
+    with _sso_org_semaphore_ref(org_id) as sem:
+        return sem
 
 
 @contextmanager
@@ -142,19 +165,19 @@ def _sso_gate(org_id: str = "") -> Iterator[None]:
     replay ledger's reaping never hold a slot."""
     from .provision import ProvisionBusy
     deadline = time.monotonic() + _SSO_GATE_WAIT_S
-    mine = _sso_org_semaphore(org_id)
-    if not mine.acquire(timeout=_SSO_GATE_WAIT_S):
-        raise ProvisionBusy(_SSO_GATE_WAIT_S)
-    try:
-        gate = _sso_gate_semaphore()
-        if not gate.acquire(timeout=max(0.0, deadline - time.monotonic())):
+    with _sso_org_semaphore_ref(org_id) as mine:
+        if not mine.acquire(timeout=_SSO_GATE_WAIT_S):
             raise ProvisionBusy(_SSO_GATE_WAIT_S)
         try:
-            yield
+            gate = _sso_gate_semaphore()
+            if not gate.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                raise ProvisionBusy(_SSO_GATE_WAIT_S)
+            try:
+                yield
+            finally:
+                gate.release()
         finally:
-            gate.release()
-    finally:
-        mine.release()
+            mine.release()
 
 
 class _LegCounter:
@@ -331,7 +354,8 @@ def _registries(p):
     from ..governor.scim_directory import ScimDirectoryRegistry
     from ..governor.sso_config import SsoConfigRegistry
     cfg = SsoConfigRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey, cached=True)
-    directory = ScimDirectoryRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey)
+    directory = ScimDirectoryRegistry(p.store, owner_key=p.orgs.owner_key, trusted_pubkey=p.orgs.trusted_pubkey,
+                                      cached=True)
     return cfg, directory
 
 
@@ -401,16 +425,47 @@ def _handoff() -> None:
     time.sleep(_HANDOFF_S)
 
 
-def _org_state_changed(store, org_id: str, since_seq: int, member_ok=None) -> bool:
-    """True iff a record after `since_seq` can change what a request of `org_id` folded: an org, SSO-config or
+def _anchor(store):
+    """The spine's last record as (seq, entry_hash) — read from the tail of the active segment, O(1) — or None when
+    that is undecidable."""
+    try:
+        last = store._read_last_entry()
+    except Exception:  # noqa: BLE001 — undecidable: the caller treats the state as changed
+        return None
+    return (last.seq, last.entry_hash) if last is not None else (-1, "")
+
+
+def _records_since(store, anchor):
+    """The records appended after `anchor` — read from the END of the active segment (`tail_after`, O(new records),
+    no seq index built on a per-request store), else through the index; None when the anchor no longer holds (a
+    rollback / rewrite)."""
+    if anchor is None:
+        return None
+    seq, entry_hash = anchor
+    tail = getattr(store, "tail_after", None)
+    if tail is not None and seq >= 0:
+        recs = tail(seq, entry_hash)
+        if recs is False:
+            return None
+        if recs is not None:
+            return recs
+    return store.iter_records(since_seq=seq)
+
+
+def _org_state_changed(store, org_id: str, anchor, member_ok=None) -> bool:
+    """True iff a record after `anchor` (`_anchor`) can change what a request of `org_id` folded: an org, SSO-config or
     SCIM-directory record of that org, a membership record of that org (only one `member_ok(username, payload)`
-    calls relevant, when given), or an owner-key-history record (it moves every signature window)."""
+    calls relevant, when given), or an owner-key-history record (it moves every signature window). An anchor that is
+    undecidable or no longer holds counts as a change."""
     from ..governor.key_history import KEY_HISTORY_KIND
     from ..governor.orgs import MEMBERSHIP_SIGNAL, ORG_SIGNAL
     from ..governor.scim_directory import SCIM_DIRECTORY_SIGNAL
     from ..governor.sso_config import SSO_CONFIG_SIGNAL
     signals = (MEMBERSHIP_SIGNAL, ORG_SIGNAL, SSO_CONFIG_SIGNAL, SCIM_DIRECTORY_SIGNAL)
-    for r in store.iter_records(since_seq=since_seq):
+    records = _records_since(store, anchor)
+    if records is None:
+        return True
+    for r in records:
         if r.kind == KEY_HISTORY_KIND:
             return True
         pl = r.payload
@@ -484,11 +539,9 @@ class _SharedSection:
         from .scim import SectionLost
         store = self.p.store
         for _attempt in range(_FOLD_ATTEMPTS):
-            t0 = store.disk_tip()
+            t0 = _anchor(store)
             if t0 is None:
                 break
-            for _r in store.iter_records(since_seq=t0):    # builds the store's seq index OUTSIDE the section
-                pass
             value = fn()
             self._member_ok = self._member_filter(value) if self._member_filter is not None else None
             self._enter()
@@ -499,7 +552,7 @@ class _SharedSection:
 
     def slice(self) -> None:
         from .scim import SectionLost
-        tip = self.p.store.disk_tip()
+        tip = _anchor(self.p.store)
         self._exit()
         _handoff()
         self._enter()
@@ -551,11 +604,9 @@ def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None
     _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     cfgreg, _ = _registries(p)
-    cfg = cfgreg.config(oid) if oid else None              # the cached fold: no slot needed to find no config
-    if cfg is None:
-        raise ProvisionDenied("single sign-on is not set up for this organization")
-    with _sso_gate(oid):
-        active = _orgs(p).org(oid) is not None
+    with _sso_gate(oid):                                   # all of the leg's spine reads, inside the org's share
+        cfg = cfgreg.config(oid) if oid else None
+        active = cfg is not None and _orgs(p).org(oid) is not None
     if not active:
         raise ProvisionDenied("single sign-on is not set up for this organization")
     if cfg.protocol == "saml":
@@ -593,17 +644,19 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     oid = _org(org_id)
     if p.saml_replay is None:
         raise ProvisionError("SAML sign-in is not available on this deployment (no replay ledger)")
-    _sign_in_budget_open(p, oid, ip=ip, now=t, reason="saml")
     cfgreg, directory = _registries(p)
     try:
-        if not oid or not str(request_id or "") or cfgreg.config(oid) is None:
-            raise ValueError("no org / AuthnRequest / SSO config to bind the response to")
-        p.saml_replay.maintain(oid, now=t)                # the replay ledger's reaping: OUTSIDE the gate, bounded
-        with _sso_gate(oid):
+        if not oid or not str(request_id or ""):
+            raise ValueError("no org / AuthnRequest to bind the response to")
+        with _sso_gate(oid):                               # the whole unauthenticated work, inside the org's share
+            _sign_in_budget_open(p, oid, ip=ip, now=t, reason="saml")
+            if cfgreg.config(oid) is None:
+                raise ValueError("no SSO config for this organization")
             xml = _decode_saml_response(saml_response)
             signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg,
                                                 replay_ledger=p.saml_replay, now=t,
                                                 expected_request_id=str(request_id))
+        p.saml_replay.maintain(oid, now=t)                 # the replay ledger's reaping: OUTSIDE the gate, bounded
     except (uiscim.SsoLoginError, ValueError):
         _sso_client_failed(p, ip, now=t)
         _bounded_audit(p, "sso_login", org_id=oid, reason="saml", outcome="denied", now=t)
@@ -668,14 +721,15 @@ def _admit_sign_in(p, org_id: str, signin, cfgreg, directory, *, now: float, rea
     from .provision import ProvisionDenied
     lim = getattr(p, "sso_signin_limiter", None)
     busy = "too many sign-ins to this organization right now; try again in a minute"
-    if lim is None or lim.admit(f"sso:org:{org_id}", now=now) is not None:
-        _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_rate", outcome="denied", now=now)
-        raise ProvisionDenied(busy)
     lock = _held(_org_lock(p, org_id, "signin", wait_s=_SIGNIN_LOCK_WAIT_S))
     if lock is None:
         _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_busy", outcome="denied", now=now)
         raise ProvisionDenied(busy)
     with lock:
+        # the budget is spent INSIDE the org's sign-in lock: one of its sign-ins at a time touches the shared limiter
+        if lim is None or lim.admit(f"sso:org:{org_id}", now=now) is not None:
+            _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_rate", outcome="denied", now=now)
+            raise ProvisionDenied(busy)
         section = _SharedSection(p, org_id, member_filter=_sign_in_member_filter(org_id))
         try:
             return uiscim.admit_verified_sign_in(
@@ -710,10 +764,11 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     _sso_client_guard(p, ip, now=t)
     _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
-    _sign_in_budget_open(p, oid, ip=ip, now=t, reason="oidc")
     cfgreg, directory = _registries(p)
+    with _sso_gate(oid):
+        _sign_in_budget_open(p, oid, ip=ip, now=t, reason="oidc")
+        cfg = cfgreg.config(oid) if oid else None
     try:
-        cfg = cfgreg.config(oid) if oid else None             # the cached fold: no slot needed
         if cfg is None or cfg.protocol != "oidc":
             raise uiscim.SsoLoginError("no active enterprise-OIDC config for this organization")
         poster, fetcher = _oidc_transport(p, cfg)

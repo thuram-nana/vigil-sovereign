@@ -59,6 +59,8 @@ assert_no_offense()
 from . import key_history as _kh  # noqa: E402  (owner-key-succession-aware resolver, mirrors orgs._fold_*)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402  (the verified incremental fold cache)
+from ..spine.fold_cache import FoldCache  # noqa: E402
 
 # Dedicated payload signal under the enforced generic `kind="event"` governor record (mirrors sso_config).
 SCIM_DIRECTORY_SIGNAL = "governor.scim_directory"
@@ -589,15 +591,93 @@ def _user_data(u: DirectoryUser) -> dict:
     return data
 
 
+def _directory_step(r, resolver, state: dict, data: dict, hw: dict) -> None:
+    """Fold ONE record into one org's (state, data, hw) — the loop body of `ScimDirectoryRegistry.directory`, shared by
+    its full fold and the cached one (the caller has matched the org)."""
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SCIM_DIRECTORY_SIGNAL:
+        return
+    rtype, rid, st = p.get("rtype"), p.get("rid"), p.get("state")
+    if rtype not in RTYPES or st not in _STATES or not isinstance(rid, str) or not _id_ok(rtype, rid):
+        return
+    if not verify_signed(p, _DIR_CORE, resolver.at(r.seq)):
+        return                                         # unsigned / forged / wrong-epoch key → inert
+    at = as_issued_at(p.get("issued_at"))
+    key = (rtype, rid)
+    if at <= hw.get(key, NO_HIGHWATER):
+        return                                         # replay / stale re-append → refused
+    hw[key] = at
+    state[key] = st
+    d = p.get("data")
+    data[key] = (d if isinstance(d, dict) else {}, at)
+
+
+def _materialize(oid: str, state: dict, data: dict, hw: dict) -> tuple:
+    """One org's folded (state, data, hw) as FRESH (users, groups, edges, highwater, jobs) — never a reference into
+    the fold's state (an `OrgDirectory` is mutated by its own writes)."""
+    users: dict = {}
+    groups: dict = {}
+    edges: set = set()
+    jobs: dict = {}
+    for (rtype, rid), st in state.items():
+        if st != "active":
+            continue
+        d, at = data[(rtype, rid)]
+        if rtype == "job":
+            j = _job_from(d)
+            if j is not None:
+                jobs[rid] = j
+        elif rtype == "user":
+            u = _user_from(oid, rid, d, at)
+            if u is not None:
+                users[rid] = u
+        elif rtype == "group":
+            g = _group_from(oid, rid, d, at)
+            if g is not None:
+                groups[rid] = g
+        else:
+            m = _EDGE_ID_RE.fullmatch(rid)
+            if m:
+                edges.add((m.group(1), m.group(2)))
+    return users, groups, edges, dict(hw), jobs
+
+
+class _DirectoryView:
+    """The cached directory fold of EVERY org: org id -> (state, data, hw), exactly what `directory` folds for it."""
+
+    __slots__ = ("orgs",)
+
+    def __init__(self) -> None:
+        self.orgs: "dict[str, tuple[dict, dict, dict]]" = {}
+
+
+def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
+    p = r.payload
+    if not isinstance(p, dict) or p.get("signal") != SCIM_DIRECTORY_SIGNAL:
+        return
+    oid = p.get("org_id")
+    if not isinstance(oid, str) or not oid:
+        return
+    folded = view.orgs.get(oid)
+    if folded is None:
+        folded = view.orgs[oid] = ({}, {}, {})
+    _directory_step(r, resolver, *folded)
+
+
+_DIRECTORY_FOLD = FoldCache("governor.scim_directory", step=_directory_cache_step)
+
+
 class ScimDirectoryRegistry:
     """The owner-signed SCIM directory on the spine. Construction mirrors `OrgRegistry` / `SsoConfigRegistry`:
-    the owner signing key + trusted pubkey default to the persisted owner identity; tests inject keypairs."""
+    the owner signing key + trusted pubkey default to the persisted owner identity; tests inject keypairs.
+    `cached=True` reads through the verified incremental fold cache (the SSO / SCIM provisioner paths)."""
 
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None):
+    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None, cached: bool = False):
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
         self.appended = 0                  # owner-signed records this registry has appended (a request's cost)
+        self.cached = bool(cached)
 
     def _check_record(self, org_id: str, rtype: str, rid: str, state: str) -> None:
         if self.owner_key is None:
@@ -618,51 +698,24 @@ class ScimDirectoryRegistry:
 
     def directory(self, org_id: str) -> OrgDirectory:
         """Fold the spine into ONE org's directory view (owner-key-succession-aware, LWW high-water per
-        (org, rtype, rid); unsigned / forged / stale / malformed records are inert)."""
+        (org, rtype, rid); unsigned / forged / stale / malformed records are inert). With `cached` the fold is the
+        verified incremental fold cache's (`fold_read.cached_read(force=True)`): a read then costs the records
+        appended since the last one plus a copy of this org's state, never a re-verification of the spine."""
         oid = str(org_id or "")
+        if self.cached:
+            hit = cached_read(_DIRECTORY_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
+                              seed=lambda snap: (_DirectoryView(), -1), live_window=True, force=True,
+                              reader=lambda v: _materialize(oid, *v.orgs.get(oid, ({}, {}, {}))))
+            if hit is not _UNCACHED:
+                users, groups, edges, hw, jobs = hit
+                return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=hw, jobs=jobs)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: "dict[tuple[str, str], str]" = {}
         data: "dict[tuple[str, str], tuple[dict, float]]" = {}
         hw: "dict[tuple[str, str], float]" = {}
         for r in self.store.iter_records():
             p = r.payload
-            if not isinstance(p, dict) or p.get("signal") != SCIM_DIRECTORY_SIGNAL or p.get("org_id") != oid:
-                continue
-            rtype, rid, st = p.get("rtype"), p.get("rid"), p.get("state")
-            if rtype not in RTYPES or st not in _STATES or not isinstance(rid, str) or not _id_ok(rtype, rid):
-                continue
-            if not verify_signed(p, _DIR_CORE, resolver.at(r.seq)):
-                continue                                   # unsigned / forged / wrong-epoch key → inert
-            at = as_issued_at(p.get("issued_at"))
-            key = (rtype, rid)
-            if at <= hw.get(key, NO_HIGHWATER):
-                continue                                   # replay / stale re-append → refused
-            hw[key] = at
-            state[key] = st
-            d = p.get("data")
-            data[key] = (d if isinstance(d, dict) else {}, at)
-        users: dict = {}
-        groups: dict = {}
-        edges: set = set()
-        jobs: dict = {}
-        for (rtype, rid), st in state.items():
-            if st != "active":
-                continue
-            d, at = data[(rtype, rid)]
-            if rtype == "job":
-                j = _job_from(d)
-                if j is not None:
-                    jobs[rid] = j
-            elif rtype == "user":
-                u = _user_from(oid, rid, d, at)
-                if u is not None:
-                    users[rid] = u
-            elif rtype == "group":
-                g = _group_from(oid, rid, d, at)
-                if g is not None:
-                    groups[rid] = g
-            else:
-                m = _EDGE_ID_RE.fullmatch(rid)
-                if m:
-                    edges.add((m.group(1), m.group(2)))
+            if isinstance(p, dict) and p.get("org_id") == oid:
+                _directory_step(r, resolver, state, data, hw)
+        users, groups, edges, hw, jobs = _materialize(oid, state, data, hw)
         return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=hw, jobs=jobs)

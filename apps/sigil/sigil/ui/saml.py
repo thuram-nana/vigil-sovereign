@@ -260,6 +260,7 @@ class _PartitionState:
 
 _PARTITIONS: "dict[tuple, _PartitionState]" = {}
 _PARTITIONS_GUARD = threading.Lock()
+_PARTITIONS_INIT = threading.Lock()
 
 
 class SamlReplayLedger:
@@ -288,7 +289,7 @@ class SamlReplayLedger:
     _DEFAULT_MAX = 16384
     _GRACE = 300.0
     _BUCKET_S = 300.0              # a bucket holds the markers whose reap instants fall in the same 5 minutes
-    _SPEND_REAP = 64               # expired markers one spend may reap itself (amortized: >= 1 marker per spend)
+    _SPEND_REAP = 8                # expired markers one spend may reap itself (amortized: >= 1 marker per spend)
     _TMP_PREFIX = ".tmp-"          # an in-flight spend's private temp file (a marker name is 64 hex, never this)
     _TMP_STALE = 3600.0            # real seconds after which a leftover temp file is a crashed spend's, and reaped
 
@@ -328,6 +329,14 @@ class SamlReplayLedger:
             state = _PARTITIONS.get(key)
             if state is not None:
                 return state
+        with _PARTITIONS_INIT:                             # one first scan at a time (a cold burst scans once)
+            with _PARTITIONS_GUARD:
+                state = _PARTITIONS.get(key)
+                if state is not None:
+                    return state
+            return self._scan(part, key)
+
+    def _scan(self, part: Path, key: tuple) -> _PartitionState:
         counts: "dict[int, int]" = {}
         try:
             for entry in os.scandir(part):
@@ -366,17 +375,17 @@ class SamlReplayLedger:
                     continue
                 bucket = int(entry.name[1:])
                 try:
-                    inner = list(os.scandir(entry.path))
+                    with os.scandir(entry.path) as inner:           # read lazily: stop at `limit`, never list it all
+                        for f in inner:
+                            if removed >= limit:
+                                return removed
+                            self._unlink(f.path)
+                            removed += 1
+                            with state.lock:
+                                if state.buckets.get(bucket, 0) > 0:
+                                    state.buckets[bucket] -= 1
                 except OSError:
                     continue
-                for f in inner:
-                    if removed >= limit:
-                        return removed
-                    self._unlink(f.path)
-                    removed += 1
-                    with state.lock:
-                        if state.buckets.get(bucket, 0) > 0:
-                            state.buckets[bucket] -= 1
                 try:
                     os.rmdir(entry.path)
                     with state.lock:
