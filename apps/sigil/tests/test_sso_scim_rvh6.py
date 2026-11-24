@@ -466,22 +466,30 @@ def test_M13_the_oidc_callback_leg_is_counted_per_ip(stack, monkeypatch):
 
 
 def test_M31_a_busy_bound_on_the_oidc_callback_is_a_503_not_a_counted_failure(stack, monkeypatch):
+    """The bound is free for the callback's first step and taken by the time its id_token is to be verified (another
+    leg took the only slot while this one waited on the IdP): a retryable 503 — never a counted, audited failure."""
+    from sigil.ui import oidc as uioidc
     monkeypatch.setattr(config, "SSO_CONCURRENCY", 1)
     monkeypatch.setattr(sso_provision, "_SSO_GATE_WAIT_S", 0.2)
     stack.oidc_org(ORG_A, client_id="cid-a")
     gate = sso_provision._sso_gate_semaphore()
-    assert gate.acquire(timeout=1)
-    from sigil.ui import oidc as uioidc
-    monkeypatch.setattr(uioidc, "exchange_code", lambda *_a, **_k: {"id_token": "x.y.z"})   # the IdP answered
+    taken: list = []
+
+    def exchange(*_a, **_k):                         # the IdP answers — meanwhile another leg takes the only slot
+        assert gate.acquire(timeout=1)
+        taken.append(1)
+        return {"id_token": "x.y.z"}
+    monkeypatch.setattr(uioidc, "exchange_code", exchange)
     monkeypatch.setattr(uioidc.JwksProvider, "keys", lambda self, now=None: [])
+    p = build_provisioner(stack.store())
     try:
-        p = build_provisioner(stack.store())
         with pytest.raises(ProvisionBusy):
             sso_provision.sso_oidc_finish(p, ORG_A, code="c", code_verifier="v" * 43, nonce="n", ip="192.0.2.44")
     finally:
-        gate.release()
+        for _ in taken:
+            gate.release()
+    assert taken == [1]
     assert [a for a in stack.audits("sso_login") if a.get("outcome") == "denied"] == []
-    assert sso_provision._SSO_FAILS.locked((sso_provision._ident(p), "192.0.2.44"), now=time.time()) is None
     assert (sso_provision._ident(p), "192.0.2.44") not in sso_provision._SSO_FAILS._keys
 
 
