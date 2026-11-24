@@ -207,6 +207,22 @@ def test_terms_page_states_the_decided_billing_behaviour():
     assert "no service-level agreement" in text and "signed written agreement" in text
 
 
+def test_terms_page_admits_individuals_and_states_the_consumer_right_of_withdrawal():
+    # Owner, 2026-11-24: VIGIL is for businesses AND individuals. The terms must not restrict use to business purposes,
+    # must keep the 18+ rule, and must state the consumer's 14-day right of withdrawal with the immediate-supply
+    # acknowledgement (unused credits refunded in proportion; the right ends once a purchase's credits are all used).
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    assert "for businesses, professionals and individuals" in text and "at least 18 years old" in text
+    assert "business and professional use" not in text and "internal business purposes" not in text
+    assert "for your own business or personal purposes" in text
+    assert "Right of withdrawal (consumers)" in text and "within 14 days" in text
+    assert "ask us to start supplying it immediately" in text
+    assert "we refund the price of that purchase's credits you have not used, in proportion" in text
+    assert "you lose the right of withdrawal for a purchase once all of its credits have been used" in text
+    # taxes: prices exclude tax, and checkout shows the taxes and the total before payment
+    assert "the checkout page shows them and the total you will pay before you pay" in text
+
+
 def test_terms_page_has_the_reviewed_notice_and_no_draft_banner():
     text = TERMS.read_text(encoding="utf-8")
     main = text[text.index("<main"):]

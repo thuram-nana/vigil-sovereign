@@ -321,3 +321,51 @@ def test_a_bounded_session_create_that_returns_no_session_is_refused(resp):
     api.create = lambda params, *, idempotency_key: resp
     with pytest.raises(UnsupportedCapability):
         _checkout(_provider(api), price="price_pro", payment_plan="price_pro", session_minutes=30)
+
+
+# ---- the required Terms of Service acceptance (VIGIL_STRIPE_TERMS_CONSENT) ------------------------------------------
+class _StripeConsent(_Stripe):
+    """The fake API, plus Stripe echoing the consent requirement it was asked for (as a real session does)."""
+
+    def create(self, params, *, idempotency_key):
+        sess = super().create(params, idempotency_key=idempotency_key)
+        if "consent_collection" in params:
+            sess["consent_collection"] = dict(params["consent_collection"])
+            sess.update(self.override)
+            self.sessions[sess["id"]] = sess
+        return copy.deepcopy(sess)
+
+
+def test_terms_consent_off_leaves_the_checkout_payload_unchanged(monkeypatch):
+    monkeypatch.delenv("VIGIL_STRIPE_TERMS_CONSENT", raising=False)
+    api = _Stripe()
+    _checkout(_provider(api))
+    _checkout(_provider(api), price="price_pro", payment_plan="price_pro", nonce="n2")
+    for params, _k in api.calls:
+        assert "consent_collection" not in params and "custom_text" not in params
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_terms_consent_on_requires_the_terms_box_with_the_immediate_supply_wording(monkeypatch, plan):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    api = _StripeConsent()
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    assert _checkout(_provider(api), **kw).hosted_link
+    params = api.calls[0][0]
+    assert params["consent_collection"] == {"terms_of_service": "required"}
+    msg = params["custom_text"]["terms_of_service_acceptance"]["message"]
+    assert "vigilguard.net/terms" in msg and "start supplying the service" in msg
+    assert "lose my right of withdrawal for this purchase once all of its credits have been used" in msg
+    assert len(msg) <= 1200                                              # Stripe's custom_text limit
+
+
+@pytest.mark.parametrize("echo", ["absent", None, {}, {"terms_of_service": "none"}, {"terms_of_service": "Required"},
+                                  "required"])
+def test_a_session_that_does_not_confirm_the_required_terms_acceptance_is_refused(monkeypatch, echo):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    if echo == "absent":
+        api = _Stripe()                                                  # never echoes consent_collection
+    else:
+        api = _StripeConsent(consent_collection=echo)
+    with pytest.raises(UnsupportedCapability, match="Terms of Service acceptance"):
+        _checkout(_provider(api))

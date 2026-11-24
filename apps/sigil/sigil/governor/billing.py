@@ -271,6 +271,13 @@ _STRIPE_SESSION_MIN_RANGE = (30, 1440)
 _STRIPE_SESSION_SLACK_S = 60
 # A plan (subscription-mode) session accepts these payment methods only; the response must echo them.
 _STRIPE_PLAN_PAYMENT_METHODS = ("card",)
+# The text beside the required Terms of Service checkbox (VIGIL_STRIPE_TERMS_CONSENT): the acceptance of the terms and,
+# for a consumer, the express request for immediate supply and the acknowledgement of when the right of withdrawal ends
+# (Terms §8). Plain text: Stripe renders it under its own "I agree to the Terms of Service" box.
+_STRIPE_TERMS_CONSENT_MESSAGE = (
+    "I agree to the VIGIL Terms of Service at vigilguard.net/terms. I ask SIGIL SARL to start supplying the service "
+    "as soon as I use the credits I am buying, and I understand that I lose my right of withdrawal for this purchase "
+    "once all of its credits have been used.")
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -451,6 +458,11 @@ class StripeBillingProvider(BillingProvider):
             # a plan is paid by card only (this adapter's hosted checkout is card), so its first invoice is
             # settled when the checkout completes rather than days later by a delayed-notification method
             params["payment_method_types"] = list(_STRIPE_PLAN_PAYMENT_METHODS)
+        from .. import config as _config
+        if _config.stripe_terms_consent_enabled():
+            # the customer must tick "I agree to the Terms of Service" (and the immediate-supply wording) to pay
+            params["consent_collection"] = {"terms_of_service": "required"}
+            params["custom_text"] = {"terms_of_service_acceptance": {"message": _STRIPE_TERMS_CONSENT_MESSAGE}}
         if session_minutes is not None:
             sm, (lo, hi) = session_minutes, _STRIPE_SESSION_MIN_RANGE
             if not isinstance(sm, int) or not lo <= sm <= hi:      # (a bool is below the range's floor)
@@ -469,6 +481,11 @@ class StripeBillingProvider(BillingProvider):
                                                  or resp.get("payment_method_types") != params["payment_method_types"]):
             raise UnsupportedCapability("checkout creation failed: the provider did not confirm a card-only plan "
                                         "session")
+        if "consent_collection" in params:
+            echoed = resp.get("consent_collection") if isinstance(resp, Mapping) else None
+            if not isinstance(echoed, Mapping) or echoed.get("terms_of_service") != "required":
+                raise UnsupportedCapability("checkout creation failed: the provider did not confirm the required "
+                                            "Terms of Service acceptance")
         link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
         if not link:
             raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
