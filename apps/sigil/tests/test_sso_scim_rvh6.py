@@ -686,3 +686,15 @@ def test_scim_and_sign_in_reads_are_served_by_the_fold_caches(stack, signed, mon
     full = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
     assert (cached._users, cached._groups, cached._edges, cached._hw, cached._jobs) == \
         (full._users, full._groups, full._edges, full._hw, full._jobs)
+
+
+@pytest.mark.parametrize("offset", [0.0, 1.0, 150.0, 299.0])
+def test_a_spent_marker_outlives_its_accept_until_at_every_bucket_alignment(tmp_path, offset):
+    """Wherever `accept_until` falls inside a time bucket, the spent marker is still there — the replay refused — at
+    every instant up to and including `accept_until`, however hard the partition is reaped meanwhile."""
+    led = uisaml.SamlReplayLedger(tmp_path / "replay")
+    x = 1_000_000_200.0 + offset                       # accept_until
+    assert led.try_spend("a", x, now=x - 3000, scope="o")
+    for now in (x - 600, x - 300, x - 1, x):
+        led.maintain("o", now=now, limit=10 ** 6)
+        assert led.try_spend("a", x, now=now, scope="o") is False, now
