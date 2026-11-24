@@ -128,7 +128,7 @@ license already provides.
 
 ---
 
-**Contact:** https://thuramnana.com · thuram@thuramnana.com
+**Contact:** https://thuramnana.com · info@sigilsovereign.com
 
 *This is a good-faith, standard-practice disclaimer for a dual-use security tool. It is
 not a substitute for advice from a lawyer licensed in your jurisdiction. For maximum

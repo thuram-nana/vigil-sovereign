@@ -322,6 +322,19 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    it). A `401` means the signing secret differs from `VIGIL_STRIPE_WEBHOOK_SECRET`; a `403` or an HTML page means
    Cloudflare challenged it; a `404` means a path other than the exact one (or the Stripe lane is not mounted on
    the proxy).
+8. **Required — turn OFF every Cloudflare feature that rewrites pages or injects a script.** The public Privacy
+   and Cookie notices say our pages load no third-party scripts; these zone settings would make that false at the
+   edge. The strict `default-src 'self'` CSP blocks only part of what they inject (the cross-origin analytics
+   beacon), not the same-origin `/cdn-cgi/` scripts, so the CSP is no substitute for these settings. In the zone
+   `vigilguard.net` (EXTERNAL: Cloudflare's labels may be worded slightly differently):
+   - **Scrape Shield → Email Address Obfuscation: Off** (it rewrites `mailto:` links and injects a decode script).
+   - **Speed → Optimization → Rocket Loader: Off** (it rewrites every `<script>` and injects its loader).
+   - **Web Analytics / Real User Monitoring (RUM): Off**, including **automatic setup / JS snippet injection**
+     for this zone and each host name (it injects the `beacon.min.js` script).
+
+   Check after each change — each command must print nothing:
+   `curl -s https://vigilguard.net/privacy | grep -iE 'cdn-cgi|beacon|rocket|email-decode'` and
+   `curl -s https://app.vigilguard.net/ | grep -iE 'cdn-cgi|beacon|rocket|email-decode'`.
 
 Verify the chain: `curl -sI https://vigilguard.net` returns `200` with the pubui headers and a `cf-ray`
 header (served through Cloudflare); a direct hit to the Elastic IP on 443 from anywhere but a Cloudflare
