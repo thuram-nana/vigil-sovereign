@@ -13,13 +13,24 @@ edge for the keyless public plane only.
 > provisioning. **Secrets never go in this repo or on a command line** — the owner key is KMS-sealed, the
 > Flutterwave secret is injected at the provisioner (`hosting-and-persistence.md` §7).
 
-The three origins (unchanged from the base topology) — only the **public** one goes behind Cloudflare:
+The three origins (unchanged from the base topology) plus the payment-webhook host — only the **public** site
+and the webhook host go behind Cloudflare:
 
 | Host | Serves | Public? | Front |
 |---|---|---|---|
 | `vigilguard.net` | pubui `127.0.0.1:8735` (marketing / tools / CVE — keyless) | yes | **Cloudflare → EC2 nginx** |
 | `app.vigilguard.net` | custui `127.0.0.1:8734` (tenant app) | yes | EC2 nginx (its own vhost; Cloudflare optional, DNS-only or proxied — your call) |
 | `console.vigilguard.net` | `vigil up` `127.0.0.1:8770` (operator) | **no** | keep private / SSO / VPN — never Cloudflare, never a public A record |
+| `hooks.vigilguard.net` | ONLY `POST /webhooks/stripe` + `POST /webhooks/billing` → the `vigil up` proxy `127.0.0.1:8770` | yes (two exact requests) | **Cloudflare → EC2 nginx** (`vigil-hooks.nginx.conf`); everything else is 404 |
+
+Stripe (and Flutterwave) cannot be on the console's private network, so they deliver to the dedicated
+`hooks` host instead: the live Stripe endpoint is `https://hooks.vigilguard.net/webhooks/stripe`. The console
+stays fully private with no webhook exception. The hooks vhost forwards exactly those two `POST`s, byte-exact on
+the raw request line, with a 1 MB body cap and `Host` / `Stripe-Signature` unchanged; the proxy's webhook routes
+answer ahead of its Host/Origin gate, so they accept `Host: hooks.vigilguard.net` while every console path still
+refuses it. It is safe to expose because the body never credits anything: the proxy checks the
+`Stripe-Signature` HMAC before it spools a byte, and the billing drain re-verifies it and re-fetches every
+Checkout Session / Invoice / Subscription from Stripe with the restricted key before the owner catalog mints.
 
 ---
 
@@ -137,12 +148,16 @@ configured in another environment file (such as the calibration one). **Rotate**
 process (the key is read at start). The cockpit's own gateway stays off in production; this parameter does not go
 in `cockpit.env`.
 
-### 2c. nginx for the public origin
+### 2c. nginx for the public origin and the webhook host
 
 Install `apps/sigil/deploy/reverse-proxy/vigil-public.nginx.conf` (it already carries the Cloudflare
 real-IP block). Give the origin a cert for the Cloudflare→origin hop — either Let's Encrypt
 (`certbot certonly -d vigilguard.net -d www.vigilguard.net`) or a **Cloudflare Origin CA** cert (longer
 lived, only trusted by Cloudflare). `nginx -t && systemctl reload nginx`.
+
+Install `apps/sigil/deploy/reverse-proxy/vigil-hooks.nginx.conf` the same way (same Cloudflare real-IP block,
+same commented per-zone AOP lines), with its own cert for `hooks.vigilguard.net` (Let's Encrypt
+`certbot certonly -d hooks.vigilguard.net`, or a Cloudflare Origin CA cert that lists `hooks.vigilguard.net`).
 
 ### 2d. Supervised SaaS background runtime (the drains)
 
@@ -210,6 +225,7 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    | A | `vigilguard.net` (`@`) | **your Elastic IP** | Proxied |
    | CNAME | `www` | `vigilguard.net` | Proxied |
    | A | `app` | your Elastic IP | Proxied |
+   | A | `hooks` | your Elastic IP | Proxied |
    | A | `console` | — | **OMIT — no public record** |
 
    Keep every public-serving record **Proxied** so DNS only ever resolves to Cloudflare, consistent with the
@@ -234,7 +250,7 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    Cloudflare's *shared* AOP cert alone is **not** a sufficient origin lock.
 5. **Cloudflare → Caching → Cache Rules — exactly these two, each matching exact host names.** Never write a
    rule whose expression could match `app.vigilguard.net`: no `*.vigilguard.net`, no
-   `ends_with(http.host, "vigilguard.net")`, no `contains`, no URL pattern without the host. The two host sets
+   `ends_with(http.host, "vigilguard.net")`, no `contains`, no URL pattern without the host. The three host sets
    below do not overlap, so their order does not matter.
 
    Cloudflare's labels (EXTERNAL) may be worded slightly differently; the settings are what matter.
@@ -242,6 +258,7 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
    | Rule name | When incoming requests match (expression editor) | Then |
    |---|---|---|
    | `VIGIL app — bypass` | `(http.host eq "app.vigilguard.net")` | Cache eligibility: **Bypass cache** |
+   | `VIGIL hooks — bypass` | `(http.host eq "hooks.vigilguard.net")` | Cache eligibility: **Bypass cache** |
    | `VIGIL public site — cache` | `(http.host in {"vigilguard.net" "www.vigilguard.net"})` | Cache eligibility: **Eligible for cache**; Edge TTL: **Use cache-control header if present, bypass cache if not**; Browser TTL: **Respect origin TTL** |
 
    - Never set "Ignore cache-control header and use this TTL" (an override TTL) on anything that matches `app`.
@@ -282,14 +299,30 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
        --data '{"purge_everything":true}'
      ```
      This purges exactly the public site: the rules in item 5 make the public site the only host this zone
-     caches (`app` is Bypass, `console` has no public record, and the `www` redirect carries no Cache-Control),
+     caches (`app` and `hooks` are Bypass, `console` has no public record, and the `www` redirect carries no
+     Cache-Control),
      so nothing else is in the cache. It reaches every page, which a list of URLs cannot: `/privacy`, `/careers`,
      every `/vs/…`, `/tools/…`, `/blog/…` and `/cve/…` page, and each query-string variant (`?utm_…`), which
      Cloudflare keeps under its own cache key. A purged object is fetched from the origin again on its next
      request. If a later rule ever makes another host cacheable on this zone, purge by host name instead where
      the plan offers it (`--data '{"hosts":["vigilguard.net"]}'`; EXTERNAL: Cloudflare plan feature).
      Rotate the token by deleting it in Cloudflare and writing a new one into the same file.
-7. **Required — turn OFF every Cloudflare feature that rewrites pages or injects a script.** The public Privacy
+7. **The webhook host (`hooks`) — what Cloudflare must let through.** Register exactly
+   `https://hooks.vigilguard.net/webhooks/stripe` in Stripe (go-live quickstart §9b). The record is Proxied (item
+   3), so Stripe reaches the origin through Cloudflare and the security group stays Cloudflare-only; the cache
+   rule is Bypass (item 5). Stripe's servers are not browsers, so nothing on the zone may challenge them on this
+   host. EXTERNAL (Cloudflare behaviour — check your plan's options): a JavaScript or managed challenge, "I'm
+   Under Attack" mode or a bot-blocking setting that applies to `hooks.vigilguard.net` turns a delivery into a
+   challenge page Stripe cannot pass; where your plan allows, add a WAF custom rule
+   `(http.host eq "hooks.vigilguard.net" and http.request.method eq "POST" and http.request.uri.path in
+   {"/webhooks/stripe" "/webhooks/billing"})` that **skips** only the browser challenges, bot blocking and "I'm
+   Under Attack" mode for those two requests — never rate limiting or the managed WAF rules. If your plan cannot
+   express that rule, leave those features off for `hooks` only; do not turn them off for the whole zone. Confirm with a test event sent by
+   Stripe to the endpoint (Dashboard or Stripe CLI; EXTERNAL): the delivery must show `202` (the proxy spooled
+   it). A `401` means the signing secret differs from `VIGIL_STRIPE_WEBHOOK_SECRET`; a `403` or an HTML page means
+   Cloudflare challenged it; a `404` means a path other than the exact one (or the Stripe lane is not mounted on
+   the proxy).
+8. **Required — turn OFF every Cloudflare feature that rewrites pages or injects a script.** The public Privacy
    and Cookie notices say our pages load no third-party scripts; these zone settings would make that false at the
    edge. The strict `default-src 'self'` CSP blocks only part of what they inject (the cross-origin analytics
    beacon), not the same-origin `/cdn-cgi/` scripts, so the CSP is no substitute for these settings. In the zone

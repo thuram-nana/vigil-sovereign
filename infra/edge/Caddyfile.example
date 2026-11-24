@@ -1,9 +1,10 @@
-# VIGIL edge — reverse proxy + automatic TLS for the three origins, in front of a single `vigil up` host.
+# VIGIL edge — reverse proxy + automatic TLS for the three origins and the payment-webhook host, in front of a
+# single `vigil up` host.
 #
-# Copy to /etc/caddy/Caddyfile (system Caddy) or ~/.config/caddy/Caddyfile, replace the three hostnames
+# Copy to /etc/caddy/Caddyfile (system Caddy) or ~/.config/caddy/Caddyfile, replace the four hostnames
 # and the console allow-list, then `sudo systemctl reload caddy` (or `caddy reload`). Caddy obtains and
 # renews Let's Encrypt certificates automatically — ports 80 and 443 must be reachable from the internet
-# and the three DNS records must already point at this host.
+# and the four DNS records must already point at this host.
 #
 # SECURITY MODEL: the three app ports (8735 / 8734 / 8770) bind to 127.0.0.1 ONLY on the box and are never
 # in a security group. Caddy is the one public listener; it terminates TLS and proxies to the loopback
@@ -28,4 +29,48 @@ console.vigil.example.com {
 	@blocked not remote_ip 203.0.113.0/24
 	respond @blocked "forbidden" 403
 	reverse_proxy 127.0.0.1:8770
+}
+
+# --- the payment webhooks -> the `vigil up` proxy's webhook routes (:8770), and NOTHING else ---
+# The console above stays behind its allow-list with no exception: Stripe (and Flutterwave) cannot be on that list,
+# so they deliver to this separate host instead. Register https://hooks.vigil.example.com/webhooks/stripe in Stripe.
+# WHY IT IS SAFE TO ACCEPT THESE FROM ANYONE: the body is untrusted and never credits an account. The proxy verifies
+# `Stripe-Signature` (HMAC-SHA256 over the raw body, 300 s tolerance) before it spools a byte; the billing drain
+# re-verifies it and RE-FETCHES every Checkout Session / Invoice / Subscription from Stripe with the restricted key,
+# and only those fetched objects, mapped through the owner catalog, can mint. Flutterwave's /webhooks/billing is the
+# same shape (constant-time verif-hash at the proxy, server-side transaction re-verify in the drain).
+hooks.vigil.example.com {
+	# EXACTLY POST /webhooks/stripe and POST /webhooks/billing, byte-exact on the raw request URI (`path` alone
+	# matches a cleaned, case-insensitive path, so `/webhooks/x/../stripe`, `/webhooks//stripe`, `/WEBHOOKS/stripe`,
+	# `/webhooks/%73tripe`, a trailing slash or a query string would otherwise match and be forwarded raw).
+	@provider_webhook {
+		method POST
+		host hooks.vigil.example.com
+		path /webhooks/stripe /webhooks/billing
+		expression `{http.request.uri} in ["/webhooks/stripe", "/webhooks/billing"]`
+	}
+	handle @provider_webhook {
+		request_body {
+			max_size 1MB
+		}
+		# Host and every client header (Stripe-Signature included) are forwarded unchanged; the proxy's webhook
+		# routes are Host-ungated and answer before its routing, so nothing else of the console is reachable.
+		# Buffer the (≤1 MB) body at the edge before dialling the proxy, so a slow or stalled client
+		# never holds a proxy thread or file descriptor.
+		reverse_proxy 127.0.0.1:8770 {
+			request_buffers 1MB
+		}
+	}
+
+	# Everything else on this host: nothing here.
+	handle {
+		@badhost not host hooks.vigil.example.com
+		respond @badhost 421
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
 }

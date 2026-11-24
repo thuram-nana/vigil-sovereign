@@ -1,7 +1,8 @@
 """AWS-DEPLOY.md §3 items 5-6 state the Cloudflare cache rules EXACTLY and the recommended purge safely:
 
-* two cache rules, each on exact host names — the public site (vigilguard.net, www) eligible and respecting the
-  origin's Cache-Control, the customer app (app.vigilguard.net) bypassed — and no rule expression anywhere that
+* three cache rules, each on exact host names — the public site (vigilguard.net, www) eligible and respecting the
+  origin's Cache-Control, the customer app (app.vigilguard.net) and the payment-webhook host (hooks.vigilguard.net)
+  bypassed — and no rule expression anywhere that
   could also match the app (no wildcard, ends_with, contains, matches);
 * the zone's Browser Cache TTL respects the origin, and no override TTL ever applies to the app;
 * the cache headers the runbook quotes are the ones the edges send (read from their source);
@@ -41,11 +42,14 @@ def _rules() -> dict:
     return {name: (expr, then) for name, expr, then in rows}
 
 
-def test_exactly_two_rules_on_exact_hosts():
+def test_exactly_three_rules_on_exact_hosts():
     rules = _rules()
-    assert set(rules) == {"VIGIL app — bypass", "VIGIL public site — cache"}
+    assert set(rules) == {"VIGIL app — bypass", "VIGIL hooks — bypass", "VIGIL public site — cache"}
     expr, then = rules["VIGIL app — bypass"]
     assert expr == '(http.host eq "app.vigilguard.net")' and "**Bypass cache**" in then
+    # the payment-webhook host is never cached either (its two POSTs must reach the origin every time)
+    expr, then = rules["VIGIL hooks — bypass"]
+    assert expr == '(http.host eq "hooks.vigilguard.net")' and "**Bypass cache**" in then
     expr, then = rules["VIGIL public site — cache"]
     assert expr == '(http.host in {"vigilguard.net" "www.vigilguard.net"})'
     assert "**Eligible for cache**" in then
