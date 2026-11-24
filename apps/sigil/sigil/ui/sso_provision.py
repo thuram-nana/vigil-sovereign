@@ -80,7 +80,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -504,7 +504,7 @@ class _SharedSection:
         self.org_id = org_id
         self.records = 0                       # what the request appended (ui.scim sets it)
         self.holds = 0
-        self._flock = None
+        self._flock: "Optional[AbstractContextManager]" = None
         # `member_filter(folded value) -> member_ok(username, payload)`: which membership records of the org can change
         # what this request folded (None: all of them)
         self._member_filter = member_filter
@@ -607,7 +607,7 @@ def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None
     with _sso_gate(oid):                                   # all of the leg's spine reads, inside the org's share
         cfg = cfgreg.config(oid) if oid else None
         active = cfg is not None and _orgs(p).org(oid) is not None
-    if not active:
+    if not active or cfg is None:
         raise ProvisionDenied("single sign-on is not set up for this organization")
     if cfg.protocol == "saml":
         if not cfg.idp_sso_url:
@@ -847,9 +847,10 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
     if m not in _SCIM_METHODS:
         return _scim_refusal(405, f"{m or 'the method'} is not a SCIM method")
     reads = getattr(p, "scim_read_limiter", None)
-    caps = (getattr(p, "scim_deprov_limiter", None), getattr(p, "scim_deprov_floor_limiter", None))
+    deprov_cap = getattr(p, "scim_deprov_limiter", None)
+    deprov_floor = getattr(p, "scim_deprov_floor_limiter", None)
     if getattr(p, "scim_auth_limiter", None) is None or getattr(p, "scim_write_limiter", None) is None \
-            or reads is None or None in caps:
+            or reads is None or deprov_cap is None or deprov_floor is None:
         return _scim_refusal(503, "SCIM is not available on this deployment")
     oid = _org(org_id)
     cfgreg, directory = _registries(p)
@@ -899,9 +900,9 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
     with lock:
         lowers = uiscim.lowers_only(m, path, body)
         if lowers:                           # its own, much higher cap — never the write budget's debt
-            wait = caps[0].locked(deprov, now=t)
+            wait = deprov_cap.locked(deprov, now=t)
             if wait is not None:             # over the cap: still ONE a minute (an offboarding always progresses)
-                floor = caps[1].admit(f"scim:deprov-floor:{oid}", now=t)
+                floor = deprov_floor.admit(f"scim:deprov-floor:{oid}", now=t)
                 if floor is not None:
                     return _scim_refusal(429, "this organization's deprovisioning rate is exceeded; retry shortly",
                                          retry_after=min(wait, floor))

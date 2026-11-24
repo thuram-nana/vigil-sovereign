@@ -50,7 +50,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, cast
 
 from ..reuse import assert_no_offense
 
@@ -269,7 +269,7 @@ def _job_from(data: object) -> Optional[dict]:
             out["rerole"] = True
         return out
     try:
-        out: dict = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
+        out = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
                      "ext": _clean_str(data.get("ext"), "ext")}
     except (DirectoryError, TypeError):
         return None
@@ -294,7 +294,7 @@ class OrgDirectory:
     owner-signed record whose `issued_at` strictly exceeds its key's high-water (so it is honored by any later
     fold) and SKIPS the append when nothing changed (a re-sync does not grow the spine)."""
 
-    def __init__(self, registry: "ScimDirectoryRegistry", org_id: str, *, users: dict, groups: dict,
+    def __init__(self, registry: "ScimDirectoryRegistry | _Journal", org_id: str, *, users: dict, groups: dict,
                  edges: set, highwater: dict, jobs: Optional[dict] = None) -> None:
         self._reg = registry
         self.org_id = org_id
@@ -517,7 +517,8 @@ class OrgDirectory:
         owner-signed records they would append (nothing reaches the spine) until `commit` replays them here. A
         caller computes what a change WILL make of the directory, acts on that first (e.g. lowers a role, with its
         audit), and only then commits — so a failure before the commit leaves the directory exactly as it was."""
-        return OrgDirectory(_Journal(self._reg, self), self.org_id, users=dict(self._users),
+        # a staged view is only ever made from a registry-backed one (a staged view is never staged again)
+        return OrgDirectory(_Journal(cast("ScimDirectoryRegistry", self._reg), self), self.org_id, users=dict(self._users),
                             groups=dict(self._groups), edges=set(self._edges), highwater=dict(self._hw),
                             jobs=self._jobs)
 
@@ -707,8 +708,9 @@ class ScimDirectoryRegistry:
                               seed=lambda snap: (_DirectoryView(), -1), live_window=True, force=True,
                               reader=lambda v: _materialize(oid, *v.orgs.get(oid, ({}, {}, {}))))
             if hit is not _UNCACHED:
-                users, groups, edges, hw, jobs = hit
-                return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=hw, jobs=jobs)
+                users, groups, edges, cached_hw, jobs = hit
+                return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=cached_hw,
+                                    jobs=jobs)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: "dict[tuple[str, str], str]" = {}
         data: "dict[tuple[str, str], tuple[dict, float]]" = {}

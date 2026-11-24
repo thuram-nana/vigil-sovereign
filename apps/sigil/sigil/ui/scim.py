@@ -75,6 +75,7 @@ FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix` (`assert_no_offense()`
 """
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -912,7 +913,7 @@ def _resume_jobs(req: _Req) -> None:
         try:
             if not job.get("delete") and req.dir.group(gid) is None:
                 raise _ScimFail(404, "the pending job's group does not exist")
-            _group_change(req, lambda gid=gid, job=job: _apply_job(req, gid, job), gid=gid, resume=job)
+            _group_change(req, functools.partial(_apply_job, req, gid, job), gid=gid, resume=job)
         except (_ScimFail, ScimError, DirectoryError):
             req.pace(1)
             req.dir.finish_job(gid, now=req.at())
