@@ -41,10 +41,7 @@ credible risk to people in the project's spaces.
 
 Report a concern to the maintainer:
 
-- **Email:** `conduct@thuramnana.com` — *placeholder: confirm this mailbox is monitored
-  before publication*
-- **Fallback (published maintainer address):** `info@sigilsovereign.com`, subject
-  `VIGIL code of conduct`
+- **Email:** `info@sigilsovereign.com`, subject `VIGIL code of conduct`
 
 Reports are read by the maintainer, Junior Thuram Nana, Founder & CEO of SIGIL SARL. They are handled as confidentially
 as is practical; your identity is not disclosed to the person reported without your
