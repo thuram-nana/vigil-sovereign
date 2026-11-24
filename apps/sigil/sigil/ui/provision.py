@@ -435,7 +435,9 @@ def _members_lock(store, *, wait_s: "Optional[float]" = None):
     check AND its audit and owner-signed write — the customer `grant_member`/`revoke_member` in the cockpit and the
     owner verbs in the `sigil` CLI — so two processes always decide against the administrator set the other left,
     never against the same one. Lock order: ``spine_lock`` (in-process) -> this -> the spine's append lock. A
-    bounded wait, then ``LockBusy`` with nothing written; an unusable lock file raises ``OSError`` (fail-closed)."""
+    bounded wait (`wait_s`, default `_MEMBERS_LOCK_WAIT_S`), then ``LockBusy`` with nothing written; an unusable
+    lock file raises ``OSError`` (fail-closed). The verbs take it through `_members_section`, which only ever TRIES
+    it while holding ``spine_lock`` and waits without it."""
     from pathlib import Path
     from vigil_integration.live.seam_lock import locked_file
     raw = getattr(store, "path", None)
