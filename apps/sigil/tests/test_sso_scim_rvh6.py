@@ -159,12 +159,15 @@ def test_a_replay_spend_is_constant_time_and_the_reaping_is_bounded_per_call(tmp
 
 
 def test_a_tenant_filling_its_replay_partition_cannot_turn_sign_ins_into_long_slot_holds(stack, signed, monkeypatch):
-    """The rvH6 shape: org A's partition holds 30,000 live markers (an hour of in-budget 24 h assertions) while 8 of its
-    sign-ins run: every hold of the SSO work bound stays short, and org B's sign-ins are never refused."""
+    """The rvH6 shape: org A's partition is FULL — 12,000 live markers (in-budget 24 h assertions) and 6,000 expired
+    ones, over its cap — while 8 of its sign-ins run: every hold of the SSO work bound stays short, org B's sign-ins
+    are never refused, and the expired markers are reaped outside the bound (org A's spends then find room again)."""
     stack.saml_org(ORG_A)
     stack.saml_org(ORG_B)
     led = uisaml.SamlReplayLedger(config.CUSTOMER_SAML_REPLAY_DIR)
-    _fill(led, ORG_A, led._bucket_of(time.time() + 24 * 3600), 30000)
+    _fill(led, ORG_A, led._bucket_of(time.time() + 24 * 3600), 12000)
+    dead = int(time.time() // led._BUCKET_S) - 10
+    _fill(led, ORG_A, dead, 6000)                                          # expired: for the reaping to remove
     b_assert = [_assertion_b64(stack, ORG_B, f"b{k}@beta.example") for k in range(8)]
     a_assert = [_assertion_b64(stack, ORG_A, f"a{k}@acme.example") for k in range(300)]
     holds: list = []
@@ -212,6 +215,7 @@ def test_a_tenant_filling_its_replay_partition_cannot_turn_sign_ins_into_long_sl
     print(f"\nreplay-fill: gate holds p50 {p50:.3f}s max {max(holds):.3f}s (n={len(holds)}); org B calm "
           f"{[round(x, 3) for x, _ in calm]} -> busy {[(round(x, 3), o) for x, o in busy]}")
     assert all(o == "ok" for _x, o in busy) and p50 < 0.2, (p50, busy)
+    assert not led._bucket_dir(led._partition(ORG_A), dead).exists()      # reaped by the sign-ins, outside the bound
 
 
 def test_a_valid_assertion_flood_from_one_org_measured_against_calm(stack, signed):
@@ -615,3 +619,70 @@ def test_M29_a_deprovisioning_request_charges_the_write_budget_every_record(stac
     monkeypatch.setattr(lr.LoginRateLimiter, "charge", charge)
     assert _scim(stack, ORG_A, "DELETE", f"/Users/{ids[0]}")["status"] == 204
     assert charged == [("writes", 3), ("deprov", 3)], charged
+
+
+def test_a_replay_never_consumes_capacity(tmp_path):
+    led = uisaml.SamlReplayLedger(tmp_path / "replay", max_outstanding=2)
+    now = 1_000_000_000.0
+    assert led.try_spend("a1", now + 60, now=now)
+    for _ in range(5):
+        assert led.try_spend("a1", now + 60, now=now) is False
+    assert led.try_spend("a2", now + 60, now=now)
+    with pytest.raises(uisaml.SamlError, match="capacity"):
+        led.try_spend("a3", now + 60, now=now)
+
+
+def test_the_sso_share_defaults_are_pinned():
+    assert config.SSO_ORG_CONCURRENCY == 1 and config.SSO_CONCURRENCY == 4
+    assert uisaml.SamlReplayLedger._DEFAULT_MAX == 16384 and uisaml.SamlReplayLedger._SPEND_REAP == 8
+    assert uisaml.SamlReplayLedger._BUCKET_S == 300.0
+
+
+def test_a_carried_re_role_mark_survives_a_second_deferral(stack, monkeypatch):
+    """A first deprovisioning removal defers more raises than a job may list (the re-role mark); a second one on the
+    same group defers one more: the mark is kept, and the next budgeted write re-roles all of them."""
+    monkeypatch.setattr(gdir, "MAX_JOB_MEMBERS", 4)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    _ga, uids = _seed(stack, ORG_A, 6, group="Admins", role="org_admin")
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    gs = "grp_" + "6" * 24
+    d.put_group(gs, display_name="Security", now=time.time())
+    for u in uids:
+        d.add_member(gs, u, now=time.time())
+        OrgRegistry(stack.store()).grant_membership(ORG_A, u, "viewer", issued_at=time.time())   # hand-lowered
+    _overdraw(stack, monkeypatch)
+    assert _scim(stack, ORG_A, "PATCH", f"/Groups/{gs}", {"Operations": [
+        {"op": "remove", "path": "members", "value": [{"value": u} for u in uids[:5]]}]})["status"] == 200
+    assert _jobs(stack, ORG_A)[gs].get("rerole") is True
+    assert _scim(stack, ORG_A, "PATCH", f"/Groups/{gs}", {"Operations": [
+        {"op": "remove", "path": f'members[value eq "{uids[5]}"]'}]})["status"] == 200
+    assert _jobs(stack, ORG_A)[gs].get("rerole") is True
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("z@acme.com", "00u-z"))["status"] == 201
+    roles = _roles(stack, ORG_A)
+    assert {roles[u] for u in uids} == {"org_admin"} and _jobs(stack, ORG_A) == {}
+
+
+def test_scim_and_sign_in_reads_are_served_by_the_fold_caches(stack, signed, monkeypatch):
+    """After a first request warms them, a SCIM read and a sign-in fold NOTHING of the spine from its start: the
+    config, org, membership and directory folds are all incremental."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    _seed(stack, ORG_A, 20)
+    assert _scim(stack, ORG_A, "GET", "/Users")["status"] == 200
+    assert _sign_in(stack, ORG_A, f"s0@{ORG_A}.example", ip="192.0.2.61")["org_id"] == ORG_A
+    n = {"v": 0}
+    orig = SpineStore.iter_records
+
+    def iter_records(store, *, since_seq=-1, strict_order=False):
+        if since_seq < 0:
+            n["v"] += 1
+        return orig(store, since_seq=since_seq, strict_order=strict_order)
+    monkeypatch.setattr(SpineStore, "iter_records", iter_records)
+    assert _scim(stack, ORG_A, "GET", "/Users")["status"] == 200
+    assert _sign_in(stack, ORG_A, f"s1@{ORG_A}.example", ip="192.0.2.62")["org_id"] == ORG_A
+    assert n["v"] == 0, n
+    # and the cached directory is the full fold's
+    cached = ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)
+    full = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert (cached._users, cached._groups, cached._edges, cached._hw, cached._jobs) == \
+        (full._users, full._groups, full._edges, full._hw, full._jobs)

@@ -648,15 +648,22 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     try:
         if not oid or not str(request_id or ""):
             raise ValueError("no org / AuthnRequest to bind the response to")
-        with _sso_gate(oid):                               # the whole unauthenticated work, inside the org's share
-            _sign_in_budget_open(p, oid, ip=ip, now=t, reason="saml")
-            if cfgreg.config(oid) is None:
-                raise ValueError("no SSO config for this organization")
-            xml = _decode_saml_response(saml_response)
-            signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg,
-                                                replay_ledger=p.saml_replay, now=t,
-                                                expected_request_id=str(request_id))
-        p.saml_replay.maintain(oid, now=t)                 # the replay ledger's reaping: OUTSIDE the gate, bounded
+        try:
+            with _sso_gate(oid):                           # the whole unauthenticated work, inside the org's share
+                _sign_in_budget_open(p, oid, ip=ip, now=t, reason="saml")
+                if cfgreg.config(oid) is None:
+                    raise ValueError("no SSO config for this organization")
+                xml = _decode_saml_response(saml_response)
+                signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg,
+                                                    replay_ledger=p.saml_replay, now=t,
+                                                    expected_request_id=str(request_id))
+        finally:
+            # the replay ledger's reaping: AFTER the gate is released, bounded per call (single-flight per org), on
+            # every outcome — a partition at capacity frees its expired markers even while its spends are refused
+            try:
+                p.saml_replay.maintain(oid, now=t)
+            except OSError:
+                pass                                       # housekeeping only: never masks the sign-in's outcome
     except (uiscim.SsoLoginError, ValueError):
         _sso_client_failed(p, ip, now=t)
         _bounded_audit(p, "sso_login", org_id=oid, reason="saml", outcome="denied", now=t)
