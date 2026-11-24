@@ -34,9 +34,9 @@ REPO = Path(__file__).resolve().parents[2]
 SECURITY_MD = REPO / "SECURITY.md"
 README = REPO / "README.md"
 
-# The repository's real, already-published security contact (LICENSE-COMMERCIAL.md, LICENSING.md,
-# README). W12-2 reuses it rather than inventing an address.
-CONTACT_EMAIL = "thuram@thuramnana.com"
+# The published security contact: SIGIL SARL's monitored company mailbox, the same one security.txt, the public
+# site and ACCEPTABLE-USE.md name (it replaced a personal mailbox).
+CONTACT_EMAIL = "info@sigilsovereign.com"
 
 
 def _collapsed(text: str) -> str:

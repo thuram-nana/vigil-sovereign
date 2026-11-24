@@ -27,9 +27,9 @@ public issue, pull request, or discussion**:
   choose **"Report a vulnerability"**. This opens a private advisory visible only to you and
   the maintainer. (If the button is not present, GitHub private vulnerability reporting has
   not yet been enabled for this repository — use email below, and it will be enabled.)
-- **Email.** Send to **thuram@thuramnana.com** with a subject line beginning
-  `VIGIL SECURITY:`. This is the maintainer's monitored mailbox (also used for licensing at
-  [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)). No PGP key is published yet; if you need
+- **Email.** Send to **info@sigilsovereign.com** with a subject line beginning
+  `VIGIL SECURITY:`. This is the monitored contact mailbox of SIGIL SARL, which provides the
+  hosted VIGIL service. No PGP key is published yet; if you need
   an encrypted channel, say so in a first (non-sensitive) message and one will be arranged.
 
 There is no paid bug-bounty programme. Good-faith reporters who follow this policy are

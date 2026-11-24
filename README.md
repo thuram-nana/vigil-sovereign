@@ -1785,7 +1785,7 @@ The core terms in one place; the full, consolidated dictionary is in **[`docs/GL
 
 - **Noncommercial use is free** — use, run, study, modify, and share VIGIL for any noncommercial purpose under PolyForm Noncommercial 1.0.0. You may **not** sell it or deploy it commercially/in production without a commercial license.
 - **⚠️ Government & public-sector use is EXCLUDED from the free grant** — a Government-Use Supplemental Term requires any government / agency / ministry / military / law-enforcement / public-authority / state-owned entity to obtain a **Commercial License**, even for a noncommercial purpose.
-- **Commercial, production, or government use** requires a commercial license — contact **thuram@thuramnana.com** (subject: `VIGIL commercial license`).
+- **Commercial, production, or government use** requires a commercial license — contact **info@sigilsovereign.com** (subject: `VIGIL commercial license`).
 
 **Third-party components keep their own licenses** (not under PolyForm-NC), tracked in [`NOTICE`](NOTICE): **Strix** (vendored, `vendor/strix/`) remains **Apache-2.0**; adapted **redamon** portions remain **MIT**; **pentagi** is design-reference only (no code vendored); AI-Gauntlet tools are invoked as subprocesses and keep their own licenses.
 

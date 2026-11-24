@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy — VIGIL</title>
-<meta name="description" content="VIGIL's privacy approach: self-hosted by default (your data never leaves your hardware), with a lean, real-subprocessor-only story for the hosted mode.">
+<meta name="description" content="How SIGIL SARL handles personal data in the hosted VIGIL service: what we collect, the providers that process it, cookies, retention and what happens when an account closes; and how self-hosted VIGIL keeps data on your own hardware.">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
@@ -25,50 +25,115 @@
 <main id="main" class="section">
   <div class="wrap prose">
     <p class="eyebrow">Privacy</p>
-    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">Privacy</h1>
-    <p class="muted">VIGIL has two modes with genuinely different privacy stories. We describe both plainly.
-      This statement reflects how the software behaves; the hosted-mode terms are finalised as that offering
-      ships.</p>
+    <h1>Privacy</h1>
+    <p class="muted">VIGIL is offered in two ways with genuinely different privacy stories: the hosted service at
+      <code>app.vigilguard.net</code>, and VIGIL running on your own hardware. We describe both plainly.</p>
 
-    <h2>Self-hosted / sovereign mode (the default)</h2>
-    <p>You run VIGIL on your own hardware with your own keys. In this mode:</p>
+    <h2 id="hosted">The hosted service</h2>
+    <p>The hosted VIGIL service is provided by <strong>SIGIL SARL</strong> (Sovereign Integrity Governance
+      Infrastructure Labs), Buea, Cameroon, RCCM RC.BUA.2026.B.0190, under our <a href="/terms">Terms of
+      Service</a>. SIGIL SARL decides how your account, sign-in and billing data are used. The testing evidence,
+      findings and reports the Service produces from your hosts are processed on your behalf, to provide the
+      Service to you.</p>
+
+    <h3>What we collect</h3>
     <ul>
-      <li><strong>Your data never leaves your machine.</strong> Scan targets, findings, and evidence stay on
-        your infrastructure.</li>
+      <li><strong>Account data</strong> — the email address and sign-in credentials you use to create and access a
+        workspace, and the workspace's members and their roles.</li>
+      <li><strong>Hosts and testing evidence</strong> — the hosts you register, their ownership proofs, and what
+        the Service captures while testing them. That can include raw responses from your systems and any personal
+        data in them, and the findings and reports drawn from them.</li>
+      <li><strong>Billing data</strong> — your purchases, plan, credit balance and usage statement. Card details
+        are handled by Stripe and are not stored by us.</li>
+      <li><strong>Security records</strong> — records of sign-ins and security-relevant actions, kept to protect
+        your account and the Service.</li>
+    </ul>
+
+    <h3 id="providers">The providers that process it</h3>
+    <p>We use these providers to run the hosted service. We list only providers the hosted service actually
+      uses:</p>
+    <ul>
+      <li><strong>Amazon Web Services (AWS)</strong>, eu-west-1 (Ireland) — hosting, encrypted backups, and
+        account email (verification, receipts and security notices) through Amazon SES.</li>
+      <li><strong>Cloudflare</strong> — DNS, content delivery and DDoS protection for our sites, and routing of
+        email sent to our addresses.</li>
+      <li><strong>Stripe</strong> — card payments in US dollars. Card data is processed by Stripe, not stored by
+        us.</li>
+      <li><strong>Google</strong> — sign-in, only if you choose "Continue with Google".</li>
+      <li><strong>GitHub</strong> — only if you connect a repository for code review.</li>
+      <li><strong>Anthropic</strong> (Claude API) — the AI features. To provide them, relevant content (for
+        example, responses from your hosts and the findings drawn from them) is sent to Anthropic under an API key
+        VIGIL holds.</li>
+    </ul>
+    <p>Some of these providers are based in, or process data in, other countries, including the United
+      States.</p>
+
+    <h3>Cookies and scripts</h3>
+    <p>The hosted service uses only the strictly-necessary session cookies listed in our
+      <a href="/cookies">Cookie notice</a>. Our pages load no third-party scripts, and there is no analytics,
+      advertising or cross-site tracking, so there is no consent banner.</p>
+
+    <h3 id="retention">Retention, and after your account closes</h3>
+    <ul>
+      <li>While your account is open, we keep your data so the Service can show it to you. It does not expire on a
+        timer.</li>
+      <li>When a workspace is closed, it and its memberships are revoked and its plan stops being honoured, so it
+        can no longer be used. Cancel any plan first (<a href="/terms#termination">Terms, section 14</a>) so that
+        the payment processor does not renew it. A member who belongs to no other workspace has their account
+        and sign-in methods revoked too.</li>
+      <li>The workspace's billing records (its credit ledger, invoices and usage records) are kept as append-only,
+        signed history, so that they cannot be silently changed; no customer can read them through the Service any
+        more. Other records
+        of accounts and findings are kept in the same kind of ledger and cannot be deleted one by one. We also keep
+        payment records for as long as the law requires.</li>
+      <li>Your other data is not deleted automatically when the workspace closes. Ask us at
+        <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a> to delete it: we will delete the data
+        that can be deleted, and tell you what we kept and why.</li>
+      <li>Copies of your data remain in encrypted backups taken before it was deleted. Under our current schedule,
+        backups on our server are removed once they are more than 30 days old, except the eight most recent;
+        copies in our off-site backup storage are not removed automatically.</li>
+    </ul>
+
+    <h3>Your rights</h3>
+    <p>You can ask us for access to, correction of, or deletion of your personal data at
+      <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a>. Depending on where you are, you may
+      have further rights, including the right to complain to a data-protection authority. If you need a data
+      processing agreement for personal data in Customer Data (as defined in section 12 of our Terms of Service),
+      write to <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a> and we will agree one with you.</p>
+
+    <h3>Governing law</h3>
+    <p>This notice, like our Terms of Service, is governed by the laws of the Republic of Cameroon, including the
+      applicable OHADA Uniform Acts. This choice of law does not deprive you of the protection of mandatory rules
+      of the law of the country where you are established or habitually reside that cannot be derogated from by
+      agreement.</p>
+
+    <h2 id="self-hosted">Self-hosted VIGIL</h2>
+    <p>You can also run VIGIL on your own hardware with your own keys. SIGIL SARL does not receive your data in
+      this mode:</p>
+    <ul>
+      <li><strong>Your data stays on your infrastructure</strong>, except what you send to the model backend you
+        configure. If that backend is a cloud provider, prompt content (which can include responses from your
+        targets and your findings) goes to that provider; see
+        <a href="https://github.com/thuram-nana/vigil-sovereign/blob/main/ACCEPTABLE-USE.md">ACCEPTABLE-USE.md section 6</a>.</li>
       <li><strong>No telemetry, no analytics, no advertising, no auto-update.</strong> There is no phone-home
-        and every outbound path is source-audited and off by default.</li>
-      <li><strong>No third-party processor.</strong> VIGIL talks only to the LLM backend <em>you</em>
-        configure — which can be a model running entirely on your own hardware.</li>
+        and every outbound path is source-audited.</li>
+      <li><strong>No SIGIL SARL processor.</strong> VIGIL talks only to the LLM backend <em>you</em> configure,
+        which can be a model running entirely on your own hardware.</li>
       <li><strong>Only strictly-necessary cookies</strong> for an operator/console session. No consent banner
         is required because there is nothing non-essential to consent to. <a href="/cookies">Cookie details →</a></li>
       <li><strong>Erasure</strong> is by cryptographic shredding: destroy the keys, and the evidence is
         unrecoverable.</li>
     </ul>
 
-    <h2>Hosted mode (in development)</h2>
-    <p>If you use a VIGIL-operated hosted offering, the operator acts as a processor for the limited data
-      needed to run your account. That story is deliberately lean, and we will only ever list subprocessors
-      that genuinely exist:</p>
-    <ul>
-      <li><strong>Account &amp; sign-up data</strong> — the email and credentials you provide to create an
-        organisation.</li>
-      <li><strong>Payments</strong> — handled by our payment processor (Flutterwave; Stripe when enabled); card data
-        is processed by them, not stored by us.</li>
-      <li><strong>Email delivery</strong> — a transactional email transport you or we configure, for
-        verification and recovery messages.</li>
-      <li><strong>LLM provider</strong> — only the model provider you choose for hosted analysis.</li>
-    </ul>
-    <p>Retention follows documented defaults; you can exercise access and erasure requests, satisfied through
-      the same cryptographic-shredding mechanism. Governing-law and controller-contact details are finalised
-      with counsel before the hosted offering is generally available.</p>
-
     <h2>What we never do</h2>
     <p>We don't sell data, we don't run advertising or cross-site tracking, and we don't claim an
       independent audit or attestation we don't hold. See the <a href="/trust">trust center</a> for the
       control details and our roadmap.</p>
 
-    <h2>Contact</h2>
-    <p>Privacy or security questions: <code>thuram@thuramnana.com</code>.</p>
+    <h2 id="contact">Contact</h2>
+    <p>Privacy or security questions: <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a>, or by
+      post to SIGIL SARL, Buea, Cameroon. To report a vulnerability in VIGIL itself, see our
+      <a href="/.well-known/security.txt">security contact</a>.</p>
   </div>
 </main>
 </body>

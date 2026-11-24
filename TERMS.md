@@ -268,7 +268,7 @@ complete terms for use of VIGIL, subject to the precedence order in § 1.
 
 ---
 
-*Contact:* `thuram@thuramnana.com` · <https://thuramnana.com>
+*Contact:* `info@sigilsovereign.com` · <https://thuramnana.com>
 
 *Maintainer note: §§ 5, 6, and 8 in particular are drafted to a plain-English standard, not
 to a jurisdiction. Have counsel confirm the liability cap, the indemnity, and the
