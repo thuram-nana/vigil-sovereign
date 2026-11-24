@@ -445,6 +445,31 @@ def test_a_deprovisioning_request_resumes_only_the_lowering_steps_of_a_pending_j
     assert {roles[u] for u in uids} == {"org_admin"} and _jobs(stack, ORG_A) == {}
 
 
+def test_a_deprovisioning_request_never_lands_a_pending_jobs_directory_change(stack, monkeypatch):
+    """A rename AWAY from a mapping cut short while still lowering (its rename record not yet committed); then, over
+    budget, an unrelated deprovisioning request: it lowers the job's remaining members, but neither commits the
+    rename nor closes the job — that is left to the org's next budgeted write."""
+    monkeypatch.setattr(uiscim, "MAX_RECORDS_PER_HOLD", 16)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    gid, uids = _seed(stack, ORG_A, 60, group="Admins", role="org_admin")
+    shutil.rmtree(config.SCIM_WRITE_RATELIMIT_DIR, ignore_errors=True)
+    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 10)
+    cut = _cut_after(monkeypatch, 2)
+    assert _scim(stack, ORG_A, "PATCH", f"/Groups/{gid}", {"Operations": [
+        {"op": "replace", "path": "displayName", "value": "Staff"}]})["status"] == 503
+    cut["on"] = False
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("y@acme.com", "00u-y"))["status"] == 429
+    assert _scim(stack, ORG_A, "DELETE", "/Users/sso_" + "0" * 24)["status"] == 404
+    roles = _roles(stack, ORG_A)
+    assert {roles[u] for u in uids} == {"viewer"}                       # every lowering landed
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert d.group(gid).display_name == "Admins" and list(d.jobs()) == [gid]   # the rename did not
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("z@acme.com", "00u-z"))["status"] == 201
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert d.group(gid).display_name == "Staff" and d.jobs() == {}
+
+
 def test_a_deprovisioning_change_never_overwrites_a_jobs_unlanded_directory_change(stack, monkeypatch):
     """A rename AWAY from a mapping cut short while it was still lowering (its rename not yet committed); then, over
     budget, a deprovisioning removal on that same group: it is not exempt (it would overwrite the job's end state),
@@ -561,7 +586,9 @@ def test_S23_P30_a_sign_ins_resumption_of_a_job_is_charged(stack, signed, monkey
     assert _sign_in(stack, ORG_A, f"s0@{ORG_A}.example")["org_id"] == ORG_A
     assert _jobs(stack, ORG_A) == {}
     appended = _n(stack) - before
-    rec = json.loads(build_provisioner(stack.store()).scim_write_limiter._marker(f"scim:writes:{ORG_A}").read_text())
+    marker = build_provisioner(stack.store()).scim_write_limiter._marker(f"scim:writes:{ORG_A}")
+    assert marker.exists(), "the sign-in's resumption of the job was never charged"
+    rec = json.loads(marker.read_text())
     charged = len(rec["fails"]) if rec["fails"] else None
     assert charged is not None and 0 < charged <= appended, (charged, appended)
 
