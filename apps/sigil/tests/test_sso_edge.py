@@ -832,7 +832,8 @@ def test_scim_tokens_are_per_org_and_lockout_never_stalls_the_valid_bearer(stack
     assert stack.scim("DELETE", f"/scim/v2/{ORG_A}/Users/{uid}", ip=shared).status == 204
     assert stack.role(uid, ORG_A) is None
     assert stack.scim("GET", f"/scim/v2/{ORG_A}/Users", token="wrong-" + "z" * 40, ip=shared).status == 429
-    assert len(stack.audits("scim_auth")) == 12                         # 2 cross-org + 10 counted; locked ones not
+    # a refusal an unauthenticated client provokes is audited at most once per org per minute (both orgs here)
+    assert sorted(a["org_id"] for a in stack.audits("scim_auth")) == sorted([ORG_A, ORG_B])
 
 
 def test_scim_role_escalation_never_reaches_founder_or_owner(stack):

@@ -93,6 +93,7 @@ from ..governor.orgs import Membership, OrgRegistry  # noqa: E402
 from ..governor.scim import BearerToken, ScimError, bearer_from_authorization_header  # noqa: E402
 from ..governor.scim_directory import DirectoryError, DirectoryUser, OrgDirectory, ScimDirectoryRegistry  # noqa: E402
 from ..governor.scim_directory import username_key  # noqa: E402
+from ..governor import scim_directory as _scim_dir  # noqa: E402
 from ..governor.sso_config import SsoConfig  # noqa: E402
 
 # The SCIM message / resource schema urns (RFC 7643 / 7644).
@@ -728,6 +729,7 @@ def _revoke(req: _Req, uid: str) -> None:
 
 
 _KEEP, _REVOKE = "keep", "revoke"
+_REROLE = "\x00rerole"                # a carried "re-role every member" mark (never a user id)
 
 
 def _target(req: _Req, uid: str, *, create: bool) -> str:
@@ -815,6 +817,8 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
         if pending:
             raise NeedsWriteBudget("a pending change of this group must land before it is changed again")
         carried = set(old.get("touch", ()))
+        if old.get("rerole"):
+            carried.add(_REROLE)
     staged = req.dir = real.staged()
     try:
         affected = change()
@@ -843,7 +847,11 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
             # a durable pending job: it spans holds, or it carries raises a deprovisioning request may not land
             job = _job_spec(real, staged, gid)
             if defer:
-                job["touch"] = sorted(carried | {uid for uid, t in raising if t != _REVOKE})
+                touch = carried | {uid for uid, t in raising if t != _REVOKE}
+                if _REROLE in touch or len(touch) > _scim_dir.MAX_JOB_MEMBERS:
+                    job["rerole"] = True       # too many to list: the next budgeted write re-roles every member
+                else:
+                    job["touch"] = sorted(touch)
             req.pace(1)
             real.put_job(gid, job, now=req.at())
     for uid, t in lowering:
@@ -878,6 +886,8 @@ def _apply_job(req: _Req, gid: str, job: dict) -> set:
     """Re-stage a pending job's end state onto `req.dir` (a staged copy of the directory as it stands now); returns
     EVERY member before and after, so each one is re-resolved (what is already in step costs nothing)."""
     touch = set(job.get("touch", ()))                 # users a deprovisioning request left to a budgeted write
+    if job.get("rerole"):                             # ... more than a job can list: every member of the org
+        touch |= {u.id for u in req.dir.users()}
     if job.get("delete"):
         return set(req.dir.delete_group(gid, now=req.at())) | touch
     before = set(req.dir.members(gid)) | touch

@@ -248,17 +248,24 @@ def _job_from(data: object) -> Optional[dict]:
     """A pending group job's END STATE, normalized, or None for a malformed record (inert): {"delete": True}, or
     {"delete": False, "name", "ext"} plus either "members" (the final member list) or "add" / "remove" (the member
     delta against the group as it stands) — and, optionally, "touch": users whose role a deprovisioning request left
-    to a budgeted write (re-resolved when the job is finished)."""
+    to a budgeted write (re-resolved when the job is finished), or "rerole": True when they were more than a job may
+    list (`MAX_JOB_MEMBERS`) — then EVERY member of the org is re-resolved when the job is finished."""
     if not isinstance(data, dict):
+        return None
+    rerole = data.get("rerole")
+    if rerole is not None and rerole is not True:
         return None
     if data.get("delete") is True:
         touch = data.get("touch")
-        if touch is None:
-            return {"delete": True}
-        if not isinstance(touch, list) or len(touch) > MAX_JOB_MEMBERS \
-                or any(not isinstance(x, str) or not _USER_ID_RE.fullmatch(x) for x in touch):
-            return None
-        return {"delete": True, "touch": sorted(set(touch))}
+        out: dict = {"delete": True}
+        if touch is not None:
+            if not isinstance(touch, list) or len(touch) > MAX_JOB_MEMBERS \
+                    or any(not isinstance(x, str) or not _USER_ID_RE.fullmatch(x) for x in touch):
+                return None
+            out["touch"] = sorted(set(touch))
+        if rerole:
+            out["rerole"] = True
+        return out
     try:
         out: dict = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
                      "ext": _clean_str(data.get("ext"), "ext")}
@@ -274,6 +281,8 @@ def _job_from(data: object) -> Optional[dict]:
         out[k] = sorted(set(v))
     if "members" in out and ("add" in out or "remove" in out):
         return None
+    if rerole:
+        out["rerole"] = True
     return out
 
 

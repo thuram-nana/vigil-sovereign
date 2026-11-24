@@ -501,6 +501,9 @@ SSO_SIGNINS_PER_MIN = _int_env("VIGIL_SSO_SIGNINS_PER_MIN", 600)
 # process's memory (`ui.sso_provision._LegCounter`).
 SSO_REQUESTS_PER_IP_PER_MIN = _int_env("VIGIL_SSO_REQUESTS_PER_IP_PER_MIN", 300)
 SSO_CONCURRENCY = _int_env("VIGIL_SSO_CONCURRENCY", 4)
+# ... of which ONE org may hold at most VIGIL_SSO_ORG_CONCURRENCY at once (default 1: its further legs wait in its own
+# queue, never in another org's share).
+SSO_ORG_CONCURRENCY = _int_env("VIGIL_SSO_ORG_CONCURRENCY", 1)
 
 
 def apex_impact_enabled() -> bool:

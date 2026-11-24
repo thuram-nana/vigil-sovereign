@@ -695,8 +695,8 @@ def test_a_sign_in_never_folds_while_holding_the_spine_lock(stack, signed, meter
 
 def test_the_per_org_sign_in_budget_refuses_with_nothing_minted(stack, signed, monkeypatch):
     """Over `VIGIL_SSO_SIGNINS_PER_MIN` verified sign-ins a minute, the org's next sign-in is refused BEFORE its
-    assertion is verified or spent: nothing minted, the client IP not counted as a failure, and once the budget is
-    repaid the very same assertion still signs in (it was never consumed)."""
+    assertion is verified or spent: nothing minted, the refusal counted against the client address (in memory) and
+    audited once, and once the budget is repaid the very same assertion still signs in (it was never consumed)."""
     from sigil.ui.provision import ProvisionDenied
     monkeypatch.setattr(config, "SSO_SIGNINS_PER_MIN", 2)
     stack.saml_org(ORG_A)                                       # just-in-time: a sign-in mints the membership
@@ -709,9 +709,9 @@ def test_the_per_org_sign_in_budget_refuses_with_nothing_minted(stack, signed, m
         _sign_in(stack, ORG_A, b64=held, ip="198.51.100.77")
     assert _roles(stack, ORG_A) == before and len(before) == 2
     assert _n(stack) == n0 + 1 and stack.audits("sso_login")[-1]["reason"] == "saml:org_rate"   # one audit row
-    p = build_provisioner(stack.store())
-    assert p.rate_limiter.locked("sso:ip:198.51.100.77") is None and not p.rate_limiter._marker(
-        "sso:ip:198.51.100.77").exists()
+    from sigil.ui import sso_provision
+    key = (sso_provision._ident(build_provisioner(stack.store())), "198.51.100.77")
+    assert sso_provision._SSO_FAILS._keys[key][1] == 1                 # one failure counted, not yet a lockout
     assert _sign_in(stack, ORG_B, "dan@beta.example")["org_id"] == ORG_B           # another org's budget is its own
     import shutil
     shutil.rmtree(config.SSO_SIGNIN_RATELIMIT_DIR, ignore_errors=True)            # the budget repaid

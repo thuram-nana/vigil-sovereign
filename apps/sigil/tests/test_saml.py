@@ -432,8 +432,13 @@ def test_the_replay_ledger_is_bounded(tmp_path):
     assert led.try_spend("a1", NOW + 60, now=NOW) and led.try_spend("a2", NOW + 60, now=NOW)
     with pytest.raises(SamlError, match="capacity"):
         led.try_spend("a3", NOW + 60, now=NOW)
-    # once the spent ids are past NotOnOrAfter (+ grace) they are reaped, and there is room again
-    assert led.try_spend("a3", NOW + 60, now=NOW + 60 + led._GRACE + 1)
+    # the spent ids are reaped once their whole time bucket has passed (never earlier than NotOnOrAfter + grace):
+    # still at capacity inside the bucket, room again after it
+    end_of_bucket = (led._bucket_of(NOW + 60) + 1) * led._BUCKET_S
+    assert end_of_bucket > NOW + 60 + led._GRACE
+    with pytest.raises(SamlError, match="capacity"):
+        led.try_spend("a3", NOW + 60, now=end_of_bucket - 1)
+    assert led.try_spend("a3", NOW + 60, now=end_of_bucket + 1)
 
 
 def test_one_org_can_neither_fill_nor_refuse_another_orgs_replay_ledger(tmp_path):
@@ -484,8 +489,10 @@ def test_a_concurrent_sweep_never_reaps_a_marker_another_spend_is_still_writing(
     assert out == {"a": True, "b": True}
     assert led.try_spend("A", NOW + 300, now=NOW + 1) is False     # A's marker survived: its replay is refused
     assert led.try_spend("B", NOW + 300, now=NOW + 1) is False
-    assert sorted(p.name for p in led._partition("").iterdir()) == sorted(led._marker(led._partition(""), x).name
-                                                                          for x in ("A", "B"))   # no temp left
+    part = led._partition("")
+    assert sorted(f.name for b in part.iterdir() if b.is_dir() for f in b.iterdir()) == sorted(
+        led._marker(part, x, NOW + 300).name for x in ("A", "B"))
+    assert not [p for p in part.iterdir() if p.name.startswith(led._TMP_PREFIX)]          # no temp left
 
 
 def test_an_in_flight_temp_file_never_counts_and_is_reaped_only_once_stale(tmp_path):
@@ -501,7 +508,7 @@ def test_an_in_flight_temp_file_never_counts_and_is_reaped_only_once_stale(tmp_p
     os.utime(stale, (old, old))
     assert led.try_spend("a2", NOW + 60, now=NOW)                # two temp files beside a1 never fill a cap of 2
     assert not stale.exists() and fresh.exists()                 # a crashed spend's stale leftover is reaped
-    assert led._marker(part, "a1").exists() and led._marker(part, "a2").exists()   # the markers are untouched
+    assert led._marker(part, "a1", NOW + 60).exists() and led._marker(part, "a2", NOW + 60).exists()   # untouched
 
 
 def _iso(epoch: float) -> str:

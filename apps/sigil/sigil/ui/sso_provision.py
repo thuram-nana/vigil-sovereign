@@ -120,19 +120,41 @@ def _sso_gate_semaphore() -> "threading.BoundedSemaphore":
         return _SSO_GATES.setdefault(n, threading.BoundedSemaphore(n))
 
 
+_SSO_ORG_GATES: "dict[tuple, threading.BoundedSemaphore]" = {}
+
+
+def _sso_org_semaphore(org_id: str) -> "threading.BoundedSemaphore":
+    """One org's share of the SSO work bound (`VIGIL_SSO_ORG_CONCURRENCY` slots). Only an org with an SSO config ever
+    gets one (the callers check the config first), so their number is bounded by the orgs."""
+    from .. import config
+    n = max(1, int(config.SSO_ORG_CONCURRENCY))
+    with _SSO_GATES_GUARD:
+        return _SSO_ORG_GATES.setdefault((str(org_id or ""), n), threading.BoundedSemaphore(n))
+
+
 @contextmanager
-def _sso_gate() -> Iterator[None]:
+def _sso_gate(org_id: str = "") -> Iterator[None]:
     """One slot of the provisioner's bound on concurrent UNAUTHENTICATED SSO work (the CPU of a sign-in start, an
-    assertion / id_token verification): a short wait (`_SSO_GATE_WAIT_S`, blocked — not polling), then
-    `ProvisionBusy` (503 + Retry-After). A network wait (the OIDC code exchange) never holds a slot."""
+    assertion / id_token verification): first one of the ORG's own slots (`VIGIL_SSO_ORG_CONCURRENCY`, default 1 —
+    an org's further requests wait in that org's own queue and never take another slot of the global bound), then one
+    of the global slots (`VIGIL_SSO_CONCURRENCY`, default 4). A short wait for both together (`_SSO_GATE_WAIT_S`,
+    blocked — not polling), then `ProvisionBusy` (503 + Retry-After). A network wait (the OIDC code exchange) and the
+    replay ledger's reaping never hold a slot."""
     from .provision import ProvisionBusy
-    gate = _sso_gate_semaphore()
-    if not gate.acquire(timeout=_SSO_GATE_WAIT_S):
+    deadline = time.monotonic() + _SSO_GATE_WAIT_S
+    mine = _sso_org_semaphore(org_id)
+    if not mine.acquire(timeout=_SSO_GATE_WAIT_S):
         raise ProvisionBusy(_SSO_GATE_WAIT_S)
     try:
-        yield
+        gate = _sso_gate_semaphore()
+        if not gate.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise ProvisionBusy(_SSO_GATE_WAIT_S)
+        try:
+            yield
+        finally:
+            gate.release()
     finally:
-        gate.release()
+        mine.release()
 
 
 class _LegCounter:
@@ -167,6 +189,128 @@ class _LegCounter:
 _LEGS = _LegCounter()
 
 
+class _FailLock:
+    """A per-key failure lockout in MEMORY (the SSO legs' per-address limiter): `max_fails` failures within `window_s`
+    lock the key for `base_lock_s`, doubling on each further lockout up to `max_lock_s`; a success clears the key.
+    O(1) per call, at most `max_keys` keys (the least recently seen forgotten first)."""
+
+    def __init__(self, *, max_fails: int = 5, window_s: float = 900.0, base_lock_s: float = 60.0,
+                 max_lock_s: float = 3600.0, max_keys: int = 65536) -> None:
+        from collections import OrderedDict
+        self.max_fails, self.window_s = int(max_fails), float(window_s)
+        self.base_lock_s, self.max_lock_s, self.max_keys = float(base_lock_s), float(max_lock_s), int(max_keys)
+        self._lock = threading.Lock()
+        self._keys: "OrderedDict[tuple, list]" = OrderedDict()      # key -> [window start, fails, lock until, locks]
+
+    def locked(self, key: tuple, *, now: float) -> "Optional[float]":
+        with self._lock:
+            slot = self._keys.get(key)
+            if slot is not None and slot[2] > now:
+                return slot[2] - now
+            return None
+
+    def record_failure(self, key: tuple, *, now: float) -> None:
+        with self._lock:
+            slot = self._keys.get(key)
+            if slot is None or now - slot[0] >= self.window_s or now < slot[0]:
+                slot = [now, 0, slot[2] if slot else 0.0, slot[3] if slot else 0]
+            slot[1] += 1
+            if slot[1] >= self.max_fails:
+                slot[3] += 1
+                slot[2] = now + min(self.base_lock_s * (2 ** (slot[3] - 1)), self.max_lock_s)
+                slot[0], slot[1] = now, 0
+            self._keys[key] = slot
+            self._keys.move_to_end(key)
+            while len(self._keys) > self.max_keys:
+                self._keys.popitem(last=False)
+
+    def record_success(self, key: tuple) -> None:
+        with self._lock:
+            self._keys.pop(key, None)
+
+
+_SSO_FAILS = _FailLock()
+
+
+def _client_key(ip: str) -> str:
+    """The address a per-client SSO / SCIM count is kept under: the IPv6 /64 a single client controls (one host is
+    routinely given a whole /64), or the IPv4 address; anything else as given."""
+    import ipaddress
+    raw = str(ip or "").strip()
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+    if addr.version == 6:
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
+def _ident(p) -> str:
+    try:
+        return str(Path(p.store.path).resolve())
+    except Exception:  # noqa: BLE001 — a store without a path still gets one bucket per address
+        return ""
+
+
+def _sso_client_guard(p, ip: str, *, now: float) -> None:
+    """Refuse an address the per-address SSO failure lockout has locked (`_SSO_FAILS`), before anything else."""
+    from .provision import ProvisionRateLimited
+    wait = _SSO_FAILS.locked((_ident(p), _client_key(ip)), now=now)
+    if wait is not None:
+        raise ProvisionRateLimited(wait)
+
+
+def _sso_client_failed(p, ip: str, *, now: float) -> None:
+    _SSO_FAILS.record_failure((_ident(p), _client_key(ip)), now=now)
+
+
+def _sso_client_ok(p, ip: str) -> None:
+    _SSO_FAILS.record_success((_ident(p), _client_key(ip)))
+
+
+class _AuditWindows:
+    """At most ONE spine row per (spine, org, action, reason) per `window_s`, for refusals an unauthenticated client
+    can provoke: the first refusal of a window is written (carrying how many the previous window suppressed), the
+    rest are counted only. So such refusals grow the spine by a constant per org per window, whatever the number of
+    requests or addresses."""
+
+    def __init__(self, *, window_s: float = 60.0, max_keys: int = 65536) -> None:
+        from collections import OrderedDict
+        self.window_s, self.max_keys = float(window_s), int(max_keys)
+        self._lock = threading.Lock()
+        self._keys: "OrderedDict[tuple, list]" = OrderedDict()      # key -> [window start, suppressed]
+
+    def admit(self, key: tuple, *, now: float) -> "Optional[int]":
+        """None ⇒ suppress (counted); else write now, reporting the previous window's suppressed count."""
+        with self._lock:
+            slot = self._keys.get(key)
+            if slot is not None and 0 <= now - slot[0] < self.window_s:
+                slot[1] += 1
+                return None
+            prev = slot[1] if slot is not None else 0
+            self._keys[key] = [now, 0]
+            self._keys.move_to_end(key)
+            while len(self._keys) > self.max_keys:
+                self._keys.popitem(last=False)
+            return prev
+
+
+_AUDIT_WINDOWS = _AuditWindows()
+
+
+def _bounded_audit(p, action: str, *, org_id: str, reason: str, now: float, **fields) -> None:
+    """A refusal audit row an unauthenticated client can provoke, bounded to one per org per minute (`_AuditWindows`);
+    the row names how many the previous minute suppressed."""
+    prev = _AUDIT_WINDOWS.admit((_ident(p), str(org_id or ""), action, reason), now=now)
+    if prev is None:
+        return
+    p._audit(action, org_id=org_id, reason=reason if not prev else f"{reason} (+{prev} in the previous minute)",
+             **fields)
+
+
 def _count_unauthenticated_leg(p, ip: str, *, now: float) -> None:
     """GUARD-AND-COUNT one unauthenticated SSO leg (start, ACS, OIDC callback) for the client IP, successes included
     (`VIGIL_SSO_REQUESTS_PER_IP_PER_MIN` per minute, per spine): over it ⇒ `ProvisionRateLimited`, before any spine
@@ -174,11 +318,7 @@ def _count_unauthenticated_leg(p, ip: str, *, now: float) -> None:
     legs, and a restart only forgets the current minute)."""
     from .. import config
     from .provision import ProvisionRateLimited
-    try:
-        ident = str(Path(p.store.path).resolve())
-    except Exception:  # noqa: BLE001 — a store without a path still gets one bucket per address
-        ident = ""
-    wait = _LEGS.admit((ident, str(ip or "")), limit=config.SSO_REQUESTS_PER_IP_PER_MIN, now=now)
+    wait = _LEGS.admit((_ident(p), _client_key(ip)), limit=config.SSO_REQUESTS_PER_IP_PER_MIN, now=now)
     if wait is not None:
         raise ProvisionRateLimited(wait)
 
@@ -407,13 +547,15 @@ def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None
     org's OWNER-SIGNED config (never a secret). Refused unless the org is active and has an active config."""
     from .provision import ProvisionDenied
     t = p._now() if now is None else float(now)
-    p._rate_guard(f"sso:ip:{ip}", now=t)
+    _sso_client_guard(p, ip, now=t)
     _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     cfgreg, _ = _registries(p)
-    with _sso_gate():
-        cfg = cfgreg.config(oid) if oid else None
-        active = cfg is not None and _orgs(p).org(oid) is not None
+    cfg = cfgreg.config(oid) if oid else None              # the cached fold: no slot needed to find no config
+    if cfg is None:
+        raise ProvisionDenied("single sign-on is not set up for this organization")
+    with _sso_gate(oid):
+        active = _orgs(p).org(oid) is not None
     if not active:
         raise ProvisionDenied("single sign-on is not set up for this organization")
     if cfg.protocol == "saml":
@@ -446,45 +588,49 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     from . import scim as uiscim
     from .provision import ProvisionDenied, ProvisionError
     t = p._now() if now is None else float(now)
-    p._rate_guard(f"sso:ip:{ip}", now=t)
+    _sso_client_guard(p, ip, now=t)
     _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
     if p.saml_replay is None:
         raise ProvisionError("SAML sign-in is not available on this deployment (no replay ledger)")
-    _sign_in_budget_open(p, oid, now=t, reason="saml")
+    _sign_in_budget_open(p, oid, ip=ip, now=t, reason="saml")
     cfgreg, directory = _registries(p)
     try:
-        if not oid or not str(request_id or ""):
-            raise ValueError("no org / AuthnRequest to bind the response to")
-        with _sso_gate():
+        if not oid or not str(request_id or "") or cfgreg.config(oid) is None:
+            raise ValueError("no org / AuthnRequest / SSO config to bind the response to")
+        p.saml_replay.maintain(oid, now=t)                # the replay ledger's reaping: OUTSIDE the gate, bounded
+        with _sso_gate(oid):
             xml = _decode_saml_response(saml_response)
             signin = uiscim.verify_saml_sign_in(xml, org_id=oid, config_registry=cfgreg,
                                                 replay_ledger=p.saml_replay, now=t,
                                                 expected_request_id=str(request_id))
     except (uiscim.SsoLoginError, ValueError):
-        p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
-        p._audit("sso_login", org_id=oid, outcome="denied", reason="saml")
+        _sso_client_failed(p, ip, now=t)
+        _bounded_audit(p, "sso_login", org_id=oid, reason="saml", outcome="denied", now=t)
         raise ProvisionDenied("single sign-on could not be verified")
     try:
         res = _admit_sign_in(p, oid, signin, cfgreg, directory, now=t, reason="saml")
     except uiscim.SsoLoginError:
-        p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
+        _sso_client_failed(p, ip, now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="saml")
         raise ProvisionDenied("single sign-on could not be verified")
-    p.rate_limiter.record_success(f"sso:ip:{ip}")
+    _sso_client_ok(p, ip)
     p._audit("sso_login", requester=res.username, org_id=oid, target=res.username, outcome="ok", reason="saml")
     return {"username": res.username, "org_id": res.org_id}
 
 
-def _sign_in_budget_open(p, org_id: str, *, now: float, reason: str) -> None:
+def _sign_in_budget_open(p, org_id: str, *, ip: str, now: float, reason: str) -> None:
     """Refuse — before any verification, so nothing is spent (the assertion stays unused) — a sign-in of an org whose
     sign-in budget (`VIGIL_SSO_SIGNINS_PER_MIN`) is spent. Only VERIFIED sign-ins spend it (`_admit_sign_in`), so
-    nobody but the org's own IdP can exhaust it. No budget wired ⇒ refused (fail-closed)."""
+    nobody but the org's own IdP can exhaust it. The refusal is counted against the client address (`_SSO_FAILS`) and
+    audited at most once per org per minute (`_bounded_audit`): such a request is not yet authenticated, so it must
+    not grow the spine per request. No budget wired ⇒ refused (fail-closed)."""
     from .provision import ProvisionDenied
     lim = getattr(p, "sso_signin_limiter", None)
     wait = lim.locked(f"sso:org:{org_id}", now=now) if lim is not None else 60.0
     if wait is not None:
-        p._audit("sso_login", org_id=org_id, outcome="denied", reason=f"{reason}:org_rate")
+        _sso_client_failed(p, ip, now=now)
+        _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_rate", outcome="denied", now=now)
         raise ProvisionDenied("too many sign-ins to this organization right now; try again in a minute")
 
 
@@ -523,11 +669,11 @@ def _admit_sign_in(p, org_id: str, signin, cfgreg, directory, *, now: float, rea
     lim = getattr(p, "sso_signin_limiter", None)
     busy = "too many sign-ins to this organization right now; try again in a minute"
     if lim is None or lim.admit(f"sso:org:{org_id}", now=now) is not None:
-        p._audit("sso_login", org_id=org_id, outcome="denied", reason=f"{reason}:org_rate")
+        _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_rate", outcome="denied", now=now)
         raise ProvisionDenied(busy)
     lock = _held(_org_lock(p, org_id, "signin", wait_s=_SIGNIN_LOCK_WAIT_S))
     if lock is None:
-        p._audit("sso_login", org_id=org_id, outcome="denied", reason=f"{reason}:org_busy")
+        _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_busy", outcome="denied", now=now)
         raise ProvisionDenied(busy)
     with lock:
         section = _SharedSection(p, org_id, member_filter=_sign_in_member_filter(org_id))
@@ -561,14 +707,13 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     from .provision import ProvisionDenied
     from .provision import ProvisionRateLimited
     t = p._now() if now is None else float(now)
-    p._rate_guard(f"sso:ip:{ip}", now=t)
+    _sso_client_guard(p, ip, now=t)
     _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
-    _sign_in_budget_open(p, oid, now=t, reason="oidc")
+    _sign_in_budget_open(p, oid, ip=ip, now=t, reason="oidc")
     cfgreg, directory = _registries(p)
     try:
-        with _sso_gate():
-            cfg = cfgreg.config(oid) if oid else None
+        cfg = cfgreg.config(oid) if oid else None             # the cached fold: no slot needed
         if cfg is None or cfg.protocol != "oidc":
             raise uiscim.SsoLoginError("no active enterprise-OIDC config for this organization")
         poster, fetcher = _oidc_transport(p, cfg)
@@ -579,24 +724,24 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
                               clock_skew_seconds=cfg.clock_skew_seconds)
         tokens = _oidc.exchange_code(oc, code, code_verifier=code_verifier, http_post=poster)
         keys = _oidc.JwksProvider(oc.jwks_uri, fetcher=fetcher).keys(now=t)
-        with _sso_gate():
+        with _sso_gate(oid):
             signin = uiscim.verify_oidc_sign_in(tokens["id_token"], org_id=oid, config_registry=cfgreg,
                                                 jwks_keys=keys, expected_nonce=str(nonce or ""), now=t)
     except ProvisionRateLimited:        # the SSO work bound (busy): retryable, not a failed sign-in
         raise
     except Exception:  # noqa: BLE001 — a refused token or an IdP/network fault: one fail-closed denial
-        p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
-        p._audit("sso_login", org_id=oid, outcome="denied", reason="oidc")
+        _sso_client_failed(p, ip, now=t)
+        _bounded_audit(p, "sso_login", org_id=oid, reason="oidc", outcome="denied", now=t)
         raise ProvisionDenied("single sign-on could not be verified")
     try:
         res = _admit_sign_in(p, oid, signin, cfgreg, directory, now=t, reason="oidc")
     except ProvisionDenied:
         raise
     except Exception:  # noqa: BLE001 — a non-member or a refused grant: the same fail-closed denial
-        p.rate_limiter.record_failure(f"sso:ip:{ip}", now=t)
+        _sso_client_failed(p, ip, now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="oidc")
         raise ProvisionDenied("single sign-on could not be verified")
-    p.rate_limiter.record_success(f"sso:ip:{ip}")
+    _sso_client_ok(p, ip)
     p._audit("sso_login", requester=res.username, org_id=oid, target=res.username, outcome="ok", reason="oidc")
     return {"username": res.username, "org_id": res.org_id}
 
@@ -649,7 +794,8 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
     cfg = cfgreg.config(oid) if oid else None
     if not authenticate_scim(cfg, bearer_from_authorization_header(authorization)):
         # per (org, client IP) AND per client IP across EVERY org id: rotating the org id in the path never escapes
-        keys = (f"scim:auth:{oid}:{ip}", f"scim:auth-ip:{ip}")
+        client = _client_key(ip)
+        keys = (f"scim:auth:{oid}:{client}", f"scim:auth-ip:{client}")
         locked = p.scim_auth_limiter.check(*keys, now=t)
         if locked is not None:
             return _scim_refusal(429, "too many failed SCIM authentications; wait and retry", retry_after=locked)
@@ -659,7 +805,7 @@ def scim_request(p, org_id: str, *, method: str, path: str, query: str = "", bod
             # audited only for an org that HAS a SCIM bearer, and at most the per-IP limit's failures per window
             # before that address is locked out — an org id with no SCIM config gets no spine record at all (and the
             # same 401: the answer never tells whether the org exists)
-            p._audit("scim_auth", org_id=oid, outcome="denied")
+            _bounded_audit(p, "scim_auth", org_id=oid, reason="", outcome="denied", now=t)
         return _scim_refusal(401, "SCIM authentication failed")
     over = uiscim.request_bound_refusal(m, path, body)
     if over is not None:                   # refused on its body alone: no lock taken, no budget spent

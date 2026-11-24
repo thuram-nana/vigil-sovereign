@@ -65,6 +65,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -242,29 +243,52 @@ def _parse_instant(value: Optional[str], what: str) -> float:
 # Replay ledger — atomic single-use per assertion ID (mirrors ui.oidc.OidcStateStore's marker idiom).
 # ---------------------------------------------------------------------------------------------------
 
+class _PartitionState:
+    """This process's bookkeeping of one replay partition: how many markers each time bucket holds (so a spend checks
+    the cap in O(1)) — built by one scan of the partition, then kept in step by the spends and the reaps."""
+
+    __slots__ = ("lock", "buckets", "reaping")
+
+    def __init__(self, buckets: "dict[int, int]") -> None:
+        self.lock = threading.Lock()
+        self.buckets = buckets
+        self.reaping = threading.Lock()            # one maintenance pass per partition at a time (others skip)
+
+    def total(self) -> int:
+        return sum(self.buckets.values())
+
+
+_PARTITIONS: "dict[tuple, _PartitionState]" = {}
+_PARTITIONS_GUARD = threading.Lock()
+
+
 class SamlReplayLedger:
     """A durable, atomic single-use ledger over assertion `ID`s. `try_spend(assertion_id, accept_until, scope=org)`
     publishes a marker named `sha256(id)` (fixed hex, no traversal/newline injection) ATOMICALLY: the payload is
     written and fsynced to a private temp file first, then hard-linked to the marker name. The link is the
     serialization point — it fails if the name exists — so of N concurrent presentations exactly ONE wins and the
-    rest are refused (replay); and the marker name never exists without its payload, so a concurrent spend's sweep
-    can never mistake a half-written marker for garbage and reap it (which would let that assertion be spent, and
-    verified, again). A sweep skips the in-flight temp files (they never count as markers) and reaps one only once
-    it is stale by real file age (a crashed spend's leftover).
+    rest are refused (replay); and the marker name never exists without its payload.
 
-    The ledger is PARTITIONED by `scope` (the verifier passes the config's org): each org's markers live in that
-    org's own sub-directory (named by a hash of the org id, never the id itself) with its OWN sweep and its OWN cap,
-    so a tenant — whose IdP chooses its assertions' NotOnOrAfter — can fill only its own partition, never refuse
-    another org's sign-ins at capacity nor make another org's spend sweep its markers. A per-spend sweep + a hard
-    cap bound each partition. `accept_until` is an instant after which NO presentation of that assertion can pass
-    the temporal guard at any allowed skew — the verifier passes its earliest NotOnOrAfter PLUS
-    `_MAX_CLOCK_SKEW_SECONDS`, never the skew in force at the first spend (the owner may raise it, up to that
-    bound, before a replay arrives) — and a marker is reaped only once that instant is more than a grace in the
-    past, so by then the temporal guard refuses the assertion whatever skew the config carries (a marker reaped
-    while any allowed window is still open would let it verify twice). Stdlib only."""
+    PARTITIONED by `scope` (the verifier passes the config's org): each org's markers live in that org's own
+    sub-directory (named by a hash of the org id, never the id itself) with its OWN cap, so a tenant — whose IdP
+    chooses its assertions' NotOnOrAfter — can fill only its own partition, never refuse another org's sign-ins at
+    capacity.
 
-    _DEFAULT_MAX = 65536
+    TIME-BUCKETED, O(1) PER SPEND. Inside a partition a marker lives in the bucket of the instant it may be reaped —
+    `accept_until` + a grace — in `_BUCKET_S` buckets. `accept_until` is derived from the assertion's own signed
+    content (its earliest NotOnOrAfter PLUS the largest skew any config may carry, `_MAX_CLOCK_SKEW_SECONDS`), so every
+    presentation of the same assertion targets the same bucket and finds its marker there. A bucket is removed only
+    once its LAST reap instant has passed, so by then the temporal guard refuses every assertion it held whatever skew
+    the config carries; a spend always targets a bucket still in the future (the guard refused an expired assertion
+    before), so it never races a removal. A spend checks the partition's cap against this process's per-bucket counts
+    (`_PartitionState`, built by one scan of the partition and kept in step) and reaps at most `_SPEND_REAP` expired
+    markers itself; the caller runs the bulk of the reaping OUTSIDE any shared section (`maintain`), bounded per call.
+    The cockpit's provisioner is the one process that spends (the counts are per process). Stdlib only."""
+
+    _DEFAULT_MAX = 16384
     _GRACE = 300.0
+    _BUCKET_S = 300.0              # a bucket holds the markers whose reap instants fall in the same 5 minutes
+    _SPEND_REAP = 64               # expired markers one spend may reap itself (amortized: >= 1 marker per spend)
     _TMP_PREFIX = ".tmp-"          # an in-flight spend's private temp file (a marker name is 64 hex, never this)
     _TMP_STALE = 3600.0            # real seconds after which a leftover temp file is a crashed spend's, and reaped
 
@@ -275,37 +299,18 @@ class SamlReplayLedger:
     def _partition(self, scope: str) -> Path:
         return self.dir / hashlib.sha256(("scope\x00" + str(scope or "")).encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _marker(part: Path, assertion_id: str) -> Path:
-        return part / hashlib.sha256(assertion_id.encode("utf-8")).hexdigest()
+    @classmethod
+    def _bucket_of(cls, accept_until: float) -> int:
+        return int((float(accept_until) + cls._GRACE) // cls._BUCKET_S)
 
-    def _sweep(self, part: Path, now: float) -> int:
-        live = 0
-        try:
-            entries = list(os.scandir(part))
-        except OSError:
-            return 0
-        for entry in entries:
-            if entry.name.startswith(self._TMP_PREFIX):
-                # Another spend's temp file, not a marker: never counted, and never reaped while that spend may still
-                # be linking it — only once it is stale by REAL file age (a crashed spend's leftover).
-                try:
-                    if time.time() - entry.stat(follow_symlinks=False).st_mtime > self._TMP_STALE:
-                        self._unlink(entry.path)
-                except OSError:
-                    pass
-                continue
-            try:
-                rec = json.loads(Path(entry.path).read_text(encoding="utf-8"))
-                expiry = float(rec["exp"])
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                self._unlink(entry.path)
-                continue
-            if now > expiry + self._GRACE:
-                self._unlink(entry.path)
-            else:
-                live += 1
-        return live
+    @staticmethod
+    def _bucket_dir(part: Path, bucket: int) -> Path:
+        return part / f"b{bucket:012d}"
+
+    @classmethod
+    def _marker(cls, part: Path, assertion_id: str, accept_until: float) -> Path:
+        return cls._bucket_dir(part, cls._bucket_of(accept_until)) / hashlib.sha256(
+            assertion_id.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _unlink(path: str) -> None:
@@ -313,6 +318,83 @@ class SamlReplayLedger:
             os.unlink(path)
         except OSError:
             pass
+
+    def _state(self, part: Path) -> _PartitionState:
+        """This process's counts for `part` (keyed by the directory's identity, so a re-created directory starts
+        afresh) — built by ONE scan of its buckets the first time."""
+        st_dir = os.stat(part, follow_symlinks=False)
+        key = (str(part.resolve()), st_dir.st_ino, st_dir.st_dev)
+        with _PARTITIONS_GUARD:
+            state = _PARTITIONS.get(key)
+            if state is not None:
+                return state
+        counts: "dict[int, int]" = {}
+        try:
+            for entry in os.scandir(part):
+                if entry.name.startswith("b") and entry.name[1:].isdigit() and entry.is_dir(follow_symlinks=False):
+                    try:
+                        counts[int(entry.name[1:])] = sum(1 for e in os.scandir(entry.path)
+                                                          if not e.name.startswith(self._TMP_PREFIX))
+                    except OSError:
+                        counts[int(entry.name[1:])] = 0
+        except OSError:
+            pass
+        with _PARTITIONS_GUARD:
+            return _PARTITIONS.setdefault(key, _PartitionState(counts))
+
+    def _reap(self, part: Path, state: _PartitionState, now: float, limit: int) -> int:
+        """Remove up to `limit` markers of the buckets whose every reap instant has passed (a bucket emptied is removed),
+        and the partition's stale temp files. One pass per partition at a time; a pass already running is skipped."""
+        if not state.reaping.acquire(blocking=False):
+            return 0
+        removed = 0
+        try:
+            current = int(float(now) // self._BUCKET_S)        # buckets below this one have fully passed
+            try:
+                entries = sorted(os.scandir(part), key=lambda e: e.name)
+            except OSError:
+                return 0
+            for entry in entries:
+                if entry.name.startswith(self._TMP_PREFIX):
+                    try:
+                        if time.time() - entry.stat(follow_symlinks=False).st_mtime > self._TMP_STALE:
+                            self._unlink(entry.path)
+                    except OSError:
+                        pass
+                    continue
+                if not (entry.name.startswith("b") and entry.name[1:].isdigit()) or int(entry.name[1:]) >= current:
+                    continue
+                bucket = int(entry.name[1:])
+                try:
+                    inner = list(os.scandir(entry.path))
+                except OSError:
+                    continue
+                for f in inner:
+                    if removed >= limit:
+                        return removed
+                    self._unlink(f.path)
+                    removed += 1
+                    with state.lock:
+                        if state.buckets.get(bucket, 0) > 0:
+                            state.buckets[bucket] -= 1
+                try:
+                    os.rmdir(entry.path)
+                    with state.lock:
+                        state.buckets.pop(bucket, None)
+                except OSError:
+                    pass
+            return removed
+        finally:
+            state.reaping.release()
+
+    def maintain(self, scope: str = "", *, now: Optional[float] = None, limit: int = 4096) -> int:
+        """Reap up to `limit` expired markers of `scope`'s partition (and build this process's counts for it, the first
+        time). For the caller to run OUTSIDE any shared section before it verifies; a spend then stays O(1)."""
+        part = self._partition(scope)
+        if not part.is_dir():
+            return 0
+        t = time.time() if now is None else float(now)
+        return self._reap(part, self._state(part), t, int(limit))
 
     def try_spend(self, assertion_id: str, accept_until: float, *, now: Optional[float] = None,
                   scope: str = "") -> bool:
@@ -326,27 +408,38 @@ class SamlReplayLedger:
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         part.mkdir(exist_ok=True, mode=0o700)
         t = time.time() if now is None else float(now)
-        if self._sweep(part, t) >= self.max_outstanding:
-            raise SamlError("SAML replay ledger at capacity")
-        marker = self._marker(part, aid)
+        state = self._state(part)
+        self._reap(part, state, t, self._SPEND_REAP)
+        bucket = self._bucket_of(accept_until)
+        with state.lock:
+            if state.total() >= self.max_outstanding:
+                raise SamlError("SAML replay ledger at capacity")
+            state.buckets[bucket] = state.buckets.get(bucket, 0) + 1     # reserved; returned on a replay / a fault
+        marker = self._marker(part, aid, accept_until)
         payload = json.dumps({"exp": float(accept_until)}, ensure_ascii=False)
-        # The payload goes to a private temp file (written + fsynced) and is then hard-linked to the marker name, so
-        # the marker never exists without its payload; the link is the serialization point (an existing name ⇒ a
-        # replay). The temp name is removed either way.
         tmp = part / (self._TMP_PREFIX + secrets.token_hex(16))
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        spent = False
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
+            marker.parent.mkdir(exist_ok=True, mode=0o700)
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
             try:
-                os.link(str(tmp), str(marker))
-            except FileExistsError:
-                return False                              # already spent → replay refused
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                try:
+                    os.link(str(tmp), str(marker))
+                except FileExistsError:
+                    return False                              # already spent → replay refused
+                spent = True
+                return True
+            finally:
+                self._unlink(str(tmp))
         finally:
-            self._unlink(str(tmp))
-        return True
+            if not spent:
+                with state.lock:
+                    if state.buckets.get(bucket, 0) > 0:
+                        state.buckets[bucket] -= 1
 
 
 # ---------------------------------------------------------------------------------------------------
