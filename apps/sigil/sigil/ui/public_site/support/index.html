@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Support — VIGIL</title>
-<meta name="description" content="Get help with VIGIL: coordinated vulnerability disclosure, self-hosted and billing questions, and how to request access.">
+<meta name="description" content="Get help with VIGIL: email support with a 2-business-day reply target, credits and plans, password reset, cancellations, refunds, data deletion and security reports.">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
@@ -23,52 +23,57 @@
 </div></header>
 
 <main id="main" class="section">
-  <div class="wrap">
+  <div class="wrap prose">
     <p class="eyebrow">Support</p>
-    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-2)">How can we help?</h1>
-    <p class="muted" style="max-width:62ch; margin:0 0 var(--sp-6)">VIGIL is self-hosted, so most answers
-      live in the product and the docs that ship with it. Here's how to reach a human and resolve the common
-      things.</p>
+    <h1>How can we help?</h1>
+    <p>Email <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a>. A real person at SIGIL SARL reads
+      every message, and we aim to reply within <strong>2 business days</strong>. That is a target, not a promised
+      response time: the Service has no service-level agreement unless one is agreed in writing
+      (<a href="/terms">Terms of Service</a>).</p>
+    <p>To help us help you, include the name of your workspace and what you were doing when the problem appeared.
+      Never send us a password, a one-time code or a secret: we will never ask for one.</p>
 
-    <div class="grid grid--2">
-      <div class="card">
-        <h3>Request access or a walkthrough</h3>
-        <p>Want to run VIGIL or see a finding prove itself? Email us and we'll set you up.</p>
-        <p style="margin-top:var(--sp-3)"><a class="btn btn--primary" href="mailto:info@sigilsovereign.com?subject=VIGIL%20access">Email the team</a></p>
-      </div>
-      <div class="card">
-        <h3>Report a security issue in VIGIL</h3>
-        <p>Coordinated disclosure with safe harbour for good-faith research: a 3-day acknowledgement and a
-          90-day window. Email <code>info@sigilsovereign.com</code> or open a private advisory on our
-          repository. Please don't file security reports in public issues.</p>
-      </div>
-    </div>
+    <h2 id="security">Report a security issue in VIGIL</h2>
+    <p>Coordinated disclosure with safe harbour for good-faith research: we aim to acknowledge a report
+      within 3 business days, and the default disclosure window is 90 days. Email <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a> or open a private advisory
+      on our repository; our <a href="/.well-known/security.txt">security.txt</a> has the details. Please don't
+      file security reports in public issues.</p>
 
-    <hr class="rule">
+    <h2 id="faq">Common questions about the hosted service</h2>
 
-    <h2 style="font-size:var(--fs-lg); margin:0 0 var(--sp-4)">Common questions</h2>
-    <div class="prose">
-      <h3>Where is the documentation?</h3>
-      <p>The full operator manual ships inside the product — open it from the cockpit. Deployment and
-        bring-up guides live with the source you run.</p>
-      <h3>Is my data sent anywhere?</h3>
-      <p>No. VIGIL runs on your hardware and talks only to the LLM backend you configure (which can be a
-        local model). There's no telemetry and no auto-update. <a href="/trust">See the trust center →</a></p>
-      <h3>How do I erase an engagement's data?</h3>
-      <p>Evidence is erased by cryptographic shredding — the keys that decrypt it are destroyed, so the data
-        is unrecoverable. It's an operator action on your own deployment.</p>
-      <h3>Self-hosted vs. hosted — which am I using?</h3>
-      <p>The default is sovereign and self-hosted: your keys, your machine. A hosted offering is in
-        development; until it ships, account/billing questions below apply only where you've explicitly
-        enabled them.</p>
-      <h3>Billing &amp; account recovery</h3>
-      <p>Where the hosted billing surface is enabled, manage plans from your account area; password recovery
-        is a single-use emailed link that also signs you out everywhere. These apply only to the hosted mode.</p>
-    </div>
+    <h3>How do credits and plans work?</h3>
+    <p>Everything VIGIL does is paid in credits. You can buy credit packs from $5 to $100 ($1 = 100 credits), and
+      purchased credits never expire. A monthly plan (Starter, Pro or Team) adds a set number of credits each month;
+      plan credits are used first and expire at the end of the month, then your purchased credits are used. If both
+      run out, an assessment pauses safely with its results so far kept, and continues when you add credits.</p>
 
-    <hr class="rule">
-    <p class="muted" style="font-size:var(--fs-xs)">We don't run a public chat widget or ticket queue — email
-      reaches a real person, and security reports are triaged first.</p>
+    <h3>I forgot my password</h3>
+    <p>Choose <em>Forgot your password?</em> on the sign-in screen. We email you a single-use link and a 6-digit code;
+      either one lets you choose a new password. If you signed up with Google, sign in with Google instead.</p>
+
+    <h3>How do I cancel or change my plan?</h3>
+    <p>On the Plans screen. A change or a cancellation takes effect at your next renewal, and a cancelled plan runs
+      to the end of the month you have already paid for. In the last day before a renewal the screen may refuse; if
+      it does, write to us before the renewal date and we will stop it.</p>
+
+    <h3>Can I get a refund?</h3>
+    <p>See section 8 of the <a href="/terms#refunds">Terms of Service</a>. If you buy as a consumer, you may have a
+      14-day right of withdrawal, and we refund the credits of that purchase you have not used.</p>
+
+    <h3>Which systems can I test?</h3>
+    <p>Only systems you are authorized to test. VIGIL tests a host only after you prove you control it (a DNS record,
+      a file under <code>/.well-known/</code>, or a meta tag); see section 3 of the
+      <a href="/terms#authorization">Terms of Service</a>.</p>
+
+    <h3>How do I delete my data or close my account?</h3>
+    <p>Write to us at <a href="mailto:info@sigilsovereign.com">info@sigilsovereign.com</a>. We answer deletion
+      requests within 30 days: we delete the data that can be deleted and tell you what we kept and why. Our
+      <a href="/privacy#retention">Privacy notice</a> explains what is kept after an account closes.</p>
+
+    <h2 id="self-hosted">Self-hosted VIGIL</h2>
+    <p>If you run VIGIL on your own hardware, the operator manual ships inside the product and the deployment guides
+      live with the source you run. Your data stays on your infrastructure, except what you send to the model backend
+      you configure; see the <a href="/privacy#self-hosted">Privacy notice</a>.</p>
   </div>
 </main>
 </body>

@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
 TERMS = ROOT / "terms" / "index.html"
 PRIVACY = ROOT / "privacy" / "index.html"
 COOKIES = ROOT / "cookies" / "index.html"
+SUPPORT = ROOT / "support" / "index.html"
 SECURITY_TXT = ROOT / ".well-known" / "security.txt"
 REPO_DOCS = "https://github.com/thuram-nana/vigil-sovereign/blob/main/"
 COMPANY_SITE = "https://sigilsovereign.com"
@@ -140,8 +141,8 @@ def test_terms_is_in_the_sitemap():
 # --- self-contained and every link resolves ------------------------------------------------------------------------
 
 def test_legal_pages_load_nothing_off_site_and_run_no_script():
-    # the terms, the privacy notice and the cookie notice: no script, no inline style, nothing loaded off-site
-    for page in (TERMS, PRIVACY, COOKIES):
+    # the terms, the privacy, cookie and support pages: no script, no inline style, nothing loaded off-site
+    for page in (TERMS, PRIVACY, COOKIES, SUPPORT):
         name = page.parent.name
         refs = _refs(page.read_text(encoding="utf-8"))
         assert refs.scripts == 0, f"/{name} runs a script"
@@ -341,3 +342,16 @@ def test_terms_page_has_no_owner_placeholders():
     left = owner_markers(TERMS.read_text(encoding="utf-8"))
     assert not left, ("the Terms of Service still carry owner placeholders — the owner must supply:\n  "
                       + "\n  ".join(left))
+
+
+def test_the_support_page_describes_the_hosted_service_and_the_owners_support_commitment():
+    # Owner, 2026-11-24 (decision 4): support goes to info@sigilsovereign.com with a 2-business-day reply TARGET (no
+    # SLA). The page must describe the live hosted service, never the old "self-hosted only / hosted in development"
+    # story, and must not contradict the privacy notice (data does go to the model provider in hosted mode).
+    text = re.sub(r"\s+", " ", SUPPORT.read_text(encoding="utf-8"))
+    assert "mailto:info@sigilsovereign.com" in text and "within <strong>2 business days</strong>" in text
+    assert "a target, not a promised response time" in text and "no service-level agreement" in text
+    for stale in ("in development", "VIGIL is self-hosted", "There's no telemetry", "Request access or a walkthrough"):
+        assert stale not in text, stale
+    assert "We answer deletion requests within 30 days" in text      # the approved retention schedule (decision 3)
+    assert "never ask for one" in text                              # no password / code / secret by email
