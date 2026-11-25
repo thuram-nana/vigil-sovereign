@@ -264,6 +264,7 @@
         h("button.cust-nav-link", { type: "button", text: "Create an account", onClick: function () { nav("#/signup"); } }),
       ]),
       passkeyBlock(),
+      ssoBlock(),
       h("div.row", {}, [
         h("button.cust-nav-link", { type: "button", text: "Forgot your password?", onClick: function () { nav("#/recover"); } }),
       ]),
@@ -306,6 +307,47 @@
     clearErr();
     if (handoffOn()) { startHandoff(); return; }
     location.assign(API + "/oidc/login");          // relative: the edge answers with the redirect to Google
+  }
+
+  // ---- Sign in with your company (enterprise SSO: SAML / per-org OIDC) -------------------------------
+  // Shown only while the edge has enterprise SSO on (data-sso="1", written at startup when VIGIL_CUSTOMER_SSO is
+  // on; off ⇒ the button is absent and every /api/customer/sso/* route 404s). The button reveals a workspace-id
+  // field — there is no email→org discovery, so the person names their workspace — and Continue is a top-level
+  // navigation to the edge's per-org SSO login route, which redirects to the org's IdP. The org value is
+  // URL-encoded and the route is same-origin (no open redirect); the edge validates the org (unknown ⇒ its own
+  // error). This page never sees an IdP assertion or token.
+  function ssoOn() { return pageFlag("sso"); }
+  function ssoBlock() {
+    if (!ssoOn()) return null;
+    var holder = h("div.cust-sso-block", {});
+    function go() {
+      var ws = val("sso-workspace");
+      if (!ws) { err("Enter your company or workspace ID."); return; }
+      var url;
+      try { url = API + "/sso/login?org=" + encodeURIComponent(ws); }   // encode: same-origin, no injection
+      catch (e) { err("Enter a valid company or workspace ID."); return; }  // malformed (e.g. lone surrogate) ⇒ no nav
+      location.assign(url);
+    }
+    function reveal() {
+      clearErr();
+      VUI.mount(holder, [
+        field("sso-workspace", "Company or workspace ID", "text"),
+        h("div.row", {}, [
+          h("button.btn.btn-primary.cust-sso-go", { type: "button", text: "Continue", onClick: go }),
+          h("button.cust-nav-link", { type: "button", text: "Cancel", onClick: collapse }),
+        ]),
+      ]);
+      var el = VUI.$("#sso-workspace");
+      if (el) { el.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); }); el.focus(); }
+    }
+    function collapse() {
+      clearErr();
+      VUI.mount(holder, [
+        h("button.btn.cust-sso", { type: "button", text: "Sign in with your company", onClick: reveal }),
+      ]);
+    }
+    collapse();
+    return holder;
   }
 
   // ---- Google sign-in inside the installed app: the hand-off ----------------------------------------------
