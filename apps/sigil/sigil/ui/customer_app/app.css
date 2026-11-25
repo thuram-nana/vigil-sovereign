@@ -258,6 +258,24 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-code-findings { display: grid; gap: 8px; }
 .cust-code-finding { display: grid; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); }
 .cust-code-finding p { margin: 0; }
+/* legal/governance S1 — the Settings hub (only while the edge has VIGIL_CUSTOMER_SETTINGS on): the General tab (its
+   labelled fields, its Save, the notice when the details could not be loaded) and the card linking the other screens */
+#cust-settings-general { margin-bottom: 16px; }
+.cust-settings-general-form, .cust-settings-links { display: grid; gap: 6px; max-width: 640px; }
+.cust-settings-general-form h3, .cust-settings-general-form p,
+.cust-settings-links h3, .cust-settings-links p { margin: 0 0 6px; }
+.cust-settings-general-form .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.cust-field { display: grid; gap: 4px; margin-top: 6px; }
+.cust-field label { font-size: 0.85rem; opacity: 0.8; }
+/* the shared kit styles text inputs but not email or phone ones: the same look for every field of the tab */
+.cust-field input { width: 100%; box-sizing: border-box; }
+.cust-field input[type=email], .cust-field input[type=tel] { background: var(--bg-2);
+  border: 1px solid var(--border-strong); color: var(--text-0); border-radius: var(--r-2); padding: 11px 14px;
+  font-size: var(--fs-md); font-family: inherit; }
+.cust-pref-save, .cust-pref-retry { min-width: 7rem; justify-content: center; }
+.cust-settings-error { color: var(--st-blocked, #e2776c); font-weight: 600; }
+.cust-settings-links .row { margin: 0; }
+.cust-settings-link { width: 100%; justify-content: flex-start; text-align: left; }
 
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {

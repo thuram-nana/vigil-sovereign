@@ -215,6 +215,13 @@ CUSTOMER_PASSKEY_SIGNCOUNT_DIR = _customer / "passkey_signcount"    # per-creden
 # Whether each customer account has finished or skipped the onboarding tour (ui/onboarding_store.py): a UI preference,
 # never money or authority — one hashed-name JSON file per account. Losing it only shows the tour once more.
 CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
+# The settings shell's General-tab preferences (ui/preferences_store.py): the legal-entity / contact profile a
+# workspace records (entity name, registered address, contractual + emergency contact). A UI preference, never money
+# or authority and never on the signed spine — one hashed-name JSON file per account; written only while
+# VIGIL_CUSTOMER_SETTINGS is on. The customer typed it and nothing regenerates it, so it is NOT under customer/ (the
+# operational markers a backup excludes): it is its own top-level directory, which the backup captures
+# (backup._STATE_DIRS) and a restore brings back.
+CUSTOMER_PREFERENCES_DIR = SIGIL_HOME / "customer_preferences"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -723,6 +730,19 @@ def customer_team_ui_enabled() -> bool:
     for the page (it is written into the page, so a change takes effect at the edge's next start) and on every request
     by the edge and the cockpit for the routes."""
     return (os.environ.get("VIGIL_CUSTOMER_TEAM_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_settings_enabled() -> bool:
+    """True iff the customer app shows its settings shell (`VIGIL_CUSTOMER_SETTINGS` affirmative; legal/governance S1):
+    the #/settings hub (a General tab that captures the legal-entity / contact profile through
+    ``GET/POST api/customer/preferences`` for the SESSION's account only — ``ui/preferences_store.py``, a UI preference
+    never on the signed spine) and in-hub links to the existing Account-security, Team (authorized administrators) and
+    Billing screens. It adds no new authority or money control. The edge's ``api/customer/preferences`` route and the
+    cockpit's ``preferences_get`` / ``preferences_set`` actions exist only while this is on.
+    OFF by default: the app is exactly as before (no Settings tab, #/settings is the home screen exactly as any unknown
+    route, and no preferences call is made). The edge reads it at startup (it is written into the page) and on each
+    request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_SETTINGS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_overview_enabled() -> bool:
