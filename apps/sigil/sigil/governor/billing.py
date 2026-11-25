@@ -96,10 +96,11 @@ class UnaccountedPayment(ValueError):
 
 
 class ReversalUnaccounted(ValueError):
-    """W5 — a SIGNED processor reversal (a dispute or a refund) VIGIL cannot account for in the wallet: the charge is
-    not a credited top-up (a subscription payment, an unknown payment), its dispute has a status this build does not
-    know, more than one dispute or checkout session claims it, or its currency differs from the purchase's. Nothing
-    moves; the drain QUARANTINES the envelope and the owner reconciles it by hand (never a guessed removal)."""
+    """W5 — a SIGNED processor reversal (a dispute or a refund) VIGIL cannot account for: the charge is neither a
+    credited top-up (from a checkout or an automatic top-up) nor the refund of a credited plan period (an unknown
+    payment, a disputed plan charge or automatic top-up, a plan period with no credits), its dispute has a status this build does not know, more than one dispute, checkout
+    session or invoice claims it, or its currency differs from the purchase's. Nothing moves; the drain QUARANTINES
+    the envelope and the owner reconciles it by hand (never a guessed removal)."""
 
 
 class UnsupportedCapability(RuntimeError):
@@ -271,6 +272,19 @@ _STRIPE_SESSION_MIN_RANGE = (30, 1440)
 _STRIPE_SESSION_SLACK_S = 60
 # A plan (subscription-mode) session accepts these payment methods only; the response must echo them.
 _STRIPE_PLAN_PAYMENT_METHODS = ("card",)
+# The text of the required Terms of Service checkbox (VIGIL_STRIPE_TERMS_CONSENT). Stripe's custom_text
+# terms_of_service_acceptance REPLACES Stripe's default agreement text (the one that links the Terms URL set in the
+# dashboard), so this text carries the link itself, as the Markdown link Stripe's custom text supports: the acceptance
+# of the terms and, for a consumer, the express request for immediate supply and the acknowledgement of when the right
+# of withdrawal ends (Terms §8).
+_STRIPE_TERMS_URL = "https://vigilguard.net/terms"
+_STRIPE_TERMS_CONSENT_MESSAGE = (
+    f"I agree to the VIGIL [Terms of Service]({_STRIPE_TERMS_URL}). I ask SIGIL SARL to start supplying the service "
+    "as soon as I use the credits I am buying, and I understand that I lose my right of withdrawal for this purchase "
+    "once all of its credits have been used.")
+# An AEGIS monitoring plan buys host monitoring, not credits (allotment 0): its box carries the plain agreement to the
+# Terms, with no credit wording.
+_STRIPE_TERMS_AGREEMENT_MESSAGE = f"I agree to the VIGIL [Terms of Service]({_STRIPE_TERMS_URL})."
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -296,7 +310,10 @@ class StripeBillingProvider(BillingProvider):
       * (W5, only with ``reversals=True``) a dispute or refund event: the dispute / refund is re-fetched for its
         charge, the CHARGE is re-fetched (amount, amount_refunded), its disputes and its checkout session are read as
         filtered lists -> EVENT_REVERSAL for the top-up (session) that charge paid, carrying how much is refunded and
-        how much an open (or lost) dispute holds. Anything it cannot account for raises ``ReversalUnaccounted``.
+        how much an open (or lost) dispute holds. A REFUND of a charge no checkout session paid maps through the
+        charge's invoice to the subscription (tenant + plan price) and that plan period -> EVENT_REVERSAL for the
+        period (``plan_invoice``), or, when no invoice names it either, to the automatic top-up its PaymentIntent is
+        (A1) -> EVENT_REVERSAL for that top-up. Anything it cannot account for raises ``ReversalUnaccounted``.
       * Anything else -> None.
 
     Tenant: `client_reference_id` / `metadata.tx_ref` (`vigil:<org>:<nonce>`) and `metadata.org_id`; when more than
@@ -388,8 +405,9 @@ class StripeBillingProvider(BillingProvider):
         `session_minutes` (a plan checkout; None sends no bound, as before) sets the session's `expires_at` so the
         link stops being payable before the provisioner's pending plan-checkout record lapses; the response must
         then echo that same `expires_at`. A plan session is card-only (`payment_method_types`), and the response
-        must echo that too; a top-up's payload is unchanged. Fail-closed throughout: any refusal raises
-        `UnsupportedCapability` / `ValueError`."""
+        must echo that too; a top-up's payload is unchanged. With `VIGIL_STRIPE_TERMS_CONSENT` on, the session
+        requires the Terms of Service box with VIGIL's text (a monitoring plan's carries the plain agreement, no
+        credit wording), and the response must echo both the requirement and exactly that text. Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
         self.require(CAP_HOSTED_CHECKOUT)
         creator = self._checkout_creator
         if creator is None:                            # unreachable once require() passed; kept for type narrowing
@@ -451,6 +469,15 @@ class StripeBillingProvider(BillingProvider):
             # a plan is paid by card only (this adapter's hosted checkout is card), so its first invoice is
             # settled when the checkout completes rather than days later by a delayed-notification method
             params["payment_method_types"] = list(_STRIPE_PLAN_PAYMENT_METHODS)
+        from .. import config as _config
+        if _config.stripe_terms_consent_enabled():
+            # the customer must tick the required terms box to pay; its text is VIGIL's (it replaces Stripe's default
+            # agreement text) and links the Terms
+            from .catalog import monitoring_price_ids
+            monitoring = price_id in monitoring_price_ids()
+            params["consent_collection"] = {"terms_of_service": "required"}
+            params["custom_text"] = {"terms_of_service_acceptance": {
+                "message": _STRIPE_TERMS_AGREEMENT_MESSAGE if monitoring else _STRIPE_TERMS_CONSENT_MESSAGE}}
         if session_minutes is not None:
             sm, (lo, hi) = session_minutes, _STRIPE_SESSION_MIN_RANGE
             if not isinstance(sm, int) or not lo <= sm <= hi:      # (a bool is below the range's floor)
@@ -469,6 +496,19 @@ class StripeBillingProvider(BillingProvider):
                                                  or resp.get("payment_method_types") != params["payment_method_types"]):
             raise UnsupportedCapability("checkout creation failed: the provider did not confirm a card-only plan "
                                         "session")
+        if "consent_collection" in params:
+            echoed = resp.get("consent_collection") if isinstance(resp, Mapping) else None
+            if not isinstance(echoed, Mapping) or echoed.get("terms_of_service") != "required":
+                raise UnsupportedCapability("checkout creation failed: the provider did not confirm the required "
+                                            "Terms of Service acceptance")
+            # the box's text carries the consumer's request for immediate supply (Terms §8): Stripe must show exactly
+            # the text sent, so the session's own custom text must equal it
+            text = resp.get("custom_text") if isinstance(resp, Mapping) else None
+            tos = text.get("terms_of_service_acceptance") if isinstance(text, Mapping) else None
+            shown = tos.get("message") if isinstance(tos, Mapping) else None
+            if not isinstance(shown, str) or shown != params["custom_text"]["terms_of_service_acceptance"]["message"]:
+                raise UnsupportedCapability("checkout creation failed: the provider did not echo the Terms of Service "
+                                            "acceptance text VIGIL sent")
         link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
         if not link:
             raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
@@ -636,9 +676,12 @@ class StripeBillingProvider(BillingProvider):
         return self._map_reversal(charge, trigger)
 
     def _map_reversal(self, charge: "Mapping[str, Any]", trigger: str) -> BillingEvent:
-        """The reversal facts of a re-fetched CHARGE (pure but for the two authoritative lists): how much of it is
-        refunded, how much a dispute that holds the funds covers, and the top-up (Checkout Session) and tenant it
-        paid for. Anything VIGIL cannot account for raises ``ReversalUnaccounted`` (quarantine)."""
+        """The reversal facts of a re-fetched CHARGE (pure but for the authoritative lists and objects): how much of it
+        is refunded, how much a dispute that holds the funds covers, and the top-up (Checkout Session) and tenant it
+        paid for — or, for a charge no checkout session paid, the plan period its invoice paid
+        (``_map_plan_reversal``), or with no invoice either, the automatic top-up its PaymentIntent is
+        (``_map_auto_topup_reversal``). Anything VIGIL cannot account for raises ``ReversalUnaccounted``
+        (quarantine)."""
         cid = str(charge["id"])
         amount, refunded = charge.get("amount"), charge.get("amount_refunded")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or isinstance(refunded, bool) \
@@ -669,6 +712,17 @@ class StripeBillingProvider(BillingProvider):
         if pi is None or not _STRIPE_PI_ID.fullmatch(pi):
             raise ReversalUnaccounted(f"Stripe charge {cid} was not paid through a checkout top-up")
         sessions = self._listed("checkout_sessions_for_payment_intent", pi, "checkout.session")
+        if not sessions:
+            # no checkout session paid this charge: the refund of a PLAN period maps through its invoice; a charge
+            # with no invoice either may be an automatic top-up's own PaymentIntent (A1), which names its pack
+            pays = None
+            if _stripe_ref(charge.get("invoice")) is None:
+                pays = self._listed("invoice_payments_for_payment_intent", pi, "invoice_payment")
+                if not pays:
+                    return self._map_auto_topup_reversal(charge, pi, trigger=trigger, disputed=bool(disputes),
+                                                         amount=amount, refunded=refunded, ccy=ccy, created=created)
+            return self._map_plan_reversal(charge, pi, trigger=trigger, disputed=bool(disputes), amount=amount,
+                                           refunded=refunded, ccy=ccy, created=created, pays=pays)
         if len(sessions) != 1:
             raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one checkout session")
         sess = sessions[0]
@@ -685,6 +739,93 @@ class StripeBillingProvider(BillingProvider):
                             data={"topup": sid, "charge": cid, "refunded_minor": min(refunded, amount),
                                   "disputed_minor": min(disputed, amount), "dispute_status": status,
                                   "trigger": trigger, "tx_ref": sess.get("client_reference_id")})
+
+    def _map_auto_topup_reversal(self, charge: "Mapping[str, Any]", pi: str, *, trigger: str, disputed: bool,
+                                 amount: int, refunded: int, ccy: str, created: float) -> BillingEvent:
+        """A REFUND of a charge that no checkout session and no invoice paid, whose PaymentIntent is an AUTOMATIC
+        top-up (A1: an off-session PaymentIntent VIGIL created, marked ``metadata.vigil_auto_topup``): the PaymentIntent
+        is re-fetched; the pack is that PaymentIntent (its id is the top-up's billing-history id and grant entry, as
+        ``_map_payment_intent`` minted it) and the tenant is its metadata, exactly as minted. The signer then removes
+        the pack's credits like a checkout top-up's. Only a succeeded PaymentIntent this one charge paid in full, in
+        the charge's currency, maps; any other PaymentIntent, a dispute of an automatic top-up, or anything else
+        raises ``ReversalUnaccounted`` (quarantine, nothing moves)."""
+        cid = str(charge["id"])
+        intent = self._fetched("payment_intent", pi, "payment_intent")
+        if intent is None or _stripe_meta(intent.get("metadata"), "vigil_auto_topup") != "1":
+            raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one paid invoice or automatic top-up")
+        pid = str(intent["id"])
+        if trigger != "refund" or disputed:
+            raise ReversalUnaccounted(f"Stripe charge {cid} paid an automatic top-up and is disputed: a dispute of an "
+                                      f"automatic top-up is reconciled by hand")
+        received, received_ccy = _stripe_amount(intent.get("amount_received"), intent.get("currency"))
+        if intent.get("status") != "succeeded" or received != amount or received_ccy != ccy:
+            raise ReversalUnaccounted(f"Stripe charge {cid} is not the whole succeeded payment of automatic top-up "
+                                      f"{pid}: reconcile its refund by hand")
+        meta = intent.get("metadata")
+        org = _stripe_tenant(None, meta)
+        if org is None:
+            raise ReversalUnaccounted(f"Stripe automatic top-up {pid} has no single recoverable tenant")
+        return BillingEvent(event_id=f"reversal:{cid}", kind=EVENT_REVERSAL, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"topup": pid, "charge": cid, "refunded_minor": min(refunded, amount),
+                                  "disputed_minor": 0, "dispute_status": "", "trigger": trigger,
+                                  "tx_ref": _stripe_meta(meta, "tx_ref")})
+
+    def _charge_invoice(self, charge: "Mapping[str, Any]", pi: str,
+                        pays: "Optional[list[Mapping[str, Any]]]" = None) -> str:
+        """The invoice a re-fetched charge paid. API versions before 2025-03-31 name it on the charge (``invoice``);
+        later ones list it as the one paid ``invoice_payment`` of the charge's PaymentIntent (``pays``: that list,
+        when the caller already read it). Raises ``ReversalUnaccounted`` unless exactly one invoice is named."""
+        cid = str(charge["id"])
+        ref = _stripe_ref(charge.get("invoice"))
+        if ref is None:
+            if pays is None:
+                pays = self._listed("invoice_payments_for_payment_intent", pi, "invoice_payment")
+            pay = pays[0] if len(pays) == 1 else None
+            payment = pay.get("payment") if pay is not None else None
+            if (pay is None or pay.get("status") != "paid" or not isinstance(payment, Mapping)
+                    or payment.get("type") != "payment_intent" or _stripe_ref(payment.get("payment_intent")) != pi):
+                raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one paid invoice")
+            ref = _stripe_ref(pay.get("invoice"))
+        if ref is None or not _STRIPE_IN_ID.fullmatch(ref):
+            raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one paid invoice")
+        return ref
+
+    def _map_plan_reversal(self, charge: "Mapping[str, Any]", pi: str, *, trigger: str, disputed: bool, amount: int,
+                           refunded: int, ccy: str, created: float,
+                           pays: "Optional[list[Mapping[str, Any]]]" = None) -> BillingEvent:
+        """A REFUND of a charge that paid a PLAN period: charge -> its invoice -> the invoice's subscription, whose
+        metadata names the tenant and the plan price (set at our checkout), exactly as ``invoice.paid`` minted the
+        period. Only a paid new-period invoice that this one charge paid in full maps (the ones VIGIL credits); the
+        signer then removes that period's plan credits in the refunded proportion. A dispute of a plan charge, a
+        charge that paid only part of its invoice, or a charge VIGIL cannot trace to one such invoice and tenant,
+        raises ``ReversalUnaccounted`` (quarantine, nothing moves)."""
+        cid = str(charge["id"])
+        if trigger != "refund" or disputed:
+            raise ReversalUnaccounted(f"Stripe charge {cid} is not a checkout top-up and is disputed: a dispute of a "
+                                      f"plan charge is reconciled by hand")
+        iid = self._charge_invoice(charge, pi, pays)
+        inv = self._fetched("invoice", iid, "invoice")
+        if inv is None or inv.get("status") != "paid" or inv.get("billing_reason") not in _STRIPE_NEW_PERIOD_REASONS:
+            raise ReversalUnaccounted(f"Stripe charge {cid} did not pay a plan period VIGIL credits ({iid})")
+        paid, paid_ccy = _stripe_amount(inv.get("amount_paid"), inv.get("currency"))
+        if paid_ccy != ccy:
+            raise ReversalUnaccounted(f"Stripe invoice {iid} is not in the currency of its charge {cid}")
+        if paid != amount:
+            # the refunded proportion is sized against the charge, and a refund total is read per charge: both hold
+            # only when this one charge paid the whole invoice (an invoice paid in parts is reconciled by hand)
+            raise ReversalUnaccounted(f"Stripe charge {cid} ({amount}) did not pay the whole of invoice {iid} "
+                                      f"({paid} paid): reconcile its refund by hand")
+        sub = self._invoice_subscription(inv)
+        meta = sub.get("metadata") if sub is not None else None
+        org = _stripe_tenant(None, meta) if sub is not None else None
+        if sub is None or org is None:
+            raise ReversalUnaccounted(f"Stripe invoice {iid} has no subscription with a single recoverable tenant")
+        return BillingEvent(event_id=f"reversal:{cid}", kind=EVENT_REVERSAL, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"plan_invoice": iid, "charge": cid, "refunded_minor": min(refunded, amount),
+                                  "disputed_minor": 0, "dispute_status": "", "trigger": trigger,
+                                  "subscription": sub.get("id"), "tx_ref": _stripe_meta(meta, "tx_ref")})
 
     def _invoice_subscription(self, invoice: "Mapping[str, Any]") -> "Optional[Mapping[str, Any]]":
         """The fetched subscription an invoice belongs to. The id is read from `subscription` (older API versions)
@@ -932,6 +1073,23 @@ def _stripe_amount(amount: object, currency: object) -> "tuple[int, str]":
         and currency.isalpha() else ""
     amt = amount if isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0 else 0
     return amt, ccy
+
+
+def refund_credits(cap: int, refunded: int, amount: int) -> int:
+    """The credits a processor REFUND of ``refunded`` minor units removes from a purchase of ``cap`` credits that
+    was charged ``amount``. A refund of the whole charge removes all ``cap`` credits (Terms §8: in the same
+    proportion). A partial refund removes the smaller of the refunded proportion rounded down (``cap x refunded /
+    amount``) and the fewest credits whose price in proportion, rounded UP to the minor unit, comes to ``refunded``
+    or more. The withdrawal runbook refunds N unused credits of a pack at their price rounded up, and below the whole
+    price unless every credit is unused (``sigil billing-reversal unused``), so that refund never removes more than N
+    credits, whichever of the drain and the owner's refund verb comes first, including for a pack worth more than one
+    credit per minor unit. PURE."""
+    r = min(max(0, int(refunded)), int(amount))
+    if r <= 0 or cap <= 0:
+        return 0
+    if r == amount:
+        return cap
+    return min(cap * r // amount, cap * (r - 1) // amount + 1)
 
 
 def _as_float(v: object, default: float = 0.0) -> float:
@@ -1691,12 +1849,15 @@ class BillingSigner:
 
     def _apply_reversal(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
         """A verified reversal of a top-up: move that purchase's removed credits to its target (``reconcile``) from the
-        processor's facts, converted to credits at the purchase's own rate (``credits x amount / charge amount``, rounded
-        down: never more than the purchase granted). The purchase's credits come from its owner-signed billing-history
-        line and its grant must be on the spine; a purchase not credited YET is retried (``ReversalRetry``), one VIGIL
-        cannot account for is refused (``ReversalUnaccounted``)."""
+        processor's facts, converted to credits at the purchase's own rate: a dispute as ``credits x amount / charge
+        amount``, rounded down, and a refund by ``refund_credits`` (never more than that, nor more than the unused
+        credits a runbook refund paid back); never more than the purchase granted. The purchase's credits come from
+        its owner-signed billing-history line and its grant must be on the spine; a purchase not credited YET is
+        retried (``ReversalRetry``), one VIGIL cannot account for is refused (``ReversalUnaccounted``)."""
         if self.reversals is None:
             return None, "not_mintable"               # unreachable: a provider maps reversals only with the flag on
+        if "plan_invoice" in (event.data or {}):
+            return self._apply_plan_reversal(event, now=now)
         from .billing_hold import sync_hold
         from .billing_reversal import ReversalRetry
         oid, data = event.org_id, event.data or {}
@@ -1720,10 +1881,88 @@ class BillingSigner:
         cap, amt = int(line.credits), int(amount)                  # amount is narrowed to int above
         sr, dd = cast(int, refunded), cast(int, disputed)          # validated non-negative ints above
         res = self.reversals.reconcile(oid, topup, cap=cap, reason=str(trigger), now=float(now),
-                                       processor_refunded=cap * min(sr, amt) // amt,
+                                       processor_refunded=refund_credits(cap, sr, amt),
                                        disputed=cap * min(dd, amt) // amt)
         sync_hold(oid, res.owed)
         return self._done(res.seq)
+
+    def _apply_plan_reversal(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
+        """A verified REFUND of a plan period: remove that period's plan credits in the refunded proportion
+        (``allotment x refunded / charge amount``, rounded down) from what remains of its tranche
+        (``BillingReversalLedger.reconcile_plan``: never more than remains, never negative, never a grant). The period
+        is the owner-signed billing-history line of the invoice, and its tranche must be on the spine; a period not
+        credited YET is retried (``ReversalRetry``), one with no credits (a monitoring plan), in another currency, or
+        whose charge is not the price the line records (the price the owner's plan-withdraw verb sizes the same
+        refund against) is refused (``ReversalUnaccounted``)."""
+        from .billing_reversal import ReversalRetry
+        oid, data = event.org_id, event.data or {}
+        iid, trigger = data.get("plan_invoice"), data.get("trigger")
+        refunded, disputed, amount = data.get("refunded_minor"), data.get("disputed_minor"), event.amount_minor
+        if not (isinstance(iid, str) and iid and trigger == "refund" and disputed == 0
+                and isinstance(refunded, int) and not isinstance(refunded, bool) and refunded >= 0
+                and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0):
+            raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r} is malformed")
+        if self.invoices is None or self.reversals is None:
+            raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r}: no billing history to price it")
+        line = next((i for i in self.invoices.invoices(oid) if i.invoice_id == iid and i.kind == "subscription"), None)
+        if line is None:
+            raise ReversalRetry(f"plan invoice {iid} of org {oid!r} is not credited yet; its reversal is retried")
+        if line.credits <= 0:
+            raise ReversalUnaccounted(f"plan invoice {iid} of org {oid!r} granted no credits (a monitoring plan); "
+                                      f"reconcile its refund by hand")
+        if not any(t.period_end == float(line.period_end) and t.granted > 0 for t in self.plan.tranches(oid)):
+            raise ReversalRetry(f"the plan period of invoice {iid} of org {oid!r} is not delivered yet; retried")
+        if line.currency and event.currency and line.currency.upper() != event.currency.upper():
+            raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r} is in {event.currency}, the "
+                                      f"invoice {iid} in {line.currency}")
+        if int(line.amount_minor) != amount:
+            # the owner's plan-withdraw verb sizes the same refund against the line's price: both paths size it
+            # against one amount, or the refund is reconciled by hand
+            raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r}: its charge ({amount}) is not "
+                                      f"the price ({line.amount_minor}) the invoice {iid} line records; reconcile by "
+                                      f"hand")
+        cap = int(line.credits)
+        res = self.reversals.reconcile_plan(oid, iid, cap=cap, period_end=float(line.period_end), now=float(now),
+                                            processor_refunded=cap * min(refunded, amount) // amount)
+        return self._done(res.seq)
+
+    def sweep_plan_reversals(self, now: float) -> "list[tuple[str, str, int]]":
+        """Re-apply every refunded plan period whose removal fell short of its target
+        (``BillingReversalLedger.plan_shortfalls``) and that has plan credits again: credits a launch held when the
+        refund was reconciled come back to the period when it settles, and must not stay spendable there. Each one
+        is ``reconcile_plan`` with the facts already recorded (the target never changes here, so nothing is ever
+        removed beyond it; never more than remains). A period that has ended is skipped (its plan credits expired).
+        Run by the Stripe drain after each pass. Returns ``(org, invoice, credits removed)`` for each period that
+        moved. A period VIGIL refuses to reconcile is reported on stderr and skipped; a busy lock waits for the next
+        pass. No-op without the reversal ledger (``VIGIL_BILLING_REVERSALS`` off)."""
+        if self.reversals is None or self.invoices is None:
+            return []
+        import sys as _sys
+
+        from .billing_reversal import ReversalRefused, ReversalRetry
+        moved: "list[tuple[str, str, int]]" = []
+        for oid, iid, cap, _removed, _target in self.reversals.plan_shortfalls():
+            line = next((i for i in self.invoices.invoices(oid) if i.invoice_id == iid and i.kind == "subscription"),
+                        None)
+            if line is None or int(line.credits) != cap:
+                _sys.stderr.write(f"vigil billing-drain: WARNING the refunded plan period of invoice {iid} of org "
+                                  f"{oid!r} has no matching billing-history line; reconcile it by hand\n")
+                continue
+            pe = float(line.period_end)
+            if float(now) >= pe or self.plan.remaining_for_period(oid, pe) <= 0:
+                continue
+            try:
+                res = self.reversals.reconcile_plan(oid, iid, cap=cap, period_end=pe, now=float(now),
+                                                    note="plan credits that came back to a refunded plan period")
+            except ReversalRetry:
+                continue                                 # the money lock is busy: the next pass retries
+            except ReversalRefused as exc:
+                _sys.stderr.write(f"vigil billing-drain: WARNING the refunded plan period of invoice {iid} of org "
+                                  f"{oid!r} could not be re-applied: {exc}\n")
+                continue
+            if res.seq is not None and res.moved > 0:
+                moved.append((oid, iid, res.moved))
+        return moved
 
     def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> "tuple[Optional[int], str]":
         """A paid AEGIS monitoring period: mint the SEPARATE monitoring line (no credit refill; the credit-plan

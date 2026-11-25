@@ -248,7 +248,23 @@ def test_fetch_gets_the_named_object_and_reads_the_key_at_call_time(monkeypatch,
     assert cap["method"] == "GET" and cap["url"] == "https://api.stripe.com" + path and cap["secret"] == key
 
 
+@pytest.mark.parametrize("kind,oid,url", [
+    ("disputes_for_charge", "ch_1A", "/v1/disputes?charge=ch_1A&limit=10"),
+    ("checkout_sessions_for_payment_intent", "pi_1A", "/v1/checkout/sessions?payment_intent=pi_1A&limit=10"),
+    # a refunded plan charge: the invoice payment of its PaymentIntent (both filters Stripe documents for the list)
+    ("invoice_payments_for_payment_intent", "pi_1A",
+     "/v1/invoice_payments?payment%5Btype%5D=payment_intent&payment%5Bpayment_intent%5D=pi_1A&limit=10"),
+])
+def test_a_list_read_sends_exactly_its_filters(monkeypatch, kind, oid, url):
+    cap: dict = {}
+    monkeypatch.setenv("VIGIL_STRIPE_SECRET_KEY", _key())
+    fetch = se.make_object_fetcher(transport=_stub(cap, {"object": "list", "data": [], "has_more": False}))
+    assert fetch(kind, oid)["object"] == "list"
+    assert cap["method"] == "GET" and cap["url"] == "https://api.stripe.com" + url
+
+
 @pytest.mark.parametrize("kind,oid", [
+    ("invoice_payments_for_payment_intent", "ch_1A"), ("invoice_payments_for_payment_intent", "pi_a&b"),
     ("invoice", "../v1/charges"), ("invoice", "in_a/b"), ("invoice", "in_"), ("invoice", "pi_123"),
     ("invoice", "evt_123"), ("invoice", "in_١٢"), ("subscription", "sub_abc\n"), ("subscription", ""),
     ("checkout_session", "cs_abc"), ("checkout_session", "cs_prod_abc"), ("checkout_session", "cs_test_a%2F"),

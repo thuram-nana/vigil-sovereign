@@ -321,3 +321,140 @@ def test_a_bounded_session_create_that_returns_no_session_is_refused(resp):
     api.create = lambda params, *, idempotency_key: resp
     with pytest.raises(UnsupportedCapability):
         _checkout(_provider(api), price="price_pro", payment_plan="price_pro", session_minutes=30)
+
+
+# ---- the required Terms of Service acceptance (VIGIL_STRIPE_TERMS_CONSENT) ------------------------------------------
+class _StripeConsent(_Stripe):
+    """The fake API, plus Stripe echoing the consent requirement it was asked for (as a real session does)."""
+
+    def create(self, params, *, idempotency_key):
+        sess = super().create(params, idempotency_key=idempotency_key)
+        if "consent_collection" in params:
+            sess["consent_collection"] = dict(params["consent_collection"])
+            sess["custom_text"] = copy.deepcopy(params["custom_text"])
+            sess.update(self.override)
+            self.sessions[sess["id"]] = sess
+        return copy.deepcopy(sess)
+
+
+def test_terms_consent_off_leaves_the_checkout_payload_unchanged(monkeypatch):
+    monkeypatch.delenv("VIGIL_STRIPE_TERMS_CONSENT", raising=False)
+    api = _Stripe()
+    _checkout(_provider(api))
+    _checkout(_provider(api), price="price_pro", payment_plan="price_pro", nonce="n2")
+    for params, _k in api.calls:
+        assert "consent_collection" not in params and "custom_text" not in params
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_terms_consent_on_requires_the_terms_box_with_the_immediate_supply_wording(monkeypatch, plan):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    api = _StripeConsent()
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    assert _checkout(_provider(api), **kw).hosted_link
+    params = api.calls[0][0]
+    assert params["consent_collection"] == {"terms_of_service": "required"}
+    msg = params["custom_text"]["terms_of_service_acceptance"]["message"]
+    # the custom text REPLACES Stripe's default agreement text (and its link), so it must link the Terms itself, as the
+    # Markdown link Stripe's custom text renders
+    assert msg.startswith("I agree to the VIGIL [Terms of Service](https://vigilguard.net/terms). ")
+    assert "start supplying the service" in msg
+    assert "lose my right of withdrawal for this purchase once all of its credits have been used" in msg
+    assert len(msg) <= 1200                                              # Stripe's custom_text limit
+
+
+@pytest.mark.parametrize("echo", ["absent", None, {}, {"terms_of_service": "none"}, {"terms_of_service": "Required"},
+                                  "required"])
+def test_a_session_that_does_not_confirm_the_required_terms_acceptance_is_refused(monkeypatch, echo):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    if echo == "absent":
+        api = _Stripe()                                                  # never echoes consent_collection
+    else:
+        api = _StripeConsent(consent_collection=echo)
+    with pytest.raises(UnsupportedCapability, match="Terms of Service acceptance"):
+        _checkout(_provider(api))
+
+
+@pytest.mark.parametrize("plan", [False, True])
+@pytest.mark.parametrize("custom_text", [
+    "absent", None, {}, "text", {"terms_of_service_acceptance": None}, {"terms_of_service_acceptance": {}},
+    {"terms_of_service_acceptance": {"message": None}},
+    {"terms_of_service_acceptance": {"message": ""}},
+    {"terms_of_service_acceptance": {"message": "I agree to the VIGIL Terms of Service."}},   # the wording dropped
+    "truncated", "upper", "trailing space"])
+def test_a_session_that_does_not_echo_the_exact_terms_text_is_refused(monkeypatch, plan, custom_text):
+    from sigil.governor.billing import _STRIPE_TERMS_CONSENT_MESSAGE as sent
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    bad = {"truncated": sent[:-1], "upper": sent.upper(), "trailing space": sent + " "}
+    if isinstance(custom_text, str) and custom_text in bad:
+        custom_text = {"terms_of_service_acceptance": {"message": bad[custom_text]}}
+    api = _StripeConsent()
+    if custom_text == "absent":
+        def create(params, *, idempotency_key, _orig=api.create):
+            sess = _orig(params, idempotency_key=idempotency_key)
+            sess.pop("custom_text", None)
+            return sess
+        api.create = create
+    else:
+        api.override["custom_text"] = custom_text
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    with pytest.raises(UnsupportedCapability, match="did not echo the Terms of Service acceptance text"):
+        _checkout(_provider(api), **kw)
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_a_session_that_echoes_the_exact_terms_text_is_accepted(monkeypatch, plan):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    api = _StripeConsent()
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    assert _checkout(_provider(api), **kw).hosted_link
+    sent = api.calls[0][0]["custom_text"]["terms_of_service_acceptance"]["message"]
+    assert next(iter(api.sessions.values()))["custom_text"]["terms_of_service_acceptance"]["message"] == sent
+
+
+def _monitoring_entry():
+    from sigil.governor import catalog
+    return next(e for e in catalog._CATALOG if e.monitor_hosts and e.allotment == 0)
+
+
+def test_a_monitoring_plan_session_carries_the_plain_terms_agreement_with_no_credit_wording(monkeypatch):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    mon = _monitoring_entry()
+    api = _StripeConsent()
+    p = StripeBillingProvider(_WHSEC, fetcher=lambda kind, oid: {}, expected_mode="test",
+                              enable_reference_adapter=True, checkout_creator=api.create,
+                              plan_periods={mon.price_id: mon.period_s})
+    assert p.create_checkout("acme", mon.price_id, expected={mon.price_id: (mon.amount_minor, mon.currency)},
+                             redirect_url=_RETURN, nonce="n1", payment_plan=mon.price_id).hosted_link
+    params = api.calls[0][0]
+    assert params["consent_collection"] == {"terms_of_service": "required"}
+    msg = params["custom_text"]["terms_of_service_acceptance"]["message"]
+    assert msg == "I agree to the VIGIL [Terms of Service](https://vigilguard.net/terms)."
+    assert "credit" not in msg.lower() and "withdrawal" not in msg.lower()
+
+
+def test_a_credit_plan_and_a_top_up_keep_the_immediate_supply_wording(monkeypatch):
+    from sigil.governor import catalog
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    plan = next(e for e in catalog._CATALOG if e.allotment > 0)
+    api = _StripeConsent()
+    p = StripeBillingProvider(_WHSEC, fetcher=lambda kind, oid: {}, expected_mode="test",
+                              enable_reference_adapter=True, checkout_creator=api.create,
+                              plan_periods={plan.price_id: plan.period_s})
+    p.create_checkout("acme", plan.price_id, expected={plan.price_id: (plan.amount_minor, plan.currency)},
+                      redirect_url=_RETURN, nonce="n1", payment_plan=plan.price_id)
+    _checkout(_provider(api), nonce="n2")
+    for params, _k in api.calls:
+        assert "credits I am buying" in params["custom_text"]["terms_of_service_acceptance"]["message"]
+
+
+def test_the_go_live_runbook_sets_the_stripe_terms_url_before_the_consent_flag():
+    # Stripe refuses a required Terms box while the account has no Terms of Service URL, so every checkout would fail
+    # closed: GO-LIVE §9b step 1 (the Stripe dashboard step) must name the Public details URL and the flag together.
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[3] / "docs" / "runbooks" / "GO-LIVE-quickstart.md").read_text("utf-8")
+    s9b = doc[doc.index("## 9b."): doc.index("## 10.")]
+    step1 = " ".join(s9b[s9b.index("1. **Stripe dashboard.**"): s9b.index("2. **Proxy route.**")].split())
+    assert "**Public details**" in step1 and "`https://vigilguard.net/terms`" in step1
+    assert "`VIGIL_STRIPE_TERMS_CONSENT=1`" in step1 and "**before**" in step1
+    assert step1.index("**Public details**") < step1.index("`VIGIL_STRIPE_TERMS_CONSENT=1`")
