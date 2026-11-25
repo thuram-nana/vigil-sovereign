@@ -1114,6 +1114,14 @@ def test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing(tmp_
             assert off == _post_raw(op, ep, "/api/customer/not-a-route", raw) == other[raw], (raw[:48], off)
         monkeypatch.setenv(FLAG, "1")
         assert store.read_prefs(ana) == _PROFILE
+        # should a codec error ever come up from the store itself (the store refuses a lone surrogate first, so only a
+        # store that raised one would reach this), the reply over the hop is still the provisioner's plain refusal
+        def _codec(*_a, **_k):
+            "\ud800".encode("utf-8")                           # raises the codec's own UnicodeEncodeError
+
+        monkeypatch.setattr(store, "write_prefs", _codec)
+        assert _post(op, ep, "/api/customer/preferences", {"preferences": {"legal_entity_name": "Acme SARL"}}) == (
+            400, {"error": "provision failed: the preferences could not be saved: a value is not valid text"})
     finally:
         sov.shutdown()
         edge.shutdown()
