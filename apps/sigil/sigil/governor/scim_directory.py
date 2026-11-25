@@ -50,6 +50,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Optional, cast
 
 from ..reuse import assert_no_offense
@@ -319,13 +320,51 @@ class OrgDirectory:
         self._hw: "dict[tuple[str, str], float]" = highwater
         self._jobs: "dict[str, dict]" = dict(jobs or {})
         self._dir_writes = 0               # directory records (all but job records) written through this view
+        self._shared = False               # True while this view reads a shared read-only snapshot (`over`)
+        self._by_group: "dict[str, set[str]]" = {}
+        self._by_user: "dict[str, set[str]]" = {}
         self._index()
+
+    @classmethod
+    def over(cls, registry: "ScimDirectoryRegistry", org_id: str, snap: _DirSnapshot) -> "OrgDirectory":
+        """A view READING the cached fold's shared read-only snapshot `snap` (`_OrgFold.snapshot`) — built in O(1)
+        (its edge index is the snapshot's, derived once per snapshot) — that takes its own copy of the containers on
+        its first write (`_own`), so nothing it writes ever reaches the snapshot another reader holds."""
+        self = cls.__new__(cls)
+        self._reg = registry
+        self.org_id = org_id
+        by_group, by_user = snap.index()
+        # read-only mappings / frozensets: any write path that skipped `_own` raises instead of corrupting the snapshot
+        self._users = cast("dict[str, DirectoryUser]", snap.users)
+        self._groups = cast("dict[str, DirectoryGroup]", snap.groups)
+        self._edges = cast("set[tuple[str, str]]", snap.edges)
+        self._hw = cast("dict[tuple[str, str], float]", snap.hw)
+        self._jobs = cast("dict[str, dict]", snap.jobs)
+        self._by_group = cast("dict[str, set[str]]", by_group)
+        self._by_user = cast("dict[str, set[str]]", by_user)
+        self._dir_writes = 0
+        self._shared = True
+        return self
+
+    def _own(self) -> None:
+        """Before this view's first write: replace the shared read-only snapshot it reads (`over`) with its own
+        mutable copy (O(the org), once per writing view — a write is budgeted; a read never pays it)."""
+        if not self._shared:
+            return
+        self._users = dict(self._users)
+        self._groups = dict(self._groups)
+        self._edges = set(self._edges)
+        self._hw = dict(self._hw)
+        self._jobs = {g: _copy_job(dict(j)) for g, j in self._jobs.items()}
+        self._by_group = {g: set(m) for g, m in self._by_group.items()}
+        self._by_user = {u: set(m) for u, m in self._by_user.items()}
+        self._shared = False
 
     def _index(self) -> None:
         """The edges indexed both ways, so a group's members / a user's groups are read in time proportional to
         THEIR edges, never to every edge of the org (a request touching many members stays linear)."""
-        self._by_group: "dict[str, set[str]]" = {}
-        self._by_user: "dict[str, set[str]]" = {}
+        self._by_group = {}
+        self._by_user = {}
         for g, u in self._edges:
             self._by_group.setdefault(g, set()).add(u)
             self._by_user.setdefault(u, set()).add(g)
@@ -413,8 +452,8 @@ class OrgDirectory:
         return [self._groups[g] for g in sorted(self._by_user.get(user_id, ())) if g in self._groups]
 
     def jobs(self) -> "dict[str, dict]":
-        """The pending group jobs, {group id: end state} (see the module docstring)."""
-        return {g: dict(j) for g, j in sorted(self._jobs.items())}
+        """The pending group jobs, {group id: end state} (see the module docstring) — copies, lists included."""
+        return {g: _copy_job(dict(j)) for g, j in sorted(self._jobs.items())}
 
     def job_issued_at(self, group_id: str) -> float:
         """The issued_at of group `group_id`'s pending job record (0.0 when none) — the moment the job was last
@@ -437,6 +476,7 @@ class OrgDirectory:
         return at if at > hw else math.nextafter(hw, math.inf)
 
     def _write(self, rtype: str, rid: str, state: str, data: dict, *, now: float) -> int:
+        self._own()                        # every write path appends through here BEFORE it touches a container
         at = self._fresh(rtype, rid, now)
         seq = self._reg._append(self.org_id, rtype, rid, state, data, issued_at=at)
         self._hw[(rtype, rid)] = at
@@ -552,7 +592,7 @@ class OrgDirectory:
         # a staged view is only ever made from a registry-backed one (a staged view is never staged again)
         return OrgDirectory(_Journal(cast("ScimDirectoryRegistry", self._reg), self), self.org_id, users=dict(self._users),
                             groups=dict(self._groups), edges=set(self._edges), highwater=dict(self._hw),
-                            jobs=self._jobs)
+                            jobs=self.jobs())
 
     def commit(self, staged: "OrgDirectory", *, before_each=None) -> None:
         """Append, in order, every record `staged` (a `staged()` copy of THIS view, with no directory write here
@@ -563,6 +603,8 @@ class OrgDirectory:
         journal = staged._reg
         if not isinstance(journal, _Journal) or journal.origin is not self or journal.base_writes != self._dir_writes:
             raise DirectoryError("a staged directory change commits only onto the unchanged view it was staged from")
+        if journal.records:
+            self._own()
         for org_id, rtype, rid, state, data, at in journal.records:
             if before_each is not None:
                 before_each()
@@ -729,11 +771,47 @@ def _copy_job(j: dict) -> dict:
     return {k: (list(v) if isinstance(v, list) else v) for k, v in j.items()}
 
 
+class _DirSnapshot:
+    """ONE org's directory as of one state of its cached fold, READ-ONLY and SHARED by every reader until that org's
+    fold changes (`_OrgFold.snapshot`): read-only mappings and frozensets over copies the fold no longer touches, so a
+    write through a view built on it must take its own copy first (`OrgDirectory._own`) — a missed one raises instead
+    of reaching another reader. The edge index (both ways) is derived from it at most once, by the first reader that
+    needs it, OUTSIDE the fold cache's entry lock (`index`)."""
+
+    __slots__ = ("users", "groups", "edges", "hw", "jobs", "_by")
+
+    def __init__(self, users: dict, groups: dict, edges: set, hw: dict, jobs: dict) -> None:
+        self.users = MappingProxyType(dict(users))
+        self.groups = MappingProxyType(dict(groups))
+        self.edges = frozenset(edges)
+        self.hw = MappingProxyType(dict(hw))
+        self.jobs = MappingProxyType({g: MappingProxyType(_copy_job(j)) for g, j in jobs.items()})
+        self._by: "Optional[tuple]" = None
+
+    def index(self) -> tuple:
+        """(by_group, by_user): the edges indexed both ways, behind read-only mappings — computed once per snapshot
+        (two readers racing compute the same value; either one is kept), at the cost one view's own index has
+        (`OrgDirectory._index`). The member sets inside are not re-frozen (that would double the cost): a view never
+        writes them before `_own` has replaced them with its own copies."""
+        by = self._by
+        if by is None:
+            by_group: "dict[str, set[str]]" = {}
+            by_user: "dict[str, set[str]]" = {}
+            for g, u in self.edges:
+                by_group.setdefault(g, set()).add(u)
+                by_user.setdefault(u, set()).add(g)
+            by = self._by = (MappingProxyType(by_group), MappingProxyType(by_user))
+        return by
+
+
 class _OrgFold:
     """ONE org's cached directory fold, kept PARSED: the high-water map plus the entities (`_fold_entity`), updated
-    record by record — so a read costs a copy of the containers, never a re-parse of the org."""
+    record by record — and MEMOISED for reading: `snapshot()` hands every reader the same read-only `_DirSnapshot`
+    until a record of this org is folded (`invalidate`), so an unchanged directory is read in O(1) and a changed one
+    costs ONE copy of its containers, never a re-parse. The memo lives outside the slots (`__dict__`): it is derived
+    from them, so the S0d rebuild-and-compare audit (which compares the slots by value) ignores it."""
 
-    __slots__ = ("hw", "users", "groups", "edges", "jobs")
+    __slots__ = ("hw", "users", "groups", "edges", "jobs", "__dict__")
 
     def __init__(self) -> None:
         self.hw: "dict[tuple[str, str], float]" = {}
@@ -741,12 +819,19 @@ class _OrgFold:
         self.groups: "dict[str, DirectoryGroup]" = {}
         self.edges: "set[tuple[str, str]]" = set()
         self.jobs: "dict[str, dict]" = {}
+        self.memo: "Optional[_DirSnapshot]" = None
 
-    def read(self) -> tuple:
-        """FRESH (users, groups, edges, highwater, jobs) containers (the entities themselves are immutable values;
-        a job's lists are copied) — never a reference into the fold, which later reads extend in place."""
-        return (dict(self.users), dict(self.groups), set(self.edges), dict(self.hw),
-                {g: _copy_job(j) for g, j in self.jobs.items()})
+    def snapshot(self) -> _DirSnapshot:
+        """The org's directory as folded so far, read-only (runs under the fold cache's entry lock): the memo when
+        nothing of this org was folded since it was taken, else ONE copy of the containers (C-level) — never a
+        reference into the containers later records extend in place."""
+        snap = self.memo
+        if snap is None:
+            snap = self.memo = _DirSnapshot(self.users, self.groups, self.edges, self.hw, self.jobs)
+        return snap
+
+    def invalidate(self) -> None:
+        self.memo = None
 
 
 class _DirectoryView:
@@ -760,14 +845,15 @@ class _DirectoryView:
         self.orgs: "dict[str, _OrgFold]" = {}
 
 
-_EMPTY_FOLD = _OrgFold()
+_EMPTY_SNAPSHOT = _DirSnapshot({}, {}, set(), {}, {})
 
 
-def _read_cached(view: _DirectoryView, oid: str) -> tuple:
+def _read_cached(view: _DirectoryView, oid: str) -> _DirSnapshot:
     """ONE org's directory from the cached fold `view` (runs under the fold cache's entry lock, which every org's
-    directory read takes): a copy of the org's already-parsed containers — O(the org's containers), never a re-parse,
-    and nothing of any other org."""
-    return view.orgs.get(oid, _EMPTY_FOLD).read()
+    directory read takes): its memoised read-only snapshot — O(1) while the org is unchanged, ONE copy of its
+    already-parsed containers after a change; never a re-parse, and nothing of any other org."""
+    folded = view.orgs.get(oid)
+    return folded.snapshot() if folded is not None else _EMPTY_SNAPSHOT
 
 
 def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
@@ -782,6 +868,7 @@ def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
         folded = view.orgs[oid] = _OrgFold()
     got = _directory_accept(r, resolver, folded.hw)
     if got is not None:
+        folded.invalidate()
         _fold_entity(oid, *got, users=folded.users, groups=folded.groups, edges=folded.edges, jobs=folded.jobs)
 
 
@@ -821,16 +908,15 @@ class ScimDirectoryRegistry:
         """Fold the spine into ONE org's directory view (owner-key-succession-aware, LWW high-water per
         (org, rtype, rid); unsigned / forged / stale / malformed records are inert). With `cached` the fold is the
         verified incremental fold cache's (`fold_read.cached_read(force=True)`): a read then costs the records
-        appended since the last one plus a copy of this org's state, never a re-verification of the spine."""
+        appended since the last one, and hands back this org's memoised read-only snapshot (O(1) while the org is
+        unchanged; one copy of its state after a change) — never a re-parse, nor a re-verification of the spine."""
         oid = str(org_id or "")
         if self.cached:
             hit = cached_read(_DIRECTORY_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
                               seed=lambda snap: (_DirectoryView(), -1), live_window=True, force=True,
                               reader=lambda v: _read_cached(v, oid))
             if hit is not _UNCACHED:
-                users, groups, edges, cached_hw, jobs = hit
-                return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=cached_hw,
-                                    jobs=jobs)
+                return OrgDirectory.over(self, oid, hit)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: "dict[tuple[str, str], str]" = {}
         data: "dict[tuple[str, str], tuple[dict, float]]" = {}

@@ -857,6 +857,111 @@ def test_BURST_a_cached_directory_read_parses_only_what_changed(stack, monkeypat
     assert parses[0] - before == 1, (before, parses)                          # ONE user record folded, not 301
 
 
+def _count_snapshot_work(monkeypatch) -> dict:
+    """Count the work a cached directory read can do: a fresh read-only snapshot of an org's fold (one copy of its
+    containers, `_DirSnapshot.__init__`), the snapshot's edge index (`_DirSnapshot.index` computing it) and a view's
+    own edge index (`OrgDirectory._index`, O(the org's edges))."""
+    n = {"snapshot": 0, "index_built": 0, "view_index": 0}
+    orig_init, orig_index, orig_view_index = gdir._DirSnapshot.__init__, gdir._DirSnapshot.index, \
+        gdir.OrgDirectory._index
+
+    def init(self, *a, **kw):
+        n["snapshot"] += 1
+        return orig_init(self, *a, **kw)
+
+    def index(self):
+        if self._by is None:
+            n["index_built"] += 1
+        return orig_index(self)
+
+    def view_index(self):
+        n["view_index"] += 1
+        return orig_view_index(self)
+    monkeypatch.setattr(gdir._DirSnapshot, "__init__", init)
+    monkeypatch.setattr(gdir._DirSnapshot, "index", index)
+    monkeypatch.setattr(gdir.OrgDirectory, "_index", view_index)
+    return n
+
+
+def test_BURST_an_unchanged_directory_is_read_in_constant_time(stack, monkeypatch):
+    """BURST/DIRCPU, the read itself — a cached read of an UNCHANGED directory copies nothing and indexes nothing: every
+    reader is handed the same memoised read-only snapshot (O(1) under the fold cache's entry lock), and its edge index
+    is derived once per snapshot, outside that lock. Another org's write leaves this org's snapshot as it is; this
+    org's own write makes the next read take exactly ONE fresh snapshot (one copy of the containers, one index), which
+    every later reader shares again. (Round 7 re-parsed the whole directory per read; a copy-per-read still costs
+    O(org) per read under the entry lock, and an index rebuild O(the org's edges) per read.)"""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B, scim_token=TOKEN_B)
+    _seed(stack, ORG_A, 200, group="Admins", role="org_admin", prefix="a")
+    first = ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)               # warm
+    n = _count_snapshot_work(monkeypatch)
+    views = [ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A) for _ in range(5)]
+    assert n == {"snapshot": 0, "index_built": 0, "view_index": 0}, n
+    assert all(v._users is first._users and v._by_user is first._by_user for v in views)     # one shared snapshot
+    assert len(views[-1].users()) == 200 and len(views[-1].members(views[-1].groups()[0].id)) == 200
+    assert _scim(stack, ORG_B, "POST", "/Users", _okta_user("x@beta.com", "00u-x"))["status"] == 201
+    assert ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)._users is first._users
+    assert n == {"snapshot": 0, "index_built": 0, "view_index": 0}, n                       # B's write: A untouched
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("y@acme.com", "00u-y"))["status"] == 201
+    n.update(snapshot=0, index_built=0, view_index=0)
+    after = [ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A) for _ in range(4)]
+    assert n == {"snapshot": 1, "index_built": 1, "view_index": 0}, n                       # ONE fresh snapshot
+    assert all(v._users is after[0]._users for v in after) and len(after[0].users()) == 201
+
+
+def test_BURST_a_write_through_a_shared_snapshot_never_reaches_another_reader(stack):
+    """The memoised snapshot is SHARED, so a view built on it takes its own copy on its first write (copy-on-write):
+    the write lands on the spine and in that view only — another reader's view of the same snapshot is unchanged, and
+    the next read sees the write. The snapshot is read-only: a write path that skipped the copy raises (TypeError /
+    AttributeError) instead of corrupting what other readers hold."""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    gid, uids = _seed(stack, ORG_A, 3, group="Admins", role="org_admin", prefix="a")
+    reg = ScimDirectoryRegistry(stack.store(), cached=True)
+    mine, other = reg.directory(ORG_A), reg.directory(ORG_A)
+    assert mine._users is other._users
+    snap_users, snap_edges = other._users, other._edges
+    new = "sso_" + "e" * 24
+    t = time.time()
+    assert mine.put_user(new, user_name="new@acme.example", active=True, now=t)
+    assert mine.add_member(gid, new, now=t)
+    assert mine.remove_member(gid, uids[0], now=t)
+    assert mine.delete_user(uids[1], now=t)
+    mine.put_job(gid, {"delete": True, "touch": [uids[2]]}, now=t)
+    assert mine._users is not snap_users and mine.user(new) is not None and mine.members(gid) == sorted([new, uids[2]])
+    # the other reader (and the shared snapshot) never saw any of it
+    assert other._users is snap_users and other._edges is snap_edges and other.user(new) is None
+    assert other.members(gid) == sorted(uids) and other.jobs() == {} and len(other.users()) == 3
+    fresh = reg.directory(ORG_A)                                                        # the next read sees it
+    assert fresh.user(new) is not None and fresh.user(uids[1]) is None and fresh.members(gid) == sorted([new, uids[2]])
+    assert fresh.jobs() == {gid: {"delete": True, "touch": [uids[2]]}}
+    full = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert fresh.users() == full.users() and fresh._edges == full._edges and fresh._hw == full._hw
+    # read-only: nothing can be written into the shared snapshot behind the copy
+    with pytest.raises((TypeError, AttributeError)):
+        fresh._users[new] = None                                                        # type: ignore[index]
+    with pytest.raises((TypeError, AttributeError)):
+        fresh._edges.add((gid, uids[0]))                                                # type: ignore[attr-defined]
+    with pytest.raises((TypeError, AttributeError)):
+        fresh._by_group[gid] = set()                                                    # type: ignore[index]
+    with pytest.raises((TypeError, AttributeError)):
+        fresh._by_user.setdefault(new, set())                                           # type: ignore[attr-defined]
+    with pytest.raises((TypeError, AttributeError)):
+        fresh._jobs[gid]["touch"] = []                                                  # type: ignore[index]
+    jobs = fresh.jobs()
+    jobs[gid]["touch"].append("x")                                                      # a caller's copy, never ours
+    assert reg.directory(ORG_A).jobs() == {gid: {"delete": True, "touch": [uids[2]]}}
+    # a staged group change COMMITTED onto a view still reading the shared snapshot (no write through it before):
+    # the commit takes the view's own copy first, so the snapshot other readers hold is unchanged
+    real, bystander = reg.directory(ORG_A), reg.directory(ORG_A)
+    assert real._shared and real._users is bystander._users
+    staged = real.staged()
+    assert staged.add_member(gid, uids[0], now=time.time())
+    real.commit(staged)
+    assert real.members(gid) == sorted([new, uids[0], uids[2]])
+    assert bystander.members(gid) == sorted([new, uids[2]]) and bystander._edges is fresh._edges
+    assert reg.directory(ORG_A).members(gid) == sorted([new, uids[0], uids[2]])
+
+
 def test_BURST_the_parsed_fold_matches_a_full_fold_after_random_activity(stack):
     """The incremental parsed fold is EXACTLY the full fold: after random directory activity (users, groups, edges,
     jobs — created, rewritten, deleted, re-created; a replayed stale record; a signed record whose data does not
