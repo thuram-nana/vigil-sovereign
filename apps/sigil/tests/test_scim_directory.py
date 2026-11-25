@@ -286,3 +286,34 @@ def test_a_staged_write_is_refused_like_a_real_one_without_the_owner_key():
     d = ScimDirectoryRegistry(_store(), owner_key=None, trusted_pubkey=OP).directory("acme")
     with pytest.raises(DirectoryError):
         d.staged().put_group(G1, display_name="Admins", now=_now())
+
+
+def test_an_explicit_no_owner_key_is_honored_even_when_one_is_persisted(monkeypatch):
+    # The leaking state a full suite run reproduces: an earlier test persisted an owner keypair under the shared
+    # keystore, so `owner_keypair()` answers with one. An EXPLICIT `owner_key=None` must still build a read-only
+    # registry — never silently borrow that ambient key — so a (staged or direct) write refuses.
+    monkeypatch.setattr(sd, "owner_keypair", lambda: OWNER)
+    reg = ScimDirectoryRegistry(_store(), owner_key=None, trusted_pubkey=OP)
+    assert reg.owner_key is None                                   # honored as given, not the ambient key
+    d = reg.directory("acme")
+    with pytest.raises(DirectoryError):
+        d.staged().put_group(G1, display_name="Admins", now=_now())
+    with pytest.raises(DirectoryError):
+        d.put_group(G1, display_name="Admins", now=_now())
+    # an OMITTED owner_key still falls back to the persisted identity (the production default is unchanged)
+    assert ScimDirectoryRegistry(_store(), trusted_pubkey=OP).owner_key is OWNER
+
+
+def test_a_key_less_registry_refuses_even_a_no_op_write_of_a_record_already_present(monkeypatch):
+    # The refusal is UNCONDITIONAL: a put of a group ALREADY present (an identical re-write that would append
+    # nothing) still raises, so a read-only registry never accepts a mutation just because it changes nothing —
+    # whether staged or direct, and whether the view was folded fresh or read from the cache.
+    monkeypatch.setattr(sd, "owner_keypair", lambda: OWNER)
+    s = _store()
+    _reg(s).directory("acme").put_group(G1, display_name="Admins", now=_now())      # a real-key write lands G1
+    ro = ScimDirectoryRegistry(s, owner_key=None, trusted_pubkey=OP).directory("acme")
+    assert ro.group(G1) is not None                               # the view already shows the group
+    with pytest.raises(DirectoryError):
+        ro.staged().put_group(G1, display_name="Admins", now=_now())   # identical ⇒ a no-op, yet refused
+    with pytest.raises(DirectoryError):
+        ro.put_group(G1, display_name="Admins", now=_now())            # the direct no-op refuses too
