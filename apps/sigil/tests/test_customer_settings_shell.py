@@ -16,7 +16,8 @@ server-side, per account:
   * a save merges ONLY the keys it names (one save at a time, so concurrent saves of different fields both land), and
     is refused with nothing written rather than ever losing a field: a record over the read bound (_MAX_BYTES, measured
     on the SERIALISED bytes — an accepted save always reads back as accepted), a lone surrogate or body bytes that are
-    not text (a clean 400, never a codec error's message), a stored file that cannot be read (a store fault: a 500,
+    not text, or that the parser refuses (a clean 400 in the route's own words, never a codec's or the parser's
+    message; every other route keeps its own answer), a stored file that cannot be read (a store fault: a 500,
     never a 400 that blames a field);
   * Provisioner.preferences_get / preferences_set serve an ACTIVE customer only, enforce the allowlist, and write to
     the per-account store — NEVER to the signed append-only spine (no audit row): a customer cannot grow the spine by
@@ -61,8 +62,9 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
   * the store takes a lone surrogate / the read surfaces one  -> test_13_unencodable_text_is_refused_in_plain_words
   * the provisioner lets a codec error's message through      -> test_13_unencodable_text_is_refused_in_plain_words
                                                                  (end to end: test_13b)
-  * the edge echoes the codec's message for body bytes that
-    are not text, or its plain refusal ignores the flag       -> test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing
+  * the edge echoes the codec's or the parser's message for a
+    body it cannot read, its plain refusal ignores the flag or
+    the route, or calls every refusal "not valid text"        -> test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing
   * a failed read renders an (empty) form / Save enabled      -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
   * Save sends every field, not only the changed ones         -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
   * a save merges onto defaults when the file cannot be read  -> test_15_the_server_merges_only_the_keys_it_is_sent
@@ -1060,6 +1062,14 @@ def test_13_unencodable_text_is_refused_in_plain_words(home, monkeypatch):
 
 _NOT_TEXT = (b'{"preferences": {"registered_address": "\xff"}}',              # bytes that are not UTF-8 at all:
              b'{"preferences": {"registered_address": "1 Rue \xc0\x80"}}')    # a stray byte, an overlong NUL
+# text the JSON parser refuses, and the route's own plain answer for each
+_NOT_JSON = ((b'{"preferences": {"legal_entity_name": "Acme', "bad request: the body could not be read as JSON"),
+             (b'{"preferences": {"legal_entity_name": "a\x01b"}}',              # a raw control character
+              "bad request: the body could not be read as JSON"),
+             (b'{"preferences": {"legal_entity_name": ' + b"9" * 5000 + b"}}",  # more digits than the parser converts
+              "bad request: the body could not be read as JSON"),
+             (b"[]", "bad request: body must be an object"))
+_PLAIN_REFUSALS = ("bad request: the body is not valid text", "bad request: the body could not be read as JSON")
 
 
 def test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing(tmp_path, monkeypatch, home):
@@ -1086,13 +1096,22 @@ def test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing(tmp_
         for raw in _NOT_TEXT:
             assert _post_raw(op, ep, "/api/customer/preferences", raw) == (
                 400, {"error": "bad request: the body is not valid text"}), raw
+        # a body that is text but that the parser refuses gets plain words of the route's own too — never the parser's
+        # message (a raw control character, an integer longer than the parser converts), and never "not valid text"
+        for raw, said in _NOT_JSON:
+            assert _post_raw(op, ep, "/api/customer/preferences", raw) == (400, {"error": said}), raw[:48]
+        assert store.read_prefs(ana) == _PROFILE
+        # every other customer route keeps its own answer for the same bytes, the flag on or off
+        other = {raw: _post_raw(op, ep, "/api/customer/not-a-route", raw)
+                 for raw in (*_NOT_TEXT, *(r for r, _said in _NOT_JSON))}
+        for raw, got in other.items():
+            assert got[0] == 400 and got[1]["error"] not in _PLAIN_REFUSALS, (raw[:48], got)
         # flag off: no such route, and the plain refusal is not there either — the edge's answer is the one any other
         # unknown customer path gets for the same bytes, as it always was
         monkeypatch.delenv(FLAG)
-        for raw in _NOT_TEXT:
+        for raw in other:
             off = _post_raw(op, ep, "/api/customer/preferences", raw)
-            assert off == _post_raw(op, ep, "/api/customer/not-a-route", raw), (raw, off)
-            assert off[0] == 400 and off[1] != {"error": "bad request: the body is not valid text"}, (raw, off)
+            assert off == _post_raw(op, ep, "/api/customer/not-a-route", raw) == other[raw], (raw[:48], off)
         monkeypatch.setenv(FLAG, "1")
         assert store.read_prefs(ana) == _PROFILE
     finally:

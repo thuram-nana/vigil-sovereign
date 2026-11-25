@@ -1109,10 +1109,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_body()
         except (ValueError, OSError) as e:
-            if isinstance(e, UnicodeDecodeError) and action == "preferences" and _settings_on():
-                # the settings shell's General tab: body bytes that are not text are refused in plain words, never
-                # with the codec's own message (with the flag off there is no such route: the answer is as before)
-                return self._deny(400, "bad request: the body is not valid text")
+            if action == "preferences" and _settings_on():
+                # the settings shell's General tab answers a body it cannot read in its own plain words — never with
+                # the codec's or the parser's own message (with the flag off there is no such route: the answer is as
+                # before, and every other route keeps its own)
+                return self._deny(400, _plain_body_refusal(e))
             return self._deny(400, f"bad request: {str(e)[:200]}")
         except Exception:  # noqa: BLE001 — e.g. RecursionError: JSON nested deeper than the parser follows
             return self._deny(400, "bad request: the body could not be read")
@@ -1618,6 +1619,18 @@ def _team_on() -> bool:
 def _settings_on() -> bool:
     from .. import config as _config
     return _config.customer_settings_enabled()
+
+
+def _plain_body_refusal(e: Exception) -> str:
+    """The settings shell's answer to a request body ``_read_body`` could not read, in plain words of its own: body
+    bytes that are not text, the edge's own size / shape refusals as they are, and anything else the parser refused
+    (not JSON, a raw control character, an integer longer than the parser converts) — never the codec's or the
+    parser's own message."""
+    if isinstance(e, UnicodeDecodeError):
+        return "bad request: the body is not valid text"
+    if str(e) in ("body too large", "body must be an object"):          # _read_body's own plain refusals
+        return f"bad request: {e}"
+    return "bad request: the body could not be read as JSON"
 
 
 def _checkout_on() -> bool:
