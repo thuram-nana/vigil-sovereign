@@ -752,9 +752,10 @@ class StripeBillingProvider(BillingProvider):
                            refunded: int, ccy: str, created: float) -> BillingEvent:
         """A REFUND of a charge that paid a PLAN period: charge -> its invoice -> the invoice's subscription, whose
         metadata names the tenant and the plan price (set at our checkout), exactly as ``invoice.paid`` minted the
-        period. Only a paid new-period invoice maps (the ones VIGIL credits); the signer then removes that period's
-        plan credits in the refunded proportion. A dispute of a plan charge, or a charge VIGIL cannot trace to one
-        such invoice and tenant, raises ``ReversalUnaccounted`` (quarantine, nothing moves)."""
+        period. Only a paid new-period invoice that this one charge paid in full maps (the ones VIGIL credits); the
+        signer then removes that period's plan credits in the refunded proportion. A dispute of a plan charge, a
+        charge that paid only part of its invoice, or a charge VIGIL cannot trace to one such invoice and tenant,
+        raises ``ReversalUnaccounted`` (quarantine, nothing moves)."""
         cid = str(charge["id"])
         if trigger != "refund" or disputed:
             raise ReversalUnaccounted(f"Stripe charge {cid} is not a checkout top-up and is disputed: a dispute of a "
@@ -763,8 +764,14 @@ class StripeBillingProvider(BillingProvider):
         inv = self._fetched("invoice", iid, "invoice")
         if inv is None or inv.get("status") != "paid" or inv.get("billing_reason") not in _STRIPE_NEW_PERIOD_REASONS:
             raise ReversalUnaccounted(f"Stripe charge {cid} did not pay a plan period VIGIL credits ({iid})")
-        if _stripe_amount(inv.get("amount_paid"), inv.get("currency"))[1] != ccy:
+        paid, paid_ccy = _stripe_amount(inv.get("amount_paid"), inv.get("currency"))
+        if paid_ccy != ccy:
             raise ReversalUnaccounted(f"Stripe invoice {iid} is not in the currency of its charge {cid}")
+        if paid != amount:
+            # the refunded proportion is sized against the charge, and a refund total is read per charge: both hold
+            # only when this one charge paid the whole invoice (an invoice paid in parts is reconciled by hand)
+            raise ReversalUnaccounted(f"Stripe charge {cid} ({amount}) did not pay the whole of invoice {iid} "
+                                      f"({paid} paid): reconcile its refund by hand")
         sub = self._invoice_subscription(inv)
         meta = sub.get("metadata") if sub is not None else None
         org = _stripe_tenant(None, meta) if sub is not None else None
@@ -1822,8 +1829,9 @@ class BillingSigner:
         (``allotment x refunded / charge amount``, rounded down) from what remains of its tranche
         (``BillingReversalLedger.reconcile_plan``: never more than remains, never negative, never a grant). The period
         is the owner-signed billing-history line of the invoice, and its tranche must be on the spine; a period not
-        credited YET is retried (``ReversalRetry``), one with no credits (a monitoring plan) or in another currency is
-        refused (``ReversalUnaccounted``)."""
+        credited YET is retried (``ReversalRetry``), one with no credits (a monitoring plan), in another currency, or
+        whose charge is not the price the line records (the price the owner's plan-withdraw verb sizes the same
+        refund against) is refused (``ReversalUnaccounted``)."""
         from .billing_reversal import ReversalRetry
         oid, data = event.org_id, event.data or {}
         iid, trigger = data.get("plan_invoice"), data.get("trigger")
@@ -1845,6 +1853,12 @@ class BillingSigner:
         if line.currency and event.currency and line.currency.upper() != event.currency.upper():
             raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r} is in {event.currency}, the "
                                       f"invoice {iid} in {line.currency}")
+        if int(line.amount_minor) != amount:
+            # the owner's plan-withdraw verb sizes the same refund against the line's price: both paths size it
+            # against one amount, or the refund is reconciled by hand
+            raise ReversalUnaccounted(f"plan reversal {event.event_id} for org {oid!r}: its charge ({amount}) is not "
+                                      f"the price ({line.amount_minor}) the invoice {iid} line records; reconcile by "
+                                      f"hand")
         cap = int(line.credits)
         res = self.reversals.reconcile_plan(oid, iid, cap=cap, period_end=float(line.period_end), now=float(now),
                                             processor_refunded=cap * min(refunded, amount) // amount)

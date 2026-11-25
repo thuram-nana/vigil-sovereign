@@ -88,8 +88,9 @@ With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from
 - a refund of a plan payment is traced from the charge to its invoice and to the subscription that names the
   org, and removes that period's plan credits in the refunded proportion, from what remains (a spent part is
   never owed);
-- a refund VIGIL cannot trace to one credited purchase (a disputed plan payment, a monitoring plan, an unknown
-  charge) is quarantined for you to reconcile by hand. A refund never adds credits: if a plan refund later goes
+- a refund VIGIL cannot trace to one credited purchase (a disputed plan payment, a monitoring plan, a payment
+  that paid only part of its invoice or not the plan's price, an unknown charge) is quarantined for you to
+  reconcile by hand. A refund never adds credits: if a plan refund later goes
   down (a failed refund), the drain quarantines it and the removed plan credits are not given back.
 
 ## Keep a record

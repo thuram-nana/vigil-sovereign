@@ -310,6 +310,28 @@ def test_an_invoice_that_is_not_a_credited_plan_period_quarantines(inv):
     assert _left(d.plan) == ALLOT
 
 
+@pytest.mark.parametrize("charge,inv", [
+    (dict(_charge(refunded=PRICE // 2), amount=PRICE // 2), _invoice()),   # this charge paid half the invoice
+    (_charge(), _invoice(amount=PRICE * 2)),                               # the invoice was paid by more than it
+])
+def test_a_charge_that_paid_only_part_of_its_invoice_quarantines(charge, inv):
+    # the proportion is sized against the charge and the refund total is read per charge: a full refund of half
+    # the payment must never remove the whole period's allotment
+    d = _Drain(charge=charge, invoice=inv)
+    with pytest.raises(ReversalUnaccounted, match="did not pay the whole of invoice"):
+        d.send()
+    assert _left(d.plan) == ALLOT and d.L.purchase("acme", plan_ref(INV)).removed == 0
+
+
+def test_a_plan_charge_that_is_not_the_price_its_invoice_line_records_quarantines():
+    # the charge paid the whole invoice, but not the price VIGIL's billing-history line records (the price the
+    # owner's plan-withdraw verb sizes the same refund against): the two paths would size it differently
+    d = _Drain(charge=dict(_charge(refunded=9_000), amount=9_000), invoice=_invoice(amount=9_000))
+    with pytest.raises(ReversalUnaccounted, match=r"is not the price \(9900\)"):
+        d.send()
+    assert _left(d.plan) == ALLOT
+
+
 def test_a_subscription_without_one_tenant_quarantines():
     sub = _sub()
     sub["metadata"]["org_id"] = "other"                               # tx_ref and org_id disagree
