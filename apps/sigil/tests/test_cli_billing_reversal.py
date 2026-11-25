@@ -258,6 +258,33 @@ def test_plan_withdraw_refuses_what_is_not_a_refund_of_a_credited_plan_invoice(m
     assert fake.updates == [] and _left(plan) == _ALLOT
 
 
+@pytest.mark.parametrize("reason", ["withdrawal\x07", "w\x00", "w\u202e"])
+def test_plan_withdraw_checks_the_reason_before_it_stops_the_renewal(monkeypatch, capsys, reason):
+    # a reason the owner-signed step would refuse is refused BEFORE anything is sent to Stripe
+    plan, fake = _seed_plan(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_billing_reversal(_pw(credits=str(_PRICE), reason=reason))
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "--reason" in err and "printable" in err
+    assert fake.updates == [] and fake.sub["cancel_at_period_end"] is False and _left(plan) == _ALLOT
+
+
+@pytest.mark.parametrize("exc,code", [("refused", 2), ("retry", 3)])
+def test_a_refusal_after_the_renewal_stop_says_the_renewal_is_stopped(monkeypatch, capsys, exc, code):
+    from sigil.governor.billing_reversal import ReversalRefused, ReversalRetry
+    plan, fake = _seed_plan(monkeypatch)
+
+    def boom(*a, **k):
+        raise ReversalRefused("hand") if exc == "refused" else ReversalRetry("lock busy")
+    monkeypatch.setattr(BillingReversalLedger, "reconcile_plan", boom)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
+    err = capsys.readouterr().err
+    assert e.value.code == code and fake.sub["cancel_at_period_end"] is True
+    assert "the renewal IS stopped (subscription sub_p1 now ends at the end of its period" in err
+    assert "no plan credit was removed" in err and _left(plan) == _ALLOT
+
+
 def test_plan_withdraw_refuses_a_monitoring_plan_with_no_credits(monkeypatch, capsys):
     plan, fake = _seed_plan(monkeypatch)
     owner = ensure_owner_keypair()

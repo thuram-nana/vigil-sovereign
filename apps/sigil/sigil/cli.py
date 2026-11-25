@@ -3008,12 +3008,14 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
     remains of that period (``BillingReversalLedger.reconcile_plan``: owner-signed, never more than remains, never
     negative). ``refunded`` is the TOTAL refunded at Stripe for that invoice, so running the verb again with the same
     amount removes nothing more (only credits that came back to the period since, e.g. a refunded launch). The Stripe
-    drain's own refund mapping converges on the same target. Nothing moves when the renewal cannot be stopped."""
+    drain's own refund mapping converges on the same target. Nothing moves when the renewal cannot be stopped. Every
+    input is checked BEFORE the renewal is stopped (the reason too), and a refusal after the stop says the renewal
+    is stopped."""
     import re as _re
     import time as _time
     from typing import NoReturn
 
-    from .governor.billing_reversal import ReversalRefused, ReversalRetry
+    from .governor.billing_reversal import ReversalRefused, ReversalRetry, _clean_note
     from .governor.invoices import InvoiceRegistry
     from .governor.metering import PlanCreditLedger
 
@@ -3023,6 +3025,10 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
 
     if not _re.fullmatch(r"in_[A-Za-z0-9]{1,88}", invoice_id) or refunded_minor < 1 or not reason.strip():
         refuse("plan-withdraw needs <org> <plan invoice id in_...> <cents refunded at Stripe >= 1> and --reason")
+    try:
+        _clean_note(reason)                       # the step's reason, checked before anything is sent to Stripe
+    except ReversalRefused as exc:
+        refuse(f"--reason: {exc}")
     line = next((i for i in InvoiceRegistry(store, owner_key=owner).invoices(org)
                  if i.invoice_id == invoice_id and i.kind == "subscription"), None)
     if line is None or line.credits <= 0:
@@ -3044,9 +3050,10 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
         res = ledger.reconcile_plan(org, invoice_id, cap=int(line.credits), period_end=float(line.period_end),
                                     now=_time.time(), owner_refunded=credits, note=reason)
     except ReversalRefused as exc:
-        refuse(str(exc))
+        refuse(f"the renewal IS stopped ({stopped}), but no plan credit was removed: {exc}")
     except ReversalRetry as exc:
-        print(f"  busy: {exc}", file=sys.stderr)
+        print(f"  busy: the renewal IS stopped ({stopped}), but no plan credit was removed yet: {exc} — run this "
+              f"command again", file=sys.stderr)
         sys.exit(3)
     print(f"  renewal stopped: {stopped}")
     if res.seq is None or res.moved <= 0:
