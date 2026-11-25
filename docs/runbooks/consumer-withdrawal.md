@@ -43,7 +43,11 @@ run from its first purchase, and a plan the customer withdraws from does not ren
   Example: 450 trial credits, one 1,000-credit pack ($10), 600 credits used. The balance is 850, the purchased
   balance remaining is 850 (the 450 trial credits were spent first), so 850 credits of the pack are unused and
   the refund is $8.50.
-- **The refund** is the purchase's price in proportion to its unused credits, rounded up to the cent.
+- **The refund** is the purchase's price in proportion to its unused credits, rounded up to the cent. A
+  refund of a pack's whole price removes every credit of the pack (Terms §8), so a pack that is not wholly
+  unused is refunded less than its whole price: when rounding up would reach the whole price (only a pack
+  worth more than one credit per cent can, and none is on sale), the refund is one cent less, and `unused`
+  says so.
 
 `sigil billing-reversal unused <org> <purchase>` prints the unused credits, the purchased balance remaining (for
 a pack) and the refund, and the verb to run next. It writes nothing. The purchase is the billing-history id: a
@@ -87,9 +91,9 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
 With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from Stripe:
 
 - a refund of a credit pack removes that pack's credits in the refunded proportion, rounded in the customer's
-  favour: the refund `unused` prints for `N` credits never removes more than `N`, so it and the owner's `refund`
-  verb converge. A part already spent is owed and puts the org on a billing hold until a later purchase repays
-  it;
+  favour (a refund of the whole price removes all of them): the refund `unused` prints for `N` credits never
+  removes more than `N`, so it and the owner's `refund` verb converge. A part already spent is owed and puts
+  the org on a billing hold until a later purchase repays it;
 - a refund of a plan payment is traced from the charge to its invoice and to the subscription that names the
   org, and removes the refunded proportion of that period's allotment (allotment x refunded / price), taken
   from the plan credits that remain in the period (never more than remain; a spent part is never owed);

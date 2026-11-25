@@ -2940,19 +2940,27 @@ def unused_purchase_credits(line, *, purchased_left: int, removed: int, plan_lef
     return max(0, min(int(line.credits) - int(removed), int(purchased_left)))
 
 
-def withdrawal_refund_minor(price_minor: int, unused: int, credits: int) -> int:
+def withdrawal_refund_minor(price_minor: int, unused: int, credits: int, *, plan: bool = False) -> int:
     """The refund for ``unused`` of a purchase's ``credits`` (Terms §8): its price in proportion, rounded UP to the
-    minor unit (the customer-favourable reading). The Stripe drain converts that refund back to no more than
-    ``unused`` credits (``billing.refund_credits``). PURE."""
+    minor unit (the customer-favourable reading). A credit pack's refund for fewer than all of its credits stays
+    below the whole price (at most the price less one minor unit): a refund of the whole price removes every credit
+    of the pack (``billing.refund_credits``), and the credits already spent would then be owed (a billing hold). Only
+    a pack worth more than one credit per minor unit can round up to its whole price that way. The Stripe drain
+    converts a pack's refund back to no more than ``unused`` credits. A plan period's refund (``plan``) is rounded up
+    plainly: a plan refund removes only the plan credits that remain and is never owed. PURE."""
     if price_minor <= 0 or credits <= 0 or unused <= 0:
         return 0
-    return -(-int(price_minor) * int(unused) // int(credits))
+    refund = -(-int(price_minor) * int(unused) // int(credits))
+    if not plan and int(unused) < int(credits):
+        refund = min(refund, int(price_minor) - 1)
+    return refund
 
 
 def _print_unused(org: str, purchase: str, *, store, owner, wallet, ledger) -> None:
     """``billing-reversal unused <org> <purchase>`` — READ-ONLY: a purchase's unused credits by the withdrawal rule
     (``unused_purchase_credits``), the refund that matches them (``withdrawal_refund_minor``: the price in proportion,
-    rounded up to the cent) and the verb that removes them. Nothing is written."""
+    rounded up to the cent, and below the whole price for a pack not wholly unused) and the verb that removes them.
+    Nothing is written."""
     import time as _time
 
     from .governor.billing_reversal import plan_ref
@@ -2970,7 +2978,8 @@ def _print_unused(org: str, purchase: str, *, store, owner, wallet, ledger) -> N
     removed = ledger.purchase(org, plan_ref(purchase) if line.kind == "subscription" else purchase).removed
     purchased_left = purchased_balance_remaining(spendable=wallet.balance(org).spendable, bought_left=bought_left)
     unused = unused_purchase_credits(line, purchased_left=purchased_left, removed=removed, plan_left=plan_left)
-    refund = withdrawal_refund_minor(int(line.amount_minor), unused, int(line.credits))
+    refund = withdrawal_refund_minor(int(line.amount_minor), unused, int(line.credits),
+                                     plan=line.kind == "subscription")
     what = "plan period" if line.kind == "subscription" else "top-up"
     print(f"  {what} {purchase} of {org}: {unused} of its {line.credits} credits unused")
     if line.kind == "topup":
@@ -2981,8 +2990,11 @@ def _print_unused(org: str, purchase: str, *, store, owner, wallet, ledger) -> N
     if unused <= 0:
         print("  every credit of this purchase is used: its right of withdrawal has ended")
         return
-    print(f"  refund at Stripe: {refund} of {line.amount_minor} {line.currency or 'minor units'} (the price in "
-          f"proportion, rounded up to the cent)")
+    rounded = withdrawal_refund_minor(int(line.amount_minor), unused, int(line.credits), plan=True)
+    why = ("the price in proportion, rounded up to the cent" if refund == rounded else
+           "the price in proportion rounded up would be the whole price, which would remove every credit of this "
+           "pack, so it is one cent less")
+    print(f"  refund at Stripe: {refund} of {line.amount_minor} {line.currency or 'minor units'} ({why})")
     if line.kind == "subscription":
         print(f"  then: sigil billing-reversal plan-withdraw {org} {purchase} <total refunded, in cents> --reason ...")
     else:

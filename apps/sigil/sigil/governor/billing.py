@@ -1033,15 +1033,18 @@ def _stripe_amount(amount: object, currency: object) -> "tuple[int, str]":
 
 def refund_credits(cap: int, refunded: int, amount: int) -> int:
     """The credits a processor REFUND of ``refunded`` minor units removes from a purchase of ``cap`` credits that
-    was charged ``amount``: the smaller of the refunded proportion rounded down (``cap x refunded / amount``) and the
-    fewest credits whose price in proportion, rounded UP to the minor unit, comes to ``refunded`` or more. The
-    withdrawal runbook refunds N unused credits at their price rounded up (``sigil billing-reversal unused``), so
-    that refund never removes more than N credits, whichever of the drain and the owner's refund verb comes first,
-    including for a pack worth more than one credit per minor unit. A full refund of a pack worth one credit per
-    minor unit or less removes all of it. PURE."""
+    was charged ``amount``. A refund of the whole charge removes all ``cap`` credits (Terms §8: in the same
+    proportion). A partial refund removes the smaller of the refunded proportion rounded down (``cap x refunded /
+    amount``) and the fewest credits whose price in proportion, rounded UP to the minor unit, comes to ``refunded``
+    or more. The withdrawal runbook refunds N unused credits of a pack at their price rounded up, and below the whole
+    price unless every credit is unused (``sigil billing-reversal unused``), so that refund never removes more than N
+    credits, whichever of the drain and the owner's refund verb comes first, including for a pack worth more than one
+    credit per minor unit. PURE."""
     r = min(max(0, int(refunded)), int(amount))
     if r <= 0 or cap <= 0:
         return 0
+    if r == amount:
+        return cap
     return min(cap * r // amount, cap * (r - 1) // amount + 1)
 
 

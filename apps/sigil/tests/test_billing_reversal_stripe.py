@@ -220,6 +220,23 @@ def test_a_withdrawal_refund_of_a_bonus_pack_removes_exactly_its_unused_credits(
         step()
     assert r.reversals.purchase("acme", "cs_test_s1").removed == unused
     assert r.reversals.owed("acme") == 0 and not r.reversals.on_hold("acme") and r.wallet.available("acme") == 0
+    # a refund of the whole price is for a wholly unused pack only (a refund of the whole price removes all of it)
+    assert (refund == _BONUS_PRICE) is (left == _BONUS_CREDITS)
+
+
+@pytest.mark.parametrize("credits,price", [(_BONUS_CREDITS, _BONUS_PRICE), (1_000, 1_000), (7, 3), (100, 1_000)])
+def test_a_full_refund_of_an_unused_pack_removes_every_credit_it_added(credits, price):
+    # Terms §8: a purchase refunded in full loses the credits it added in the same proportion, i.e. all of them,
+    # whatever the pack's credits per minor unit (the retired 6k pack: 6,000 credits for $50)
+    r = _Rig(objects=[_charge(amount=price)], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
+    r.wallet.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    r.wallet.grant("acme", credits, "topup", entry_id="cs_test_s1", issued_at=1.0)
+    r.invoices.record("acme", invoice_id="cs_test_s1", kind="topup", price_id="vigil_topup_6k", amount_minor=price,
+                      currency="USD", credits=credits, issued_at=1.0)
+    r.objects["ch_1"]["amount_refunded"] = price
+    r.send("charge.refunded", "ch_1")
+    assert r.reversals.purchase("acme", "cs_test_s1").removed == credits
+    assert r.wallet.available("acme") == 450 and r.reversals.owed("acme") == 0       # the trial credits stay
 
 
 @pytest.mark.parametrize("cap,amount", [(1_000, 1_000), (6_000, 5_000), (20_000, 9_900), (100, 1_000), (7, 3)])
@@ -231,8 +248,9 @@ def test_a_refund_converts_to_no_more_credits_than_its_proportion_or_the_unused_
         assert refund_credits(cap, back, amount) <= unused                        # never more than it paid back
     assert refund_credits(cap, amount + 1, amount) == refund_credits(cap, amount, amount)
     assert refund_credits(cap, 0, amount) == 0 and refund_credits(cap, -5, amount) == 0
-    if cap <= amount:                                     # one credit per minor unit or less: a full refund is all
-        assert refund_credits(cap, amount, amount) == cap
+    assert refund_credits(cap, amount, amount) == cap     # a full refund removes all of it, at every ratio
+    for unused in range(1, cap):                          # a pack's refund for fewer than all is below the whole price
+        assert cli.withdrawal_refund_minor(amount, unused, cap) < amount
     if cap == amount:                                     # every pack on sale: exactly the refunded amount
         assert all(refund_credits(cap, r, amount) == r for r in range(amount + 1))
 

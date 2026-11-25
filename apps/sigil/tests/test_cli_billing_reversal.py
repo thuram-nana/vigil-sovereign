@@ -343,9 +343,33 @@ def test_the_unused_refund_is_the_price_in_proportion_rounded_up_to_the_cent(mon
 @pytest.mark.parametrize("price,unused,credits,refund", [
     (5_000, 5, 6_000, 5), (5_000, 4_997, 6_000, 4_165), (1_000, 850, 1_000, 850), (9_900, 1, 20_000, 1),
     (5_000, 6_000, 6_000, 5_000), (0, 5, 6_000, 0), (5_000, 0, 6_000, 0), (5_000, -5, 6_000, 0), (5_000, 5, 0, 0),
+    # a pack not wholly unused whose rounded-up price would be its whole price: one cent less (the whole price
+    # removes every credit of the pack, and the spent ones would be owed)
+    (5_000, 5_999, 6_000, 4_999), (3, 5, 7, 2), (3, 6, 7, 2), (3, 7, 7, 3), (1_000, 999, 1_000, 999),
 ])
 def test_withdrawal_refund_minor_rounds_up_and_never_refunds_a_purchase_with_no_price(price, unused, credits, refund):
     assert cli.withdrawal_refund_minor(price, unused, credits) == refund
+
+
+@pytest.mark.parametrize("unused,refund", [(11_999, 9_900), (12_000, 9_900), (9_000, 7_425), (1, 1)])
+def test_a_plan_withdrawal_refund_is_rounded_up_plainly(unused, refund):
+    # a plan refund removes only the plan credits that remain and is never owed, so its rounding is never capped
+    assert cli.withdrawal_refund_minor(_PRICE, unused, _ALLOT, plan=True) == refund
+
+
+def test_unused_of_a_bonus_pack_one_credit_short_says_why_the_refund_is_one_cent_less(monkeypatch, capsys):
+    monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
+    owner = ensure_owner_keypair()
+    s = cli.SpineStore()
+    w = WalletRegistry(s, owner_key=owner)
+    w.grant("acme", 6_000, "topup", entry_id="cs_6k", issued_at=1.0)
+    InvoiceRegistry(s, owner_key=owner).record("acme", invoice_id="cs_6k", kind="topup", price_id="vigil_topup_6k",
+                                               amount_minor=5_000, currency="USD", credits=6_000, issued_at=1.0)
+    w.debit("acme", 1, entry_id="spend", issued_at=1.5)
+    cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup="cs_6k", credits=None))
+    out = capsys.readouterr().out
+    assert "5999 of its 6000 credits unused" in out and "refund at Stripe: 4999 of 5000 USD" in out
+    assert "would be the whole price" in out and "refund acme cs_6k 5999" in out
 
 
 def test_unused_refuses_what_is_not_a_purchase_with_credits(monkeypatch, capsys):
