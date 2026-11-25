@@ -133,7 +133,7 @@ def _load(org_id: str, *, strict: bool) -> dict:
     for host, rec in saved.items():
         if not (isinstance(host, str) and _is_text(host) and isinstance(rec, dict)):
             continue
-        clean = {}
+        clean: dict[str, object] = {}  # holds str fields (requested_by, note) and a float 'at'
         for k in REQUEST_KEYS:
             v = rec.get(k)
             if isinstance(v, str) and _is_text(v):
