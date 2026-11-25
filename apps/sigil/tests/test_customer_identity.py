@@ -120,3 +120,26 @@ def test_finish_login_output_is_role_free_and_the_username_is_not_an_operator_ac
     assert set(result.keys()) == {"username", "orgs"}          # no role/global_role leaks into the login tail
     assert out["username"].startswith("cust_")
     assert AccountsRegistry(s).account(out["username"]) is None  # a customer is NOT an operator account (disjoint)
+
+
+def test_a_successful_login_does_not_reset_the_per_ip_failure_counter():
+    """PL01: a successful login clears only the EMAIL failure counter, never the per-IP one — so an attacker
+    holding ONE valid account on an IP cannot reset the IP limit and keep brute-forcing OTHER accounts from it."""
+    from sigil.ui.provision import ProvisionRateLimited
+    p, _s = _prov()                                            # LoginRateLimiter(max_fails=3)
+    _signup(p, "attacker@acme.com", pw="attacker-pw-1")
+    IP = "9.9.9.9"
+    # Two failed logins from this IP, each against a DISTINCT (non-existent) email, so no single EMAIL counter
+    # reaches the limit — only the per-IP counter accumulates.
+    for em in ("v1@acme.com", "v2@acme.com"):
+        with pytest.raises(ProvisionDenied):
+            p.login(em, "wrong", ip=IP)
+    # A successful login as the attacker's OWN account from the SAME IP clears only the attacker's email counter.
+    assert p.login("attacker@acme.com", "attacker-pw-1", ip=IP)["username"]
+    # The per-IP counter was NOT reset by that success (still at 2): a third failed attempt reaches the limit, so
+    # the FOURTH is locked out BY IP (ProvisionRateLimited), not merely answered with a password error. Under the
+    # old clear-on-success behaviour the success would have reset the IP counter and this would never lock.
+    with pytest.raises(ProvisionDenied):
+        p.login("v3@acme.com", "wrong", ip=IP)                 # the 3rd per-IP failure
+    with pytest.raises(ProvisionRateLimited):
+        p.login("v4@acme.com", "wrong", ip=IP)                 # IP locked: the success did not clear it

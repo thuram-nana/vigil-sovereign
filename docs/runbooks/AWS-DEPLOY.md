@@ -245,7 +245,15 @@ Cloudflare fronts the domain by becoming its DNS authority, so you delegate DNS 
      uncommenting the `ssl_client_certificate` + `ssl_verify_client on` block in `vigil-public.nginx.conf`
      so the origin rejects any connection not bearing THIS zone's client cert; or
    - **(b) a Cloudflare Tunnel** (`cloudflared`) — then there is no public 443 at all and the SG needs no
-     inbound 443/80.
+     inbound 443/80. **One extra real-IP step the tunnel needs:** `cloudflared` delivers every request to the
+     origin from `127.0.0.1`, so the Cloudflare-IP-range `set_real_ip_from` lines never match and the real-IP
+     recovery collapses — nginx then sees every visitor as `127.0.0.1` and buckets ALL customers under one
+     per-IP login/signup rate limit (one visitor's wrong passwords would lock everyone out). With the tunnel,
+     also add `set_real_ip_from 127.0.0.1;` and `set_real_ip_from ::1;` (keeping the existing
+     `real_ip_header CF-Connecting-IP;`) to the
+     real-IP block in BOTH `vigil-public.nginx.conf` and `vigil-customer.nginx.conf`, so the true visitor IP is
+     recovered from the header the tunnel forwards. (Harmless under option (a) too: it only affects
+     loopback-origin connections, which the direct path never makes.)
 
    Cloudflare's *shared* AOP cert alone is **not** a sufficient origin lock.
 5. **Cloudflare → Caching → Cache Rules — exactly these two, each matching exact host names.** Never write a

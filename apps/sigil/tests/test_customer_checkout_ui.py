@@ -129,7 +129,10 @@ def test_an_org_with_a_live_plan_is_told_so(monkeypatch):
     SubscriptionRegistry(p.store).subscribe(org, "research", 2000, period_start=100.0, period_end=10_000.0,
                                             issued_at=100.0)
     assert p.customer_billing_offers(admin, org, now=5000.0)["has_active_plan"] is True
-    assert p.customer_billing_offers(admin, org, now=10_001.0)["has_active_plan"] is False   # lapsed
+    # PL01 CHK-1b: the plan stays "live" through a 72h renewal/retry grace past period_end (so the UI keeps
+    # showing it and never offers a double-buy); it reads lapsed only AFTER the grace fully elapses.
+    assert p.customer_billing_offers(admin, org, now=10_001.0)["has_active_plan"] is True             # within grace
+    assert p.customer_billing_offers(admin, org, now=10_000.0 + 72 * 3600 + 1.0)["has_active_plan"] is False  # lapsed
 
 
 def test_the_offers_hop_and_route_are_flag_gated_and_session_scoped():

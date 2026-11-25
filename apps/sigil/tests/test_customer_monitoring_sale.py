@@ -343,7 +343,9 @@ def test_offers_report_a_live_aegis_plan(monkeypatch):
     assert p.customer_billing_offers(admin, org, now=5000.0)["has_monitoring_plan"] is False
     _live_aegis(p, org, pe=10_000.0)
     assert p.customer_billing_offers(admin, org, now=5000.0)["has_monitoring_plan"] is True
-    assert p.customer_billing_offers(admin, org, now=10_001.0)["has_monitoring_plan"] is False   # lapsed
+    # PL01 CHK-1b: live through the 72h renewal/retry grace past period_end, lapsed only after it elapses.
+    assert p.customer_billing_offers(admin, org, now=10_001.0)["has_monitoring_plan"] is True            # within grace
+    assert p.customer_billing_offers(admin, org, now=10_000.0 + 72 * 3600 + 1.0)["has_monitoring_plan"] is False  # lapsed
     assert p.customer_billing_offers(admin, org, now=5000.0)["has_active_plan"] is False          # credit independent
 
 
