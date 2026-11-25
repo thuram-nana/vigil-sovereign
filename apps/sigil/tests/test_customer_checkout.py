@@ -217,7 +217,7 @@ def test_the_edge_route_is_absent_while_the_flag_is_off(monkeypatch):
 
 # --- red-pen folds ---------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("plan", ["vigil_research_monthly", "vigil_pro_monthly", "vigil_team_monthly"])
+@pytest.mark.parametrize("plan", ["vigil_starter_monthly", "vigil_pro_monthly", "vigil_team_monthly"])
 def test_a_subscription_plan_is_refused_never_charged_for_nothing(monkeypatch, plan):
     """Red-pen HIGH: a plan sold through this ONE-TIME payment would carry no payment_plan, so the inbound mapper
     would mint NOTHING — the customer charged, granted nothing. The edge offers top-ups only."""

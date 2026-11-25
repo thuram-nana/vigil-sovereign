@@ -45,7 +45,7 @@ from test_compliance_rollup import _area6_env  # noqa: F401  (autouse: every Are
 from test_compliance_rollup import _member, _prov, _store
 
 ORG = "acme"
-TEAM, PRO, RESEARCH = "vigil_team_monthly", "vigil_pro_monthly", "vigil_research_monthly"
+TEAM, PRO, RESEARCH = "vigil_team_monthly", "vigil_pro_monthly", "vigil_starter_monthly"
 DAY = 86400.0
 T0 = 1_000_000.0
 _WHSEC = "whsec_" + "prg-plan-change"

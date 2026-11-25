@@ -8,7 +8,7 @@ Load-bearing invariants:
     drain-built signer still mints it exactly once;
   * a paid monitoring period that reaches a signer with no monitoring line raises UnaccountedPayment under the plan
     alarm (alarm off keeps the historical no-op);
-  * no entry is retired in this slice and the offered surface is byte-identical to before.
+  * the only retired entry is the owner's pre-launch bonus pack; the offered surface is the catalog minus it.
 """
 from __future__ import annotations
 
@@ -72,8 +72,10 @@ def test_offered_surface_unchanged(monkeypatch, monitoring):
         monkeypatch.setenv(_MON, "1")
     else:
         monkeypatch.delenv(_MON, raising=False)
-    assert not any(e.retired for e in cat._CATALOG), "S1 retires nothing"
-    pre = [e for e in cat._CATALOG if monitoring or not e.monitor_hosts]
+    # the only retired entry is the owner's pre-launch $50 bonus pack (2026-11-24); the offered surface is exactly
+    # the catalog minus retired entries (and minus AEGIS while its flag is off)
+    assert [e.price_id for e in cat._CATALOG if e.retired] == ["vigil_topup_6k"]
+    pre = [e for e in cat._CATALOG if not e.retired and (monitoring or not e.monitor_hosts)]
     assert cat.plans() == [e.public() for e in pre]
     assert cat.entitlements() == {e.price_id: e.entitlement() for e in pre}
     assert cat.expected_amounts() == {e.price_id: (e.amount_minor, e.currency) for e in pre}
