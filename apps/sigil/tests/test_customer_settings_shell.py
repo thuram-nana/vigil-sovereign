@@ -57,6 +57,7 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
   * the guide has no Settings step                            -> test_11_the_guide_covers_settings_only_while_it_is_shown
                                                                  (and test_customer_onboarding's screen census)
   * the guide lists a switch-named step whatever the switch   -> test_11_the_guide_covers_settings_only_while_it_is_shown
+  * the guide names Account security with that screen off     -> test_11_the_guide_covers_settings_only_while_it_is_shown
   * routeShown ignores the settings flag                      -> test_11_the_guide_covers_settings_only_while_it_is_shown
   * the store caps code points, not the serialised bytes      -> test_12_an_accepted_save_always_reads_back_as_accepted
   * the store takes a lone surrogate / the read surfaces one  -> test_13_unencodable_text_is_refused_in_plain_words
@@ -883,6 +884,7 @@ def test_10_backup_captures_the_profile_and_toggle_off_is_byte_identical(tmp_pat
 # =====================================================================================================================
 _GUIDE_WORLD = r"""
 document.body.dataset.settings = __FLAG__;
+document.body.dataset.security = __SECURITY__;
 const VUI = window.VUI, G = window.VIGIL_GUIDE, navs = [];
 var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, POSTURE_ON = false;   // routeShown's other screens: off
 // The Guide screen as app.js mounts it (viewGuideScreen passes shown: routeShown, flag: pageFlag): every chapter tab in
@@ -900,10 +902,11 @@ function guideTabs(shown) {
 """
 
 
-def _guide_app(flag: str) -> str:
-    """guide.js (loaded by the harness) plus app.js's own SETTINGS_ON and routeShown lines, verbatim."""
+def _guide_app(flag: str, security: str = "0") -> str:
+    """guide.js (loaded by the harness) plus app.js's own SETTINGS_ON and routeShown lines, verbatim; ``security`` is
+    the Account-security page switch (the Settings step's ``alt`` clicks name that screen only where it is on)."""
     src = APP_JS.read_text(encoding="utf-8")
-    return "\n".join([_GUIDE_WORLD.replace("__FLAG__", json.dumps(flag)),
+    return "\n".join([_GUIDE_WORLD.replace("__FLAG__", json.dumps(flag)).replace("__SECURITY__", json.dumps(security)),
                       _line(src, r"^  function h\(\) \{.*\}$"), _fn(src, "pageFlag"),
                       _line(src, r'^  var SETTINGS_ON = pageFlag\("settings"\);$'),
                       _line(src, r"^  function routeShown\(route\) \{.*\}$")])
@@ -923,11 +926,16 @@ def test_11_the_guide_covers_settings_only_while_it_is_shown():
     st = steps[("workspace", "organization")]
     assert (st["where"], st["route"], st["when"]) == ("Settings", "#/settings", "settings")
     assert '  var SETTINGS_ON = pageFlag("settings");' in src      # the switch the step names is the one app.js reads
-    # every control the step names is one the hub really shows (its own literal in the Settings block)
-    told, block = " ".join(st["clicks"]), _settings_block(src)
+    # every control the step names is one the hub really shows (its own literal in the Settings block) — and the
+    # Account-security link, which the hub shows only where that screen is on, is named only in the step's `alt`
+    # clicks, which the guide uses only where that screen's page switch is on
+    told, block = " ".join(st["clicks"] + st["alt"]["clicks"]), _settings_block(src)
     for label in ("Settings", "General", "Save", "Your organization", "Account security & sign-in",
                   "Authorized administrators", "Billing"):
         assert label in told and f'"{label}"' in block, label
+    assert st["alt"]["when"] == "security" and st["alt"]["clicks"][:-1] == st["clicks"][:-1]
+    assert "Account security" not in " ".join(st["clicks"]) and "Account security & sign-in" in st["alt"]["clicks"][-1]
+    assert '(hash !== "#/security" || SECURITY_ON)' in block      # the hub's own condition for that link
     assert 'navLink("Settings", "#/settings")' in src and "roles are changed on Team" in st["why"]
     # a switch-named step is never on the tour, so the tour is the same whatever the flag
     scoped = {key for key, s in steps.items() if s.get("when")}
@@ -959,6 +967,19 @@ out.navs = navs;
     assert on["shown"] == [True, True]
     assert on["titles"] == ["The Overview", "Bring in your team", "Notifications", "Record your organization's details"]
     assert on["go"] == ["Go to Overview", "Go to Team", "Go to Settings"] and on["navs"] == ["#/settings"]
+    # the step names Account security & sign-in only where that screen's switch is on, as the hub links it
+    told = {}
+    for security in ("0", "1"):
+        told[security] = _node(_guide_app("1", security) + r"""
+const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown: routeShown, flag: pageFlag,
+                        chapter: "workspace" });
+document.body.appendChild(g);
+const card = g.querySelectorAll("div.cust-guide-step").filter(c =>
+  text(c.querySelector("span.cust-guide-step-title")) === "Record your organization's details")[0];
+out.clicks = card.querySelector("ol.cust-tour-clicks").querySelectorAll("li").map(e => text(e));
+""")["clicks"]
+    assert told["0"] == st["clicks"] and told["1"] == st["alt"]["clicks"]
+    assert "Account security" not in " ".join(told["0"]) and "Account security & sign-in" in told["1"][-1]
 
 
 # =====================================================================================================================

@@ -486,9 +486,11 @@ def test_the_guide_walks_through_plans_and_reports():
                    + [f"faq/{f['q']}" for f in out["faq"] if f.get("when")]
                    + [f"{ch['id']}/{st['id']}:alt" for ch in out["chapters"] for st in ch["steps"] if st.get("alt")])
     assert gated == ["assess/fixfirst", "assess/report", "assess/standards", "credits/compare", "credits/plans:alt",
-                     "faq/Can I give our results to an auditor or a customer?", "workspace/organization"]
+                     "faq/Can I give our results to an auditor or a customer?", "workspace/organization",
+                     "workspace/organization:alt"]
     assert steps[("assess", "fixfirst")]["when"] == "posture"                     # PR-B's step, never a PR-G switch
     assert steps[("workspace", "organization")]["when"] == "settings"            # lgS1's step, never a PR-G switch
+    assert steps[("workspace", "organization")]["alt"]["when"] == "security"     # its Account-security clicks
     plans = steps[("credits", "plans")]
     assert plans["clicks"][-1] == "A workspace has one plan at a time. To change plans, contact VIGIL."   # as before
     assert plans["alt"]["when"] == "plans" and plans["alt"]["clicks"][:-1] == plans["clicks"][:-1]
