@@ -1419,7 +1419,15 @@ def test_17_every_class_the_settings_hub_renders_is_styled():
             "cust-settings-error", "cust-pref-save", "cust-pref-retry"} <= set(ours), ours
 
     def styled(token: str) -> bool:
-        return any(re.search(re.escape(token) + r"(?![\w-])", sel) for sel, _body in rules)
+        """Whether some rule styles the element that carries ``token`` ITSELF: ``token`` is in the subject (the last
+        compound) of one of the rule's selectors — a rule that names it only as an ancestor (``.cust-field label``)
+        styles another element, so a container whose own rule is gone is caught."""
+        for sel, _body in rules:
+            for one in sel.split(","):
+                compounds = re.split(r"\s*[>+~]\s*|\s+", one.strip())
+                if compounds and re.search(re.escape(token) + r"(?![\w-])", compounds[-1]):
+                    return True
+        return False
 
     assert [c for c in ours if not styled("." + c)] == []
     assert styled("#cust-settings-general")
