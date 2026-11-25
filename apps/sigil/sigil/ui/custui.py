@@ -46,6 +46,7 @@ from vigil_core.posture import is_production_posture  # noqa: E402
 from ..bridge.daemon import bind_ok  # noqa: E402
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
+from .sso_edge import SsoEdgeMixin  # noqa: E402  (PR-H: the SSO / SCIM routes — every one absent while the flag is off)
 from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
@@ -96,6 +97,11 @@ _SLOW_HOP_TIMEOUTS_S = {
     # against _HASH_WAIT_S by test_custui_hop_budget.py.
     "signup_confirm": 45.0,
     "recover_confirm": 45.0,
+    # PR-H enterprise OIDC: the same token exchange POST + JWKS GET as oidc_finish, to the org's own IdP.
+    "sso_oidc_finish": 45.0,
+    # PR-H SCIM: one request may re-role up to a thousand group members (each an owner-signed grant + its critical
+    # audit row); a hop that gave up first would tell the IdP "failed" for a change that landed.
+    "scim_request": 45.0,
     # PR-G: a plan change makes up to 4 Stripe calls (2 reads + 2 writes), each bounded per blocking socket op by
     # plan_change.EGRESS_TIMEOUT_S (connect + read) -> 48 s + margin. Pinned by test_customer_plans.py.
     "billing_plan_change": 55.0,
@@ -433,6 +439,9 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         # per-IP limit on redeeming them — SIBLING dirs, like the two above.
         self.oidc_handoff_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff"
         self.oidc_handoff_limit_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff-limit"
+        # PR-H — the edge's single-use enterprise-SSO login states + finish tickets (ui/sso_edge.py), a SIBLING dir;
+        # nothing is written there unless VIGIL_CUSTOMER_SSO is on and a sign-in starts.
+        self.sso_state_dir = Path(str(sessions_dir)).parent / "customer-sso-state"
         # the app, read ONCE: what this process serves until it stops (one consistent build; see static_site)
         self.app = build_app_snapshot()
         port = self.server_address[1]
@@ -452,7 +461,7 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         self.allowed_origins = frozenset(origins)
 
 
-class CustomerHandler(BaseHTTPRequestHandler):
+class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
     server: CustomerServer
     server_version = "vigil-custui/1.0"
     timeout = 30
@@ -746,6 +755,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             if not _config.customer_oidc_enabled():
                 return self._deny(404, "not found")
             return self._oidc_login() if path.endswith("/login") else self._oidc_callback()
+        # PR-H — enterprise SSO sign-in (start / SAML finish / OIDC callback) and SCIM reads, served ONLY while
+        # VIGIL_CUSTOMER_SSO is on; off, these paths fall through to the unknown-route 404 below, byte-identical.
+        if self._sso_handles_get(path):
+            return self._sso_get(path)
         if path.startswith("/api/"):           # an unknown API route 404s — NEVER fall through to the SPA shell
             return self._deny(404, "not found")
         return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
@@ -1101,6 +1114,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 
     def _route_post(self):
         path = urlparse(self.path).path
+        # PR-H — the IdP's SAML ACS form POST (a foreign origin: Host-gated, bound by the single-use RelayState +
+        # the browser cookie instead) and SCIM (bearer-authenticated server-to-server, no cookie): ONLY while
+        # VIGIL_CUSTOMER_SSO is on, ahead of the cookie plane's Origin gate. Off ⇒ the unchanged 404 below.
+        if self._sso_handles_post(path):
+            return self._sso_post(path)
         if not path.startswith("/api/customer/"):
             return self._deny(404, "not found")
         if not self._origin_host_ok():                # CSRF/anti-rebind on EVERY customer mutation

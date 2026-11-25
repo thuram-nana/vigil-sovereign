@@ -43,8 +43,10 @@ import hashlib
 import json
 import math
 import secrets
+import threading
 import time
-from typing import Any, Callable, NoReturn, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -278,6 +280,12 @@ class ProvisionRateLimited(ProvisionError):
         self.retry_after = retry_after
 
 
+class ProvisionBusy(ProvisionRateLimited):
+    """The provisioner is at its bound of concurrent unauthenticated work (SSO): retry after `retry_after` seconds.
+    The HTTP layer answers 503 + Retry-After (a ProvisionRateLimited, so a caller that does not know it still backs
+    off)."""
+
+
 class ProvisionStepUpRequired(ProvisionError):
     """E3c — a sensitive op needs a FRESH step-up second factor (the session's `mfa_at` is absent/stale and
     step-up enforcement is ON). The HTTP layer maps it to 401 with `step_up_required=True` so the SPA prompts
@@ -420,14 +428,16 @@ def _member_target(username) -> str:
 _MEMBERS_LOCK_WAIT_S = 10.0
 
 
-def _members_lock(store):
+def _members_lock(store, *, wait_s: "Optional[float]" = None):
     """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
     ``<spine dir>/<stem>.members.lock`` (a ``*.lock`` transient the backups skip), taken with the same hardened
     ``locked_file`` as the settle lock. Every member verb that applies the last-admin rule holds it around that
     check AND its audit and owner-signed write — the customer `grant_member`/`revoke_member` in the cockpit and the
     owner verbs in the `sigil` CLI — so two processes always decide against the administrator set the other left,
     never against the same one. Lock order: ``spine_lock`` (in-process) -> this -> the spine's append lock. A
-    bounded wait, then ``LockBusy`` with nothing written; an unusable lock file raises ``OSError`` (fail-closed)."""
+    bounded wait (`wait_s`, default `_MEMBERS_LOCK_WAIT_S`), then ``LockBusy`` with nothing written; an unusable
+    lock file raises ``OSError`` (fail-closed). The verbs take it through `_members_section`, which only ever TRIES
+    it while holding ``spine_lock`` and waits without it."""
     from pathlib import Path
     from vigil_integration.live.seam_lock import locked_file
     raw = getattr(store, "path", None)
@@ -435,7 +445,56 @@ def _members_lock(store):
         raise ValueError("the membership lock needs a spine store with a path")
     sp = Path(raw)
     path = sp.parent / f"{sp.stem or sp.name}.members.lock"
-    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S, create=False, chown_like=path.parent)
+    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S if wait_s is None else float(wait_s), create=False,
+                       chown_like=path.parent)
+
+
+_MEMBERS_SECTION = threading.local()                  # this thread's depth inside `_members_section`
+
+
+def members_section_held() -> bool:
+    """True iff THIS thread is inside `_members_section` (it holds the spine lock and the membership flock)."""
+    return getattr(_MEMBERS_SECTION, "depth", 0) > 0
+
+
+@contextmanager
+def _members_section(lock, store) -> "Iterator[None]":
+    """The membership critical section — `lock` (the process-wide re-entrant spine lock), then the cross-process
+    membership flock (`_members_lock`) — taken so that this thread NEVER WAITS ON THE FLOCK WHILE HOLDING `lock`
+    (every spine append of the process waits on `lock`): the flock is only ever TRIED under `lock`; when another
+    holder has it, `lock` is released, the wait happens without it, and both are tried again — up to
+    `_MEMBERS_LOCK_WAIT_S`, then `LockBusy` with nothing held. A thread that already holds the section (a nested
+    entry: its own flock would conflict with itself), or that holds `lock` from an outer frame (releasing it would
+    not free it), gets ONE try and then `LockBusy` at once, never a wait."""
+    from vigil_integration.live.seam_lock import POLL_S, LockBusy
+    if members_section_held():
+        raise LockBusy("the membership critical section is already held by this thread (nested entry refused)")
+    outer = bool(getattr(lock, "_is_owned", lambda: False)())
+    deadline = time.monotonic() + _MEMBERS_LOCK_WAIT_S
+    while True:
+        lock.acquire()
+        try:
+            cm = _members_lock(store, wait_s=0.0)
+            cm.__enter__()
+        except LockBusy:
+            lock.release()
+            if outer or time.monotonic() >= deadline:
+                raise
+            time.sleep(POLL_S)
+            continue
+        except BaseException:
+            lock.release()
+            raise
+        break
+    _MEMBERS_SECTION.depth = getattr(_MEMBERS_SECTION, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _MEMBERS_SECTION.depth -= 1
+        try:
+            cm.__exit__(None, None, None)
+        finally:
+            lock.release()
 
 
 def _member_admins(orgs, org_id: str) -> "set[str]":
@@ -487,7 +546,7 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
         raise ValueError("a reason is required (it is recorded in the audit)")
     orgs = orgs if orgs is not None else OrgRegistry(store)
     customers = customers if customers is not None else CustomerRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         prev = orgs.membership_role(u, oid)
@@ -514,7 +573,7 @@ def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Opti
         raise ValueError("a reason is required (it is recorded in the audit)")
     oid = _check_org_id(org_id) if org_id is not None else None
     orgs = orgs if orgs is not None else OrgRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if oid is not None and orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         founders = [m for m in orgs.memberships(oid)
@@ -543,7 +602,10 @@ class Provisioner:
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  shard_assignments=None,
-                 expose_dev_tokens: bool = False, now_fn=time.time):
+                 saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
+                 scim_deprov_limiter=None, scim_deprov_floor_limiter=None, sso_signin_limiter=None,
+                 sso_oidc_http_post=None,
+                 sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up
         # (`build_provisioner` injects it; None ⇒ shard-on-signup is a no-op). Injected, it stays inert unless
@@ -647,6 +709,22 @@ class Provisioner:
         # vigil-customer.nginx.conf). The limiter stores only sha256(key). Over the limit means no trial (the
         # account is still created). The IP is never an identity or a claim key.
         self.trial_ip_limiter = trial_ip_limiter
+        # Consumer PR-H — SSO / SCIM (VIGIL_CUSTOMER_SSO; wired by the factory only while the flag is on). The
+        # durable single-use SAML assertion-ID ledger (None ⇒ SAML sign-in refused), the per-(org, IP) SCIM
+        # failed-authentication limiter and the per-org SCIM write and read budgets (any None ⇒ SCIM refused, 503),
+        # and the enterprise-OIDC egress hooks (both None ⇒ the owner-signed per-org host allowlist; a test injects a
+        # local fake IdP).
+        self.saml_replay = saml_replay
+        self.scim_auth_limiter = scim_auth_limiter
+        self.scim_write_limiter = scim_write_limiter
+        self.scim_read_limiter = scim_read_limiter
+        # The per-org deprovisioning cap + its one-per-minute floor (either None ⇒ SCIM refused, 503) and the per-org
+        # enterprise sign-in budget (None ⇒ every SSO sign-in refused).
+        self.scim_deprov_limiter = scim_deprov_limiter
+        self.scim_deprov_floor_limiter = scim_deprov_floor_limiter
+        self.sso_signin_limiter = sso_signin_limiter
+        self.sso_oidc_http_post = sso_oidc_http_post
+        self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -1158,6 +1236,32 @@ class Provisioner:
             cred = self.customer_credentials.by_credential_id(identity.credential_id or "")
             return cred.username if cred is not None else None
         return None
+
+    # -- Consumer PR-H: enterprise SSO + SCIM (VIGIL_CUSTOMER_SSO; dispatched only while it is on) --------
+    # Session-less bootstrap actions like login/oidc_finish: the hop key alone gates the call, and the org only
+    # selects WHICH owner-signed config the presented proof (IdP signature bound to the login's AuthnRequest /
+    # nonce, or the org's SCIM bearer) must verify under — see ui/sso_provision.py for the full contract.
+    def sso_login_start(self, org_id: str, *, ip: str = "") -> dict:
+        """The org's IdP sign-in endpoint (owner-signed, non-secret) for an SP-initiated SSO sign-in."""
+        from .sso_provision import sso_login_start
+        return sso_login_start(self, org_id, ip=ip)
+
+    def sso_saml_acs(self, org_id: str, saml_response: str, *, request_id: str, ip: str = "") -> dict:
+        """Verify a SAML Response bound to this login's AuthnRequest → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_saml_acs
+        return sso_saml_acs(self, org_id, saml_response, request_id=request_id, ip=ip)
+
+    def sso_oidc_finish(self, org_id: str, *, code: str, code_verifier: str, nonce: str, ip: str = "") -> dict:
+        """Enterprise-OIDC code exchange + id_token verification → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_oidc_finish
+        return sso_oidc_finish(self, org_id, code=code, code_verifier=code_verifier, nonce=nonce, ip=ip)
+
+    def scim_request(self, org_id: str, *, method: str, path: str, query: str = "", body=None,
+                     authorization: str = "", ip: str = "") -> dict:
+        """One bearer-authenticated SCIM 2.0 request → {status, body, deactivated[, retry_after]}."""
+        from .sso_provision import scim_request
+        return scim_request(self, org_id, method=method, path=path, query=query, body=body,
+                            authorization=authorization, ip=ip)
 
     # -- Google OIDC login (E2b) -------------------------------------------------------------------
     def oidc_finish(self, *, code: str, code_verifier: str, nonce: str, ip: str = "",
@@ -1693,7 +1797,7 @@ class Provisioner:
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
         member_username = _member_target(member_username)
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
@@ -1740,7 +1844,7 @@ class Provisioner:
         so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
         member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
@@ -1810,7 +1914,7 @@ class Provisioner:
             email_l = _check_email(email)
         except ValueError:
             raise ProvisionError(_ADD_BAD_EMAIL) from None
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("add_member", requester=requester, org_id=requester_org_id, outcome="denied")
@@ -4469,7 +4573,8 @@ class Provisioner:
 
 
 def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time,
-                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None) -> Provisioner:
+                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,
+                      sso_oidc_http_post=None, sso_oidc_jwks_fetcher=None) -> Provisioner:
     """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
     the persisted owner identity — THIS is the only process that holds it), the filesystem email-token +
     login-rate-limit ledgers rooted under SIGIL_HOME (config), and the configured EmailSender
@@ -4615,4 +4720,37 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                               if config.TRIAL_LAUNCH_DAILY_CAP > 0 else None),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
+        **_sso_wiring(config, LoginRateLimiter, sso_oidc_http_post, sso_oidc_jwks_fetcher),
     )
+
+
+def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) -> dict:
+    """Consumer PR-H — the SSO / SCIM ledgers, ONLY while VIGIL_CUSTOMER_SSO is on (off ⇒ {} ⇒ the Provisioner is
+    built exactly as before, and its SSO/SCIM methods are unreachable: the dispatch 404s them). The durable SAML
+    assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
+    then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per
+    minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); the per-org
+    SCIM read budget (VIGIL_SCIM_READS_PER_MIN reads per minute, guard-and-count); the per-org deprovisioning cap
+    (VIGIL_SCIM_DEPROVISIONS_PER_MIN) and its one-a-minute floor; the per-org enterprise sign-in budget
+    (VIGIL_SSO_SIGNINS_PER_MIN verified sign-ins a minute); and the enterprise-OIDC egress hooks a test injects."""
+    if not config.customer_sso_enabled():
+        return {}
+    from .saml import SamlReplayLedger
+    return {"saml_replay": SamlReplayLedger(config.CUSTOMER_SAML_REPLAY_DIR),
+            "scim_auth_limiter": limiter_cls(config.SCIM_AUTH_RATELIMIT_DIR, max_fails=10, window_s=300.0,
+                                             base_lock_s=300.0, max_lock_s=3600.0),
+            # a BUDGET, not a penalty: an over-budget burst waits until the budget has repaid it (no escalation),
+            # so a large initial IdP sync slows down rather than locking itself out
+            "scim_write_limiter": limiter_cls(config.SCIM_WRITE_RATELIMIT_DIR, max_fails=config.SCIM_OPS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_read_limiter": limiter_cls(config.SCIM_READ_RATELIMIT_DIR, max_fails=config.SCIM_READS_PER_MIN,
+                                             window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_deprov_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR,
+                                               max_fails=config.SCIM_DEPROVISIONS_PER_MIN,
+                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            # the floor: ONE deprovisioning a minute is admitted even while the cap above is spent (its own keys)
+            "scim_deprov_floor_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR, max_fails=1,
+                                                     window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_signin_limiter": limiter_cls(config.SSO_SIGNIN_RATELIMIT_DIR, max_fails=config.SSO_SIGNINS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

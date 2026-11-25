@@ -81,6 +81,15 @@ assert "framework" not in __import__("sys").modules, "redpen_system* must not im
 assert "strix" not in __import__("sys").modules, "redpen_system* must not import strix at module scope"
 import sigil.ui.redpen_scheduler              # R4: the sovereign System-review producer (owner key) stays offense-free
 assert "framework" not in __import__("sys").modules, "redpen_scheduler must not import framework at module scope"
+import sigil.governor.sso_config             # PR-H: the owner-signed per-org SSO/SCIM config (delegation record)
+import sigil.governor.scim                   # PR-H: capped owner-signed SSO/SCIM provisioning (the mint site)
+import sigil.ui.saml                         # PR-H: SAML assertion verification (stdlib XML + cryptography only)
+import sigil.ui.scim                         # PR-H: the SCIM handler + SSO-login composition
+import sigil.governor.scim_directory         # PR-H edge: the owner-signed per-org SCIM directory (bookkeeping)
+import sigil.ui.sso_provision                # PR-H edge: the provisioner side of SSO sign-in + SCIM (owner key)
+import sigil.ui.sso_edge                     # PR-H edge: the KEYLESS customer-edge SSO/SCIM routes (stdlib only)
+assert "framework" not in __import__("sys").modules, "PR-H SSO/SCIM modules must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "PR-H SSO/SCIM modules must not import strix at module scope"
 import sigil.governor.cloud_connect           # PR-C: the READ-ONLY cloud-grant registry (owner key) — SOVEREIGN
 assert "framework" not in __import__("sys").modules, "cloud_connect must not import framework at module scope"
 assert "strix" not in __import__("sys").modules, "cloud_connect must not import strix at module scope"
