@@ -2156,14 +2156,16 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
     from .governor.wallet import WalletRegistry
     from . import config
     wallet = WalletRegistry(store)
+    plan = PlanCreditLedger(store)
     reversals = None
     if config.billing_reversals_enabled():
-        # W5: the reversal ledger, so a verified dispute / refund moves credits and every top-up repays arrears first
+        # W5: the reversal ledger, so a verified dispute / refund moves credits (the wallet's, or a refunded plan
+        # period's plan credits) and every top-up repays arrears first
         from .governor.billing_reversal import BillingReversalLedger
-        reversals = BillingReversalLedger(store, wallet=wallet)
+        reversals = BillingReversalLedger(store, wallet=wallet, plan=plan)
     return BillingSigner(provider, alarm_unaccounted_plans=alarm, reversals=reversals,
                          wallet=wallet, subscriptions=SubscriptionRegistry(store),
-                         plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
+                         plan=plan, catalog=catalog.mintable_entitlements(),
                          expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
                          # AEGIS: a paid monitoring price mints its OWN line, never the credit plan (flag-free,
                          # like mintable_entitlements(): a sold AEGIS plan's renewals keep minting).
@@ -2275,7 +2277,10 @@ def _stripe_billing_watcher(a):
     hook = _auto_topup_capture_hook(store, fetcher) if auto else None
     signer = _billing_signer(provider, store, alarm=alarm, require_verified_amount=True, alarm_topups=alarm,
                              on_saved_payment_method=hook)
-    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
+    # W5: after every pass, plan credits that came back to a refunded plan period (a launch that held them when the
+    # refund was reconciled has settled) are removed again (no sweep while VIGIL_BILLING_REVERSALS is off)
+    sweep = signer.sweep_plan_reversals if signer.reversals is not None else None
+    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1(), after_pass=sweep)
 
 
 # The money-IN drain lanes: (the drain's own spool variable — None: the lane drains exactly the --spool its unit
@@ -2756,7 +2761,10 @@ def cmd_billing_reversal(a) -> None:
     line's invoice id, e.g. a Stripe Checkout Session id) through the same reversal path as a processor refund
     (reason ``refund``): it is refused unless the org's spendable balance covers it, and a later refund of the same money
     at the processor removes nothing more. Return the money to the customer at the processor yourself; this verb moves
-    credits only. ``status [<org>] [--sync]`` lists the orgs on a billing hold (what each owes); ``--sync`` rewrites the
+    credits only. ``plan-withdraw <org> <invoice> <refunded cents> --reason`` is a consumer's withdrawal from a plan
+    (``_plan_withdraw``): it stops the plan's renewal at Stripe, then removes the refunded part of that period's plan
+    credits. ``unused <org> <purchase>`` (read-only) prints a purchase's unused credits by the withdrawal rule and the
+    refund that matches them. ``status [<org>] [--sync]`` lists the orgs on a billing hold (what each owes); ``--sync`` rewrites the
     owner alarm file from the spine. Exit 2 on a refusal, 3 when the billing lock is busy (retry)."""
     import time as _time
 
@@ -2787,12 +2795,23 @@ def cmd_billing_reversal(a) -> None:
         for o, n in holds:
             print(f"  {o}: ON HOLD, owes {n} credits (the next top-up repays it)")
         return
+    if a.reversal_cmd == "unused":
+        try:
+            org = org_tenant_id(str(a.org or ""))
+        except ValueError as exc:
+            print(f"  refused: {exc}", file=sys.stderr)
+            sys.exit(2)
+        _print_unused(org, str(a.topup or ""), store=store, owner=owner, wallet=wallet, ledger=ledger)
+        return
     try:
         org = org_tenant_id(str(a.org or ""))
         credits = int(a.credits)
     except (TypeError, ValueError) as exc:
         print(f"  refused: {exc}", file=sys.stderr)
         sys.exit(2)
+    if a.reversal_cmd == "plan-withdraw":
+        _plan_withdraw(org, str(a.topup or ""), credits, str(a.reason or ""), store=store, owner=owner, ledger=ledger)
+        return
     topup = str(a.topup or "")
     if credits < 1 or not (a.reason or "").strip():
         print("  refused: refund needs <org> <topup> <credits >= 1> and --reason", file=sys.stderr)
@@ -2817,6 +2836,258 @@ def cmd_billing_reversal(a) -> None:
     else:
         print(f"  {res.moved} credits removed from {org} (top-up {topup}, owner refund, seq {res.seq}); "
               f"return the money at the processor")
+
+
+def _stripe_subscription_updater():
+    """The outbound Stripe subscription update (``POST /v1/subscriptions/<id>``), DEFAULT-OFF on
+    ``VIGIL_STRIPE_SECRET_KEY`` (None when unset)."""
+    from .governor import stripe_egress as se
+    if not se.stripe_secret_configured():
+        return None
+    return se.make_subscription_updater()
+
+
+def _cancel_step(invoice_id: str, sub_id: str = "") -> str:
+    """The exact Stripe Dashboard step that stops a plan's renewal by hand."""
+    which = f"subscription {sub_id}" if sub_id else f"the subscription that invoice {invoice_id} paid"
+    return (f"in the Stripe Dashboard open {which} (search for {invoice_id}), choose Cancel subscription and confirm "
+            f"it, then run this command again")
+
+
+def _stop_plan_renewal(org: str, invoice_id: str) -> str:
+    """Stop the renewal of the Stripe subscription that ``invoice_id`` paid, for the plan withdrawal verb. Returns how
+    it was stopped. The invoice and its subscription are read from Stripe with our key; the subscription must name
+    ``org`` in its metadata and be in this key's mode. Already cancelled (or already ending at the period end): nothing
+    is sent. Otherwise VIGIL sets ``cancel_at_period_end`` (the same safe-direction update a self-serve plan
+    cancellation sends) under an idempotency key of its own for this run, requires Stripe's answer to echo it, then
+    reads the subscription back and requires Stripe's current state to show it too. Raises ``RuntimeError`` carrying
+    the exact Stripe step whenever VIGIL cannot read Stripe, cannot match the subscription, or cannot confirm the
+    stop."""
+    import secrets as _secrets
+    from typing import Mapping as _Mapping
+
+    from .governor import stripe_egress as se
+    from .governor.billing import _stripe_tenant
+
+    fetch, mode = _stripe_object_fetcher(), se.stripe_key_mode()
+    if not callable(fetch) or mode is None:
+        raise RuntimeError("VIGIL cannot read Stripe from this shell (set VIGIL_STRIPE_SECRET_KEY and "
+                           "VIGIL_STRIPE_API_VERSION as in the cockpit env), so it cannot stop the renewal: "
+                           + _cancel_step(invoice_id))
+    try:
+        inv = fetch("invoice", invoice_id)
+        parent = inv.get("parent") if isinstance(inv, _Mapping) else None
+        details = parent.get("subscription_details") if isinstance(parent, _Mapping) else None
+        refs = (inv.get("subscription") if isinstance(inv, _Mapping) else None,
+                details.get("subscription") if isinstance(details, _Mapping) else None)
+        ids = {r.get("id") if isinstance(r, _Mapping) else r for r in refs} - {None, ""}
+        sub_id = next(iter(ids)) if len(ids) == 1 else ""
+        if not isinstance(sub_id, str) or not sub_id.startswith("sub_"):
+            raise RuntimeError(f"Stripe names no single subscription for invoice {invoice_id}: "
+                               + _cancel_step(invoice_id))
+        sub = fetch("subscription", sub_id)
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a read fault stops nothing: refuse with the manual step
+        raise RuntimeError(f"Stripe could not be read ({type(exc).__name__}): " + _cancel_step(invoice_id)) from None
+    if (not isinstance(sub, _Mapping) or sub.get("object") != "subscription" or sub.get("id") != sub_id
+            or sub.get("livemode") is not (mode == "live") or _stripe_tenant(None, sub.get("metadata")) != org):
+        raise RuntimeError(f"the Stripe subscription of invoice {invoice_id} does not belong to {org} in "
+                           f"{mode} mode; nothing was changed")
+    if sub.get("status") in ("canceled", "incomplete_expired"):
+        return f"subscription {sub_id} is cancelled"
+    if sub.get("cancel_at_period_end") is True:
+        return f"subscription {sub_id} already ends at the end of its period"
+    update = _stripe_subscription_updater()
+    # A key of this run's own: Stripe answers a repeated key with the response it saved for it, without making the
+    # update again, so a run that reused an earlier run's key after the customer resumed the plan would be told the
+    # plan ends while it renews.
+    key = f"vigil-pw-{invoice_id}-{_secrets.token_hex(8)}"
+    try:
+        if update is None:
+            raise RuntimeError("no Stripe key")
+        resp = update(sub_id, {"cancel_at_period_end": True}, idempotency_key=key)
+    except Exception as exc:  # noqa: BLE001 — the update may not have been made: refuse with the manual step
+        raise RuntimeError(f"VIGIL could not stop the renewal of {sub_id} ({type(exc).__name__}): "
+                           + _cancel_step(invoice_id, sub_id)) from None
+    if (not isinstance(resp, _Mapping) or resp.get("object") != "subscription" or resp.get("id") != sub_id
+            or resp.get("cancel_at_period_end") is not True):
+        raise RuntimeError(f"Stripe did not confirm that {sub_id} stops renewing: " + _cancel_step(invoice_id, sub_id))
+    # The stop is confirmed by the subscription Stripe holds now, read back, not by the update's answer alone.
+    try:
+        after = fetch("subscription", sub_id)
+    except Exception as exc:  # noqa: BLE001 — the stop cannot be confirmed: refuse with the manual step
+        raise RuntimeError(f"Stripe could not be read back ({type(exc).__name__}) to confirm that {sub_id} stops "
+                           f"renewing: " + _cancel_step(invoice_id, sub_id)) from None
+    if (not isinstance(after, _Mapping) or after.get("object") != "subscription" or after.get("id") != sub_id
+            or not (after.get("cancel_at_period_end") is True
+                    or after.get("status") in ("canceled", "incomplete_expired"))):
+        raise RuntimeError(f"Stripe's subscription {sub_id}, read back, does not show that it stops renewing: "
+                           + _cancel_step(invoice_id, sub_id))
+    return f"subscription {sub_id} now ends at the end of its period (it will not renew)"
+
+
+def purchased_balance_remaining(*, spendable: int, bought_left: int) -> int:
+    """The purchased credits still in the wallet, by the withdrawal runbook's customer-favourable reading: the wallet
+    pools trial and bought credits in one balance, so trial credits are taken as spent FIRST and never count as
+    purchased — ``min(spendable balance, credits bought less what refunds already removed)``. PURE."""
+    return max(0, min(int(spendable), int(bought_left)))
+
+
+def unused_purchase_credits(line, *, purchased_left: int, removed: int, plan_left: int) -> int:
+    """The credits of one purchase a consumer has NOT used (Terms §8). A plan period: what remains of its plan tranche
+    (plan credits are spent first). A top-up: ``min(its credits not yet removed, purchased balance remaining)``
+    (``purchased_balance_remaining``). PURE."""
+    if line.kind == "subscription":
+        return max(0, int(plan_left))
+    return max(0, min(int(line.credits) - int(removed), int(purchased_left)))
+
+
+def withdrawal_refund_minor(price_minor: int, unused: int, credits: int, *, plan: bool = False) -> int:
+    """The refund for ``unused`` of a purchase's ``credits`` (Terms §8): its price in proportion, rounded UP to the
+    minor unit (the customer-favourable reading). A credit pack's refund for fewer than all of its credits stays
+    below the whole price (at most the price less one minor unit): a refund of the whole price removes every credit
+    of the pack (``billing.refund_credits``), and the credits already spent would then be owed (a billing hold). Only
+    a pack worth more than one credit per minor unit can round up to its whole price that way. The Stripe drain
+    converts a pack's refund back to no more than ``unused`` credits. A plan period's refund (``plan``) is rounded up
+    plainly: a plan refund removes only the plan credits that remain and is never owed. PURE."""
+    if price_minor <= 0 or credits <= 0 or unused <= 0:
+        return 0
+    refund = -(-int(price_minor) * int(unused) // int(credits))
+    if not plan and int(unused) < int(credits):
+        refund = min(refund, int(price_minor) - 1)
+    return refund
+
+
+def _print_unused(org: str, purchase: str, *, store, owner, wallet, ledger) -> None:
+    """``billing-reversal unused <org> <purchase>`` — READ-ONLY: a purchase's unused credits by the withdrawal rule
+    (``unused_purchase_credits``), the refund that matches them (``withdrawal_refund_minor``: the price in proportion,
+    rounded up to the cent, and below the whole price for a pack not wholly unused) and the verb that removes them.
+    Nothing is written."""
+    import time as _time
+
+    from .governor.billing_reversal import plan_ref
+    from .governor.invoices import InvoiceRegistry
+    from .governor.metering import PlanCreditLedger
+    lines = InvoiceRegistry(store, owner_key=owner).invoices(org)
+    line = next((i for i in lines if i.invoice_id == purchase and i.kind in ("topup", "subscription")), None)
+    if line is None or line.credits <= 0:
+        print(f"  refused: {purchase!r} is not a purchase of {org} with credits", file=sys.stderr)
+        sys.exit(2)
+    bought = [i for i in lines if i.kind == "topup" and i.credits > 0]
+    bought_left = sum(int(i.credits) - ledger.purchase(org, i.invoice_id).removed for i in bought)
+    plan_left = PlanCreditLedger(store, owner_key=owner).remaining_for_period(org, float(line.period_end)) \
+        if line.kind == "subscription" else 0
+    removed = ledger.purchase(org, plan_ref(purchase) if line.kind == "subscription" else purchase).removed
+    purchased_left = purchased_balance_remaining(spendable=wallet.balance(org).spendable, bought_left=bought_left)
+    unused = unused_purchase_credits(line, purchased_left=purchased_left, removed=removed, plan_left=plan_left)
+    refund = withdrawal_refund_minor(int(line.amount_minor), unused, int(line.credits),
+                                     plan=line.kind == "subscription")
+    what = "plan period" if line.kind == "subscription" else "top-up"
+    print(f"  {what} {purchase} of {org}: {unused} of its {line.credits} credits unused")
+    if line.kind == "topup":
+        print(f"  purchased balance remaining: {purchased_left} (trial credits are spent first and never count)")
+    if line.kind == "subscription" and _time.time() >= float(line.period_end):
+        print("  this plan period has ended: the plan credits it had left expired unused and are counted as unused "
+              "here; a plan's 14 days run from its first purchase, so check the request's date first")
+    if unused <= 0:
+        print("  every credit of this purchase is used: its right of withdrawal has ended")
+        return
+    rounded = withdrawal_refund_minor(int(line.amount_minor), unused, int(line.credits), plan=True)
+    why = ("the price in proportion, rounded up to the cent" if refund == rounded else
+           "the price in proportion rounded up would be the whole price, which would remove every credit of this "
+           "pack, so it is one cent less")
+    print(f"  refund at Stripe: {refund} of {line.amount_minor} {line.currency or 'minor units'} ({why})")
+    if line.kind == "subscription":
+        print(f"  then: sigil billing-reversal plan-withdraw {org} {purchase} <total refunded, in cents> --reason ...")
+    else:
+        print(f"  then: sigil billing-reversal refund {org} {purchase} {unused} --reason ...")
+
+
+def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, *, store, owner, ledger) -> None:
+    """``billing-reversal plan-withdraw <org> <invoice> <refunded cents> --reason`` — a consumer's withdrawal from a
+    plan (Terms §8): stop the plan's renewal at Stripe (``_stop_plan_renewal``), then remove the plan credits of the
+    period that invoice paid in the refunded proportion (``allotment x refunded / price``, rounded down), from what
+    remains of that period (``BillingReversalLedger.reconcile_plan``: owner-signed, never more than remains, never
+    negative). ``refunded`` is the TOTAL refunded at Stripe for that invoice, so running the verb again with the same
+    amount removes nothing more (only credits that came back to the period since, e.g. a refunded launch). The Stripe
+    drain's own refund mapping converges on the same target. Nothing moves when the renewal cannot be stopped. Every
+    input is checked BEFORE the renewal is stopped (the reason too), and a refusal after the stop says the renewal
+    is stopped."""
+    import re as _re
+    import time as _time
+    from typing import NoReturn
+
+    from .governor.billing_reversal import ReversalRefused, ReversalRetry, _clean_note
+    from .governor.invoices import InvoiceRegistry
+    from .governor.metering import PlanCreditLedger
+
+    def refuse(msg: str) -> "NoReturn":
+        print(f"  refused: {msg}", file=sys.stderr)
+        sys.exit(2)
+
+    if not _re.fullmatch(r"in_[A-Za-z0-9]{1,88}", invoice_id) or refunded_minor < 1 or not reason.strip():
+        refuse("plan-withdraw needs <org> <plan invoice id in_...> <cents refunded at Stripe >= 1> and --reason")
+    try:
+        _clean_note(reason)                       # the step's reason, checked before anything is sent to Stripe
+    except ReversalRefused as exc:
+        refuse(f"--reason: {exc}")
+    lines = InvoiceRegistry(store, owner_key=owner).invoices(org)
+    line = next((i for i in lines if i.invoice_id == invoice_id and i.kind == "subscription"), None)
+    if line is None or line.credits <= 0:
+        refuse(f"{invoice_id!r} is not a credited plan invoice of {org} (a monitoring plan has no credits to remove)")
+    if line.amount_minor <= 0:
+        refuse(f"plan invoice {invoice_id} carries no price to size the refund — reconcile by hand")
+    if refunded_minor > line.amount_minor:
+        refuse(f"{refunded_minor} is more than plan invoice {invoice_id}'s price ({line.amount_minor} "
+               f"{line.currency or 'minor units'})")
+    plan = PlanCreditLedger(store, owner_key=owner)
+    if not any(t.period_end == float(line.period_end) and t.granted > 0 for t in plan.tranches(org)):
+        refuse(f"the plan period of invoice {invoice_id} has not been credited to {org}")
+    try:
+        stopped = _stop_plan_renewal(org, invoice_id)
+    except RuntimeError as exc:
+        refuse(f"the plan still renews and nothing was removed: {exc}")
+    credits = int(line.credits) * refunded_minor // int(line.amount_minor)
+    now = _time.time()
+    try:
+        res = ledger.reconcile_plan(org, invoice_id, cap=int(line.credits), period_end=float(line.period_end),
+                                    now=now, owner_refunded=credits, note=reason)
+    except ReversalRefused as exc:
+        refuse(f"the renewal IS stopped ({stopped}), but no plan credit was removed: {exc}")
+    except ReversalRetry as exc:
+        print(f"  busy: the renewal IS stopped ({stopped}), but no plan credit was removed yet: {exc} — run this "
+              f"command again", file=sys.stderr)
+        sys.exit(3)
+    print(f"  renewal stopped: {stopped}")
+    if res.seq is None or res.moved <= 0:
+        print(f"  nothing removed: no credit of that plan period is left to remove from {org} "
+              f"(refund of {credits} of its {line.credits} credits recorded)")
+    else:
+        print(f"  {res.moved} plan credits removed from {org} (invoice {invoice_id}, owner refund of {credits} "
+              f"credits, seq {res.seq}); return the money at Stripe if you have not")
+    pe = float(line.period_end)
+    if now >= pe:
+        # an ENDED period: its plan credits had expired, and the periods the plan renewed into are not this
+        # invoice's — say both, so the owner withdraws those too if the withdrawal covers them
+        print(f"  this plan period ended on {_time.strftime('%Y-%m-%d %H:%M UTC', _time.gmtime(pe))}: its plan "
+              f"credits had already expired, so no spendable credit was removed by this command")
+        later = sorted((i for i in lines if i.kind == "subscription" and i.credits > 0 and float(i.period_end) > pe),
+                       key=lambda i: float(i.period_end))
+        if later:
+            names = ", ".join(f"{i.invoice_id} (to {_time.strftime('%Y-%m-%d', _time.gmtime(float(i.period_end)))}"
+                              f", {i.credits} credits)" for i in later)
+            print(f"  the plan has renewed since: the plan period(s) of {names} are untouched; if the withdrawal "
+                  f"covers them, refund them at Stripe and run plan-withdraw for each")
+    if res.removed < credits:
+        # the refund covers more plan credits than were left to remove: some were spent (or are held by a running
+        # scan) after `unused` sized the refund — never taken back silently
+        print(f"  WARNING: the refund covers {credits} plan credits of invoice {invoice_id}, but only {res.removed} "
+              f"have left {org}'s plan period: the other {credits - res.removed} were spent, or are held by a scan "
+              f"still running, when this ran. Spent plan credits are not taken back; credits a running scan gives "
+              f"back are removed by the Stripe drain's next pass (VIGIL_BILLING_REVERSALS on in its env) or when "
+              f"this command runs again. Check `sigil billing-reversal unused {org} "
+              f"{invoice_id}` against the refund and reconcile any difference by hand.", file=sys.stderr)
 
 
 def cmd_reports(a) -> None:
@@ -4865,13 +5136,18 @@ def main(argv=None) -> None:
     ppp.set_defaults(fn=cmd_postpaid)
     prv = sub.add_parser("billing-reversal",
                          help="W5 payment reversals (default-OFF: VIGIL_BILLING_REVERSALS=1): refund unused credits "
-                              "of a top-up | status of the orgs on a billing hold")
-    prv.add_argument("reversal_cmd", choices=["refund", "status"])
+                              "of a top-up | withdraw from a plan (stop its renewal, remove the refunded plan "
+                              "credits) | the unused credits of a purchase (read-only) | status of the orgs on a "
+                              "billing hold")
+    prv.add_argument("reversal_cmd", choices=["refund", "plan-withdraw", "unused", "status"])
     prv.add_argument("org", nargs="?", default=None, help="tenant org_id (== tenant_id)")
-    prv.add_argument("topup", nargs="?", default=None,
-                     help="(refund) the top-up's id: its billing-history invoice id (e.g. a Stripe Checkout Session id)")
-    prv.add_argument("credits", nargs="?", default=None, help="(refund) the unused credits to refund")
-    prv.add_argument("--reason", default="", help="(refund) why — recorded beside the owner-signed step")
+    prv.add_argument("topup", nargs="?", default=None, metavar="purchase",
+                     help="(refund, unused) the top-up's id: its billing-history invoice id (e.g. a Stripe Checkout "
+                          "Session id); (plan-withdraw, unused) the plan period's Stripe invoice id (in_...)")
+    prv.add_argument("credits", nargs="?", default=None, metavar="amount",
+                     help="(refund) the unused credits to refund; (plan-withdraw) the TOTAL refunded at Stripe for "
+                          "that invoice, in cents")
+    prv.add_argument("--reason", default="", help="(refund, plan-withdraw) why — recorded beside the owner-signed step")
     prv.add_argument("--sync", action="store_true", help="(status) rewrite the owner alarm file from the spine")
     prv.set_defaults(fn=cmd_billing_reversal)
     pmd = sub.add_parser("monitoring-drain",

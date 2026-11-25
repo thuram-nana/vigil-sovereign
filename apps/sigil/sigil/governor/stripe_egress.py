@@ -5,7 +5,8 @@ INJECTED into ``StripeBillingProvider`` so ``billing.py`` stays pure (no network
 
   * ``make_object_fetcher()`` -> ``fetch(kind, object_id)``: GET the authoritative Checkout Session / Invoice /
     Subscription named by a signed inbound event — and (W5) the Dispute / Refund / Charge of a reversal, with the
-    disputes of a charge and the Checkout Session of a PaymentIntent read as filtered lists. The signer maps money
+    disputes of a charge, the Checkout Session of a PaymentIntent and (a refunded plan charge) the invoice payment of a
+    PaymentIntent read as filtered lists. The signer maps money
     from THESE objects, never from the webhook body. A 404 is a hard refusal (not a no-op): a signed event naming an object our key cannot see means a key,
     account or test/live mismatch, which an operator must look at.
   * ``make_checkout_creator()`` -> ``create(params, *, idempotency_key)``: POST ``/v1/checkout/sessions`` with an
@@ -64,12 +65,17 @@ _OBJECTS: "Mapping[str, tuple[str, str, re.Pattern[str]]]" = {
     # money/tenant are read from the AUTHORITATIVE object (never the webhook body), exactly like the others.
     "payment_intent": ("/v1/payment_intents/", "payment_intent", re.compile(r"pi_[A-Za-z0-9]{1,255}")),
 }
-# W5 — the two LIST reads a reversal needs: kind -> (path, the one filter parameter, its anchored id shape). Each is
-# fetched with that filter only and limit=10; the response must be a Stripe `list`.
-_LISTS: "Mapping[str, tuple[str, str, re.Pattern[str]]]" = {
-    "disputes_for_charge": ("/v1/disputes", "charge", re.compile(r"(?:ch|py)_[A-Za-z0-9]{1,255}")),
+# W5 — the LIST reads a reversal needs: kind -> (path, the one id filter parameter, its anchored id shape, the fixed
+# filters sent with it). Each is fetched with those filters only and limit=10; the response must be a Stripe `list`.
+# The invoice payments of a PaymentIntent lead a refunded plan charge to the invoice (the plan period) it paid, on API
+# versions whose charges no longer name their invoice.
+_LISTS: "Mapping[str, tuple[str, str, re.Pattern[str], tuple[tuple[str, str], ...]]]" = {
+    "disputes_for_charge": ("/v1/disputes", "charge", re.compile(r"(?:ch|py)_[A-Za-z0-9]{1,255}"), ()),
     "checkout_sessions_for_payment_intent": ("/v1/checkout/sessions", "payment_intent",
-                                             re.compile(r"pi_[A-Za-z0-9]{1,255}")),
+                                             re.compile(r"pi_[A-Za-z0-9]{1,255}"), ()),
+    "invoice_payments_for_payment_intent": ("/v1/invoice_payments", "payment[payment_intent]",
+                                            re.compile(r"pi_[A-Za-z0-9]{1,255}"),
+                                            (("payment[type]", "payment_intent"),)),
 }
 _LIST_LIMIT = 10
 
@@ -237,8 +243,9 @@ def make_object_fetcher(*, transport=None) -> ObjectFetcher:
     """Build ``fetch(kind, object_id)``: ``kind`` is one of ``checkout_session`` / ``invoice`` / ``subscription`` /
     ``dispute`` / ``refund`` / ``charge``; the id must match that kind's anchored shape and is percent-encoded into one
     path segment. Returns the object, which must carry the expected ``object`` type and the requested ``id``. W5: the
-    LIST kinds ``disputes_for_charge`` (a charge id) and ``checkout_sessions_for_payment_intent`` (a PaymentIntent id)
-    GET the list filtered by that id (``limit=10``) and return the Stripe ``list`` object; the caller checks its items.
+    LIST kinds ``disputes_for_charge`` (a charge id), ``checkout_sessions_for_payment_intent`` and
+    ``invoice_payments_for_payment_intent`` (a PaymentIntent id) GET the list filtered by that id (``limit=10``) and
+    return the Stripe ``list`` object; the caller checks its items.
     Any refusal raises (a 404, a 4xx, a type or id mismatch: definitive; a transport fault or 408/425/429/5xx:
     transient). It never returns None: an event whose object cannot be read is never treated as a no-op."""
     send = transport or _request
@@ -246,11 +253,11 @@ def make_object_fetcher(*, transport=None) -> ObjectFetcher:
     def fetch(kind: str, object_id: str) -> "Mapping[str, Any]":
         listing = _LISTS.get(kind) if isinstance(kind, str) else None
         if listing is not None:
-            path, param, id_shape = listing
+            path, param, id_shape, fixed = listing
             if not isinstance(object_id, str) or not id_shape.fullmatch(object_id):
                 raise StripeEgressError(f"refusing a Stripe {kind} list for a malformed id")
             secret = _require_secret()
-            query = urlencode([(param, object_id), ("limit", str(_LIST_LIMIT))])
+            query = urlencode([*fixed, (param, object_id), ("limit", str(_LIST_LIMIT))])
             obj = send("GET", f"{_API_BASE}{path}?{query}", secret=secret)
             if not isinstance(obj, Mapping) or obj.get("object") != "list" or not isinstance(obj.get("data"), list):
                 raise StripeEgressError(f"Stripe {kind} list returned an unexpected object")

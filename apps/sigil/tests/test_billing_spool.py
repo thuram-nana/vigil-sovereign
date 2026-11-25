@@ -260,3 +260,37 @@ def test_drain_failed_recurring_charge_marks_past_due():
     res = watcher.drain()
     assert res["minted"] == 1 and res["rejected"] == 0 and res["noop"] == 0
     assert subs.subscription("acme").status == STATUS_PAST_DUE
+
+
+# ---- the after-pass hook (the Stripe lane's refunded-plan sweep) -------------------------------------------------------
+def test_the_after_pass_hook_runs_once_after_the_passs_webhooks_and_a_fault_never_fails_the_pass(capsys):
+    _s, w, base, root = _rig(_ok_tx())
+    seen: list = []
+
+    def hook(now):
+        seen.append((now, w.available("acme")))          # runs after the pass's webhook was credited
+        if len(seen) == 2:
+            raise RuntimeError("sweep fault")
+    watcher = BillingSpoolWatcher(base.signer, spool_dir=root, verif_hash=_SECRET, now_fn=lambda: 100.0,
+                                  after_pass=hook)
+    _spool(root, _body(9911))
+    res = watcher.drain()
+    assert res["minted"] == 1 and seen == [(100.0, 200)]
+    res2 = watcher.drain()                               # the hook raises: the pass's result stands, said on stderr
+    assert res2["minted"] == 0 and res2["rejected"] == 0 and len(seen) == 2
+    assert "WARNING the after-pass sweep failed: RuntimeError: sweep fault" in capsys.readouterr().err
+    assert base._after_pass is None                      # no hook unless the lane passes one
+
+
+def test_a_busy_pass_runs_no_after_pass_hook():
+    import fcntl
+    _s, _w, base, root = _rig(_ok_tx())
+    seen: list = []
+    watcher = BillingSpoolWatcher(base.signer, spool_dir=root, verif_hash=_SECRET, now_fn=lambda: 100.0,
+                                  after_pass=seen.append)
+    fd = os.open(str(root / "working" / ".drain.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)                   # another drainer holds the lock
+        assert watcher.drain().get("busy") is True and seen == []
+    finally:
+        os.close(fd)
