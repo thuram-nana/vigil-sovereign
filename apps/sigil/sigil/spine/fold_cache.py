@@ -208,6 +208,7 @@ class FoldCache:
         self._step = step
         self._entries: "dict[tuple, _Entry]" = {}
         self._lock = threading.Lock()
+        self._building: "dict[tuple, threading.Lock]" = {}     # one rebuild at a time per spine (single-flight)
         with _REGISTRY_LOCK:
             _REGISTRY.append(self)
 
@@ -274,6 +275,20 @@ class FoldCache:
         the last read, or rebuilding it from the spine when it cannot be proven a prefix of the spine."""
         ident = (_store_identity(store),)
         key = tuple(key)
+        hit = self._try_cached(store, ident, key, reader)
+        if hit is not _MISSING:
+            return hit
+        # SINGLE-FLIGHT: one rebuild per spine at a time; a reader that waited for it reads the entry it left
+        with self._lock:
+            gate = self._building.setdefault(ident, threading.Lock())
+        with gate:
+            hit = self._try_cached(store, ident, key, reader)
+            if hit is not _MISSING:
+                return hit
+            return self._rebuild(store, ident, key, build, reader)
+
+    def _try_cached(self, store, ident: tuple, key: tuple, reader):
+        """`reader(state)` over the cached entry brought to the tip, or `_MISSING` (none, another key, or discarded)."""
         with self._lock:
             e = self._entries.get(ident)
         if e is not None:
@@ -285,7 +300,7 @@ class FoldCache:
                     except Exception:  # noqa: BLE001 — any doubt: discard and rebuild from the spine
                         pass
                     self._discard(ident, e)
-        return self._rebuild(store, ident, key, build, reader)
+        return _MISSING
 
     def _rebuild(self, store, ident: tuple, key: tuple, build, reader):
         tip = _store_tip(store)
