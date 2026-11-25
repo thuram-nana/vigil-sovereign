@@ -591,6 +591,11 @@ class OrgRegistry:
         keys = sorted(fold) if org_id is None else sorted(k for k in fold if k[0] == org_id)
         return [fold[k] for k in keys]
 
+    def member_count(self, org_id: str) -> int:
+        """The number of ACTIVE members of ``org_id`` — the seat-accounting unit (V12). Counts granted
+        memberships; the trust-root owner key-holder is not a membership and is not counted."""
+        return len(self.memberships(org_id))
+
     def membership_role(self, username: str, org_id: str) -> Optional[str]:
         """The per-org role `username` holds in `org_id`, or None (fail-closed) when the user is NOT an active
         member OR the org itself is not active. Revoking the org therefore strips every member's effective
