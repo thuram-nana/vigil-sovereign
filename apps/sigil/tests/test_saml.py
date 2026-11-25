@@ -633,8 +633,14 @@ def test_missing_scd_refused():
 
 # --- the signature backend FAILS CLOSED without a vetted library -----------------------------------
 
-def test_default_backend_fails_closed_without_signxml():
-    # In this environment signxml is not installed, so the shipped backend returns NO verified ids ⇒ refused.
+def test_default_backend_fails_closed_without_signxml(monkeypatch):
+    # The shipped backend uses signxml when importable and FAILS CLOSED (returns NO verified ids ⇒ the
+    # assertion is refused) when it is not. signxml is now a direct sovereign-lock dependency, so it IS
+    # present in the sovereign CI leg — the real enveloped-signature round-trip is proven there by
+    # test_saml_signxml_roundtrip.py. This test pins the OTHER half: simulate signxml's ABSENCE (block its
+    # import) so the import-fail fail-closed branch stays exercised in every environment, present or not.
+    monkeypatch.setitem(sys.modules, "signxml", None)      # `from signxml import …` now raises ImportError
+    assert saml.signxml_sig_verifier(_response(), ("PEMCERT",)) == frozenset()
     with pytest.raises(SamlError):
         saml.verify_saml_response(_response(), config=CFG, now=NOW, replay_ledger=_led())
 
