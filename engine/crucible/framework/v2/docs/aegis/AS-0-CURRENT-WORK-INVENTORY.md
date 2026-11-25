@@ -24,8 +24,8 @@ record).
 
 | Part | LOC |
 |------|----:|
-| Modules (18 `.py`, non-test) | 4,624 |
-| Tests (39 files) | 7,343 |
+| Modules (19 `.py`, non-test) | 4,624 |
+| Tests (40 files) | 7,430 |
 | `slice_graph.json` (AS-0 graph gate) | — |
 | **Package total** | **~11.5K** |
 
@@ -38,6 +38,7 @@ record).
 | `cli.py` | 469 | The `python3 -m framework.v2 aegis` entry (additive, off the gate path): `detect` one envelope, or run the `gateway`. |
 | `models.py` | 279 | The typed surface (pydantic `extra="forbid"`): `ActorRef`, `Surface`, `Verdict`, `CertRef`, `LLMInteraction`, `AuthActivity`, `AegisConfig` — honesty properties enforced by construction. |
 | `boundary.py` | 273 | The untrusted-input ingest boundary: treats all tenant-forwarded content as hostile, fails closed on malformed input, redacts PII. |
+| `integrate.py` | 247 | The AEGIS→engagement adapter (an additional, opt-in sink): folds a `detect()` verdict into the shared engagement `WorldModel` and event spine so the unified report/evidence tools compose the defensive dual, carrying the verdict's own certificate (prove-don't-guess preserved); never changes `detect`'s default behaviour. |
 | `oob_correlator.py` | 229 | Passive OOB→belief correlation: the gateway forwards byte-for-byte and never injects; a real callback elevates belief only, never blocks. |
 | `sensors.py` | 208 | The inbound producers implementing `sensors.base.Sensor`: mint observations (`intel:` tier), never facts. |
 | `pipeline.py` | 194 | `detect()`: the signal → observation → scored → oracle → verdict flow, assembled from reused CRUCIBLE machinery. |
@@ -52,7 +53,7 @@ record).
 | `registry.py` | 63 | The additive vocabulary AEGIS registers into the shared verifier/world-model — appends only, never rewrites. |
 | `demo_app.py` | 56 | Holds the bundled labelled benchmark app open on a fixed port so a defender has a ready-made upstream to try the gateway in front of. |
 
-### 1.2 Tests (39 files, 7,343 LOC)
+### 1.2 Tests (40 files, 7,430 LOC)
 
 The gate-invariance and byte-identity suites are load-bearing for AS-0: they prove the
 AEGIS package stays **off the default scan/engage/gate path** so `make gate` is
