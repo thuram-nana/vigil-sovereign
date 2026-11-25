@@ -8,12 +8,16 @@ server-side, per account:
 
   * ui/preferences_store keeps one hashed-name 0600 file per account in a 0700 directory of its own
     ($SIGIL_HOME/customer_preferences — the backup CAPTURES it: the customer typed it and nothing regenerates it); only
-    the CLOSED PREFERENCE_KEYS allowlist of string fields that are valid text is ever stored, and anything missing,
-    unreadable, malformed, oversized or symlinked reads as the documented DEFAULTS (an empty profile), never an error;
+    the CLOSED PREFERENCE_KEYS allowlist of string fields that are valid text is ever stored. A missing or symlinked
+    file holds no profile (the documented DEFAULTS); a file that is there but cannot be read as a whole profile (an I/O
+    error, anything but a regular file, oversized, not UTF-8, malformed; a short read is read on to the end) reads as
+    the DEFAULTS in the lenient read and is ProfileUnreadable in the STRICT read the General tab and every save use; no
+    open ever blocks (a FIFO at an account's path never holds the save lock);
   * a save merges ONLY the keys it names (one save at a time, so concurrent saves of different fields both land), and
     is refused with nothing written rather than ever losing a field: a record over the read bound (_MAX_BYTES, measured
     on the SERIALISED bytes — an accepted save always reads back as accepted), a lone surrogate or body bytes that are
-    not text (a clean 400, never a codec error's message), a stored file that cannot be read;
+    not text (a clean 400, never a codec error's message), a stored file that cannot be read (a store fault: a 500,
+    never a 400 that blames a field);
   * Provisioner.preferences_get / preferences_set serve an ACTIVE customer only, enforce the allowlist, and write to
     the per-account store — NEVER to the signed append-only spine (no audit row): a customer cannot grow the spine by
     saving the tab;
@@ -33,6 +37,10 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
   * read_prefs ignores the file (always defaults)             -> test_9_get_post_get_round_trips_for_the_same_account
   * write_prefs accepts any key                               -> test_7_store_rejects_keys_outside_the_closed_allowlist
   * read_prefs follows a symlink / reads odd bytes            -> test_6_malformed_or_oversized_file_reads_as_default
+  * a damaged file is merged onto as the empty defaults       -> test_6_malformed_or_oversized_file_reads_as_default
+  * one read is taken for the whole file / a failed read kept -> test_6b_a_short_read_is_never_taken_for_the_whole_file
+  * the open blocks on a FIFO / a special file is read        -> test_6c_a_special_file_at_an_accounts_path_never_blocks_and_is_never_read
+  * an account name with no UTF-8 form raises the codec error -> test_6d_an_account_name_with_no_utf8_form_holds_no_profile
   * the provisioner skips the active-customer check           -> test_5_account_is_the_hop_principal_no_cross_account
   * the provisioner audits / writes the spine                 -> test_8_preferences_never_touch_the_signed_spine
   * the cockpit dispatch ignores the flag / takes the body    -> test_5_account_is_the_hop_principal_no_cross_account
@@ -58,6 +66,8 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
   * a failed read renders an (empty) form / Save enabled      -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
   * Save sends every field, not only the changed ones         -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
   * a save merges onto defaults when the file cannot be read  -> test_15_the_server_merges_only_the_keys_it_is_sent
+  * the tab's read shows an unreadable file as an empty
+    profile / a store fault is a 400 that blames a field      -> test_15c_a_stored_profile_that_cannot_be_read_is_an_error_on_the_tab_never_an_empty_form
   * saves are not serialized (no _SAVE_LOCK)                  -> test_15b_concurrent_saves_of_different_fields_both_land
   * the backup leaves the profile out / restores it umask     -> test_10_backup_captures_the_profile_and_toggle_off_is_byte_identical
                                                                  (and test_backup_recovery_functional)
@@ -568,16 +578,28 @@ def test_5_account_is_the_hop_principal_no_cross_account(home, tmp_path, monkeyp
 
 
 # =====================================================================================================================
-# 6. A malformed or oversized (> _MAX_BYTES) file reads as the default, not an error
+# 6. A malformed or oversized (> _MAX_BYTES) file reads as the default in the lenient read, not an error — and the
+#    STRICT read (the General tab, every save) refuses it: a save never merges onto a profile it could not read
 # =====================================================================================================================
 def test_6_malformed_or_oversized_file_reads_as_default(home, tmp_path):
-    store.write_prefs("cust_ana", {"legal_entity_name": "Acme SARL"}, now=1.0)
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
     f = next(home.iterdir())
+    whole = f.read_bytes()
     big = json.dumps({"prefs": {"legal_entity_name": "x" * (store._MAX_BYTES + 10)}})
     for raw in (b"", b"not json", b"[]", b"null", b'{"prefs": "nope"}', b'{"state": "done"}', b"\xff\xfe",
-                big.encode(), b'{"prefs": {"legal_entity_name": "ok"}}' + b" " * (store._MAX_BYTES + 10)):
+                big.encode(), b'{"prefs": {"legal_entity_name": "ok"}}' + b" " * (store._MAX_BYTES + 10),
+                whole[:len(whole) // 2]):                       # a truncated record: half of the real one
         f.write_bytes(raw)
         assert store.read_prefs("cust_ana") == store.DEFAULTS, raw[:24]
+        with pytest.raises(store.ProfileUnreadable):
+            store.read_prefs("cust_ana", strict=True)
+        # a partial save would merge onto the empty defaults and blank the fields it does not name: refused, the
+        # damaged file left exactly as it was (it used to be overwritten with the one field the save named)
+        with pytest.raises(store.ProfileUnreadable):
+            store.write_prefs("cust_ana", {"emergency_contact_phone": "+33 2"}, now=2.0)
+        assert f.read_bytes() == raw, raw[:24]
+    f.write_bytes(whole)
+    assert store.read_prefs("cust_ana", strict=True) == _PROFILE
     # a non-allowlisted key sitting in a well-formed file is ignored, not surfaced (defence in depth on the read too)
     f.write_text(json.dumps({"prefs": {"legal_entity_name": "Acme SARL", "api_key": "sk-leak", "balance": 999}}))
     assert store.read_prefs("cust_ana") == {**store.DEFAULTS, "legal_entity_name": "Acme SARL"}
@@ -587,12 +609,110 @@ def test_6_malformed_or_oversized_file_reads_as_default(home, tmp_path):
     elsewhere.write_text(json.dumps({"prefs": {"legal_entity_name": "LEAK"}}))
     f.unlink()
     f.symlink_to(elsewhere)
-    assert store.read_prefs("cust_ana") == store.DEFAULTS
+    assert store.read_prefs("cust_ana") == store.DEFAULTS == store.read_prefs("cust_ana", strict=True)
     store.write_prefs("cust_ana", {"legal_entity_name": "Acme SARL"}, now=2.0)
     assert not f.is_symlink() and store.read_prefs("cust_ana")["legal_entity_name"] == "Acme SARL"
     assert json.loads(elsewhere.read_text())["prefs"]["legal_entity_name"] == "LEAK"   # the link target was untouched
     shutil.rmtree(home)                                                 # the directory gone: defaults, no error
+    assert store.read_prefs("cust_ana") == store.DEFAULTS == store.read_prefs("cust_ana", strict=True)
+
+
+def test_6b_a_short_read_is_never_taken_for_the_whole_file(home, monkeypatch):
+    """A file system may answer a read with fewer bytes than asked (a FUSE- or NFS-backed home): the store reads to the
+    end of the file, so a stored profile read a few bytes at a time is the whole profile, and a partial save keeps
+    every field it does not name. (One read used to be taken for the whole file: the cut record read as the defaults,
+    and the save blanked the other five fields.)"""
+    store.write_prefs("cust_ana", _PROFILE, now=1.0)
+    real_read = os.read
+    monkeypatch.setattr(os, "read", lambda fd, n: real_read(fd, min(n, 7)))
+    assert store.read_prefs("cust_ana", strict=True) == _PROFILE == store.read_prefs("cust_ana")
+    assert store.write_prefs("cust_ana", {"emergency_contact_phone": "+33 2"}, now=2.0) == {
+        **_PROFILE, "emergency_contact_phone": "+33 2"}
+    monkeypatch.setattr(os, "read", real_read)
+    assert store.read_prefs("cust_ana") == {**_PROFILE, "emergency_contact_phone": "+33 2"}
+    # a read that fails before the end of the file is a file that could not be read — even when the bytes read so far
+    # parse as a whole record: refused, never taken for the profile
+    f = home / store._name("cust_ana")
+    before = f.read_bytes()
+    reads: list = []
+
+    def _fails_at_the_end(fd, n):
+        reads.append(n)
+        if len(reads) > 1:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_read(fd, n)
+
+    monkeypatch.setattr(os, "read", _fails_at_the_end)
+    with pytest.raises(store.ProfileUnreadable):
+        store.read_prefs("cust_ana", strict=True)
+    reads.clear()
+    with pytest.raises(store.ProfileUnreadable):
+        store.write_prefs("cust_ana", {"legal_entity_name": "X"}, now=3.0)
+    monkeypatch.setattr(os, "read", real_read)
+    assert f.read_bytes() == before
+
+
+def test_6c_a_special_file_at_an_accounts_path_never_blocks_and_is_never_read(home):
+    """Only a regular file is a stored profile. A FIFO planted at an account's path is refused at once — its open never
+    waits for a writer, so it never holds the store's process-wide save lock (every other account's save goes on) —
+    and it is never read: bytes waiting in it stay there. A directory there is refused too."""
+    home.mkdir(parents=True, exist_ok=True)
+    fifo = home / store._name("cust_ana")
+    os.mkfifo(fifo)
+    results: dict = {}
+
+    def _run(name, fn):
+        try:
+            results[name] = fn()
+        except Exception as e:  # noqa: BLE001 — surfaced by the assertions below
+            results[name] = e
+
+    calls = {"save": lambda: store.write_prefs("cust_ana", {"legal_entity_name": "X"}, now=1.0),
+             "strict": lambda: store.read_prefs("cust_ana", strict=True),
+             "lenient": lambda: store.read_prefs("cust_ana")}
+    try:
+        for name, fn in calls.items():                  # no writer holds the FIFO: a blocking open would wait forever
+            t = threading.Thread(target=_run, args=(name, fn), daemon=True)
+            t.start()
+            t.join(timeout=10)
+            assert not t.is_alive(), f"{name} blocked on the FIFO"
+    finally:
+        try:                                            # a reader stuck in open() is released by a writer's open
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+    assert isinstance(results["save"], store.ProfileUnreadable) and isinstance(results["strict"], store.ProfileUnreadable)
+    assert results["lenient"] == store.DEFAULTS and not store._SAVE_LOCK.locked()
+    assert store.write_prefs("cust_ben", {"legal_entity_name": "Ben SA"}, now=1.0)["legal_entity_name"] == "Ben SA"
+    # bytes waiting in the FIFO (a writer holds it open) are never read: the store refuses before any read
+    record = json.dumps({"prefs": {**_PROFILE}, "at": 1.0}).encode()
+    held = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        os.write(held, record)
+        with pytest.raises(store.ProfileUnreadable):
+            store.write_prefs("cust_ana", {"legal_entity_name": "X"}, now=2.0)
+        with pytest.raises(store.ProfileUnreadable):
+            store.read_prefs("cust_ana", strict=True)
+        assert os.read(held, len(record) + 1) == record                # still there, whole
+    finally:
+        os.close(held)
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)                       # refused, never replaced
+    fifo.unlink()
+    fifo.mkdir()                                                       # a directory where the file goes
+    with pytest.raises(store.ProfileUnreadable):
+        store.write_prefs("cust_ana", {"legal_entity_name": "X"}, now=3.0)
     assert store.read_prefs("cust_ana") == store.DEFAULTS
+
+
+def test_6d_an_account_name_with_no_utf8_form_holds_no_profile(home):
+    """An account name with no UTF-8 form (a lone surrogate) can hold no stored profile: every read answers the
+    documented defaults — the lenient read never raises — and a save is refused in plain words, with nothing written."""
+    bad = "cust_\ud800"
+    assert store.read_prefs(bad) == store.DEFAULTS == store.read_prefs(bad, strict=True)
+    with pytest.raises(ValueError) as ei:
+        store.write_prefs(bad, {"legal_entity_name": "X"}, now=1.0)
+    assert type(ei.value) is ValueError and "valid text" in str(ei.value)   # never the codec's own error
+    assert not home.exists() or not any(home.iterdir())
 
 
 # =====================================================================================================================
@@ -1014,8 +1134,8 @@ def test_14_a_failed_read_shows_an_error_and_save_is_disabled():
         out = _node(_settings_app("1", _PROFILE) + _FAILED_READ.replace("__FAIL__", json.dumps(fail)))
         assert out["error"].startswith("Could not load your organization's details") and out["role"] == "alert", fail
         assert out["inputs"] == 0 and out["saveDisabled"] is True and out["posts"] == [], fail   # no form, nothing sent
-        assert out["banners"] == ["Your organization's details could not be loaded, so nothing was saved. "
-                                  "Select Try again."], fail
+        assert out["banners"] == [("Your organization's details could not be loaded, so nothing was saved. "
+                                   "Select Try again.")], fail
         assert out["gets"] == 2 and out["fields"] == [_PROFILE[k] for k in store.PREFERENCE_KEYS], fail
         assert out["saveEnabled"] is True and out["navs"] == [] and out["refreshed"] == 0, fail
     # a reply without the profile is a failed read like any other: no form
@@ -1075,18 +1195,69 @@ def test_15_the_server_merges_only_the_keys_it_is_sent(home, monkeypatch):
         return real_open(path, flags, *a, **k)
 
     monkeypatch.setattr(os, "open", _unreadable)
-    with pytest.raises(PermissionError):
+    with pytest.raises(store.ProfileUnreadable):
         store.write_prefs("cust_ana", {"legal_entity_name": "Beta SARL"}, now=3.0)
-    assert store.read_prefs("cust_ana") == store.DEFAULTS          # the read keeps its contract: defaults, no raise
+    assert store.read_prefs("cust_ana") == store.DEFAULTS          # the lenient read keeps its contract: no raise
+    with pytest.raises(store.ProfileUnreadable):
+        store.read_prefs("cust_ana", strict=True)                   # the strict read (the General tab) reports it
     p, s, custs = _prov()
     custs.create("ana@acme.io", issued_at=1.0, password="password-xyz", username="cust_ana")
-    with pytest.raises(ProvisionError, match="could not be saved"):
+    # a store fault, not the input: never a ProvisionError (a 400 that would blame a field) — the cockpit's clean 500
+    with pytest.raises(store.ProfileUnreadable):
         p.preferences_set("cust_ana", {"legal_entity_name": "Beta SARL"})
+    with pytest.raises(store.ProfileUnreadable):
+        p.preferences_get("cust_ana")                               # never the empty profile, shown as the customer's
     monkeypatch.setattr(os, "open", real_open)
     assert f.read_bytes() == before and store.read_prefs("cust_ana") == _PROFILE   # whole: every field it had
     # no file yet holds no stored profile: a first save proceeds (a symlink where it goes: test_6)
     assert store.write_prefs("cust_new", {"legal_entity_name": "New SA"}, now=4.0) == {
         **store.DEFAULTS, "legal_entity_name": "New SA"}
+
+
+def test_15c_a_stored_profile_that_cannot_be_read_is_an_error_on_the_tab_never_an_empty_form(tmp_path, monkeypatch,
+                                                                                              home):
+    """Over the real edge, hop and cockpit: while the account's stored file is there but cannot be read, the General
+    tab's read is a 500 (a store fault) — so the app shows its error with Save disabled (test_14), never an empty form
+    standing in for a stored profile — and a save is a 500 too, with nothing written. The app then says the settings
+    could not be saved, never that a field is too long: that copy is for a 400, a refusal of what was typed. Once the
+    file can be read again, the profile is there, whole."""
+    monkeypatch.setenv(FLAG, "1")
+    sov, edge, ep, op, ana = _signed_up(tmp_path, monkeypatch, "ana@acme.io")
+    try:
+        assert _post(op, ep, "/api/customer/preferences", {"preferences": _PROFILE})[0] == 200
+        f = home / store._name(ana)
+        before = f.read_bytes()
+        real_open = os.open
+
+        def _unreadable(path, flags, *a, **k):
+            if str(path) == str(f):
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_open(path, flags, *a, **k)
+
+        monkeypatch.setattr(os, "open", _unreadable)
+        assert _get(op, ep, "/api/customer/preferences") == (500, {"error": "provision failed"})
+        assert _post(op, ep, "/api/customer/preferences", {"preferences": {"legal_entity_name": "Beta SARL"}}) == (
+            500, {"error": "provision failed"})
+        monkeypatch.setattr(os, "open", real_open)
+        assert f.read_bytes() == before
+        assert _get(op, ep, "/api/customer/preferences") == (200, {"ok": True, "preferences": _PROFILE})
+    finally:
+        sov.shutdown()
+        edge.shutdown()
+    _need_node()
+    copy = {}
+    for code in (500, 400):
+        out = _node(_settings_app("1", _PROFILE) + r"""
+show(); await tick();
+root.querySelector("#pref-legal_entity_name").value = "Beta SARL";
+postFail = __FAIL__;
+button(root, "Save").click(); await tick(); await tick();
+out.banners = banners.slice(); out.saveEnabled = !button(root, "Save").disabled;
+""".replace("__FAIL__", json.dumps({"status": code, "data": {"error": "x"}})))
+        assert len(out["banners"]) == 1 and out["saveEnabled"] is True, (code, out)
+        copy[code] = out["banners"][0]
+    assert copy[500] == "Your settings could not be saved. Please try again." and "shorten" not in copy[500]
+    assert "shorten" in copy[400] and "nothing was changed" in copy[400]
 
 
 def test_15b_concurrent_saves_of_different_fields_both_land(home, monkeypatch):
