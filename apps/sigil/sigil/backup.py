@@ -203,6 +203,14 @@ _EXCLUSION_REASONS: dict[str, str] = {
                 "same host supersedes it and `ops-sweep reservations` releases it). The settings shell's General "
                 "profile is NOT here: the customer typed it and nothing regenerates it, so it is its own top-level "
                 "`customer_preferences`, captured",
+    "customer_authorization_requests": "legal/governance S12: the UNSIGNED owner-review requests a customer drops from "
+                                       "the read-only Authorizations surface (\"please authorize host X\"). An "
+                                       "operational owner-review queue, not an authority and not money — it mints "
+                                       "nothing and is never owner-signed. EXCLUDED: a restore drops any pending "
+                                       "request and the customer re-requests; the AUTHORITATIVE owner-signed "
+                                       "EngagementAuthorities live on the authority seam (the offense leg's to "
+                                       "capture), and the settings General profile (customer-typed, nothing "
+                                       "regenerates it) is the one captured customer_* top-level — this queue is not it",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "

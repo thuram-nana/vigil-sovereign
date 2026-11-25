@@ -234,6 +234,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
     settings = _config.customer_settings_enabled()
+    # Legal/governance S12 — the read-only Authorizations surface (the #/settings/authorizations screen). Like every
+    # switch here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
+    # when it is on.
+    authorizations = _config.customer_authorizations_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -285,6 +289,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
+                                     "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -717,6 +722,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._onboarding(None)
         if path == "/api/customer/preferences" and _settings_on():      # settings General prefs (flag OFF -> 404)
             return self._preferences(None)
+        if path == "/api/customer/authorizations" and _authorizations_on():   # S12 read-only disclosure (OFF -> 404)
+            return self._customer_read_relay("customer_authorizations_list")
         if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
@@ -1217,6 +1224,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._onboarding(body)
         if action == "preferences" and _settings_on():               # save settings General prefs (OFF -> 404)
             return self._preferences(body)
+        if action == "authorizations/request" and _authorizations_on():   # S12 drop an owner-review request (OFF -> 404)
+            return self._authorization_request(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action == "mfa/totp/confirm" and _mfa_enroll_hardening_on():   # new route (flag OFF -> unknown-action 404)
@@ -1510,6 +1519,22 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                                    {"preferences": prefs if isinstance(prefs, dict) else {}, "ip": self._ip()})
         return self._json(r, c)
 
+    def _authorization_request(self, body: dict):
+        """S12 — the Authorizations surface drops an UNSIGNED owner-review request to authorize an assessment of a host.
+        Org-scoped: the REQUESTER and the ORG come from the SERVER-side session, never a body field (a body
+        ``org_id``/``username`` is ignored); only the ``host`` and an optional ``note`` travel to the provisioner, which
+        enforces membership + that the org proven-owns the host. This mints NO authority and writes no signed record."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        host = body.get("host") if isinstance(body, dict) else ""
+        note = body.get("note") if isinstance(body, dict) else ""
+        c, r = self._provision("customer_authorization_request", requester,
+                               {"org_id": str(rec.get("org_id") or ""),
+                                "host": str(host or ""), "note": str(note or ""), "ip": self._ip()})
+        return self._json(r, c)
+
     def _security_status(self):
         """The Account security screen's read: which second factors the SESSION's account has (an authenticator app,
         its passkeys) — never a secret. Account-level like MFA: the REQUESTER is the server-side session username, never
@@ -1643,6 +1668,11 @@ def _team_on() -> bool:
 def _settings_on() -> bool:
     from .. import config as _config
     return _config.customer_settings_enabled()
+
+
+def _authorizations_on() -> bool:
+    from .. import config as _config
+    return _config.customer_authorizations_enabled()
 
 
 def _plain_body_refusal(e: Exception) -> str:

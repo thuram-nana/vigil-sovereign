@@ -3869,6 +3869,80 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
 
+    # -- Legal/governance S12: the read-only Authorizations surface (behind VIGIL_CUSTOMER_AUTHORIZATIONS) -------------
+    # DISCLOSURE, never a mint. ``customer_authorizations_list`` READS the owner-signed EngagementAuthorities on record
+    # for the SESSION org's OWN proven-owned hosts (re-derived per-(org,host) slug, so org A never sees org B's), and
+    # discloses scope/window/GET-only + whether each is active. ``customer_authorization_request`` DROPS an UNSIGNED
+    # owner-review request (``authorization_requests_store``) — it mints NO authority, signs nothing and writes no
+    # spine row; the owner still signs the real authority in the cockpit (``target_authorization.add_customer_target``).
+    # Both are flag-gated (default OFF; the dispatch also 404s) and org-scoped by the hop-bound SESSION principal.
+    def _authorizations_enabled_or_deny(self, action: str, requester: str, org_id: str) -> None:
+        """Flag gate (default OFF, defence in depth under the dispatch's 404): off ⇒ a clean refusal, audited, exactly
+        as an unknown route. Caller then does its own admit."""
+        from .. import config as _config
+        if not _config.customer_authorizations_enabled():
+            self._audit(action, requester=requester, org_id=org_id, outcome="authorizations_off")
+            raise ProvisionDenied("the authorizations surface is not enabled on this deployment")
+
+    def customer_authorizations_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                     now: "Optional[float]" = None) -> dict:
+        """The SESSION org's owner-signed engagement authorities, DISCLOSED read-only (legal/governance S12): one row per
+        host the org PROVEN-OWNS (verified or lapsed proof) — whether an owner-signed authority is on record, whether it
+        is active (window honored), and its scope / environment / validity window / GET-only (non-destructive) flags —
+        plus which hosts already have an open owner-review request. Tenant-scoped by ``_customer_read``'s
+        ``admit_customer(view_assessments)`` (NO global leg, live membership re-check); the ``org_id`` is the hop-bound
+        session principal, never a body field, so org A can never read org B's authorities. A pure read: it mints
+        nothing, signs nothing, touches no owner key for a decision and writes no record."""
+        import time as _t
+        self._authorizations_enabled_or_deny("customer_authorizations_list", requester, requester_org_id)
+        t = _t.time() if now is None else float(now)
+
+        def project(store, org_id):
+            from ..governor.asset_ownership import AssetOwnershipRegistry
+            from . import authorization_requests_store as _reqs
+            from . import target_authorization as _ta
+            # the org's OWN hosts (proven-owned now or lapsed) — never another org's; pending (no proof yet) has no
+            # authority, so it is excluded.
+            hosts = [a["host"] for a in AssetOwnershipRegistry(store, owner_key=None).assets_overview(org_id, now=t)
+                     if a.get("status") in ("verified", "expired")]
+            authorities = _ta.list_customer_authorities(org_id, hosts, now=t)
+            requested = _reqs.pending_hosts(org_id)
+            return {"org_id": org_id, "can_request": True, "authorities": authorities, "requested": requested}
+
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
+
+    def customer_authorization_request(self, requester: str, requester_org_id: str, host: str, *,
+                                       note: str = "", ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Drop an UNSIGNED owner-review request to authorize an assessment of ``host`` for the SESSION org (legal/
+        governance S12). This MINTS NO AUTHORITY, signs nothing and writes no spine row — it only records the ask so the
+        owner can act on it (the owner signs the real authority in the cockpit). Gated, fail-closed at each step: the
+        flag (default OFF); ``admit_customer(view_assessments)`` on the hop-bound SESSION org (never a body field — org
+        A can never request for org B); and the host must be one THIS org PROVEN-OWNS right now (a request for a host
+        the org cannot prove it controls is refused — ownership is separate from billing/membership)."""
+        import time as _t
+        self._authorizations_enabled_or_deny("customer_authorization_request", requester, requester_org_id)
+        t = _t.time() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+                self._audit("customer_authorization_request", requester=requester, org_id=requester_org_id,
+                            target=str(host or ""), outcome="denied")
+                raise ProvisionDenied("requester may not request authorization for this org (view_assessments)")
+            h = str(host or "").strip()
+            from ..governor.asset_ownership import AssetOwnershipRegistry
+            if not h or not AssetOwnershipRegistry(self.store, owner_key=None).has_current_proof(
+                    requester_org_id, h, now=t):
+                self._audit("customer_authorization_request", requester=requester, org_id=requester_org_id,
+                            target=h, outcome="no_proof")
+                raise ProvisionDenied("no current ownership proof for this host: prove control of the asset before "
+                                      "requesting an assessment authorization for it")
+            from . import authorization_requests_store as _reqs
+            try:
+                _reqs.record_request(requester_org_id, host=h, requested_by=requester, note=str(note or ""), now=t)
+            except ValueError as e:
+                raise ProvisionError(f"the authorization request could not be recorded ({e})") from None
+        # NOT audited as a spine signal and NOT owner-signed: this is a non-authority, off-spine owner-review note.
+        return {"ok": True, "requested": True, "host": h, "org_id": requester_org_id}
+
     # -- Consumer PR-C: the unified CONNECT surface (site + repo + cloud) — one screen, behind VIGIL_CUSTOMER_CONNECT ----
     # CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER AUTHORIZES OFFENSE. Every action here is behind the master
     # flag ``VIGIL_CUSTOMER_CONNECT`` (the cloud actions ALSO behind ``VIGIL_CUSTOMER_CLOUD_CONNECT``; off ⇒ the

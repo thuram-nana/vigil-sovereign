@@ -4100,6 +4100,12 @@
   // controls) and Billing (#/billing) — and adds NO new authority or money control of its own: roles are still changed
   // on #/team over the existing routes, and credits are still bought on #/billing.
   var SETTINGS_ON = pageFlag("settings");
+  // Legal/governance S12 — the read-only Authorizations surface (#/settings/authorizations), linked from this hub only
+  // while the edge writes data-authorizations="1". Off, the link is absent and the route is the home screen exactly as
+  // any unknown route (byte-identical). It only reads the owner-signed authorities and drops an unsigned owner-review
+  // request; it mints no authority and changes no scope (the gate stays the sole authority). The screen itself lives in
+  // its own block below (outside this hub's own code), so the hub still reaches the network through /preferences alone.
+  var AUTHZ_ON = pageFlag("authorizations");
   // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
   // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
   var PREF_FIELDS = [
@@ -4112,7 +4118,8 @@
   ];
   // The hub links a screen only where this deployment shows it: routeShown (the guide's own test) and, for Account
   // security, its own switch — off, #/security is the home screen exactly as any unknown route, so no link leads there.
-  function settingsLinkShown(hash) { return routeShown(hash) && (hash !== "#/security" || SECURITY_ON); }
+  function settingsLinkShown(hash) { return routeShown(hash) && (hash !== "#/security" || SECURITY_ON)
+    && (hash !== "#/settings/authorizations" || AUTHZ_ON); }
   function settingsLink(label, hash) {
     if (!settingsLinkShown(hash)) { return null; }
     return h("div.row", {}, [h("button.btn.cust-settings-link",
@@ -4125,6 +4132,7 @@
       h("p.cust-muted", { text: "Manage the rest of your workspace on its own screens." }),
       settingsLink("Account security & sign-in", "#/security"),
       settingsLink("Authorized administrators", "#/team"),
+      settingsLink("Authorizations", "#/settings/authorizations"),
       settingsLink("Billing", "#/billing"),
     ]);
   }
@@ -4283,6 +4291,119 @@
     }
   }
 
+  // ---- Authorizations (VIGIL_CUSTOMER_AUTHORIZATIONS): the read-only trust surface -------------------------------
+  // A disclosure, never a control: it READS the owner-signed engagement authorities on record for this workspace's own
+  // proven-owned hosts (scope, validity window, GET-only / non-destructive) and lets a workspace REQUEST authorization
+  // of a host — which drops an UNSIGNED owner-review request only (POST /authorizations/request). It MINTS NO authority
+  // and widens no scope: VIGIL's launch/conjunctive gate stays the sole authority and refuses a forged, expired or
+  // out-of-scope authority independently of this page. The screen reaches the network through /authorizations and
+  // /authorizations/request alone.
+  function authzDate(iso) { return String(iso || "").split("T")[0] || String(iso || ""); }
+  function authzStateLabel(a) {
+    if (!a.authorized) { return "Not authorized"; }
+    if (!a.verified || !a.trusted) { return "On record — not verified"; }   // present but not owner-signed/verifiable
+    if (a.active) { return "Active"; }
+    return "Expired or not yet valid";
+  }
+  // The disclosure card: what VIGIL is authorized to test, and that the GATE (not this page) enforces R1/R2/R3. The
+  // formal authorization terms are owner/counsel input — a placeholder stands in until they are provided (never
+  // invented legal text).
+  function authorizationsIntro() {
+    return h("div.card.cust-authz-intro", {}, [
+      h("h3", { text: "What VIGIL is authorized to test" }),
+      h("p.cust-muted", { text: "VIGIL assesses only the hosts your organization has authorized through an "
+        + "owner-signed engagement authority. This page shows those authorities, read-only." }),
+      h("ul.cust-authz-rules", {}, [
+        h("li", { text: "Scope: each authority names exactly the host(s) in scope; every other host is out of scope." }),
+        h("li", { text: "Validity window: an authority applies only between its start and end — outside it, or once "
+          + "revoked, it authorizes nothing." }),
+        h("li", { text: "New-host / out-of-scope refusal: VIGIL's gate refuses any redirect or new host that is not in "
+          + "a signed scope." }),
+      ]),
+      h("p.cust-authz-disclaim", { text: "This page discloses what the gate enforces — it does not itself grant, widen "
+        + "or enforce anything. Issuing or changing an authority is an owner-signed action in the VIGIL cockpit." }),
+      h("p.cust-authz-terms", { text: "«AUTHORIZATION TERMS — PENDING OWNER/COUNSEL»" }),
+    ]);
+  }
+  function authzRow(a, requested) {
+    var rows = [h("h3", { text: String(a.host || "") }),
+      h("p.cust-authz-state", { text: "Status: " + authzStateLabel(a) })];
+    if (a.authorized) {
+      rows.push(h("p.cust-muted", { text: "In scope: " + ((a.scope || []).join(", ") || String(a.host || "")) }));
+      rows.push(h("p.cust-muted", { text: "Out of scope: every other host (a run against a host not in scope is "
+        + "refused by VIGIL's gate, not by this page)." }));
+      rows.push(h("p.cust-muted", { text: "Valid " + authzDate(a.not_before) + " – " + authzDate(a.not_after) }));
+      rows.push(h("p.cust-muted", { text: a.allow_destructive ? "Includes destructive actions."
+        : "Read-only / non-destructive (GET-only): no write or change is authorized." }));
+      if (a.environment) { rows.push(h("p.cust-muted", { text: "Environment: " + String(a.environment) })); }
+    } else {
+      rows.push(h("p.cust-muted", { text: "No assessment of this host is authorized yet." }));
+    }
+    // the request action is offered only where the host is NOT actively authorized; it drops an unsigned owner-review
+    // request (it mints no authority — the owner signs in the cockpit).
+    if (!a.active) {
+      if ((requested || []).indexOf(a.host) >= 0) {
+        rows.push(h("p.cust-authz-requested", { text: "Authorization requested — pending owner review." }));
+      }
+      rows.push(h("div.row", {}, [h("button.btn.cust-authz-request",
+        { type: "button", text: "Request authorization", onClick: function () { return requestAuthorization(a.host); } })]));
+    }
+    return h("div.card.cust-authz-row", {}, rows);
+  }
+  function authorizationsBody(r) {
+    var auths = (r && Array.isArray(r.authorities)) ? r.authorities : [];
+    var requested = (r && Array.isArray(r.requested)) ? r.requested : [];
+    var cards = [authorizationsIntro()];
+    if (!auths.length) {
+      cards.push(h("div.card.cust-authz-empty", {}, [h("p.cust-muted",
+        { text: "No hosts are on record for your workspace yet. Prove ownership of a host on the Connect or Assets "
+          + "screen; once it is owner-verified it appears here." })]));
+    } else {
+      auths.forEach(function (a) { cards.push(authzRow(a, requested)); });
+    }
+    return h("div.cust-authz-list", {}, cards);
+  }
+  // A read that failed for any reason but sign-in: an honest card with Try again (never a half-rendered list).
+  function authorizationsUnavailable(holder) {
+    return h("div.card.cust-authz-unavailable", {}, [
+      h("p.cust-settings-error", { role: "alert", text: "Could not load your authorizations right now. Nothing was "
+        + "changed." }),
+      h("div.row", {}, [h("button.btn.cust-authz-retry", { type: "button", text: "Try again",
+        onClick: function () { return loadAuthorizations(holder); } })])]);
+  }
+  async function loadAuthorizations(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/authorizations"); }
+    catch (e) {
+      if (here() !== "#/settings/authorizations") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, authorizationsUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/settings/authorizations") { return; }
+    VUI.mount(holder, (r && typeof r === "object") ? authorizationsBody(r) : authorizationsUnavailable(holder));
+  }
+  // Drop an UNSIGNED owner-review request to authorize an assessment of `host`. It mints no authority and changes no
+  // scope; the owner signs the real authority in the cockpit. Only the host travels (the org is the server session).
+  async function requestAuthorization(host) {
+    try {
+      await VUI.postJSON(API + "/authorizations/request", { host: host });
+      if (here() !== "#/settings/authorizations") { return; }
+      VUI.toast("Authorization requested");
+      var holder = VUI.$("#cust-authorizations");
+      if (holder) { loadAuthorizations(holder); }                   // re-read so the pending-review note shows
+    } catch (e) {
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      err("Your authorization request could not be sent. Please try again.");
+    }
+  }
+  function viewAuthorizations() {
+    var holder = h("div#cust-authorizations");
+    loadAuthorizations(holder);
+    return shell(h("div", {}, [h("h2", { text: "Authorizations" }), holder]), "#/settings/authorizations");
+  }
+
   // ---- misc ---------------------------------------------------------------------------------------
   function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
@@ -4323,6 +4444,8 @@
     "#/security": function () { return authed() ? (SECURITY_ON ? viewSecurityScreen() : viewDashboard()) : viewLogin(); },
     // the settings shell off: #/settings is the home screen, exactly as any unknown route is
     "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
+    // S12 Authorizations off: #/settings/authorizations is the home screen, exactly as any unknown route is
+    "#/settings/authorizations": function () { return authed() ? (AUTHZ_ON ? viewAuthorizations() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

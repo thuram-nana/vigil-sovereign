@@ -596,6 +596,68 @@ def add_customer_target(
     }
 
 
+def list_customer_authorities(org_id: Any, hosts: Any, *, now: float) -> list:
+    """Read-only DISCLOSURE (legal/governance S12): the owner-signed EngagementAuthorities on the seam for THIS org's
+    own ``(org_id, host)`` slugs. TENANT-SAFE — only slugs RE-DERIVED from ``(org_id, host)`` for the hosts the caller
+    supplies (the sovereign provisioner supplies the org's proven-owned hosts) are read, so one org never sees
+    another's authority; ``org_id`` is never a client-supplied field.
+
+    One row per host (``hosts`` order): whether an owner-signed authority is PRESENT for it, whether it is BOUND to THIS
+    cockpit's owner key AND its signature VERIFIES, whether it is ACTIVE at ``now`` (window honored), plus the
+    public-safe scope, environment, validity window and the GET-only (non-destructive) flags. A forged/unbound or
+    unverified bundle is disclosed PRESENT-but-inactive — the surface never trusts it, and the launch/conjunctive gate
+    refuses it independently. This DISCLOSES the enforced gate (scope/exclusions R1, expiry R2, out-of-scope/new-host
+    refusal R3); it is NOT a second enforcement path and NEVER widens scope. Never raises, never writes, never signs."""
+    from vigil_core import verify_engagement_authority
+    from vigil_integration.live.authorization_broker import read_authorization
+
+    kp = None
+    try:
+        kp = _owner_keypair()
+    except Exception:  # noqa: BLE001 — disclosure must not require an unsealed key; bound/active fall to False
+        kp = None
+    oid = str(org_id or "")
+    out: list = []
+    for host in list(hosts or []):
+        h = str(host or "")
+        if not h:
+            continue
+        slug = _customer_slug(oid, h)
+        ta = None
+        try:
+            ta = read_authorization(_base_dir(), slug)
+        except Exception:  # noqa: BLE001 — an unreadable/absent bundle is simply "not authorized"
+            ta = None
+        if ta is None:
+            out.append({"host": h, "slug": slug, "authorized": False, "active": False})
+            continue
+        doc = ta.signed_authority.document
+        owner_ids = {a.public_key_b64 for a in ta.trust_root.authorizers}
+        bound = bool(kp and kp.public_key_b64 in owner_ids)
+        verified = False
+        try:
+            verified, _reason = verify_engagement_authority(ta.signed_authority, ta.trust_root)
+        except Exception:  # noqa: BLE001 — a malformed bundle disclosed as unverified, never a crash
+            verified = False
+        try:
+            nb, na = doc.not_before.timestamp(), doc.not_after.timestamp()
+        except Exception:  # noqa: BLE001
+            nb = na = 0.0
+        trusted = bool(bound and verified)
+        out.append({
+            "host": h, "slug": ta.slug, "authorized": True,
+            "bound": bound, "verified": bool(verified), "trusted": trusted,
+            "active": bool(trusted and nb <= float(now) < na),
+            "scope": list(doc.scope),
+            "environment": getattr(doc.environment, "value", str(doc.environment)),
+            "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
+            "allow_destructive": bool(getattr(doc, "allow_destructive", False)),
+            "live_destructive_acknowledged": bool(getattr(doc, "live_destructive_acknowledged", False)),
+            "issued_by": str(getattr(doc, "issued_by", "")), "note": str(getattr(doc, "note", "")),
+        })
+    return out
+
+
 def list_targets() -> dict:
     """Every owner-signed authorization on the seam (public-safe fields only). Read-only; total."""
     from vigil_integration.live.authorization_broker import list_authorizations

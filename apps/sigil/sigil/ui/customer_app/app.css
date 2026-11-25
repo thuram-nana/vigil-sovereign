@@ -277,6 +277,19 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-settings-links .row { margin: 0; }
 .cust-settings-link { width: 100%; justify-content: flex-start; text-align: left; }
 
+/* S12 — the read-only Authorizations surface (#/settings/authorizations): a disclosure of the owner-signed engagement
+   authorities + a "request authorization" action that drops an unsigned owner-review request. */
+.cust-authz-list { display: grid; gap: 12px; max-width: 760px; }
+.cust-authz-intro, .cust-authz-row, .cust-authz-empty, .cust-authz-unavailable { display: grid; gap: 6px; }
+.cust-authz-intro h3, .cust-authz-row h3, .cust-authz-intro p, .cust-authz-row p { margin: 0 0 4px; }
+.cust-authz-rules { margin: 0 0 6px; padding-left: 18px; display: grid; gap: 4px; opacity: 0.85; }
+.cust-authz-state { font-weight: 600; }
+.cust-authz-requested { color: var(--st-progress, #d9a441); font-weight: 600; }
+.cust-authz-disclaim { opacity: 0.7; font-size: 0.85rem; }
+.cust-authz-terms { opacity: 0.6; font-size: 0.8rem; font-style: italic; }
+.cust-authz-request, .cust-authz-retry { min-width: 10rem; justify-content: center; }
+.cust-authz-row .row, .cust-authz-unavailable .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {
   position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60;
