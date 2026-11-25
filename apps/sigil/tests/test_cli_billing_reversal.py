@@ -360,6 +360,24 @@ def test_the_reversal_flag_ships_commented_in_the_drain_and_cockpit_env_examples
         assert not any(ln.startswith("VIGIL_BILLING_REVERSALS") for ln in lines), rel
 
 
+def test_go_live_and_the_withdrawal_runbook_subscribe_the_webhook_to_every_reversal_event_the_drain_acts_on():
+    # GO-LIVE §9b step 1 is where the owner subscribes the endpoint: it names every event the drain maps to a
+    # reversal (the withdrawal runbook points there and lists the same), so a withdrawal's refund reaches the drain
+    from pathlib import Path
+
+    from sigil.governor.billing import _STRIPE_REVERSAL_TYPES
+    runbooks = Path(__file__).resolve().parents[3] / "docs" / "runbooks"
+    doc = (runbooks / "GO-LIVE-quickstart.md").read_text("utf-8")
+    s9b = doc[doc.index("## 9b."): doc.index("## 10.")]
+    step1 = " ".join(s9b[s9b.index("1. **Stripe dashboard.**"): s9b.index("2. **Proxy route.**")].split())
+    withdrawal = " ".join((runbooks / "consumer-withdrawal.md").read_text("utf-8").split())
+    assert "`VIGIL_BILLING_REVERSALS=1`" in step1 and "(consumer-withdrawal.md)" in step1
+    assert "(GO-LIVE-quickstart.md)" in withdrawal
+    for etype in sorted(_STRIPE_REVERSAL_TYPES):
+        assert f"`{etype}`" in step1, etype
+        assert f"`{etype}`" in withdrawal, etype
+
+
 def test_the_drain_signer_and_its_reversal_ledger_share_one_plan_ledger(monkeypatch):
     # a refunded plan period is checked (tranche delivered) and debited through the SAME plan ledger
     from sigil.governor.billing import StripeBillingProvider

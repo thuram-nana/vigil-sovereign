@@ -401,8 +401,16 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    card only. Add a webhook endpoint at exactly `https://<hooks host>/webhooks/stripe` — the webhook host of §7,
    live: `https://hooks.vigilguard.net/webhooks/stripe` — with no trailing slash, no query string and no other
    path (anything else is 404 at the hooks vhost). Never point it at the console host: the console is private.
-   Subscribe it to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-   `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed`.
+   Subscribe it to: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed` (exactly these while
+   `VIGIL_BILLING_REVERSALS` is off).
+   **Refunds, chargebacks and consumer withdrawals.** Before you set `VIGIL_BILLING_REVERSALS=1`
+   ([consumer-withdrawal.md](consumer-withdrawal.md)), also subscribe the endpoint to `charge.refunded`,
+   `charge.refund.updated`, `refund.created`, `refund.updated`, `refund.failed`, `charge.dispute.created`,
+   `charge.dispute.updated`, `charge.dispute.closed`, `charge.dispute.funds_withdrawn` and
+   `charge.dispute.funds_reinstated`. Also give the restricted key read access to Charges, Refunds and Disputes,
+   plus write access to Subscriptions if `sigil billing-reversal plan-withdraw` is to stop a plan's renewal
+   itself. Without these events the drain never sees a refund; the withdrawal runbook's owner verbs still work.
    **Terms of Service at checkout.** Under Settings → Business → **Public details**, set the Terms of Service
    URL to `https://vigilguard.net/terms` **before** turning on `VIGIL_STRIPE_TERMS_CONSENT=1` in the cockpit env
    (`deploy/cockpit.env.example` ships it on). With it on, every checkout VIGIL creates requires the customer to

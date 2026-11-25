@@ -15,9 +15,12 @@ run from its first purchase, and a plan the customer withdraws from does not ren
 - `VIGIL_BILLING_REVERSALS=1` in the Stripe drain's env (`~/.config/vigil/billing-drain-stripe.env`) and in the
   env of the shell that runs `sigil billing-reversal` (the cockpit env carries the line). Both examples ship it
   commented out; every `billing-reversal` verb refuses while it is off.
-- The Stripe webhook endpoint (GO-LIVE §9b step 1) also sends the refund events the drain acts on:
-  `charge.refunded`, `charge.refund.updated`, `refund.created`, `refund.updated`, `refund.failed` (and the
-  `charge.dispute.*` events for chargebacks).
+- The Stripe webhook endpoint is also subscribed to the refund and dispute events the drain acts on, as
+  [GO-LIVE §9b step 1](GO-LIVE-quickstart.md) lists them: `charge.refunded`, `charge.refund.updated`,
+  `refund.created`, `refund.updated`, `refund.failed`, and for chargebacks `charge.dispute.created`,
+  `charge.dispute.updated`, `charge.dispute.closed`, `charge.dispute.funds_withdrawn` and
+  `charge.dispute.funds_reinstated`. Without them the drain never sees a refund (the owner verbs below still
+  work).
 - The restricted Stripe key can read Charges, Refunds, Disputes, Invoices and Subscriptions. For VIGIL to stop a
   plan's renewal itself it also needs write access to Subscriptions; without it, cancel the subscription in the
   Stripe Dashboard (step P4) and the verb only confirms it.
