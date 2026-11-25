@@ -15,6 +15,9 @@ THE MODEL (one record per STEP; the record is the commit point of the step):
   * ``note``    — the purchase's processor facts changed without moving credits (no wallet record).
   * ``repay``   — ``credits`` (> 0) of arrears repaid from the wallet (a debit written just before): the ONLY step that
     lowers what an org owes. Run after every top-up (``BillingSigner``) and after every restore.
+  * ``plan_remove`` — ``credits`` (> 0) leave the PLAN tranche of one refunded plan period (a ``governor.plan_debit``
+    with the same entry id, written just before; ``wallet`` names that plan debit, ``credits == wallet``, nothing is
+    owed). The purchase is ``plan-<invoice id>`` (``plan_ref``); only ``reconcile_plan`` writes it.
 A purchase (``ref`` — the top-up's grant entry id, e.g. the Stripe Checkout Session id) carries its state after each
 step: ``k`` (1, 2, ... consecutively; the entry id is ``rev:<ref>:<k>``), ``cap`` (the credits the purchase granted),
 ``removed``, and the facts the target is computed from — ``owner_refunded`` (credits the owner refunded with
@@ -26,6 +29,12 @@ disputed)``. It is always computed from the FRESHEST facts — the Stripe drain 
 every event — so a duplicate, replayed or out-of-order event finds the same target and changes nothing, a refund and a
 dispute of the same charge never remove more than the purchase granted, and a won dispute gives back exactly the part
 it removed. An owner refund made through Stripe as well is covered by the ``max``.
+
+A PLAN period (``reconcile_plan``: the owner's plan withdrawal verb, or the Stripe drain's refund of a plan charge) is a
+refund only. Its target is ``min(cap, max(processor_refunded, owner_refunded))`` credits of the period's allotment
+(``cap``), and it moves towards it only by debiting what REMAINS of that period's plan tranche: plan credits already
+spent are not owed, and ``removed`` counts the credits that actually left. A refund never mints credit: a target below
+``removed`` (a refund that went down after credits left) is refused for the owner, never given back.
 
 CRASH SAFETY: inside the cross-process settle lock (the same lock every metered reserve, extension and settle takes),
 the WALLET record is written first and the step record second. A crash between them leaves a wallet record without its
@@ -44,6 +53,8 @@ while it is off. FATAL-2: sovereign-side, ``assert_no_offense`` at import.
 from __future__ import annotations
 
 import contextlib
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional, cast
 
@@ -62,7 +73,11 @@ from .fold_read import UNCACHED as _UNCACHED, cached_read  # noqa: E402
 REVERSAL_SIGNAL = "governor.billing_reversal"
 RECORD_VERSION = 1
 STEP_REMOVE, STEP_RESTORE, STEP_NOTE, STEP_REPAY = "remove", "restore", "note", "repay"
-STEPS = frozenset({STEP_REMOVE, STEP_RESTORE, STEP_NOTE, STEP_REPAY})
+STEP_PLAN_REMOVE = "plan_remove"
+STEPS = frozenset({STEP_REMOVE, STEP_RESTORE, STEP_NOTE, STEP_REPAY, STEP_PLAN_REMOVE})
+#: A plan period's purchase id in this ledger is ``plan-<processor invoice id>`` (``plan_ref``): it can never be a
+#: top-up's (a top-up is named by its checkout session or transaction id), and only plan steps may use it.
+PLAN_REF_PREFIX = "plan-"
 #: What triggered a step: a dispute or a refund (from the processor, or the owner's refund verb), a top-up (or a
 #: restore) that repays, or a wallet movement a crashed step left behind, adopted.
 REASON_DISPUTE, REASON_REFUND, REASON_REPAY, REASON_RECOVERED = "dispute", "refund", "repay", "recovered"
@@ -79,6 +94,8 @@ _REV_PREFIX = "rev:"
 _REPAY_PREFIX = "repay:"
 _MAX_REF = 96               # a purchase id (a Stripe session id is 66 characters): rev:<ref>:<k> stays under 128
 _MAX_TRIGGER = 128
+# A processor invoice id that names a plan period: ``plan-<id>`` stays within the 96 characters of a purchase id.
+_PLAN_INVOICE_ID = re.compile(r"in_[A-Za-z0-9]{1,88}")
 
 
 class ReversalRefused(ValueError):
@@ -105,6 +122,14 @@ def _nonneg_int(v: object) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
+def _clean_note(note: object) -> str:
+    """The owner's words for a step's human-readable reason: whitespace folded, at most 200 printable characters."""
+    s = " ".join(str(note or "").split())[:200]
+    if any(not c.isprintable() for c in s):
+        raise ReversalRefused("the note must be printable text")
+    return s
+
+
 def rev_entry_id(ref: str, k: int) -> str:
     """The entry id of step ``k`` of purchase ``ref`` (the step record and its wallet record share it)."""
     return f"{_REV_PREFIX}{ref}:{int(k)}"
@@ -113,6 +138,11 @@ def rev_entry_id(ref: str, k: int) -> str:
 def repay_entry_id(n: int) -> str:
     """The entry id of an org's ``n``-th repay (the step record and its wallet debit share it)."""
     return f"{_REPAY_PREFIX}{int(n)}"
+
+
+def plan_ref(invoice_id: str) -> str:
+    """The purchase id of the plan period that processor invoice ``invoice_id`` paid (``plan-<invoice id>``)."""
+    return f"{PLAN_REF_PREFIX}{invoice_id}"
 
 
 def _well_formed(p: dict) -> Optional[tuple]:
@@ -139,6 +169,11 @@ def _well_formed(p: dict) -> Optional[tuple]:
     except ReversalRefused:
         return None
     if eid != rev_entry_id(ref, k) or cap < 1 or removed > cap:
+        return None
+    is_plan = ref.startswith(PLAN_REF_PREFIX)
+    if step != STEP_NOTE and (step == STEP_PLAN_REMOVE) is not is_plan:
+        return None                       # a plan period moves plan credits only; a top-up never moves them
+    if step == STEP_PLAN_REMOVE and not (credits >= 1 and credits == wallet and owed == 0 and d == 0):
         return None
     if step == STEP_REMOVE and not (credits >= 1 and credits == wallet + owed):
         return None
@@ -258,9 +293,10 @@ class StepResult:
 
 class BillingReversalLedger:
     """The owner-signed reversal ledger on the spine (construction mirrors ``WalletRegistry``). ``wallet`` is the
-    ``WalletRegistry`` the steps move credits in (default: one over the same store and keys)."""
+    ``WalletRegistry`` the steps move credits in (default: one over the same store and keys); ``plan`` is the
+    ``PlanCreditLedger`` a plan step debits (default: likewise)."""
 
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None, wallet=None):
+    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None, wallet=None, plan=None):
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
@@ -268,6 +304,10 @@ class BillingReversalLedger:
             from .wallet import WalletRegistry
             wallet = WalletRegistry(store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
         self.wallet = wallet
+        if plan is None:
+            from .metering import PlanCreditLedger
+            plan = PlanCreditLedger(store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
+        self.plan = plan
 
     # -- reads -----------------------------------------------------------------------------------------------------
     def _seed(self, snap) -> "tuple[ReversalFold, int]":
@@ -308,6 +348,20 @@ class BillingReversalLedger:
         key = (str(org_id), str(ref))
         row = self._read(lambda v: list(v.refs.get(key) or ()))
         return PurchaseState(*row) if row else PurchaseState()
+
+    def plan_shortfalls(self) -> "list[tuple[str, str, int, int, int]]":
+        """Every refunded PLAN period whose removal fell short of its target: ``(org, invoice id, cap, removed,
+        target)`` in (org, invoice) order, ``target = min(cap, max(owner_refunded, processor_refunded))``. A plan
+        step removes only what remains of the period, so plan credits held by a launch still running when the refund
+        was reconciled leave a shortfall until they come back (the Stripe drain's sweep removes them then)."""
+        def rows(v: ReversalFold) -> "list[tuple[str, str, int, int, int]]":
+            out = []
+            for (oid, ref), (_k, cap, removed, o, sr, _d) in sorted(v.refs.items()):
+                target = min(cap, max(o, sr))
+                if ref.startswith(PLAN_REF_PREFIX) and target > removed:
+                    out.append((oid, ref[len(PLAN_REF_PREFIX):], cap, removed, target))
+            return out
+        return list(self._read(rows))
 
     def repays(self, org_id: str) -> int:
         return int(self._read(lambda v: v.repays.get(org_id, 0)))
@@ -416,9 +470,9 @@ class BillingReversalLedger:
         step record's human-readable reason only."""
         oid = org_tenant_id(org_id)
         pref = _check_ref(ref)
-        note = " ".join(str(note or "").split())[:200]
-        if any(not c.isprintable() for c in note):
-            raise ReversalRefused("the note must be printable text")
+        if pref.startswith(PLAN_REF_PREFIX):
+            raise ReversalRefused("a plan period's credits are reversed with reconcile_plan, never from the wallet")
+        note = _clean_note(note)
         if reason not in (REASON_DISPUTE, REASON_REFUND):
             raise ReversalRefused("a reconcile is triggered by a dispute or a refund")
         for name, v in (("cap", cap), ("owner_refund", owner_refund)):
@@ -467,6 +521,85 @@ class BillingReversalLedger:
             else:
                 after = st
             return StepResult(seq, after.removed, self.owed(oid), moved=delta if seq is not None else 0)
+
+    # -- a refunded plan period -----------------------------------------------------------------------------------------
+    def _adopt_plan_orphan(self, oid: str, ref: str, st: PurchaseState, period_end: float,
+                           now: float) -> PurchaseState:
+        """Commit the plan debit a crashed plan step ``st.k + 1`` left behind (``reason: recovered``), if any."""
+        k = st.k + 1
+        eid = rev_entry_id(ref, k)
+        if self.has_entry(oid, eid):
+            raise ReversalRefused(f"step {eid} of {oid} is recorded but the fold did not apply it — reconcile by hand")
+        if not self.plan.has_debit_entry(oid, eid):
+            return st
+        found = self.plan.debited_entry(oid, eid)
+        if found is None or float(found[1]) != float(period_end):
+            raise ReversalRefused(f"the plan debit {eid} of {oid} has no step record and its amount or period is no "
+                                  f"longer on the live spine — reconcile by hand")
+        taken = int(found[0])
+        after = PurchaseState(k, st.cap, min(st.cap, st.removed + taken), st.owner_refunded, st.processor_refunded, 0)
+        self._append(oid, eid, STEP_PLAN_REMOVE, REASON_RECOVERED, ref, k, credits=taken, wallet=taken, owed=0,
+                     state=after, issued_at=now)
+        return after
+
+    def reconcile_plan(self, org_id: str, invoice_id: str, *, cap: int, period_end: float, now: float,
+                       processor_refunded: Optional[int] = None, owner_refunded: Optional[int] = None,
+                       note: str = "") -> StepResult:
+        """Remove the refunded part of the plan period that processor invoice ``invoice_id`` paid, from that period's
+        plan tranche (``period_end``) — the plan twin of :meth:`reconcile`, for a REFUND only.
+
+        ``cap`` is the period's allotment (the credits its billing-history line records). The target is
+        ``min(cap, max(processor_refunded, owner_refunded))`` credits: ``processor_refunded`` is the processor's
+        freshest refunded amount in credits and ``owner_refunded`` the owner's (the plan withdrawal verb); each is a
+        TOTAL for the invoice (None keeps the last one recorded; the owner's never goes down), so running either again
+        with the same facts moves nothing. The step debits ``min(target - removed, what remains of the tranche)``:
+        never more than remains, never negative, nothing owed. A target below ``removed`` (the refund went down after
+        credits left) is refused — a refund never mints credit. Under the money lock; nothing is written when nothing
+        changes."""
+        oid = org_tenant_id(org_id)
+        if not isinstance(invoice_id, str) or not _PLAN_INVOICE_ID.fullmatch(invoice_id):
+            raise ReversalRefused("a plan period is named by its processor invoice id (in_...)")
+        pref = _check_ref(plan_ref(invoice_id))
+        note = _clean_note(note)
+        if not _nonneg_int(cap) or cap < 1:
+            raise ReversalRefused("a plan period that granted no credits has nothing to remove")
+        for name, ov in (("processor_refunded", processor_refunded), ("owner_refunded", owner_refunded)):
+            if ov is not None and not _nonneg_int(ov):
+                raise ReversalRefused(f"{name} must be a non-negative integer of credits")
+        pe = period_end
+        if isinstance(pe, bool) or not isinstance(pe, (int, float)) or not math.isfinite(float(pe)) or float(pe) <= 0:
+            raise ReversalRefused("a plan period is keyed by a finite, positive period end")
+        pe = float(pe)
+        with self._money_lock():
+            st = self.purchase(oid, pref)
+            if st.k and st.cap != cap:
+                raise ReversalRefused(f"plan period {pref} of {oid} granted {st.cap} credits, not {cap} — reconcile by "
+                                      f"hand")
+            st = PurchaseState(st.k, cap, st.removed, st.owner_refunded, st.processor_refunded, 0)
+            st = self._adopt_plan_orphan(oid, pref, st, pe, now)
+            sr = st.processor_refunded if processor_refunded is None else min(cap, int(processor_refunded))
+            o = st.owner_refunded if owner_refunded is None else max(st.owner_refunded, min(cap, int(owner_refunded)))
+            target = min(cap, max(sr, o))
+            if target < st.removed:
+                raise ReversalRefused(f"plan period {pref} of {oid}: the refund now covers {target} credits but "
+                                      f"{st.removed} already left the plan — plan credits are never given back "
+                                      f"automatically; reconcile by hand")
+            take = min(target - st.removed, self.plan.remaining_for_period(oid, pe))
+            k = st.k + 1
+            eid = rev_entry_id(pref, k)
+            seq: Optional[int] = None
+            if take > 0:
+                after = PurchaseState(k, cap, st.removed + take, o, sr, 0)
+                self.plan.debit(oid, take, period_end=pe, engagement_id="", entry_id=eid, issued_at=now)
+                seq = self._append(oid, eid, STEP_PLAN_REMOVE, REASON_REFUND, pref, k, credits=take, wallet=take,
+                                   owed=0, state=after, issued_at=now, note=note)
+            elif (o, sr) != (st.owner_refunded, st.processor_refunded):
+                after = PurchaseState(k, cap, st.removed, o, sr, 0)
+                seq = self._append(oid, eid, STEP_NOTE, REASON_REFUND, pref, k, credits=0, wallet=0, owed=0,
+                                   state=after, issued_at=now, note=note)
+            else:
+                after = st
+            return StepResult(seq, after.removed, self.owed(oid), moved=take if seq is not None else 0)
 
     # -- the repay -----------------------------------------------------------------------------------------------------
     def repay(self, org_id: str, trigger: str, *, now: float) -> StepResult:

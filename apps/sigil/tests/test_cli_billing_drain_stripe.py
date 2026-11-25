@@ -249,6 +249,22 @@ def test_the_stripe_lane_signer_requires_a_verified_currency(home, monkeypatch):
     assert watcher._reader.schema == "vigil.webhook.stripe.v1"
 
 
+@pytest.mark.parametrize("reversals", [False, True])
+def test_the_stripe_lane_sweeps_refunded_plan_periods_after_each_pass_only_with_reversals_on(home, monkeypatch,
+                                                                                            reversals):
+    pid, _credits = _topup()
+    monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: _session_fetcher(pid))
+    if reversals:
+        monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
+    else:
+        monkeypatch.delenv("VIGIL_BILLING_REVERSALS", raising=False)
+    watcher = cli._stripe_billing_watcher(_ns(tempfile.mkdtemp()))
+    if reversals:
+        assert watcher._after_pass == watcher.signer.sweep_plan_reversals and watcher.signer.reversals is not None
+    else:
+        assert watcher._after_pass is None and watcher.signer.reversals is None
+
+
 def test_a_missing_fetcher_is_refused_even_with_a_valid_key(home, capsys, monkeypatch):
     monkeypatch.setattr(cli, "_stripe_object_fetcher", lambda: None)
     code, text = _run(["billing-drain", "--provider", "stripe", "--spool", tempfile.mkdtemp()], capsys)

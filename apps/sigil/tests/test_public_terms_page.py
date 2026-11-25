@@ -208,6 +208,49 @@ def test_terms_page_states_the_decided_billing_behaviour():
     assert "no service-level agreement" in text and "signed written agreement" in text
 
 
+def test_terms_page_admits_individuals_and_states_the_consumer_right_of_withdrawal():
+    # Owner, 2026-11-24: VIGIL is for businesses AND individuals. The terms must not restrict use to business purposes,
+    # must keep the 18+ rule, and must state the consumer's 14-day right of withdrawal with the immediate-supply
+    # acknowledgement (unused credits refunded in proportion; the right ends once a purchase's credits are all used).
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    assert "for businesses, professionals and individuals" in text and "at least 18 years old" in text
+    assert "business and professional use" not in text and "internal business purposes" not in text
+    assert "for your own business or personal purposes" in text
+    # §1: a workspace is an individual's account too, consistent with §2 admitting individuals
+    assert 'A "workspace" is the account of one person or organisation on the Service' in text
+    assert "the account of one organisation" not in text
+    assert "Right of withdrawal (consumers)" in text and "within 14 days" in text
+    assert "ask us to start supplying it immediately" in text
+    assert "we refund the price of that purchase's credits you have not used, in proportion" in text
+    assert "you lose the right of withdrawal for a purchase once all of its credits have been used" in text
+
+def test_terms_page_pins_the_consumer_refund_window_and_protection_sentences():
+    # D3/D4/D5 (P1218 round-2 mutation review): the sentences the owner/counsel settled for consumers. Pinned verbatim
+    # so deleting or inverting any of them fails CI. The generic "within 14 days" assertions above are also satisfied
+    # by the earlier "within 14 days of it", so these three are asserted in full rather than by a shared fragment.
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    # §8 refunds: the refund window and method
+    assert "We refund within 14 days of receiving your withdrawal, to the payment method you used." in text   # D3
+    # §8 refunds: a plan's 14 days run from its first purchase, and a withdrawn plan does not renew
+    assert ("For a plan, the 14 days run from its first purchase, and a plan you withdraw from does not renew."
+            in text)                                                                                           # D4
+    # §2 eligibility: the consumer-protection bullet (the law's non-excludable protection still applies)
+    assert ("the points of these terms marked for consumers apply to you, and so does the consumer protection that "
+            "the law of the country where you live gives you and that cannot be excluded by contract.") in text  # D5
+
+
+def test_terms_page_never_claims_the_checkout_computes_or_shows_tax():
+    # Owner, 2026-11-24: no tax or VAT computation at launch (no checkout asks the processor to compute one). §6 keeps
+    # the wording of the reviewed terms: prices exclude taxes, which are added where the law requires and are the
+    # customer's responsibility. It must not promise that the checkout adds or shows a tax line.
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    assert ("Prices are in US dollars (USD) and are shown on the Service and on the checkout page before you pay. "
+            "They exclude taxes. Applicable taxes, such as VAT, GST or sales tax, are added where the law requires "
+            "and are your responsibility.") in text
+    low = text.lower()
+    assert "checkout page shows them" not in low and "shows the tax" not in low and "shows taxes" not in low
+
+
 def test_terms_page_has_the_reviewed_notice_and_no_draft_banner():
     text = TERMS.read_text(encoding="utf-8")
     main = text[text.index("<main"):]

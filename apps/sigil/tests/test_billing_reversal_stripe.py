@@ -15,8 +15,9 @@ import tempfile
 
 import pytest
 
+from sigil import cli
 from sigil.governor.billing import (EVENT_TOPUP, BillingSigner, Entitlement, ReversalUnaccounted,
-                                    StripeBillingProvider)
+                                    StripeBillingProvider, refund_credits)
 from sigil.governor.billing_reversal import BillingReversalLedger
 from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.metering import PlanCreditLedger
@@ -55,7 +56,7 @@ def _session(sid="cs_test_s1", *, org="acme", pi="pi_1", price="price_topup_1k",
 
 
 class _Rig:
-    def __init__(self, *, reversals=True, objects=(), disputes=None, sessions=None):
+    def __init__(self, *, reversals=True, objects=(), disputes=None, sessions=None, payments=None, auto_topup=False):
         s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
         s.append(kind="message", source="x", actor="user", payload={"text": "hi"})
         self.store = s
@@ -65,12 +66,14 @@ class _Rig:
         self.objects = {o["id"]: o for o in objects}
         self.disputes = {} if disputes is None else dict(disputes)       # charge id -> [dispute, ...]
         self.sessions = {} if sessions is None else dict(sessions)       # pi -> [session, ...]
+        self.payments = {} if payments is None else dict(payments)       # pi -> [invoice_payment, ...]
         for ds in self.disputes.values():                                # a dispute event fetches the dispute by id
             for d in ds:
                 self.objects.setdefault(d["id"], d)
         self.fetched: list = []
         self.provider = StripeBillingProvider(_WHSEC, fetcher=self._fetch, expected_mode="test",
-                                              enable_reference_adapter=True, reversals=reversals)
+                                              enable_reference_adapter=True, reversals=reversals,
+                                              auto_topup=auto_topup)
         self.signer = BillingSigner(self.provider, wallet=self.wallet, subscriptions=SubscriptionRegistry(s, **_K),
                                     plan=PlanCreditLedger(s, **_K), catalog=_CATALOG, expected=_EXPECTED,
                                     invoices=self.invoices, reversals=self.reversals if reversals else None)
@@ -88,6 +91,9 @@ class _Rig:
         if kind == "checkout_sessions_for_payment_intent":
             return {"object": "list", "url": "/v1/checkout/sessions", "has_more": False,
                     "data": [copy.deepcopy(x) for x in self.sessions.get(oid, [])]}
+        if kind == "invoice_payments_for_payment_intent":
+            return {"object": "list", "url": "/v1/invoice_payments", "has_more": False,
+                    "data": [copy.deepcopy(x) for x in self.payments.get(oid, [])]}
         obj = self.objects[oid]
         if isinstance(obj, Exception):
             raise obj
@@ -184,6 +190,76 @@ def test_a_new_top_up_repays_the_arrears_then_lifts_the_hold():
 
 
 # ---- fail-closed -----------------------------------------------------------------------------------------------
+# ---- a consumer's withdrawal: the runbook's refund (rounded up) and the drain converge (Terms §8) ---------------------
+_BONUS_CREDITS, _BONUS_PRICE = 6_000, 5_000          # the retired 6k pack: 6,000 credits for $50.00
+
+
+@pytest.mark.parametrize("drain_first", [False, True])
+@pytest.mark.parametrize("left", [5, 4_997, 5_999, 6_000])
+def test_a_withdrawal_refund_of_a_bonus_pack_removes_exactly_its_unused_credits(left, drain_first):
+    # the runbook: `unused` gives N and the refund R (the price of N, rounded UP) -> R refunded at Stripe -> the
+    # owner's `refund <N>`; the drain converts the same Stripe refund on its own. Whichever comes first, the two
+    # remove the N unused credits and no more: one more would be owed and put a consumer who withdrew correctly on a
+    # billing hold
+    r = _Rig(objects=[_charge(amount=_BONUS_PRICE)], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
+    r.wallet.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    r.wallet.grant("acme", _BONUS_CREDITS, "topup", entry_id="cs_test_s1", issued_at=1.0)
+    r.invoices.record("acme", invoice_id="cs_test_s1", kind="topup", price_id="vigil_topup_6k",
+                      amount_minor=_BONUS_PRICE, currency="USD", credits=_BONUS_CREDITS, issued_at=1.0)
+    r.wallet.debit("acme", 450 + _BONUS_CREDITS - left, entry_id="spend", issued_at=1.5)
+    line = next(i for i in r.invoices.invoices("acme") if i.invoice_id == "cs_test_s1")
+    bought = cli.purchased_balance_remaining(spendable=r.wallet.balance("acme").spendable, bought_left=_BONUS_CREDITS)
+    unused = cli.unused_purchase_credits(line, purchased_left=bought, removed=0, plan_left=0)
+    refund = cli.withdrawal_refund_minor(line.amount_minor, unused, line.credits)
+    assert unused == left and 0 < refund <= _BONUS_PRICE
+
+    def drain():
+        r.objects["ch_1"]["amount_refunded"] = refund
+        r.send("charge.refunded", "ch_1")
+
+    def owner():
+        r.reversals.reconcile("acme", "cs_test_s1", cap=_BONUS_CREDITS, reason="refund", now=3.0,
+                              owner_refund=unused, unused_only=True)
+
+    for step in ((drain, owner) if drain_first else (owner, drain)):
+        step()
+    assert r.reversals.purchase("acme", "cs_test_s1").removed == unused
+    assert r.reversals.owed("acme") == 0 and not r.reversals.on_hold("acme") and r.wallet.available("acme") == 0
+    # a refund of the whole price is for a wholly unused pack only (a refund of the whole price removes all of it)
+    assert (refund == _BONUS_PRICE) is (left == _BONUS_CREDITS)
+
+
+@pytest.mark.parametrize("credits,price", [(_BONUS_CREDITS, _BONUS_PRICE), (1_000, 1_000), (7, 3), (100, 1_000)])
+def test_a_full_refund_of_an_unused_pack_removes_every_credit_it_added(credits, price):
+    # Terms §8: a purchase refunded in full loses the credits it added in the same proportion, i.e. all of them,
+    # whatever the pack's credits per minor unit (the retired 6k pack: 6,000 credits for $50)
+    r = _Rig(objects=[_charge(amount=price)], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
+    r.wallet.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    r.wallet.grant("acme", credits, "topup", entry_id="cs_test_s1", issued_at=1.0)
+    r.invoices.record("acme", invoice_id="cs_test_s1", kind="topup", price_id="vigil_topup_6k", amount_minor=price,
+                      currency="USD", credits=credits, issued_at=1.0)
+    r.objects["ch_1"]["amount_refunded"] = price
+    r.send("charge.refunded", "ch_1")
+    assert r.reversals.purchase("acme", "cs_test_s1").removed == credits
+    assert r.wallet.available("acme") == 450 and r.reversals.owed("acme") == 0       # the trial credits stay
+
+
+@pytest.mark.parametrize("cap,amount", [(1_000, 1_000), (6_000, 5_000), (20_000, 9_900), (100, 1_000), (7, 3)])
+def test_a_refund_converts_to_no_more_credits_than_its_proportion_or_the_unused_credits_it_paid_back(cap, amount):
+    for r in range(amount + 1):
+        assert refund_credits(cap, r, amount) <= cap * r // amount                 # never more than the proportion
+    for unused in range(1, cap + 1, max(1, cap // 997)):
+        back = cli.withdrawal_refund_minor(amount, unused, cap)
+        assert refund_credits(cap, back, amount) <= unused                        # never more than it paid back
+    assert refund_credits(cap, amount + 1, amount) == refund_credits(cap, amount, amount)
+    assert refund_credits(cap, 0, amount) == 0 and refund_credits(cap, -5, amount) == 0
+    assert refund_credits(cap, amount, amount) == cap     # a full refund removes all of it, at every ratio
+    for unused in range(1, cap):                          # a pack's refund for fewer than all is below the whole price
+        assert cli.withdrawal_refund_minor(amount, unused, cap) < amount
+    if cap == amount:                                     # every pack on sale: exactly the refunded amount
+        assert all(refund_credits(cap, r, amount) == r for r in range(amount + 1))
+
+
 def test_a_charge_that_is_not_a_credited_top_up_is_refused():
     r = _Rig(objects=[_charge()], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
     # no top-up recorded for this session -> the reversal cannot be priced
@@ -223,3 +299,67 @@ def test_with_reversals_off_a_dispute_event_mints_nothing_and_fetches_nothing():
     r.topup()
     assert r.send("charge.dispute.created", "du_1") is None
     assert r.fetched == [] and r.reversals.owed("acme") == 0 and r.wallet.available("acme") == 1000
+
+
+# ---- an automatic top-up (A1): an off-session PaymentIntent, no checkout session, no invoice ----------------------------
+def _auto_intent(pid="pi_auto1", *, marker="1", status="succeeded", received=1000, org="acme"):
+    meta = {"org_id": org, "price_id": "price_topup_1k", "tx_ref": f"vigil:{org}:a1"}
+    if marker is not None:
+        meta["vigil_auto_topup"] = marker
+    return {"object": "payment_intent", "id": pid, "livemode": False, "status": status, "amount_received": received,
+            "currency": "usd", "created": 900, "metadata": meta}
+
+
+def _auto_rig(**intent):
+    r = _Rig(objects=[_charge(pi="pi_auto1"), _auto_intent(**intent)], disputes={"ch_1": []}, auto_topup=True)
+    assert r.send("payment_intent.succeeded", "pi_auto1", eid="evt_paid") is not None     # the real A1 mint
+    assert r.wallet.available("acme") == 1000
+    return r
+
+
+@pytest.mark.parametrize("refunded,left", [(400, 600), (1000, 0)])
+def test_a_refund_of_an_automatic_top_up_removes_its_pack_credits_in_proportion(refunded, left):
+    r = _auto_rig()
+    r.wallet.debit("acme", 100, entry_id="spend", issued_at=1.5)
+    r.objects["ch_1"]["amount_refunded"] = refunded
+    assert r.send("charge.refunded", "ch_1", eid="evt_ref") is not None
+    assert r.reversals.purchase("acme", "pi_auto1").removed == refunded
+    assert r.wallet.available("acme") == max(0, left - 100) and r.reversals.owed("acme") == max(0, 100 - left)
+    assert ("payment_intent", "pi_auto1") in r.fetched
+
+
+@pytest.mark.parametrize("why,intent,etype,oid", [
+    ("not our automatic top-up", dict(marker=None), "charge.refunded", "ch_1"),
+    ("another marker value", dict(marker="0"), "charge.refunded", "ch_1"),
+    ("not the whole payment", dict(received=2000), "charge.refunded", "ch_1"),
+    ("not succeeded", dict(status="processing"), "charge.refunded", "ch_1"),
+])
+def test_a_charge_that_is_not_one_whole_automatic_top_up_quarantines(why, intent, etype, oid):
+    r = _Rig(objects=[_charge(pi="pi_auto1", refunded=1000), _auto_intent(**intent)], disputes={"ch_1": []})
+    r.wallet.grant("acme", 1000, "topup", entry_id="pi_auto1", issued_at=1.0)
+    r.invoices.record("acme", invoice_id="pi_auto1", kind="topup", price_id="price_topup_1k", amount_minor=1000,
+                      currency="USD", credits=1000, issued_at=1.0)
+    with pytest.raises(ReversalUnaccounted):
+        r.send(etype, oid)
+    assert r.wallet.available("acme") == 1000 and r.reversals.purchase("acme", "pi_auto1").removed == 0
+
+
+def test_a_dispute_of_an_automatic_top_up_quarantines():
+    r = _auto_rig()
+    r.disputes["ch_1"] = [_dispute(status="needs_response")]
+    r.objects["du_1"] = _dispute(status="needs_response")
+    with pytest.raises(ReversalUnaccounted, match="automatic top-up is reconciled by hand"):
+        r.send("charge.dispute.created", "du_1", eid="evt_du")
+    assert r.wallet.available("acme") == 1000
+
+
+def test_a_charge_an_invoice_paid_never_takes_the_automatic_top_up_path():
+    pay = {"object": "invoice_payment", "id": "inpay_1", "livemode": False, "invoice": "in_x1", "status": "paid",
+           "payment": {"type": "payment_intent", "payment_intent": "pi_auto1"}}
+    draft = {"object": "invoice", "id": "in_x1", "livemode": False, "status": "draft"}
+    r = _Rig(objects=[_charge(pi="pi_auto1", refunded=1000), _auto_intent(), draft], disputes={"ch_1": []},
+             payments={"pi_auto1": [pay]})
+    r.wallet.grant("acme", 1000, "topup", entry_id="pi_auto1", issued_at=1.0)
+    with pytest.raises(ReversalUnaccounted, match="did not pay a plan period"):
+        r.send("charge.refunded", "ch_1")
+    assert ("payment_intent", "pi_auto1") not in r.fetched and r.wallet.available("acme") == 1000
