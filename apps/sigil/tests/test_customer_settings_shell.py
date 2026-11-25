@@ -67,6 +67,9 @@ Each test here is one acceptance bullet for slice S1. Mutation-verify targets (e
     the route, or calls every refusal "not valid text"        -> test_13b_over_the_real_hop_bad_input_is_a_clean_400_and_changes_nothing
   * a failed read renders an (empty) form / Save enabled      -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
   * Save sends every field, not only the changed ones         -> test_14_a_failed_read_shows_an_error_and_save_is_disabled
+                                                                 (an untouched value with spaces around it: test_14b)
+  * a save reply without the profile mounts an empty form, or
+    a read failing after the customer left changes the page   -> test_14b_after_a_save_the_tab_shows_what_is_stored_and_never_a_blank_profile
   * a save merges onto defaults when the file cannot be read  -> test_15_the_server_merges_only_the_keys_it_is_sent
   * the tab's read shows an unreadable file as an empty
     profile / a store fault is a 400 that blames a field      -> test_15c_a_stored_profile_that_cannot_be_read_is_an_error_on_the_tab_never_an_empty_form
@@ -232,7 +235,7 @@ const navs = []; function nav(r) { navs.push(r); }
 let refreshed = 0; async function refreshWho() { refreshed++; }
 const calls = [];
 let prefs = __PREFS__;
-let getFail = null, postFail = null, getReply = null;
+let getFail = null, postFail = null, getReply = null, postReply = null;
 function failure(f) { const e = new Error(f.message || (f.data && f.data.error) || "failed");
   e.status = f.status; e.data = f.data || null; return e; }
 const VUI = window.VUI;
@@ -240,7 +243,9 @@ VUI.getJSON = async p => { calls.push(["GET", p]); if (getFail) { const f = getF
   if (getReply) { const r = getReply; getReply = null; return r; }
   return { ok: true, preferences: prefs }; };
 VUI.postJSON = async (p, b) => { calls.push(["POST", p, b]); if (postFail) { const f = postFail; postFail = null; throw failure(f); }
-  prefs = Object.assign({}, prefs, (b && b.preferences) || {}); return { ok: true, preferences: prefs }; };
+  prefs = Object.assign({}, prefs, (b && b.preferences) || {});
+  if (postReply) { const r = postReply; postReply = null; return r; }
+  return { ok: true, preferences: prefs }; };
 // every other way a page could reach the network, recorded — each answering inertly, so a call is seen in `raw`, not
 // lost to a crash: the hub must use none of them
 const raw = [];
@@ -1198,6 +1203,49 @@ out.fields = PREF_FIELDS.map(f => root.querySelector("#pref-" + f[0]).value);
     assert out["unchanged"] == [] and out["toasts"] == ["No changes to save", "Saved"]
     assert out["posts"] == [["POST", "api/customer/preferences", {"preferences": changed}]]
     assert out["fields"] == [{**_PROFILE, **changed}[k] for k in store.PREFERENCE_KEYS]
+
+
+def test_14b_after_a_save_the_tab_shows_what_is_stored_and_never_a_blank_profile():
+    """After a save the tab shows the profile the server stored: its merged answer — or, should the reply not carry
+    the profile, the stored profile read again; never an empty form standing in for a stored profile. A field the
+    customer did not touch is never sent, even when the stored value has spaces around it. And a read that fails after
+    the customer has left the screen changes nothing on the page and sends no one to sign in."""
+    _need_node()
+    out = _node(_settings_app("1", _PROFILE) + r"""
+show(); await tick();
+root.querySelector("#pref-registered_address").value = "2 Avenue Foch, 75116 Paris, FR";
+postReply = { ok: true };                                      // a reply without the profile
+button(root, "Save").click(); for (let i = 0; i < 6; i++) await tick();
+out.gets = calls.filter(c => c[0] === "GET").length;
+out.inputs = root.querySelectorAll("input").length;
+out.fields = PREF_FIELDS.map(f => { const el = root.querySelector("#pref-" + f[0]); return el ? el.value : null; });
+""")
+    stored = {**_PROFILE, "registered_address": "2 Avenue Foch, 75116 Paris, FR"}
+    assert out["gets"] == 2 and out["inputs"] == len(store.PREFERENCE_KEYS)
+    assert out["fields"] == [stored[k] for k in store.PREFERENCE_KEYS]
+    # an untouched field whose stored value has spaces around it is not a change: only the edited field is sent
+    spaced = {**_PROFILE, "legal_entity_name": "  Acme SARL  "}
+    out = _node(_settings_app("1", spaced) + r"""
+show(); await tick();
+root.querySelector("#pref-emergency_contact_phone").value = "+33 6 00 00 00 00";
+button(root, "Save").click(); await tick(); await tick();
+out.posts = calls.filter(c => c[0] === "POST");
+""")
+    assert out["posts"] == [["POST", "api/customer/preferences",
+                             {"preferences": {"emergency_contact_phone": "+33 6 00 00 00 00"}}]]
+    # the customer left before the read failed: the page is left as it is, and no one is sent to sign in
+    for fail in ({"status": 500}, {"status": 401}):
+        out = _node(_settings_app("1", _PROFILE) + r"""
+getFail = __FAIL__;
+show();
+const holder = root.querySelector("#cust-settings-general");
+location.hash = "#/billing";                                    // left the screen before the read answered
+for (let i = 0; i < 6; i++) await tick();
+out.error = holder.querySelectorAll(".cust-settings-error").length;
+out.buttons = holder.querySelectorAll("button").length;
+out.navs = navs; out.refreshed = refreshed;
+""".replace("__FAIL__", json.dumps(fail)))
+        assert out == {"error": 0, "buttons": 0, "navs": [], "refreshed": 0}, (fail, out)
 
 
 # =====================================================================================================================
