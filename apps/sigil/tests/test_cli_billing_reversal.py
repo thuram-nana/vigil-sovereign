@@ -320,12 +320,18 @@ def test_unused_counts_each_purchase_against_the_purchased_pool_less_what_refund
     assert f"{unused} of its 1000 credits unused" in capsys.readouterr().out
 
 
-def test_unused_of_a_plan_period_is_what_remains_of_its_plan_credits(monkeypatch, capsys):
+@pytest.mark.parametrize("ended", [False, True])
+def test_unused_of_a_plan_period_is_what_remains_of_its_plan_credits(monkeypatch, capsys, ended):
+    import time
     plan, _fake = _seed_plan(monkeypatch, used=3_000)
+    monkeypatch.setattr(time, "time", lambda: _PE + 1.0 if ended else _PE - 1.0)
     cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup=_INV, credits=None))
     out = capsys.readouterr().out
     assert "9000 of its 12000 credits unused" in out and "refund at Stripe: 7425 of 9900 USD" in out
     assert f"plan-withdraw acme {_INV}" in out and _left(plan) == 9_000
+    # an ended period's leftover plan credits expired UNUSED: the note says they are still counted as unused
+    assert ("has ended: the plan credits it had left expired unused and are counted as unused here" in out) is ended
+    assert ("14 days run from its first purchase" in out) is ended
 
 
 def test_the_unused_refund_is_the_price_in_proportion_rounded_up_to_the_cent(monkeypatch, capsys):

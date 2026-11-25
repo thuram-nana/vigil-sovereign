@@ -2976,7 +2976,8 @@ def _print_unused(org: str, purchase: str, *, store, owner, wallet, ledger) -> N
     if line.kind == "topup":
         print(f"  purchased balance remaining: {purchased_left} (trial credits are spent first and never count)")
     if line.kind == "subscription" and _time.time() >= float(line.period_end):
-        print("  this plan period has ended (its plan credits expired)")
+        print("  this plan period has ended: the plan credits it had left expired unused and are counted as unused "
+              "here; a plan's 14 days run from its first purchase, so check the request's date first")
     if unused <= 0:
         print("  every credit of this purchase is used: its right of withdrawal has ended")
         return
