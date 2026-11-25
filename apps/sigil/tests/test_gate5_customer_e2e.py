@@ -107,6 +107,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
+    "#/settings": ("Settings", ("api/customer/preferences",)),
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -136,6 +137,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
     "#/attack-path": {"View findings": 1},                          # F1's one chain card (its steps unlisted)
+    "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
+                   "Authorized administrators": 1,
+                   "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
     "#/guide": {"Replay the welcome tour": 1,
                 "Mark as done": 6},                                 # the open chapter, Get started: its six steps
     "#/plans": {"Upgrade": 1, "Downgrade": 1, "Cancel plan": 1, "Buy credits on Billing": 1},
@@ -165,7 +169,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "settings": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
@@ -175,7 +179,8 @@ _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1
 _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
-              "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP")   # + PR-G
+              "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
+              "VIGIL_CUSTOMER_SETTINGS")
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -407,6 +412,11 @@ _FAKE_SERVER = {
                                 "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
     "api/customer/monitoring/events": {"org_id": "org_acme", "events": []},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
+    # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
+    "api/customer/preferences": {"ok": True, "preferences": {
+        "legal_entity_name": "Acme SAS", "registered_address": "1 Example Street, Example City",
+        "contractual_contact_email": "legal@acme.com", "emergency_contact_name": "Dana Ops",
+        "emergency_contact_phone": "+1 555 0100", "emergency_contact_email": "soc@acme.com"}},
     # PR-B Fix first: one verified host tested — two open findings worst first (the critical one with its signed
     # plain-language parts and fix), one a retest proved fixed, the first six weeks not measured yet. The scores are the
     # server's own arithmetic over these severities (100 x 100 // (100 + 45 + 22 [+ 9 while the medium was open])).
@@ -866,7 +876,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
         for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
-                  "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance"):   # + PR-G (Area 6)
+                  "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
+                  "preferences"):
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

@@ -177,9 +177,10 @@
                         shown: routeShown, flag: pageFlag })]),   // flag: PR-G's guide steps that need a page switch
     "#/guide");
   }
-  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there.
+  // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
+  // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -4039,6 +4040,126 @@
     if (w) { host.parentNode.replaceChild(w, host); } else { host.remove(); }
   }
 
+  // ---- Settings (VIGIL_CUSTOMER_SETTINGS): the settings shell + the General preferences tab ------------------------
+  // Shown only while the edge writes data-settings="1". Off, #/settings is the home screen exactly as any unknown
+  // route, no preferences call is made, and the guide does not list its step (routeShown). The hub is navigation plus
+  // a General tab that captures the workspace's legal-entity / contact profile (GET/POST api/customer/preferences for
+  // the SESSION's account only — a UI preference, never money, never authority, never on the signed spine; the SERVER
+  // enforces the closed key allowlist and the account). It LINKS the screens that already exist — Account security &
+  // sign-in (#/security, only where that screen is shown), Authorized administrators (#/team, the existing member/role
+  // controls) and Billing (#/billing) — and adds NO new authority or money control of its own: roles are still changed
+  // on #/team over the existing routes, and credits are still bought on #/billing.
+  var SETTINGS_ON = pageFlag("settings");
+  // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
+  // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
+  var PREF_FIELDS = [
+    ["legal_entity_name", "Legal entity name", "text"],
+    ["registered_address", "Registered / operating address", "text"],
+    ["contractual_contact_email", "Primary contractual contact email", "email"],
+    ["emergency_contact_name", "Emergency operational contact — name", "text"],
+    ["emergency_contact_phone", "Emergency operational contact — phone", "tel"],
+    ["emergency_contact_email", "Emergency operational contact — email", "email"],
+  ];
+  // The hub links a screen only where this deployment shows it: routeShown (the guide's own test) and, for Account
+  // security, its own switch — off, #/security is the home screen exactly as any unknown route, so no link leads there.
+  function settingsLinkShown(hash) { return routeShown(hash) && (hash !== "#/security" || SECURITY_ON); }
+  function settingsLink(label, hash) {
+    if (!settingsLinkShown(hash)) { return null; }
+    return h("div.row", {}, [h("button.btn.cust-settings-link",
+      { type: "button", text: label, dataset: { route: hash }, onClick: function () { nav(hash); } })]);
+  }
+  // The hub's navigation card: it only LINKS the existing screens, it never forks their authority/money controls.
+  function settingsLinks() {
+    return h("div.card.cust-settings-links", {}, [
+      h("h3", { text: "Your organization" }),
+      h("p.cust-muted", { text: "Manage the rest of your workspace on its own screens." }),
+      settingsLink("Account security & sign-in", "#/security"),
+      settingsLink("Authorized administrators", "#/team"),
+      settingsLink("Billing", "#/billing"),
+    ]);
+  }
+  // The General tab: the profile fields, pre-filled from what the server stored, with one Save. `shown` keeps each
+  // field as the tab showed it, so Save sends ONLY the fields the customer changed: a field they did not touch is never
+  // sent, and the server merges only the keys it is sent — a Save never blanks a stored field. It then re-renders from
+  // what the server stored (its merged answer).
+  function generalForm(prefs) {
+    var p = prefs || {}, shown = {};
+    var rows = [h("h3", { text: "General" }),
+      h("p.cust-muted", { text: "Who this workspace is on paper — used for your records and contracts." })];
+    PREF_FIELDS.forEach(function (f) {
+      var pair = field("pref-" + f[0], f[1], f[2]);
+      pair[1].value = String(p[f[0]] || "");
+      shown[f[0]] = String(pair[1].value || "").trim();          // what val() reads back while it is untouched
+      rows.push(h("div.cust-field", {}, pair));
+    });
+    rows.push(h("div.row", {}, [h("button.btn.cust-pref-save",
+      { type: "button", text: "Save", onClick: function () { return saveGeneral(shown); } })]));
+    return h("div.card.cust-settings-general-form", {}, rows);
+  }
+  // A read that failed for any reason but sign-in leaves the stored details unknown here: the tab says so and shows no
+  // form at all — never an empty one whose Save would send blanks over the stored fields. Save is disabled (and
+  // saveGeneral, with nothing loaded, sends nothing); Try again reads them again.
+  function generalUnavailable(holder) {
+    return h("div.card.cust-settings-general-form", {}, [h("h3", { text: "General" }),
+      h("p.cust-settings-error", { role: "alert", text: "Could not load your organization's details, so they cannot "
+        + "be changed right now. Nothing was changed." }),
+      h("div.row", {}, [
+        h("button.btn.cust-pref-retry", { type: "button", text: "Try again",
+          onClick: function () { return loadGeneral(holder); } }),
+        h("button.btn.cust-pref-save", { type: "button", text: "Save", disabled: true,
+          onClick: function () { return saveGeneral(null); } })])]);
+  }
+  // Read the account's stored details into the General tab. A sign-in problem goes to sign-in; any other failure, or a
+  // reply without the profile, is shown as one (generalUnavailable).
+  async function loadGeneral(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/preferences"); }
+    catch (e) {
+      if (here() !== "#/settings") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, generalUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/settings") { return; }
+    var p = r && r.preferences;
+    VUI.mount(holder, (p && typeof p === "object" && !Array.isArray(p)) ? generalForm(p) : generalUnavailable(holder));
+  }
+  // Save the fields that differ from what the tab showed (`shown`), and nothing else; with no details loaded (`shown`
+  // null) nothing at all.
+  async function saveGeneral(shown) {
+    if (!shown) {
+      err("Your organization's details could not be loaded, so nothing was saved. Select Try again.");
+      return;
+    }
+    var out = {}, changed = false;
+    PREF_FIELDS.forEach(function (f) {
+      var v = val("pref-" + f[0]);
+      if (v !== shown[f[0]]) { out[f[0]] = v; changed = true; }
+    });
+    if (!changed) { VUI.toast("No changes to save"); return; }
+    var btn = VUI.$(".cust-pref-save"); if (btn) { btn.disabled = true; }
+    try {
+      var r = await VUI.postJSON(API + "/preferences", { preferences: out });
+      if (here() !== "#/settings") { return; }
+      VUI.toast("Saved");
+      var holder = VUI.$("#cust-settings-general"), p = r && r.preferences;
+      if (!holder) { return; }
+      if (p && typeof p === "object" && !Array.isArray(p)) { VUI.mount(holder, generalForm(p)); }  // the server's merge
+      else { loadGeneral(holder); }                                 // a reply without the profile: read it again
+    } catch (e) {
+      if (btn) { btn.disabled = false; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      err((e && e.status === 400) ? "Your settings could not be saved, and nothing was changed. If a field is very "
+        + "long, shorten it, then try again." : "Your settings could not be saved. Please try again.");
+    }
+  }
+  function viewSettings() {
+    var holder = h("div#cust-settings-general");
+    loadGeneral(holder);                       // the loader at once, then the tab (or why it could not be loaded)
+    return shell(h("div", {}, [h("h2", { text: "Settings" }), holder, settingsLinks()]), "#/settings");
+  }
+
   // ---- shell --------------------------------------------------------------------------------------
   function navLink(label, hash) {
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
@@ -4061,6 +4182,7 @@
         // PR-G (Area 6): the same page switches PLANS_ON / REPORTS_ON hold, read here so the top bar stays self-contained
         .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
         .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
+        .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -4149,6 +4271,8 @@
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is
     "#/security": function () { return authed() ? (SECURITY_ON ? viewSecurityScreen() : viewDashboard()) : viewLogin(); },
+    // the settings shell off: #/settings is the home screen, exactly as any unknown route is
+    "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

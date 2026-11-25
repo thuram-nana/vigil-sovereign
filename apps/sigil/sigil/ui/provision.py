@@ -1527,6 +1527,44 @@ class Provisioner:
             self._audit("onboarding_record", requester=requester, target=requester, outcome=state)
         return {"ok": True, "state": state}
 
+    def preferences_get(self, requester: str) -> dict:
+        """The settings shell's General preferences for the requesting customer's OWN account
+        (``ui/preferences_store``): the legal-entity / contact profile, defaulting to an empty profile when nothing is
+        stored. Account-level, like the onboarding state: the requester is the hop-bound session principal, never a body
+        field, and must be an ACTIVE customer. The read is STRICT: a stored profile that is there but cannot be read
+        (``preferences_store.ProfileUnreadable``) is a store fault — the cockpit's clean 500, so the General tab shows
+        its error with Save disabled — never an empty profile the tab would show as the customer's."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .preferences_store import read_prefs
+        return {"ok": True, "preferences": read_prefs(requester, strict=True)}
+
+    def preferences_set(self, requester: str, prefs: dict, *, now: "Optional[float]" = None) -> dict:
+        """Record the requesting customer's General preferences (``prefs`` merged onto the stored profile — only the
+        keys it names) and return the full stored profile. Account-level: the requester is the hop-bound session
+        principal, never a body field, and must be an ACTIVE customer. Only the CLOSED ``PREFERENCE_KEYS`` allowlist is
+        accepted (any other key, a non-string, text with a lone surrogate, an over-long value, or a profile too large to
+        read back is refused, nothing written); a secret / authority / money key can never be written. Every refusal of
+        the input is a ``ProvisionError`` (a 400) in plain words — never a codec's own message. A store that cannot be
+        read or written (a stored profile that is there but cannot be read, a directory that cannot be written) is
+        refused too, nothing written, as a store fault — the cockpit's clean 500, never a 400 that blames the input.
+        This is a UI preference: it is written to the per-account store, NEVER to the signed append-only spine (no audit
+        row), so a customer cannot grow the spine by saving the tab."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        if not isinstance(prefs, dict):
+            raise ProvisionError("preferences must be an object")
+        from .preferences_store import write_prefs
+        t = self._now() if now is None else float(now)
+        try:
+            merged = write_prefs(requester, prefs, now=t)
+        except UnicodeError:                        # a ValueError too: caught first, so a codec's message never leaks
+            raise ProvisionError("the preferences could not be saved: a value is not valid text") from None
+        except ValueError as e:
+            raise ProvisionError(f"the preferences could not be saved: {str(e)[:120]}") from None
+        # an OSError (ProfileUnreadable included) is a store fault, not the input: it reaches the cockpit's clean 500
+        return {"ok": True, "preferences": merged}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an

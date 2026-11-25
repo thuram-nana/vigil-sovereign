@@ -323,7 +323,7 @@ def test_flag_off_hides_aegis_plans_from_catalog_and_signer(monkeypatch):
     aegis = {e.price_id for e in cat._CATALOG if e.monitor_hosts}
     assert aegis and aegis <= set(on_ents)
     monkeypatch.delenv("VIGIL_CUSTOMER_MONITORING_ENABLED")
-    pre = [e for e in cat._CATALOG if not e.monitor_hosts]
+    pre = [e for e in cat._CATALOG if not e.monitor_hosts and not e.retired]
     assert cat.plans() == [e.public() for e in pre]
     assert cat.entitlements() == {e.price_id: e.entitlement() for e in pre}
     assert cat.expected_amounts() == {e.price_id: (e.amount_minor, e.currency) for e in pre}

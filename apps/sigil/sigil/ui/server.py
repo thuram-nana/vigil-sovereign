@@ -1649,6 +1649,18 @@ class Handler(BaseHTTPRequestHandler):
             if action == "onboarding_get":
                 return p.onboarding_state(requester)
             return p.onboarding_record(requester, str(body.get("state", "")))
+        # The settings shell's General preferences (legal-entity / contact profile). Account-level like onboarding:
+        # requester is the hop principal, never a body field; a body `username`/`org_id` is ignored. Absent (unknown
+        # action -> 404) unless VIGIL_CUSTOMER_SETTINGS is on, the same flag that gates the edge route. A UI preference:
+        # read/written off the signed spine, never audited.
+        if action in ("preferences_get", "preferences_set"):
+            from .. import config as _config
+            if not _config.customer_settings_enabled():
+                return None
+            if action == "preferences_get":
+                return p.preferences_get(requester)
+            prefs = body.get("preferences")
+            return p.preferences_set(requester, prefs if isinstance(prefs, dict) else {})
         # The Account security screen's read: the requesting account's own second factors (never a secret).
         # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.
