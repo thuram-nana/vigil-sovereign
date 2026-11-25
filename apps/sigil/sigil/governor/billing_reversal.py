@@ -349,6 +349,20 @@ class BillingReversalLedger:
         row = self._read(lambda v: list(v.refs.get(key) or ()))
         return PurchaseState(*row) if row else PurchaseState()
 
+    def plan_shortfalls(self) -> "list[tuple[str, str, int, int, int]]":
+        """Every refunded PLAN period whose removal fell short of its target: ``(org, invoice id, cap, removed,
+        target)`` in (org, invoice) order, ``target = min(cap, max(owner_refunded, processor_refunded))``. A plan
+        step removes only what remains of the period, so plan credits held by a launch still running when the refund
+        was reconciled leave a shortfall until they come back (the Stripe drain's sweep removes them then)."""
+        def rows(v: ReversalFold) -> "list[tuple[str, str, int, int, int]]":
+            out = []
+            for (oid, ref), (_k, cap, removed, o, sr, _d) in sorted(v.refs.items()):
+                target = min(cap, max(o, sr))
+                if ref.startswith(PLAN_REF_PREFIX) and target > removed:
+                    out.append((oid, ref[len(PLAN_REF_PREFIX):], cap, removed, target))
+            return out
+        return list(self._read(rows))
+
     def repays(self, org_id: str) -> int:
         return int(self._read(lambda v: v.repays.get(org_id, 0)))
 

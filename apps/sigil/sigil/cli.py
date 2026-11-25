@@ -2277,7 +2277,10 @@ def _stripe_billing_watcher(a):
     hook = _auto_topup_capture_hook(store, fetcher) if auto else None
     signer = _billing_signer(provider, store, alarm=alarm, require_verified_amount=True, alarm_topups=alarm,
                              on_saved_payment_method=hook)
-    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1())
+    # W5: after every pass, plan credits that came back to a refunded plan period (a launch that held them when the
+    # refund was reconciled has settled) are removed again (no sweep while VIGIL_BILLING_REVERSALS is off)
+    sweep = signer.sweep_plan_reversals if signer.reversals is not None else None
+    return BillingSpoolWatcher(signer, spool_dir=spool, envelope_reader=StripeEnvelopeV1(), after_pass=sweep)
 
 
 # The money-IN drain lanes: (the drain's own spool variable — None: the lane drains exactly the --spool its unit
@@ -3082,7 +3085,8 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
         print(f"  WARNING: the refund covers {credits} plan credits of invoice {invoice_id}, but only {res.removed} "
               f"have left {org}'s plan period: the other {credits - res.removed} were spent, or are held by a scan "
               f"still running, when this ran. Spent plan credits are not taken back; credits a running scan gives "
-              f"back are removed when this command runs again. Check `sigil billing-reversal unused {org} "
+              f"back are removed by the Stripe drain's next pass (VIGIL_BILLING_REVERSALS on in its env) or when "
+              f"this command runs again. Check `sigil billing-reversal unused {org} "
               f"{invoice_id}` against the refund and reconcile any difference by hand.", file=sys.stderr)
 
 

@@ -403,3 +403,45 @@ def test_a_plan_refund_in_another_currency_than_its_invoice_line_quarantines():
     with pytest.raises(ReversalUnaccounted, match="EUR"):
         d.send()
     assert _left(d.plan) == ALLOT
+
+
+# ---- the drain's sweep: plan credits that come back to a refunded plan period -------------------------------------------
+def test_the_sweep_removes_plan_credits_a_settled_launch_gives_back_to_a_fully_refunded_period():
+    d = _Drain(used=19_000)                          # a launch still running holds 19,000 of the period's 20,000
+    d.send()                                         # the WHOLE price refunded: the 1,000 left are removed
+    assert _left(d.plan) == 0 and d.L.plan_shortfalls() == [("acme", INV, ALLOT, 1_000, ALLOT)]
+    d.plan.grant("acme", 18_900, period_end=PE, entry_id="settle-plan:s1:n1", issued_at=2_500.0)   # it settles
+    assert d.signer.sweep_plan_reversals(3_000.0) == [("acme", INV, 18_900)]
+    assert _left(d.plan) == 0 and d.L.purchase("acme", plan_ref(INV)).removed == 19_900
+    assert d.signer.sweep_plan_reversals(3_100.0) == []                # nothing more to do: it moves nothing
+    assert d.wallet.available("acme") == 500 and d.L.owed("acme") == 0
+
+
+def test_the_sweep_never_removes_more_than_the_refunded_proportion():
+    d = _Drain(charge=_charge(refunded=PRICE // 4), used=19_000)       # 25% refunded: 5,000 credits; 1,000 left
+    d.send()
+    assert d.L.purchase("acme", plan_ref(INV)).removed == 1_000
+    d.plan.grant("acme", 18_900, period_end=PE, entry_id="settle-plan:s1:n1", issued_at=2_500.0)
+    assert d.signer.sweep_plan_reversals(3_000.0) == [("acme", INV, 4_000)]
+    assert d.L.purchase("acme", plan_ref(INV)).removed == 5_000 and _left(d.plan) == 14_900
+    assert d.L.plan_shortfalls() == [] and d.signer.sweep_plan_reversals(3_100.0) == []
+
+
+def test_the_sweep_leaves_an_ended_period_and_a_period_with_nothing_back():
+    d = _Drain(used=19_000)
+    d.send()
+    assert d.signer.sweep_plan_reversals(3_000.0) == []                # nothing came back yet
+    d.plan.grant("acme", 18_900, period_end=PE, entry_id="settle-plan:s1:n1", issued_at=2_500.0)
+    assert d.signer.sweep_plan_reversals(PE) == [] and _left(d.plan) == 18_900   # ended: its credits expired
+    d.signer.reversals = None                                          # VIGIL_BILLING_REVERSALS off: no sweep
+    assert d.signer.sweep_plan_reversals(3_000.0) == [] and _left(d.plan) == 18_900
+
+
+def test_the_sweep_reports_a_period_it_cannot_price_and_still_sweeps_the_others(capsys):
+    d = _Drain(used=19_000)
+    d.send()
+    # a plan step on the spine for an invoice with no billing-history line (reconciled by hand from another copy)
+    d.L.reconcile_plan("acme", "in_ghost1", cap=ALLOT, period_end=PE, now=2_100.0, owner_refunded=ALLOT)
+    d.plan.grant("acme", 18_900, period_end=PE, entry_id="settle-plan:s1:n1", issued_at=2_500.0)
+    assert d.signer.sweep_plan_reversals(3_000.0) == [("acme", INV, 18_900)]
+    assert "invoice in_ghost1 of org 'acme' has no matching billing-history line" in capsys.readouterr().err

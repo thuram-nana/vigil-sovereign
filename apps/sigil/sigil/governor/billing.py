@@ -1882,6 +1882,44 @@ class BillingSigner:
                                             processor_refunded=cap * min(refunded, amount) // amount)
         return self._done(res.seq)
 
+    def sweep_plan_reversals(self, now: float) -> "list[tuple[str, str, int]]":
+        """Re-apply every refunded plan period whose removal fell short of its target
+        (``BillingReversalLedger.plan_shortfalls``) and that has plan credits again: credits a launch held when the
+        refund was reconciled come back to the period when it settles, and must not stay spendable there. Each one
+        is ``reconcile_plan`` with the facts already recorded (the target never changes here, so nothing is ever
+        removed beyond it; never more than remains). A period that has ended is skipped (its plan credits expired).
+        Run by the Stripe drain after each pass. Returns ``(org, invoice, credits removed)`` for each period that
+        moved. A period VIGIL refuses to reconcile is reported on stderr and skipped; a busy lock waits for the next
+        pass. No-op without the reversal ledger (``VIGIL_BILLING_REVERSALS`` off)."""
+        if self.reversals is None or self.invoices is None:
+            return []
+        import sys as _sys
+
+        from .billing_reversal import ReversalRefused, ReversalRetry
+        moved: "list[tuple[str, str, int]]" = []
+        for oid, iid, cap, _removed, _target in self.reversals.plan_shortfalls():
+            line = next((i for i in self.invoices.invoices(oid) if i.invoice_id == iid and i.kind == "subscription"),
+                        None)
+            if line is None or int(line.credits) != cap:
+                _sys.stderr.write(f"vigil billing-drain: WARNING the refunded plan period of invoice {iid} of org "
+                                  f"{oid!r} has no matching billing-history line; reconcile it by hand\n")
+                continue
+            pe = float(line.period_end)
+            if float(now) >= pe or self.plan.remaining_for_period(oid, pe) <= 0:
+                continue
+            try:
+                res = self.reversals.reconcile_plan(oid, iid, cap=cap, period_end=pe, now=float(now),
+                                                    note="plan credits that came back to a refunded plan period")
+            except ReversalRetry:
+                continue                                 # the money lock is busy: the next pass retries
+            except ReversalRefused as exc:
+                _sys.stderr.write(f"vigil billing-drain: WARNING the refunded plan period of invoice {iid} of org "
+                                  f"{oid!r} could not be re-applied: {exc}\n")
+                continue
+            if res.seq is not None and res.moved > 0:
+                moved.append((oid, iid, res.moved))
+        return moved
+
     def _apply_monitoring(self, oid: str, event: BillingEvent, ent: Entitlement) -> "tuple[Optional[int], str]":
         """A paid AEGIS monitoring period: mint the SEPARATE monitoring line (no credit refill; the credit-plan
         subscription is untouched), record the invoice only if the mint is the one the fold honors (a stale /

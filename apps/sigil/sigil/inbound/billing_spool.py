@@ -208,7 +208,8 @@ class BillingSpoolWatcher:
     contract and the same hostile-file hardening)."""
 
     def __init__(self, signer: BillingSigner, *, spool_dir: str | os.PathLike, verif_hash: Optional[str] = None,
-                 now_fn: Callable[[], float] = time.time, envelope_reader: Optional[EnvelopeReader] = None) -> None:
+                 now_fn: Callable[[], float] = time.time, envelope_reader: Optional[EnvelopeReader] = None,
+                 after_pass: Optional[Callable[[float], object]] = None) -> None:
         if not isinstance(signer, BillingSigner):
             raise ValueError("a BillingSigner is required — the drain never mints on its own")
         # Exactly one source of the (body, signature, time) triple: the Flutterwave secret (the default V1 reader,
@@ -223,6 +224,9 @@ class BillingSpoolWatcher:
         self.signer = signer
         self._reader = envelope_reader
         self._now = now_fn
+        # Run at the end of every pass, under the single-drainer lock (None: nothing, as before). The Stripe lane
+        # passes the signer's refunded-plan sweep (``BillingSigner.sweep_plan_reversals``) when reversals are on.
+        self._after_pass = after_pass
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
         self.working = self.spool / "working"       # a file is CLAIMED here (out of incoming) before ingest
@@ -603,6 +607,13 @@ class BillingSpoolWatcher:
         out = {"minted": minted, "noop": noop, "rejected": rejected, "deduped": deduped, "seqs": seqs}
         if recovery_on:
             out["deferred"] = deferred                   # NET-2b only: the OFF result shape is unchanged
+        if self._after_pass is not None:
+            try:
+                self._after_pass(float(self._now()))
+            except Exception as exc:  # noqa: BLE001 — the pass's webhooks are already handled; say it, never hide it
+                import sys as _sys
+                _sys.stderr.write(f"vigil billing-drain: WARNING the after-pass sweep failed: "
+                                  f"{type(exc).__name__}: {exc}\n")
         return out
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None, busy_warn_s: float = 120.0) -> None:

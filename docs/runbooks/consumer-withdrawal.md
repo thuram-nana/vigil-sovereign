@@ -84,7 +84,7 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
    choose **Cancel subscription**, then run the command again. Once the renewal is stopped it removes the plan
    credits for `R` (the allotment in the refunded proportion), never more than remain in the period. Running it
    again with the same `R` removes nothing more (only credits that came back to the period since, for example
-   from a refunded scan).
+   from a refunded scan; the drain also removes those on its own, see below).
 
 Run steps 3 to 5 one right after the other. Until step 5 runs (or the drain applies Stripe's refund event, within
 about a minute when the endpoint is subscribed to it), the customer can still spend the plan credits the refund
@@ -108,6 +108,10 @@ With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from
 - a refund of a plan payment is traced from the charge to its invoice and to the subscription that names the
   org, and removes the refunded proportion of that period's allotment (allotment x refunded / price), taken
   from the plan credits that remain in the period (never more than remain; a spent part is never owed);
+- after every pass, plan credits that came back to a refunded plan period are removed again, up to what the
+  refund covers: a scan that held plan credits when the refund was applied gives back what it did not use when
+  it ends, and those credits must not stay spendable (a period that has ended is left alone: its credits
+  expired);
 - a refund VIGIL cannot trace to one credited purchase (a disputed plan payment, a monitoring plan, a payment
   that paid only part of its invoice or not the plan's price, an unknown charge) is quarantined for you to
   reconcile by hand. A refund never adds credits: if a plan refund later goes down (a failed refund), the drain
