@@ -261,6 +261,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # attack_path / oob_attestation field (byte-identical). Same flags that gate the projection in config.py.
     attack_path = _config.customer_attack_path_enabled()
     blind_vuln = _config.customer_blind_vuln_enabled()
+    # PR-H (Area 7): whether the customer login screen offers enterprise SSO ("Sign in with your company"). The
+    # same VIGIL_CUSTOMER_SSO that serves the /api/customer/sso/* edge routes (sso_edge.py), so the button and the
+    # routes are never out of step; a non-secret on/off value written into the page, counting in the build id. Off
+    # ⇒ the button is absent and every SSO route 404s (byte-identical to a build without SSO).
+    sso = _config.customer_sso_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -270,6 +275,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_CODE__": "1" if _config.redpen_enabled() else "0",
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
+                                     "__VIGIL_SSO__": "1" if sso else "0",
                                      "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
                                      "__VIGIL_SECURITY__": "1" if security else "0",
                                      "__VIGIL_PASSKEY__": "1" if passkey else "0",
