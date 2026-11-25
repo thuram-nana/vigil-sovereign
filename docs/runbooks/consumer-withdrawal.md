@@ -83,8 +83,10 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
 
 With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from Stripe:
 
-- a refund of a credit pack removes that pack's credits in the refunded proportion; a part already spent is
-  owed and puts the org on a billing hold until a later purchase repays it;
+- a refund of a credit pack removes that pack's credits in the refunded proportion, rounded in the customer's
+  favour: the refund `unused` prints for `N` credits never removes more than `N`, so it and the owner's `refund`
+  verb converge. A part already spent is owed and puts the org on a billing hold until a later purchase repays
+  it;
 - a refund of a plan payment is traced from the charge to its invoice and to the subscription that names the
   org, and removes that period's plan credits in the refunded proportion, from what remains (a spent part is
   never owed);

@@ -15,8 +15,9 @@ import tempfile
 
 import pytest
 
+from sigil import cli
 from sigil.governor.billing import (EVENT_TOPUP, BillingSigner, Entitlement, ReversalUnaccounted,
-                                    StripeBillingProvider)
+                                    StripeBillingProvider, refund_credits)
 from sigil.governor.billing_reversal import BillingReversalLedger
 from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.metering import PlanCreditLedger
@@ -184,6 +185,58 @@ def test_a_new_top_up_repays_the_arrears_then_lifts_the_hold():
 
 
 # ---- fail-closed -----------------------------------------------------------------------------------------------
+# ---- a consumer's withdrawal: the runbook's refund (rounded up) and the drain converge (Terms §8) ---------------------
+_BONUS_CREDITS, _BONUS_PRICE = 6_000, 5_000          # the retired 6k pack: 6,000 credits for $50.00
+
+
+@pytest.mark.parametrize("drain_first", [False, True])
+@pytest.mark.parametrize("left", [5, 4_997, 5_999, 6_000])
+def test_a_withdrawal_refund_of_a_bonus_pack_removes_exactly_its_unused_credits(left, drain_first):
+    # the runbook: `unused` gives N and the refund R (the price of N, rounded UP) -> R refunded at Stripe -> the
+    # owner's `refund <N>`; the drain converts the same Stripe refund on its own. Whichever comes first, the two
+    # remove the N unused credits and no more: one more would be owed and put a consumer who withdrew correctly on a
+    # billing hold
+    r = _Rig(objects=[_charge(amount=_BONUS_PRICE)], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
+    r.wallet.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    r.wallet.grant("acme", _BONUS_CREDITS, "topup", entry_id="cs_test_s1", issued_at=1.0)
+    r.invoices.record("acme", invoice_id="cs_test_s1", kind="topup", price_id="vigil_topup_6k",
+                      amount_minor=_BONUS_PRICE, currency="USD", credits=_BONUS_CREDITS, issued_at=1.0)
+    r.wallet.debit("acme", 450 + _BONUS_CREDITS - left, entry_id="spend", issued_at=1.5)
+    line = next(i for i in r.invoices.invoices("acme") if i.invoice_id == "cs_test_s1")
+    bought = cli.purchased_balance_remaining(spendable=r.wallet.balance("acme").spendable, bought_left=_BONUS_CREDITS)
+    unused = cli.unused_purchase_credits(line, purchased_left=bought, removed=0, plan_left=0)
+    refund = cli.withdrawal_refund_minor(line.amount_minor, unused, line.credits)
+    assert unused == left and 0 < refund <= _BONUS_PRICE
+
+    def drain():
+        r.objects["ch_1"]["amount_refunded"] = refund
+        r.send("charge.refunded", "ch_1")
+
+    def owner():
+        r.reversals.reconcile("acme", "cs_test_s1", cap=_BONUS_CREDITS, reason="refund", now=3.0,
+                              owner_refund=unused, unused_only=True)
+
+    for step in ((drain, owner) if drain_first else (owner, drain)):
+        step()
+    assert r.reversals.purchase("acme", "cs_test_s1").removed == unused
+    assert r.reversals.owed("acme") == 0 and not r.reversals.on_hold("acme") and r.wallet.available("acme") == 0
+
+
+@pytest.mark.parametrize("cap,amount", [(1_000, 1_000), (6_000, 5_000), (20_000, 9_900), (100, 1_000), (7, 3)])
+def test_a_refund_converts_to_no_more_credits_than_its_proportion_or_the_unused_credits_it_paid_back(cap, amount):
+    for r in range(amount + 1):
+        assert refund_credits(cap, r, amount) <= cap * r // amount                 # never more than the proportion
+    for unused in range(1, cap + 1, max(1, cap // 997)):
+        back = cli.withdrawal_refund_minor(amount, unused, cap)
+        assert refund_credits(cap, back, amount) <= unused                        # never more than it paid back
+    assert refund_credits(cap, amount + 1, amount) == refund_credits(cap, amount, amount)
+    assert refund_credits(cap, 0, amount) == 0 and refund_credits(cap, -5, amount) == 0
+    if cap <= amount:                                     # one credit per minor unit or less: a full refund is all
+        assert refund_credits(cap, amount, amount) == cap
+    if cap == amount:                                     # every pack on sale: exactly the refunded amount
+        assert all(refund_credits(cap, r, amount) == r for r in range(amount + 1))
+
+
 def test_a_charge_that_is_not_a_credited_top_up_is_refused():
     r = _Rig(objects=[_charge()], disputes={"ch_1": []}, sessions={"pi_1": [_session()]})
     # no top-up recorded for this session -> the reversal cannot be priced

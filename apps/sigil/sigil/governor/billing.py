@@ -1031,6 +1031,20 @@ def _stripe_amount(amount: object, currency: object) -> "tuple[int, str]":
     return amt, ccy
 
 
+def refund_credits(cap: int, refunded: int, amount: int) -> int:
+    """The credits a processor REFUND of ``refunded`` minor units removes from a purchase of ``cap`` credits that
+    was charged ``amount``: the smaller of the refunded proportion rounded down (``cap x refunded / amount``) and the
+    fewest credits whose price in proportion, rounded UP to the minor unit, comes to ``refunded`` or more. The
+    withdrawal runbook refunds N unused credits at their price rounded up (``sigil billing-reversal unused``), so
+    that refund never removes more than N credits, whichever of the drain and the owner's refund verb comes first,
+    including for a pack worth more than one credit per minor unit. A full refund of a pack worth one credit per
+    minor unit or less removes all of it. PURE."""
+    r = min(max(0, int(refunded)), int(amount))
+    if r <= 0 or cap <= 0:
+        return 0
+    return min(cap * r // amount, cap * (r - 1) // amount + 1)
+
+
 def _as_float(v: object, default: float = 0.0) -> float:
     import math
     try:
@@ -1788,10 +1802,11 @@ class BillingSigner:
 
     def _apply_reversal(self, event: BillingEvent, *, now: float) -> "tuple[Optional[int], str]":
         """A verified reversal of a top-up: move that purchase's removed credits to its target (``reconcile``) from the
-        processor's facts, converted to credits at the purchase's own rate (``credits x amount / charge amount``, rounded
-        down: never more than the purchase granted). The purchase's credits come from its owner-signed billing-history
-        line and its grant must be on the spine; a purchase not credited YET is retried (``ReversalRetry``), one VIGIL
-        cannot account for is refused (``ReversalUnaccounted``)."""
+        processor's facts, converted to credits at the purchase's own rate: a dispute as ``credits x amount / charge
+        amount``, rounded down, and a refund by ``refund_credits`` (never more than that, nor more than the unused
+        credits a runbook refund paid back); never more than the purchase granted. The purchase's credits come from
+        its owner-signed billing-history line and its grant must be on the spine; a purchase not credited YET is
+        retried (``ReversalRetry``), one VIGIL cannot account for is refused (``ReversalUnaccounted``)."""
         if self.reversals is None:
             return None, "not_mintable"               # unreachable: a provider maps reversals only with the flag on
         if "plan_invoice" in (event.data or {}):
@@ -1819,7 +1834,7 @@ class BillingSigner:
         cap, amt = int(line.credits), int(amount)                  # amount is narrowed to int above
         sr, dd = cast(int, refunded), cast(int, disputed)          # validated non-negative ints above
         res = self.reversals.reconcile(oid, topup, cap=cap, reason=str(trigger), now=float(now),
-                                       processor_refunded=cap * min(sr, amt) // amt,
+                                       processor_refunded=refund_credits(cap, sr, amt),
                                        disputed=cap * min(dd, amt) // amt)
         sync_hold(oid, res.owed)
         return self._done(res.seq)

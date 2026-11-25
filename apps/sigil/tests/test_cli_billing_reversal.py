@@ -328,6 +328,20 @@ def test_unused_of_a_plan_period_is_what_remains_of_its_plan_credits(monkeypatch
     assert f"plan-withdraw acme {_INV}" in out and _left(plan) == 9_000
 
 
+def test_the_unused_refund_is_the_price_in_proportion_rounded_up_to_the_cent(monkeypatch, capsys):
+    plan, _fake = _seed_plan(monkeypatch, used=3_001)               # 8,999 left: 9,900 x 8,999 / 12,000 = 7,424.175
+    cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup=_INV, credits=None))
+    assert "refund at Stripe: 7425 of 9900 USD" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("price,unused,credits,refund", [
+    (5_000, 5, 6_000, 5), (5_000, 4_997, 6_000, 4_165), (1_000, 850, 1_000, 850), (9_900, 1, 20_000, 1),
+    (5_000, 6_000, 6_000, 5_000), (0, 5, 6_000, 0), (5_000, 0, 6_000, 0), (5_000, -5, 6_000, 0), (5_000, 5, 0, 0),
+])
+def test_withdrawal_refund_minor_rounds_up_and_never_refunds_a_purchase_with_no_price(price, unused, credits, refund):
+    assert cli.withdrawal_refund_minor(price, unused, credits) == refund
+
+
 def test_unused_refuses_what_is_not_a_purchase_with_credits(monkeypatch, capsys):
     monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
     _seed(credits=1000)
