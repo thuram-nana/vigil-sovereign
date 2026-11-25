@@ -294,3 +294,17 @@ def test_the_reversal_flag_ships_commented_in_the_drain_and_cockpit_env_examples
         lines = [ln.strip() for ln in (repo / rel).read_text(encoding="utf-8").splitlines()]
         assert "# VIGIL_BILLING_REVERSALS=1" in lines, rel
         assert not any(ln.startswith("VIGIL_BILLING_REVERSALS") for ln in lines), rel
+
+
+def test_the_drain_signer_and_its_reversal_ledger_share_one_plan_ledger(monkeypatch):
+    # a refunded plan period is checked (tranche delivered) and debited through the SAME plan ledger
+    from sigil.governor.billing import StripeBillingProvider
+    monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
+    ensure_owner_keypair()
+    provider = StripeBillingProvider("whsec_x", fetcher=lambda k, o: {}, expected_mode="test",
+                                     enable_reference_adapter=True, reversals=True)
+    signer = cli._billing_signer(provider, cli.SpineStore(), alarm=True)
+    assert signer.reversals is not None and signer.reversals.plan is signer.plan
+    assert signer.reversals.wallet is signer.wallet
+    monkeypatch.delenv("VIGIL_BILLING_REVERSALS")
+    assert cli._billing_signer(provider, cli.SpineStore(), alarm=True).reversals is None

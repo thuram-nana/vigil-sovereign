@@ -2156,14 +2156,16 @@ def _billing_signer(provider, store, *, alarm: bool, require_verified_amount: bo
     from .governor.wallet import WalletRegistry
     from . import config
     wallet = WalletRegistry(store)
+    plan = PlanCreditLedger(store)
     reversals = None
     if config.billing_reversals_enabled():
-        # W5: the reversal ledger, so a verified dispute / refund moves credits and every top-up repays arrears first
+        # W5: the reversal ledger, so a verified dispute / refund moves credits (the wallet's, or a refunded plan
+        # period's plan credits) and every top-up repays arrears first
         from .governor.billing_reversal import BillingReversalLedger
-        reversals = BillingReversalLedger(store, wallet=wallet)
+        reversals = BillingReversalLedger(store, wallet=wallet, plan=plan)
     return BillingSigner(provider, alarm_unaccounted_plans=alarm, reversals=reversals,
                          wallet=wallet, subscriptions=SubscriptionRegistry(store),
-                         plan=PlanCreditLedger(store), catalog=catalog.mintable_entitlements(),
+                         plan=plan, catalog=catalog.mintable_entitlements(),
                          expected=catalog.mintable_expected(), invoices=InvoiceRegistry(store),
                          # AEGIS: a paid monitoring price mints its OWN line, never the credit plan (flag-free,
                          # like mintable_entitlements(): a sold AEGIS plan's renewals keep minting).
