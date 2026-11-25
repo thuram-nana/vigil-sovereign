@@ -470,6 +470,18 @@ class OrgDirectory:
                 if rtype == "member" and at >= since and rid.startswith(prefix)}
 
     # -- writes (owner-signed; in-memory view kept in step) --------------------------------------------------
+    def _require_owner_key(self) -> None:
+        """Refuse a write with NO owner signing key UNCONDITIONALLY — at the top of every mutator, before any
+        no-op short-circuit (an identical re-write, a remove of an absent edge, a put of a record already present)
+        and whether this view was folded fresh or read from the cache. The actual append re-checks the key in
+        `ScimDirectoryRegistry._append`; a no-op path never reaches it, so without this a key-less (read-only)
+        registry would silently ACCEPT a mutation that happens to change nothing. Mirrors `OrgRegistry` /
+        `SsoConfigRegistry`, which check the key before their own writes."""
+        reg = self._reg
+        base = reg.base if isinstance(reg, _Journal) else reg
+        if getattr(base, "owner_key", None) is None:
+            raise DirectoryError("a SCIM directory write requires the owner signing key")
+
     def _fresh(self, rtype: str, rid: str, now: float) -> float:
         hw = self._hw.get((rtype, rid), NO_HIGHWATER)
         at = float(now)
@@ -488,6 +500,7 @@ class OrgDirectory:
                  active: bool, selectors=(), profile: Optional[dict] = None, clamp: tuple = (), now: float) -> bool:
         """Create or replace user `user_id` (with the sign-in clamp's bookkeeping `clamp` = (took, at), or () for
         none). Returns True iff a record was appended (False ⇒ already identical)."""
+        self._require_owner_key()
         if not _USER_ID_RE.fullmatch(str(user_id or "")):
             raise DirectoryError("a directory user id must be the per-org sso_ id")
         data = {"userName": _clean_str(user_name, "userName", required=True),
@@ -508,6 +521,7 @@ class OrgDirectory:
     def delete_user(self, user_id: str, *, now: float, before_each=None) -> bool:
         """Delete user `user_id` and CASCADE-delete every edge to it. Returns True iff the user existed.
         `before_each()` (optional) is called before each record is appended."""
+        self._require_owner_key()
         if user_id not in self._users:
             return False
         for g in sorted(self._by_user.get(user_id, ())):
@@ -521,6 +535,7 @@ class OrgDirectory:
         return True
 
     def put_group(self, group_id: str, *, display_name: str, external_id: str = "", now: float) -> bool:
+        self._require_owner_key()
         if not _GROUP_ID_RE.fullmatch(str(group_id or "")):
             raise DirectoryError("a directory group id must be a server-minted grp_ id")
         data = {"displayName": _clean_str(display_name, "displayName", required=True),
@@ -534,6 +549,7 @@ class OrgDirectory:
 
     def delete_group(self, group_id: str, *, now: float) -> "list[str]":
         """Delete group `group_id` (+ its edges). Returns the ids of the users who were in it."""
+        self._require_owner_key()
         if group_id not in self._groups:
             return []
         was = self.members(group_id)
@@ -544,6 +560,7 @@ class OrgDirectory:
         return was
 
     def add_member(self, group_id: str, user_id: str, *, now: float) -> bool:
+        self._require_owner_key()
         if group_id not in self._groups or user_id not in self._users:
             return False
         if (group_id, user_id) in self._edges:
@@ -555,6 +572,7 @@ class OrgDirectory:
         return True
 
     def remove_member(self, group_id: str, user_id: str, *, now: float) -> bool:
+        self._require_owner_key()
         if (group_id, user_id) not in self._edges:
             return False
         self._write("member", edge_id(group_id, user_id), "deleted", {}, now=now)
@@ -566,6 +584,7 @@ class OrgDirectory:
     def put_job(self, group_id: str, spec: dict, *, now: float) -> bool:
         """Open (or restate) the pending job of group `group_id` with end state `spec`. True iff a record was
         appended (False ⇒ the same job is already open)."""
+        self._require_owner_key()
         job = _job_from(spec)
         if job is None or not _GROUP_ID_RE.fullmatch(str(group_id or "")):
             raise DirectoryError("malformed pending group job")
@@ -577,6 +596,7 @@ class OrgDirectory:
 
     def finish_job(self, group_id: str, *, now: float) -> bool:
         """Close the pending job of group `group_id`. True iff one was open."""
+        self._require_owner_key()
         if group_id not in self._jobs:
             return False
         self._write("job", group_id, "deleted", {}, now=now)
@@ -874,15 +894,24 @@ def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
 
 _DIRECTORY_FOLD = FoldCache("governor.scim_directory", step=_directory_cache_step)
 
+# The owner-key default: ONLY an OMITTED owner_key falls back to the persisted identity. An owner_key passed
+# EXPLICITLY — including `owner_key=None` — is honored as given, so a caller that builds a read-only (key-less)
+# registry gets one that refuses writes, never one that silently borrows the ambient persisted owner key. Without
+# this, `owner_key=None` meant "default", and whether a key-less registry actually had a key depended on whether
+# this process had an owner key at rest — the directory write would then sign or refuse out of that ambient state.
+_OWNER_DEFAULT: object = object()
+
 
 class ScimDirectoryRegistry:
     """The owner-signed SCIM directory on the spine. Construction mirrors `OrgRegistry` / `SsoConfigRegistry`:
-    the owner signing key + trusted pubkey default to the persisted owner identity; tests inject keypairs.
-    `cached=True` reads through the verified incremental fold cache (the SSO / SCIM provisioner paths)."""
+    the owner signing key + trusted pubkey default to the persisted owner identity when OMITTED; tests inject
+    keypairs, and an explicit `owner_key=None` builds a read-only registry (writes refuse). `cached=True` reads
+    through the verified incremental fold cache (the SSO / SCIM provisioner paths)."""
 
-    def __init__(self, store, *, owner_key=None, trusted_pubkey: Optional[str] = None, cached: bool = False):
+    def __init__(self, store, *, owner_key=_OWNER_DEFAULT, trusted_pubkey: Optional[str] = None,
+                 cached: bool = False):
         self.store = store
-        self.owner_key = owner_key if owner_key is not None else owner_keypair()
+        self.owner_key = owner_keypair() if owner_key is _OWNER_DEFAULT else owner_key
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
         self.appended = 0                  # owner-signed records this registry has appended (a request's cost)
         self.cached = bool(cached)
