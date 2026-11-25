@@ -10,7 +10,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from framework.v2.evidence.retention import analyze_engagement, analyze_retention
+from framework.v2.evidence import retention
+from framework.v2.evidence.retention import (
+    RetentionReport,
+    analyze_engagement,
+    analyze_retention,
+    format_report_text,
+    report_to_dict,
+)
 
 
 def _write(p: Path, data: bytes) -> None:
@@ -90,3 +97,37 @@ def test_empty_or_absent_targets_root_is_empty_report(tmp_path: Path) -> None:
     assert analyze_retention(targets_root=tmp_path / "does-not-exist").engagements == []
     (tmp_path / "empty").mkdir()
     assert analyze_retention(targets_root=tmp_path / "empty").engagements == []
+
+
+def test_report_to_dict_matches_classification(tmp_path: Path) -> None:
+    root = tmp_path / "targets"
+    _engagement(root, "alpha", report_findings=[{"action_id": "a1"}], action_dirs={"a1": 1, "a2": 100})
+    d = report_to_dict(analyze_retention(targets_root=root))
+    assert d["total_sweep_candidate_dirs"] == 1
+    assert d["total_sweep_candidate_bytes"] == 100
+    assert d["total_keep_dirs"] == 1
+    eng = d["engagements"][0]
+    assert eng["slug"] == "alpha"
+    assert eng["keep_dirs"] == ["a1"]
+    assert eng["sweep_candidate_dirs"] == ["a2"]
+
+
+def test_format_report_text_summarizes(tmp_path: Path) -> None:
+    root = tmp_path / "targets"
+    _engagement(root, "alpha", report_findings=[{"action_id": "a1"}], action_dirs={"a1": 1, "a2": 100})
+    txt = format_report_text(analyze_retention(targets_root=root))
+    assert "DRY RUN" in txt
+    assert "alpha" in txt
+    assert "sweep-candidate 1 dir(s) / 100 B" in txt
+    assert format_report_text(RetentionReport()).endswith("no engagements found")
+
+
+def test_cli_main_text_and_json(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "targets"
+    _engagement(root, "alpha", report_findings=[{"action_id": "a1"}], action_dirs={"a1": 1, "a2": 7})
+    assert retention.main(["--targets-root", str(root)]) == 0
+    assert "DRY RUN" in capsys.readouterr().out
+    assert retention.main(["--targets-root", str(root), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_sweep_candidate_bytes"] == 7
+    assert payload["engagements"][0]["sweep_candidate_dirs"] == ["a2"]

@@ -149,3 +149,65 @@ def analyze_retention(targets_root: Path | None = None) -> RetentionReport:
             continue
         report.engagements.append(analyze_engagement(slug, targets_root=root))
     return report
+
+
+def report_to_dict(report: RetentionReport) -> dict[str, object]:
+    """JSON-serialisable view of a :class:`RetentionReport` (read-only)."""
+    return {
+        "engagements": [
+            {
+                "slug": e.slug,
+                "report_present": e.report_present,
+                "keep_dirs": e.keep_dirs,
+                "sweep_candidate_dirs": e.sweep_candidate_dirs,
+                "keep_bytes": e.keep_bytes,
+                "sweep_candidate_bytes": e.sweep_candidate_bytes,
+            }
+            for e in report.engagements
+        ],
+        "total_keep_dirs": report.total_keep_dirs,
+        "total_sweep_candidate_dirs": report.total_sweep_candidate_dirs,
+        "total_sweep_candidate_bytes": report.total_sweep_candidate_bytes,
+    }
+
+
+def format_report_text(report: RetentionReport) -> str:
+    """Human-readable, one-line-per-engagement summary of a :class:`RetentionReport`."""
+    lines = ["evidence retention — DRY RUN (read-only; nothing is deleted)"]
+    if not report.engagements:
+        lines.append("  no engagements found")
+        return "\n".join(lines)
+    for e in report.engagements:
+        tag = "report" if e.report_present else "NO REPORT — keeping all"
+        lines.append(
+            f"  {e.slug}: keep {len(e.keep_dirs)} dir(s) / {e.keep_bytes} B,"
+            f" sweep-candidate {len(e.sweep_candidate_dirs)} dir(s) / {e.sweep_candidate_bytes} B"
+            f"  [{tag}]")
+    lines.append(
+        f"  TOTAL: sweep-candidate {report.total_sweep_candidate_dirs} dir(s) /"
+        f" {report.total_sweep_candidate_bytes} B; keep {report.total_keep_dirs} dir(s)"
+        f" across {len(report.engagements)} engagement(s)")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Read-only CLI: print the dry-run retention report (text, or ``--json``). Deletes nothing."""
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="python3 -m framework.v2.evidence.retention",
+        description="Dry-run evidence-retention report. Classifies each engagement's raw "
+                    "evidence/<action_id>/ dir as KEEP (backs an active finding) or a SWEEP "
+                    "candidate (orphan scan traffic) with byte totals. Read-only — deletes nothing. "
+                    "The 90-day 'engagement ended' trigger and the actual sweep are a later, gated slice.")
+    p.add_argument("--json", action="store_true", help="emit JSON instead of the text summary")
+    p.add_argument("--targets-root", default=None,
+                   help="override the targets/ root (default: resolved from CRUCIBLE_ROOT)")
+    args = p.parse_args(list(argv) if argv is not None else None)
+    report = analyze_retention(Path(args.targets_root) if args.targets_root else None)
+    print(json.dumps(report_to_dict(report), indent=2) if args.json else format_report_text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
