@@ -6,6 +6,7 @@ top-up through the same reversal path (reason ``refund``), refused when it would
 """
 from __future__ import annotations
 
+import re
 import tempfile
 from types import SimpleNamespace
 
@@ -97,23 +98,50 @@ _PE, _INV, _ALLOT, _PRICE = 5_000_000.0, "in_plan1", 12_000, 9_900
 class _FakeStripe:
     """The Stripe the verb reads (invoice -> subscription) and, when the plan still renews, updates."""
 
-    def __init__(self, *, status="active", ending=False, org="acme", livemode=False, echo=True, fail=False):
+    def __init__(self, *, status="active", ending=False, org="acme", livemode=False, echo=True, fail=False,
+                 answer_only=False, readback_fail=False):
         self.sub = {"object": "subscription", "id": "sub_p1", "livemode": livemode, "status": status,
                     "cancel_at_period_end": ending, "metadata": {"org_id": org, "price_id": "vigil_pro_monthly"}}
         self.inv = {"object": "invoice", "id": _INV, "livemode": livemode,
                     "parent": {"subscription_details": {"subscription": "sub_p1"}}}
         self.echo, self.fail, self.updates = echo, fail, []
+        # answer_only: the update's answer says the plan ends, but the subscription Stripe holds is unchanged
+        # readback_fail: the subscription cannot be read again once an update was sent
+        self.answer_only, self.readback_fail = answer_only, readback_fail
 
     def fetch(self, kind, oid):
-        return dict(self.inv) if kind == "invoice" else dict(self.sub)
+        if kind == "invoice":
+            return dict(self.inv)
+        if self.readback_fail and self.updates:
+            raise RuntimeError("network")
+        return dict(self.sub)
 
     def update(self, sid, params, *, idempotency_key):
         self.updates.append((sid, dict(params), idempotency_key))
         if self.fail:
             raise RuntimeError("network")
+        if self.answer_only:
+            return dict(self.sub, cancel_at_period_end=bool(params.get("cancel_at_period_end")))
         if self.echo:
             self.sub["cancel_at_period_end"] = bool(params.get("cancel_at_period_end"))
         return dict(self.sub)
+
+
+class _ReplayingStripe(_FakeStripe):
+    """Stripe's idempotent requests as documented: a repeated Idempotency-Key gets the response saved for it, and
+    the update is NOT made again."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.saved: dict = {}
+
+    def update(self, sid, params, *, idempotency_key):
+        if idempotency_key in self.saved:
+            self.updates.append((sid, dict(params), idempotency_key))
+            return dict(self.saved[idempotency_key])
+        resp = super().update(sid, params, idempotency_key=idempotency_key)
+        self.saved[idempotency_key] = dict(resp)
+        return resp
 
 
 def _seed_plan(monkeypatch, *, used=0, stripe=None, key=True):
@@ -148,8 +176,28 @@ def test_plan_withdraw_stops_the_renewal_then_removes_the_unused_plan_credits(mo
     plan, fake = _seed_plan(monkeypatch, used=3_000)                 # 9,000 left of 12,000
     cli.cmd_billing_reversal(_pw(credits=str(_PRICE * 9_000 // _ALLOT)))   # refunded the unused 3/4 at Stripe
     out = capsys.readouterr().out
-    assert fake.updates == [("sub_p1", {"cancel_at_period_end": True}, f"vigil-pw-{_INV}")]
+    assert [(sid, params) for sid, params, _key in fake.updates] == [("sub_p1", {"cancel_at_period_end": True})]
+    assert re.fullmatch(rf"vigil-pw-{_INV}-[0-9a-f]{{16}}", fake.updates[0][2])     # this run's own key
     assert _left(plan) == 0 and "9000 plan credits removed" in out and "will not renew" in out
+
+
+def test_a_rerun_after_the_customer_resumed_the_plan_stops_the_renewal_again(monkeypatch, capsys):
+    # the customer resumed the plan after a first withdrawal run (the console's "keep my plan" sends
+    # cancel_at_period_end=False under its own key); the runbook's re-run must really stop the renewal again and
+    # never take an earlier run's saved Stripe answer for this run's update
+    from sigil.governor.metering import PlanCreditLedger
+    fake = _ReplayingStripe()
+    plan, _ = _seed_plan(monkeypatch, used=3_000, stripe=fake)      # 9,000 left: a full refund removes them
+    cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
+    capsys.readouterr()
+    fake.sub["cancel_at_period_end"] = False                         # resumed by the customer
+    PlanCreditLedger(cli.SpineStore(), owner_key=ensure_owner_keypair()).grant(
+        "acme", 300, period_end=_PE, entry_id="settle-plan:s1:n1", issued_at=4.0)     # a refunded launch
+    cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
+    out = capsys.readouterr().out
+    assert "will not renew" in out and fake.sub["cancel_at_period_end"] is True     # Stripe's state agrees
+    assert len(fake.updates) == 2 and fake.updates[0][2] != fake.updates[1][2]     # each run its own key
+    assert _left(plan) == 0 and "300 plan credits removed" in out
 
 
 def test_plan_withdraw_run_again_removes_nothing_more_and_sends_nothing(monkeypatch, capsys):
@@ -171,6 +219,8 @@ def test_plan_withdraw_of_a_plan_already_stopped_at_stripe_sends_no_update(monke
     ("cannot read Stripe from this shell (set VIGIL_STRIPE_SECRET_KEY", dict(key=False)),
     ("could not stop the renewal of sub_p1", dict(stripe=_FakeStripe(fail=True))),
     ("did not confirm that sub_p1 stops renewing", dict(stripe=_FakeStripe(echo=False))),
+    ("read back, does not show that it stops renewing", dict(stripe=_FakeStripe(answer_only=True))),
+    ("could not be read back (RuntimeError) to confirm that sub_p1", dict(stripe=_FakeStripe(readback_fail=True))),
 ])
 def test_plan_withdraw_refuses_with_the_stripe_step_when_vigil_cannot_stop_the_renewal(monkeypatch, capsys, why, kw):
     plan, _fake = _seed_plan(monkeypatch, **kw)

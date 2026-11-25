@@ -2856,8 +2856,11 @@ def _stop_plan_renewal(org: str, invoice_id: str) -> str:
     it was stopped. The invoice and its subscription are read from Stripe with our key; the subscription must name
     ``org`` in its metadata and be in this key's mode. Already cancelled (or already ending at the period end): nothing
     is sent. Otherwise VIGIL sets ``cancel_at_period_end`` (the same safe-direction update a self-serve plan
-    cancellation sends) and requires Stripe's answer to echo it. Raises ``RuntimeError`` carrying the exact Stripe
-    step whenever VIGIL cannot read Stripe, cannot match the subscription, or cannot confirm the stop."""
+    cancellation sends) under an idempotency key of its own for this run, requires Stripe's answer to echo it, then
+    reads the subscription back and requires Stripe's current state to show it too. Raises ``RuntimeError`` carrying
+    the exact Stripe step whenever VIGIL cannot read Stripe, cannot match the subscription, or cannot confirm the
+    stop."""
+    import secrets as _secrets
     from typing import Mapping as _Mapping
 
     from .governor import stripe_egress as se
@@ -2893,16 +2896,31 @@ def _stop_plan_renewal(org: str, invoice_id: str) -> str:
     if sub.get("cancel_at_period_end") is True:
         return f"subscription {sub_id} already ends at the end of its period"
     update = _stripe_subscription_updater()
+    # A key of this run's own: Stripe answers a repeated key with the response it saved for it, without making the
+    # update again, so a run that reused an earlier run's key after the customer resumed the plan would be told the
+    # plan ends while it renews.
+    key = f"vigil-pw-{invoice_id}-{_secrets.token_hex(8)}"
     try:
         if update is None:
             raise RuntimeError("no Stripe key")
-        resp = update(sub_id, {"cancel_at_period_end": True}, idempotency_key=f"vigil-pw-{invoice_id}")
+        resp = update(sub_id, {"cancel_at_period_end": True}, idempotency_key=key)
     except Exception as exc:  # noqa: BLE001 — the update may not have been made: refuse with the manual step
         raise RuntimeError(f"VIGIL could not stop the renewal of {sub_id} ({type(exc).__name__}): "
                            + _cancel_step(invoice_id, sub_id)) from None
     if (not isinstance(resp, _Mapping) or resp.get("object") != "subscription" or resp.get("id") != sub_id
             or resp.get("cancel_at_period_end") is not True):
         raise RuntimeError(f"Stripe did not confirm that {sub_id} stops renewing: " + _cancel_step(invoice_id, sub_id))
+    # The stop is confirmed by the subscription Stripe holds now, read back, not by the update's answer alone.
+    try:
+        after = fetch("subscription", sub_id)
+    except Exception as exc:  # noqa: BLE001 — the stop cannot be confirmed: refuse with the manual step
+        raise RuntimeError(f"Stripe could not be read back ({type(exc).__name__}) to confirm that {sub_id} stops "
+                           f"renewing: " + _cancel_step(invoice_id, sub_id)) from None
+    if (not isinstance(after, _Mapping) or after.get("object") != "subscription" or after.get("id") != sub_id
+            or not (after.get("cancel_at_period_end") is True
+                    or after.get("status") in ("canceled", "incomplete_expired"))):
+        raise RuntimeError(f"Stripe's subscription {sub_id}, read back, does not show that it stops renewing: "
+                           + _cancel_step(invoice_id, sub_id))
     return f"subscription {sub_id} now ends at the end of its period (it will not renew)"
 
 

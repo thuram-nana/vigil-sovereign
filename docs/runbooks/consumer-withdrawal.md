@@ -70,8 +70,10 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
 5. `sigil billing-reversal plan-withdraw <org> <in_...> <R> --reason "withdrawal received <date>"`, where `R` is
    the **total** refunded at Stripe for that invoice, in cents. It first stops the renewal: a subscription that
    is already cancelled, or already set to end at the end of its period, is left as it is; otherwise VIGIL sets
-   it to end at the end of the period and checks Stripe's answer. When VIGIL cannot do that (no Stripe key in
-   the shell, a key without write access, an unconfirmed answer), it refuses, removes nothing and prints the
+   it to end at the end of the period, checks Stripe's answer and reads the subscription back to confirm it.
+   Each run sends its own update, so a plan the customer resumed after an earlier run is stopped again. When
+   VIGIL cannot do that (no Stripe key in the shell, a key without write access, an unconfirmed answer or
+   read-back), it refuses, removes nothing and prints the
    Stripe step: open the subscription in the Dashboard, choose **Cancel subscription**, then run the command
    again. Once the renewal is stopped it removes the plan credits for `R` (the allotment in the refunded
    proportion), never more than remain in the period. Running it again with the same `R` removes nothing more
