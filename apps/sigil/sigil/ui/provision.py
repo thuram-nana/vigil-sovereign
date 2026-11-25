@@ -1802,7 +1802,11 @@ class Provisioner:
                 rows.append(row)
             rows.sort(key=lambda r: (_TEAM_ORDER.get(str(r["role"]), len(_TEAM_ORDER)),
                                      str(r.get("email") or r["username"])))
-            return {"org_id": org_id, "members": rows, "count": len(rows)}
+            out: "dict[str, object]" = {"org_id": org_id, "members": rows, "count": len(rows)}
+            from .. import config
+            if config.customer_seats_enabled():   # V12: Team screen shows "used of limit" only when seats are on
+                out["seats"] = {"used": len(rows), "limit": config.customer_default_seats()}
+            return out
         return self._customer_read(requester, requester_org_id, "manage_members", project)
 
     def add_member(self, requester: str, requester_org_id: str, email: str, role: str, *, ip: str = "",

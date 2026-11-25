@@ -251,6 +251,50 @@ def test_seats_revoking_a_member_frees_a_seat(tmp_path, monkeypatch):
     assert p.orgs.member_count("org_a") == 5
 
 
+def test_team_read_reports_seat_usage_only_when_seats_on(tmp_path, monkeypatch):
+    p, s = _prov(tmp_path)
+    _team(p)                                                            # org_a has 5 members
+    monkeypatch.delenv("VIGIL_CUSTOMER_SEATS", raising=False)           # flag off -> no seats key (byte-identical)
+    assert "seats" not in p.customer_members("cust_ad", "org_a")
+    monkeypatch.setenv("VIGIL_CUSTOMER_SEATS", "1")                     # flag on -> usage reported
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "8")
+    got = p.customer_members("cust_ad", "org_a")
+    assert got["count"] == 5 and got["seats"] == {"used": 5, "limit": 8}
+
+
+def test_the_team_screen_shows_seat_usage_when_seats_are_on():
+    out = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 4, limit: 8 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+out.hasAdd = !!root.querySelector(".cust-team-add");
+""")
+    assert out["seat"] == "4 of 8 member seats used" and out["hasAdd"] is True
+
+
+def test_the_team_seat_line_hints_when_full_and_is_absent_when_seats_off():
+    full = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 8, limit: 8 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+""")
+    assert "8 of 8 member seats used" in full["seat"] and "add a seat" in full["seat"]
+    one = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 1, limit: 1 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+""")
+    assert "1 of 1 member seat used" in one["seat"]          # singular "seat" when limit == 1
+    off = _node(_app() + r"""
+show(); await tick();
+out.absent = root.querySelector(".cust-team-seats") === null;
+""")
+    assert off["absent"] is True
+
+
 def test_add_member_never_changes_a_current_members_role(tmp_path):
     p, s = _prov(tmp_path)
     _team(p)
