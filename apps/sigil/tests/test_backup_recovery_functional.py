@@ -281,6 +281,9 @@ def test_customer_preferences_restored_owner_only(tmp_path):
     nested = src / "customer_preferences" / "nested"
     nested.mkdir()
     (nested / "stray.json").write_text("{}")                    # whatever the unit holds is restored owner-only
+    deep = src / "customer_preferences" / "a" / "b"             # `a` holds no file of its own: only the walk up from
+    deep.mkdir(parents=True)                                    # b/f.json's directory reaches it
+    (deep / "f.json").write_text("{}")
     dest = tmp_path / "bk.sglbk"
     create_backup(dest, PW, home=src, vault=v, owner_key=owner)
     old = os.umask(0o022)                                       # a typical umask: world-readable unless chmodded
@@ -290,6 +293,7 @@ def test_customer_preferences_restored_owner_only(tmp_path):
         os.umask(old)
     unit = new / "customer_preferences"
     assert (unit / _prefs_name(_PREFS_USER)).is_file() and (unit / "nested" / "stray.json").is_file()
+    assert (unit / "a" / "b" / "f.json").is_file() and not [p for p in (unit / "a").iterdir() if p.is_file()]
     dirs = [unit] + [p for p in unit.rglob("*") if p.is_dir()]
     files = [p for p in unit.rglob("*") if p.is_file()]
     assert {oct(stat.S_IMODE(d.stat().st_mode)) for d in dirs} == {oct(0o700)}
