@@ -272,11 +272,14 @@ _STRIPE_SESSION_MIN_RANGE = (30, 1440)
 _STRIPE_SESSION_SLACK_S = 60
 # A plan (subscription-mode) session accepts these payment methods only; the response must echo them.
 _STRIPE_PLAN_PAYMENT_METHODS = ("card",)
-# The text beside the required Terms of Service checkbox (VIGIL_STRIPE_TERMS_CONSENT): the acceptance of the terms and,
-# for a consumer, the express request for immediate supply and the acknowledgement of when the right of withdrawal ends
-# (Terms §8). Plain text: Stripe renders it under its own "I agree to the Terms of Service" box.
+# The text of the required Terms of Service checkbox (VIGIL_STRIPE_TERMS_CONSENT). Stripe's custom_text
+# terms_of_service_acceptance REPLACES Stripe's default agreement text (the one that links the Terms URL set in the
+# dashboard), so this text carries the link itself, as the Markdown link Stripe's custom text supports: the acceptance
+# of the terms and, for a consumer, the express request for immediate supply and the acknowledgement of when the right
+# of withdrawal ends (Terms §8).
+_STRIPE_TERMS_URL = "https://vigilguard.net/terms"
 _STRIPE_TERMS_CONSENT_MESSAGE = (
-    "I agree to the VIGIL Terms of Service at vigilguard.net/terms. I ask SIGIL SARL to start supplying the service "
+    f"I agree to the VIGIL [Terms of Service]({_STRIPE_TERMS_URL}). I ask SIGIL SARL to start supplying the service "
     "as soon as I use the credits I am buying, and I understand that I lose my right of withdrawal for this purchase "
     "once all of its credits have been used.")
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
@@ -463,7 +466,8 @@ class StripeBillingProvider(BillingProvider):
             params["payment_method_types"] = list(_STRIPE_PLAN_PAYMENT_METHODS)
         from .. import config as _config
         if _config.stripe_terms_consent_enabled():
-            # the customer must tick "I agree to the Terms of Service" (and the immediate-supply wording) to pay
+            # the customer must tick the required terms box to pay; its text is VIGIL's (it replaces Stripe's default
+            # agreement text) and links the Terms
             params["consent_collection"] = {"terms_of_service": "required"}
             params["custom_text"] = {"terms_of_service_acceptance": {"message": _STRIPE_TERMS_CONSENT_MESSAGE}}
         if session_minutes is not None:

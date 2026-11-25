@@ -857,9 +857,10 @@ def billing_topup_alarm_enabled() -> bool:
 def stripe_terms_consent_enabled() -> bool:
     """True iff every Stripe checkout makes the customer ACCEPT the Terms of Service before paying
     (`VIGIL_STRIPE_TERMS_CONSENT` affirmative; default OFF). ON, the session asks Stripe for a required terms checkbox
-    (`consent_collection.terms_of_service = required`) whose text also records the consumer's request for immediate
-    supply and the end of the right of withdrawal once a purchase's credits are used (Terms §8), and a session Stripe
-    does not confirm with that requirement is refused (fail-closed). Stripe shows the box only when the account's
+    (`consent_collection.terms_of_service = required`) whose text is VIGIL's (`custom_text.terms_of_service_acceptance`
+    REPLACES Stripe's default agreement text): a link to the Terms and the consumer's request for immediate supply and
+    the end of the right of withdrawal once a purchase's credits are used (Terms §8). A session Stripe does not confirm
+    with that requirement is refused (fail-closed). Stripe shows the box only when the account's
     Terms of Service URL is set in its public details: set it before turning this on. OFF: the checkout payload is
     byte-identical to before. Read at call time."""
     return (os.environ.get("VIGIL_STRIPE_TERMS_CONSENT") or "").strip().lower() in _OIDC_AFFIRMATIVE

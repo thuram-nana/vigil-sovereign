@@ -354,7 +354,10 @@ def test_terms_consent_on_requires_the_terms_box_with_the_immediate_supply_wordi
     params = api.calls[0][0]
     assert params["consent_collection"] == {"terms_of_service": "required"}
     msg = params["custom_text"]["terms_of_service_acceptance"]["message"]
-    assert "vigilguard.net/terms" in msg and "start supplying the service" in msg
+    # the custom text REPLACES Stripe's default agreement text (and its link), so it must link the Terms itself, as the
+    # Markdown link Stripe's custom text renders
+    assert msg.startswith("I agree to the VIGIL [Terms of Service](https://vigilguard.net/terms). ")
+    assert "start supplying the service" in msg
     assert "lose my right of withdrawal for this purchase once all of its credits have been used" in msg
     assert len(msg) <= 1200                                              # Stripe's custom_text limit
 
