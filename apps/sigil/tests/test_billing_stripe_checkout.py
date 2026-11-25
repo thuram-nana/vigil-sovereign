@@ -331,6 +331,7 @@ class _StripeConsent(_Stripe):
         sess = super().create(params, idempotency_key=idempotency_key)
         if "consent_collection" in params:
             sess["consent_collection"] = dict(params["consent_collection"])
+            sess["custom_text"] = copy.deepcopy(params["custom_text"])
             sess.update(self.override)
             self.sessions[sess["id"]] = sess
         return copy.deepcopy(sess)
@@ -372,3 +373,40 @@ def test_a_session_that_does_not_confirm_the_required_terms_acceptance_is_refuse
         api = _StripeConsent(consent_collection=echo)
     with pytest.raises(UnsupportedCapability, match="Terms of Service acceptance"):
         _checkout(_provider(api))
+
+
+@pytest.mark.parametrize("plan", [False, True])
+@pytest.mark.parametrize("custom_text", [
+    "absent", None, {}, "text", {"terms_of_service_acceptance": None}, {"terms_of_service_acceptance": {}},
+    {"terms_of_service_acceptance": {"message": None}},
+    {"terms_of_service_acceptance": {"message": ""}},
+    {"terms_of_service_acceptance": {"message": "I agree to the VIGIL Terms of Service."}},   # the wording dropped
+    "truncated", "upper", "trailing space"])
+def test_a_session_that_does_not_echo_the_exact_terms_text_is_refused(monkeypatch, plan, custom_text):
+    from sigil.governor.billing import _STRIPE_TERMS_CONSENT_MESSAGE as sent
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    bad = {"truncated": sent[:-1], "upper": sent.upper(), "trailing space": sent + " "}
+    if isinstance(custom_text, str) and custom_text in bad:
+        custom_text = {"terms_of_service_acceptance": {"message": bad[custom_text]}}
+    api = _StripeConsent()
+    if custom_text == "absent":
+        def create(params, *, idempotency_key, _orig=api.create):
+            sess = _orig(params, idempotency_key=idempotency_key)
+            sess.pop("custom_text", None)
+            return sess
+        api.create = create
+    else:
+        api.override["custom_text"] = custom_text
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    with pytest.raises(UnsupportedCapability, match="did not echo the Terms of Service acceptance text"):
+        _checkout(_provider(api), **kw)
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_a_session_that_echoes_the_exact_terms_text_is_accepted(monkeypatch, plan):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    api = _StripeConsent()
+    kw = {"price": "price_pro", "payment_plan": "price_pro"} if plan else {}
+    assert _checkout(_provider(api), **kw).hosted_link
+    sent = api.calls[0][0]["custom_text"]["terms_of_service_acceptance"]["message"]
+    assert next(iter(api.sessions.values()))["custom_text"]["terms_of_service_acceptance"]["message"] == sent

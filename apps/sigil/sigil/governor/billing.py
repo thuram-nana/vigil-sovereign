@@ -401,8 +401,9 @@ class StripeBillingProvider(BillingProvider):
         `session_minutes` (a plan checkout; None sends no bound, as before) sets the session's `expires_at` so the
         link stops being payable before the provisioner's pending plan-checkout record lapses; the response must
         then echo that same `expires_at`. A plan session is card-only (`payment_method_types`), and the response
-        must echo that too; a top-up's payload is unchanged. Fail-closed throughout: any refusal raises
-        `UnsupportedCapability` / `ValueError`."""
+        must echo that too; a top-up's payload is unchanged. With `VIGIL_STRIPE_TERMS_CONSENT` on, the session
+        requires the Terms of Service box with VIGIL's text, and the response must echo both the requirement and
+        exactly that text. Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
         self.require(CAP_HOSTED_CHECKOUT)
         creator = self._checkout_creator
         if creator is None:                            # unreachable once require() passed; kept for type narrowing
@@ -493,6 +494,14 @@ class StripeBillingProvider(BillingProvider):
             if not isinstance(echoed, Mapping) or echoed.get("terms_of_service") != "required":
                 raise UnsupportedCapability("checkout creation failed: the provider did not confirm the required "
                                             "Terms of Service acceptance")
+            # the box's text carries the consumer's request for immediate supply (Terms §8): Stripe must show exactly
+            # the text sent, so the session's own custom text must equal it
+            text = resp.get("custom_text") if isinstance(resp, Mapping) else None
+            tos = text.get("terms_of_service_acceptance") if isinstance(text, Mapping) else None
+            shown = tos.get("message") if isinstance(tos, Mapping) else None
+            if not isinstance(shown, str) or shown != params["custom_text"]["terms_of_service_acceptance"]["message"]:
+                raise UnsupportedCapability("checkout creation failed: the provider did not echo the Terms of Service "
+                                            "acceptance text VIGIL sent")
         link = self._checkout_link(resp, tx_ref=tx_ref, mode=mode, amount_minor=amount_minor, currency=currency)
         if not link:
             raise UnsupportedCapability("checkout creation failed: the provider returned no matching session with "
