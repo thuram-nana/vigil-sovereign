@@ -86,6 +86,12 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
    again with the same `R` removes nothing more (only credits that came back to the period since, for example
    from a refunded scan).
 
+Run steps 3 to 5 one right after the other. Until step 5 runs (or the drain applies Stripe's refund event, within
+about a minute when the endpoint is subscribed to it), the customer can still spend the plan credits the refund
+pays back. If step 5 prints `WARNING: the refund covers ... but only ... have left`, some of those credits were
+spent, or are held by a scan still running, before it ran: VIGIL does not take spent plan credits back. Run
+`unused` again, compare it with the refund, and reconcile the difference with the customer by hand.
+
 ## What the drain does on its own
 
 With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from Stripe:

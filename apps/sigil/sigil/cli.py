@@ -3062,6 +3062,14 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
     else:
         print(f"  {res.moved} plan credits removed from {org} (invoice {invoice_id}, owner refund of {credits} "
               f"credits, seq {res.seq}); return the money at Stripe if you have not")
+    if res.removed < credits:
+        # the refund covers more plan credits than were left to remove: some were spent (or are held by a running
+        # scan) after `unused` sized the refund — never taken back silently
+        print(f"  WARNING: the refund covers {credits} plan credits of invoice {invoice_id}, but only {res.removed} "
+              f"have left {org}'s plan period: the other {credits - res.removed} were spent, or are held by a scan "
+              f"still running, when this ran. Spent plan credits are not taken back; credits a running scan gives "
+              f"back are removed when this command runs again. Check `sigil billing-reversal unused {org} "
+              f"{invoice_id}` against the refund and reconcile any difference by hand.", file=sys.stderr)
 
 
 def cmd_reports(a) -> None:

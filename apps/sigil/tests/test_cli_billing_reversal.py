@@ -200,6 +200,26 @@ def test_a_rerun_after_the_customer_resumed_the_plan_stops_the_renewal_again(mon
     assert _left(plan) == 0 and "300 plan credits removed" in out
 
 
+def test_plan_withdraw_warns_when_the_refunded_plan_credits_were_spent_before_it_ran(monkeypatch, capsys):
+    # the runbook's order: `unused` (12,000 unused) -> the whole price refunded at Stripe -> the customer launches a
+    # scan that reserves 11,000 plan credits -> plan-withdraw finds only 1,000 to remove: it says so, loudly
+    plan, fake = _seed_plan(monkeypatch)
+    plan.debit("acme", 11_000, period_end=_PE, entry_id="reserve-plan:s9:n9", issued_at=3.0)
+    cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
+    out, err = capsys.readouterr()
+    assert "1000 plan credits removed" in out and _left(plan) == 0
+    assert "WARNING: the refund covers 12000 plan credits of invoice in_plan1, but only 1000" in err
+    assert "the other 11000 were spent, or are held by a scan still running" in err
+
+
+@pytest.mark.parametrize("used,refunded", [(3_000, _PRICE * 9_000 // _ALLOT), (0, _PRICE), (0, _PRICE // 2)])
+def test_plan_withdraw_does_not_warn_when_every_refunded_credit_left(monkeypatch, capsys, used, refunded):
+    plan, fake = _seed_plan(monkeypatch, used=used)
+    cli.cmd_billing_reversal(_pw(credits=str(refunded)))
+    cli.cmd_billing_reversal(_pw(credits=str(refunded)))             # the re-run: nothing more, still no warning
+    assert "WARNING" not in capsys.readouterr().err
+
+
 def test_plan_withdraw_run_again_removes_nothing_more_and_sends_nothing(monkeypatch, capsys):
     plan, fake = _seed_plan(monkeypatch)
     cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
