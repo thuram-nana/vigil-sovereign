@@ -76,11 +76,11 @@ pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id 
    it to end at the end of the period, checks Stripe's answer and reads the subscription back to confirm it.
    Each run sends its own update, so a plan the customer resumed after an earlier run is stopped again. When
    VIGIL cannot do that (no Stripe key in the shell, a key without write access, an unconfirmed answer or
-   read-back), it refuses, removes nothing and prints the
-   Stripe step: open the subscription in the Dashboard, choose **Cancel subscription**, then run the command
-   again. Once the renewal is stopped it removes the plan credits for `R` (the allotment in the refunded
-   proportion), never more than remain in the period. Running it again with the same `R` removes nothing more
-   (only credits that came back to the period since, for example from a refunded scan).
+   read-back), it refuses, removes nothing and prints the Stripe step: open the subscription in the Dashboard,
+   choose **Cancel subscription**, then run the command again. Once the renewal is stopped it removes the plan
+   credits for `R` (the allotment in the refunded proportion), never more than remain in the period. Running it
+   again with the same `R` removes nothing more (only credits that came back to the period since, for example
+   from a refunded scan).
 
 ## What the drain does on its own
 
@@ -95,8 +95,8 @@ With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from
   from the plan credits that remain in the period (never more than remain; a spent part is never owed);
 - a refund VIGIL cannot trace to one credited purchase (a disputed plan payment, a monitoring plan, a payment
   that paid only part of its invoice or not the plan's price, an unknown charge) is quarantined for you to
-  reconcile by hand. A refund never adds credits: if a plan refund later goes
-  down (a failed refund), the drain quarantines it and the removed plan credits are not given back.
+  reconcile by hand. A refund never adds credits: if a plan refund later goes down (a failed refund), the drain
+  quarantines it and the removed plan credits are not given back.
 
 ## Keep a record
 
