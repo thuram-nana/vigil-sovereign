@@ -215,6 +215,9 @@ def test_terms_page_admits_individuals_and_states_the_consumer_right_of_withdraw
     assert "for businesses, professionals and individuals" in text and "at least 18 years old" in text
     assert "business and professional use" not in text and "internal business purposes" not in text
     assert "for your own business or personal purposes" in text
+    # §1: a workspace is an individual's account too, consistent with §2 admitting individuals
+    assert 'A "workspace" is the account of one person or organisation on the Service' in text
+    assert "the account of one organisation" not in text
     assert "Right of withdrawal (consumers)" in text and "within 14 days" in text
     assert "ask us to start supplying it immediately" in text
     assert "we refund the price of that purchase's credits you have not used, in proportion" in text

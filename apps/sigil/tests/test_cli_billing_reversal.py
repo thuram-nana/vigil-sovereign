@@ -284,3 +284,13 @@ def test_unused_refuses_what_is_not_a_purchase_with_credits(monkeypatch, capsys)
     with pytest.raises(SystemExit) as e:
         cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup="cs_nope", credits=None))
     assert e.value.code == 2 and "not a purchase" in capsys.readouterr().err
+
+
+def test_the_reversal_flag_ships_commented_in_the_drain_and_cockpit_env_examples():
+    # default OFF: both units document it, neither turns it on
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[3]
+    for rel in ("apps/sigil/deploy/cockpit.env.example", "infra/systemd/vigil-billing-drain-stripe.env.example"):
+        lines = [ln.strip() for ln in (repo / rel).read_text(encoding="utf-8").splitlines()]
+        assert "# VIGIL_BILLING_REVERSALS=1" in lines, rel
+        assert not any(ln.startswith("VIGIL_BILLING_REVERSALS") for ln in lines), rel
