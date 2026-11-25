@@ -51,6 +51,7 @@ _OWNER = re.compile(
 _CRITICAL_PREFIXES = (
     "/engine/crucible/framework/v2/verify/",
     "/engine/crucible/framework/v2/veracity/",
+    "/engine/crucible/framework/v2/aegis/",
     "/integration/vigil_integration/live/",
     "/gateway/",
     "/tools/egress-guard/",
