@@ -443,6 +443,82 @@ def test_the_per_client_counts_key_ipv6_on_the_64():
     assert sso_provision._client_key("::ffff:198.51.100.7") == "198.51.100.7"
 
 
+def test_CSRFLOCK_the_lockout_key_is_per_full_address_and_maps_nat64_fronts():
+    """CSRFLOCK, part 1 — the SSO failure lockout key narrows to a single client, never a shared front: a whole regular
+    IPv6 /64 is NOT one client (so two hosts in it are separate lockouts), and a NAT64 well-known front (64:ff9b::/96)
+    maps back to the embedded IPv4 — in BOTH the lockout key and the coarse volume key — so two IPv4 clients behind one
+    NAT64 front are never locked together."""
+    lk, ck = sso_provision._lockout_key, sso_provision._client_key
+    # two distinct IPv4 clients behind one NAT64 front keep their own lockout key (not one collapsed /64)
+    assert lk("64:ff9b::198.51.100.7") == "198.51.100.7" and lk("64:ff9b::198.51.100.8") == "198.51.100.8"
+    assert lk("64:ff9b::198.51.100.7") != lk("64:ff9b::198.51.100.8")
+    assert ck("64:ff9b::198.51.100.7") == "198.51.100.7"                 # the coarse volume key maps NAT64 too
+    assert ck("64:ff9b::198.51.100.7") != ck("64:ff9b::198.51.100.8")
+    # a regular IPv6 client's LOCKOUT is its full address, never the /64 (the coarse volume key still uses the /64)
+    assert lk("2001:db8:1:2::1") == "2001:db8:1:2::1" and lk("2001:db8:1:2::1") != lk("2001:db8:1:2::2")
+    assert ck("2001:db8:1:2::1") == ck("2001:db8:1:2::2")
+    assert lk("::ffff:198.51.100.7") == "198.51.100.7" and lk("198.51.100.7") == "198.51.100.7"
+
+
+def test_CSRFLOCK_one_orgs_idp_failures_never_lock_another_orgs_sign_ins(stack, signed):
+    """CSRFLOCK, part 2 — a hostile org A's IdP cannot lock a victim's address out of org B's SSO. The failure lockout
+    is per (spine, org, full address): garbage ACS posts to org A (whose IdP the attacker controls, via a lured
+    browser) lock only (A, address); the victim's org-B sign-in from the SAME address is still admitted. (Round 7
+    keyed the lockout per address across ALL orgs, so A's failures locked B's sign-ins too.)"""
+    stack.saml_org(ORG_A)                                               # the hostile tenant (its IdP is the attacker)
+    stack.saml_org(ORG_B)                                               # the victim's own org
+    ip = "198.51.100.200"
+    assert _sign_in(stack, ORG_B, "victim@beta.example", ip=ip)["org_id"] == ORG_B      # calm: the victim signs in
+    garbage = base64.b64encode(b"<garbage/>").decode()
+    for _ in range(5):                                                  # the attacker's five garbage ACS to org A
+        with pytest.raises(ProvisionDenied):
+            _acs(stack, ORG_A, garbage, ip)
+    p = build_provisioner(stack.store())
+    assert sso_provision._SSO_FAILS.locked(sso_provision._fail_key(p, ORG_A, ip), now=time.time()) is not None
+    assert sso_provision._SSO_FAILS.locked(sso_provision._fail_key(p, ORG_B, ip), now=time.time()) is None
+    # the victim's org-B sign-in from the same address is STILL admitted (refused under the old cross-org key)
+    assert _sign_in(stack, ORG_B, "victim2@beta.example", ip=ip)["org_id"] == ORG_B
+
+
+def test_CSRFLOCK_over_the_edge_a_hostile_idp_never_locks_a_victim_out_of_another_org(stack, signed):
+    """CSRFLOCK over the REAL edge (the rvH7 reviewer's probe, promoted): a victim lured to a hostile tenant's page is
+    walked through five rounds of (start org A, org A's IdP auto-posts a garbage SAMLResponse with the fresh
+    RelayState). That locks the victim's address out of org A ONLY — its own start of org A is refused — while the victim's start
+    of its own org B still goes to org B's IdP (round 7 answered it '/#sso=err', locked across every org)."""
+    stack.saml_org(ORG_A)                       # the hostile tenant (its IdP is the attacker's page)
+    stack.saml_org(ORG_B)                       # the victim's own org
+    _cookie, user = edge._saml_sign_in(stack, ORG_B, name_id="victim@beta.example")     # calm: the victim signs in
+    assert user
+    for _ in range(5):                          # the attacker's page: start org A, then its IdP auto-posts garbage
+        r, _sid = stack.start(ORG_A)
+        assert r.status == 302 and r.location.startswith(edge.IDP_SSO_URL + "?"), (r.status, r.location)
+        _req, relay = _authn_request(r.location)
+        assert stack.post_acs(b"<garbage/>", relay).status == 303
+    r, _sid = stack.start(ORG_B)                # the victim now signs in to ITS org: still sent to org B's IdP
+    assert r.status == 302 and r.location.startswith(edge.IDP_SSO_URL + "?"), (r.status, r.location)
+    r, _sid = stack.start(ORG_A)                # ... while org A's own lockout of that address holds
+    assert r.status == 302 and not r.location.startswith(edge.IDP_SSO_URL), (r.status, r.location)
+
+
+@pytest.mark.parametrize("locked_ip,neighbour_ip", [
+    ("64:ff9b::198.51.100.7", "64:ff9b::198.51.100.8"),          # two IPv4 clients behind one NAT64 / SIIT front
+    ("2001:db8:7:7::1", "2001:db8:7:7::2"),                      # two hosts of one shared IPv6 /64 (a LAN prefix)
+])
+def test_CSRFLOCK_two_clients_behind_one_front_are_never_locked_together(stack, signed, locked_ip, neighbour_ip):
+    """CSRFLOCK, the client key — five failures from one client behind a shared front lock THAT client (for that org)
+    and nobody else: its neighbour behind the same NAT64 front, or in the same IPv6 /64, still signs in (round 7 keyed
+    the lockout on the /64, so the whole front was locked as one)."""
+    stack.saml_org(ORG_A)
+    garbage = base64.b64encode(b"<garbage/>").decode()
+    for _ in range(5):
+        with pytest.raises(ProvisionDenied):
+            _acs(stack, ORG_A, garbage, locked_ip)
+    with pytest.raises(ProvisionRateLimited):                          # the failing client itself is locked out
+        sso_provision.sso_login_start(build_provisioner(stack.store()), ORG_A, ip=locked_ip)
+    assert sso_provision.sso_login_start(build_provisioner(stack.store()), ORG_A, ip=neighbour_ip)["org_id"] == ORG_A
+    assert _sign_in(stack, ORG_A, "neighbour@acme.example", ip=neighbour_ip)["org_id"] == ORG_A
+
+
 def test_M13_the_oidc_callback_leg_is_counted_per_ip(stack, monkeypatch):
     monkeypatch.setattr(config, "SSO_REQUESTS_PER_IP_PER_MIN", 2)
     stack.oidc_org(ORG_A, client_id="cid-a")
@@ -490,7 +566,7 @@ def test_M31_a_busy_bound_on_the_oidc_callback_is_a_503_not_a_counted_failure(st
             gate.release()
     assert taken == [1]
     assert [a for a in stack.audits("sso_login") if a.get("outcome") == "denied"] == []
-    assert (sso_provision._ident(p), "192.0.2.44") not in sso_provision._SSO_FAILS._keys
+    assert (sso_provision._ident(p), ORG_A, "192.0.2.44") not in sso_provision._SSO_FAILS._keys
 
 
 def test_M02_M07_an_outer_spine_lock_holder_never_waits_on_the_flock(stack):

@@ -710,8 +710,8 @@ def test_the_per_org_sign_in_budget_refuses_with_nothing_minted(stack, signed, m
     assert _roles(stack, ORG_A) == before and len(before) == 2
     assert _n(stack) == n0 + 1 and stack.audits("sso_login")[-1]["reason"] == "saml:org_rate"   # one audit row
     from sigil.ui import sso_provision
-    key = (sso_provision._ident(build_provisioner(stack.store())), "198.51.100.77")
-    assert sso_provision._SSO_FAILS._keys[key][1] == 1                 # one failure counted, not yet a lockout
+    key = (sso_provision._ident(build_provisioner(stack.store())), ORG_A, "198.51.100.77")
+    assert sso_provision._SSO_FAILS._keys[key][1] == 1                 # one failure counted (this org), not yet a lockout
     assert _sign_in(stack, ORG_B, "dan@beta.example")["org_id"] == ORG_B           # another org's budget is its own
     import shutil
     shutil.rmtree(config.SSO_SIGNIN_RATELIMIT_DIR, ignore_errors=True)            # the budget repaid

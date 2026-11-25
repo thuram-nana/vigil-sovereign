@@ -15,7 +15,9 @@ under THAT org's owner-signed IdP (audience, issuer, signature, InResponseTo / n
 the path and must present THAT org's bearer. A proof for org A can therefore never provision into org B.
 
 Each action is fail-closed and rate-limited:
-  * sign-in: the per-IP login limiter guards start / ACS / finish; a refused verification counts as a failure;
+  * sign-in: the per-IP leg counter bounds start / ACS / finish (the coarse, cross-org volume bound); a refused
+    verification counts as a failure against the (org, FULL client address) lockout, so an org's IdP can only ever
+    lock out its OWN sign-ins, from exactly the address the failures came from;
   * SCIM: failed bearer authentications are counted per (org, client IP) and lock out that pair's further
     INVALID attempts (a valid bearer is never refused by it — see `scim_request`); both limiters are on disk (the
     provisioner is rebuilt per request).
@@ -213,9 +215,9 @@ _LEGS = _LegCounter()
 
 
 class _FailLock:
-    """A per-key failure lockout in MEMORY (the SSO legs' per-address limiter): `max_fails` failures within `window_s`
-    lock the key for `base_lock_s`, doubling on each further lockout up to `max_lock_s`; a success clears the key.
-    O(1) per call, at most `max_keys` keys (the least recently seen forgotten first)."""
+    """A per-key failure lockout in MEMORY (the SSO legs' per-(org, address) lockout): `max_fails` failures within
+    `window_s` lock the key for `base_lock_s`, doubling on each further lockout up to `max_lock_s`; a success clears
+    the key. O(1) per call, at most `max_keys` keys (the least recently seen forgotten first)."""
 
     def __init__(self, *, max_fails: int = 5, window_s: float = 900.0, base_lock_s: float = 60.0,
                  max_lock_s: float = 3600.0, max_keys: int = 65536) -> None:
@@ -255,9 +257,30 @@ class _FailLock:
 _SSO_FAILS = _FailLock()
 
 
+#: RFC 6052 NAT64 well-known prefix: an IPv4 host reached through a NAT64 / SIIT front arrives as
+#: ``64:ff9b::<a.b.c.d>``, so its last 32 bits ARE the client's own IPv4 — a whole /64 of it is NOT one client.
+_NAT64_WELLKNOWN = "64:ff9b::/96"
+
+
+def _embedded_ipv4(addr) -> "Optional[str]":
+    """The IPv4 a single client owns inside an IPv4-mapped (``::ffff:a.b.c.d``) or NAT64 well-known
+    (``64:ff9b::a.b.c.d``) IPv6 address, else None — so independent IPv4 clients reaching the edge through one
+    translation front keep their own key instead of collapsing into one /64."""
+    import ipaddress
+    if getattr(addr, "version", None) != 6:
+        return None
+    if addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
+    if addr in ipaddress.ip_network(_NAT64_WELLKNOWN):
+        return str(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+    return None
+
+
 def _client_key(ip: str) -> str:
-    """The address a per-client SSO / SCIM count is kept under: the IPv6 /64 a single client controls (one host is
-    routinely given a whole /64), or the IPv4 address; anything else as given."""
+    """The address a per-client SSO / SCIM VOLUME count is kept under (the coarse, anti-abuse key): the IPv6 /64 a
+    single client controls (one host is routinely given a whole /64), or the IPv4 address — but the IPv4 EMBEDDED in
+    an IPv4-mapped or NAT64 well-known address (`_embedded_ipv4`), so a shared translation front does not collapse many
+    independent clients into one /64; anything else as given."""
     import ipaddress
     raw = str(ip or "").strip()
     try:
@@ -265,9 +288,30 @@ def _client_key(ip: str) -> str:
     except ValueError:
         return raw
     if addr.version == 6:
-        if addr.ipv4_mapped is not None:
-            return str(addr.ipv4_mapped)
+        embedded = _embedded_ipv4(addr)
+        if embedded is not None:
+            return embedded
         return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
+def _lockout_key(ip: str) -> str:
+    """The address the SSO failure LOCKOUT is counted under — a single client's FULL address, NEVER a shared /64 or
+    translation front: the IPv4 embedded in an IPv4-mapped / NAT64 well-known address (`_embedded_ipv4`), else the full
+    IPv6 address, else the IPv4 address. A lockout is long-lived and an org's IdP decides what a lured browser posts,
+    so collapsing independent clients into one lockout key would let one org's failures deny unrelated clients; paired
+    with the per-(spine, org) lockout scope, an org's IdP can lock out only its OWN sign-ins, and only from exactly the
+    address the failures came from."""
+    import ipaddress
+    raw = str(ip or "").strip()
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+    if addr.version == 6:
+        embedded = _embedded_ipv4(addr)
+        if embedded is not None:
+            return embedded
     return str(addr)
 
 
@@ -278,20 +322,28 @@ def _ident(p) -> str:
         return ""
 
 
-def _sso_client_guard(p, ip: str, *, now: float) -> None:
-    """Refuse an address the per-address SSO failure lockout has locked (`_SSO_FAILS`), before anything else."""
+def _fail_key(p, org_id: str, ip: str) -> tuple:
+    """The SSO failure-lockout key: per (spine, ORG, full client address). Scoped to the org so one org's IdP
+    failures lock only that org's sign-ins, and to the FULL address (`_lockout_key`) so a shared /64 or NAT64 front is
+    never locked as one — the two properties that keep a hostile org's IdP from denying an unrelated network's SSO."""
+    return (_ident(p), str(org_id or ""), _lockout_key(ip))
+
+
+def _sso_client_guard(p, ip: str, *, org_id: str, now: float) -> None:
+    """Refuse an address this ORG's SSO failure lockout has locked (`_SSO_FAILS`, per (spine, org, address)), before
+    anything else. Another org's lockout of the same address never refuses here."""
     from .provision import ProvisionRateLimited
-    wait = _SSO_FAILS.locked((_ident(p), _client_key(ip)), now=now)
+    wait = _SSO_FAILS.locked(_fail_key(p, org_id, ip), now=now)
     if wait is not None:
         raise ProvisionRateLimited(wait)
 
 
-def _sso_client_failed(p, ip: str, *, now: float) -> None:
-    _SSO_FAILS.record_failure((_ident(p), _client_key(ip)), now=now)
+def _sso_client_failed(p, ip: str, *, org_id: str, now: float) -> None:
+    _SSO_FAILS.record_failure(_fail_key(p, org_id, ip), now=now)
 
 
-def _sso_client_ok(p, ip: str) -> None:
-    _SSO_FAILS.record_success((_ident(p), _client_key(ip)))
+def _sso_client_ok(p, ip: str, *, org_id: str) -> None:
+    _SSO_FAILS.record_success(_fail_key(p, org_id, ip))
 
 
 class _AuditWindows:
@@ -600,9 +652,9 @@ def sso_login_start(p, org_id: str, *, ip: str = "", now: Optional[float] = None
     org's OWNER-SIGNED config (never a secret). Refused unless the org is active and has an active config."""
     from .provision import ProvisionDenied
     t = p._now() if now is None else float(now)
-    _sso_client_guard(p, ip, now=t)
-    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
+    _sso_client_guard(p, ip, org_id=oid, now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     cfgreg, _ = _registries(p)
     with _sso_gate(oid):                                   # all of the leg's spine reads, inside the org's share
         cfg = cfgreg.config(oid) if oid else None
@@ -639,9 +691,9 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
     from . import scim as uiscim
     from .provision import ProvisionDenied, ProvisionError
     t = p._now() if now is None else float(now)
-    _sso_client_guard(p, ip, now=t)
-    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
+    _sso_client_guard(p, ip, org_id=oid, now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     if p.saml_replay is None:
         raise ProvisionError("SAML sign-in is not available on this deployment (no replay ledger)")
     cfgreg, directory = _registries(p)
@@ -665,16 +717,16 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
             except OSError:
                 pass                                       # housekeeping only: never masks the sign-in's outcome
     except (uiscim.SsoLoginError, ValueError):
-        _sso_client_failed(p, ip, now=t)
+        _sso_client_failed(p, ip, org_id=oid, now=t)
         _bounded_audit(p, "sso_login", org_id=oid, reason="saml", outcome="denied", now=t)
         raise ProvisionDenied("single sign-on could not be verified")
     try:
         res = _admit_sign_in(p, oid, signin, cfgreg, directory, now=t, reason="saml")
     except uiscim.SsoLoginError:
-        _sso_client_failed(p, ip, now=t)
+        _sso_client_failed(p, ip, org_id=oid, now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="saml")
         raise ProvisionDenied("single sign-on could not be verified")
-    _sso_client_ok(p, ip)
+    _sso_client_ok(p, ip, org_id=oid)
     p._audit("sso_login", requester=res.username, org_id=oid, target=res.username, outcome="ok", reason="saml")
     return {"username": res.username, "org_id": res.org_id}
 
@@ -682,14 +734,14 @@ def sso_saml_acs(p, org_id: str, saml_response: str, *, request_id: str, ip: str
 def _sign_in_budget_open(p, org_id: str, *, ip: str, now: float, reason: str) -> None:
     """Refuse — before any verification, so nothing is spent (the assertion stays unused) — a sign-in of an org whose
     sign-in budget (`VIGIL_SSO_SIGNINS_PER_MIN`) is spent. Only VERIFIED sign-ins spend it (`_admit_sign_in`), so
-    nobody but the org's own IdP can exhaust it. The refusal is counted against the client address (`_SSO_FAILS`) and
-    audited at most once per org per minute (`_bounded_audit`): such a request is not yet authenticated, so it must
-    not grow the spine per request. No budget wired ⇒ refused (fail-closed)."""
+    nobody but the org's own IdP can exhaust it. The refusal is counted against (this org, the client address)
+    (`_SSO_FAILS`) and audited at most once per org per minute (`_bounded_audit`): such a request is not yet
+    authenticated, so it must not grow the spine per request. No budget wired ⇒ refused (fail-closed)."""
     from .provision import ProvisionDenied
     lim = getattr(p, "sso_signin_limiter", None)
     wait = lim.locked(f"sso:org:{org_id}", now=now) if lim is not None else 60.0
     if wait is not None:
-        _sso_client_failed(p, ip, now=now)
+        _sso_client_failed(p, ip, org_id=org_id, now=now)
         _bounded_audit(p, "sso_login", org_id=org_id, reason=f"{reason}:org_rate", outcome="denied", now=now)
         raise ProvisionDenied("too many sign-ins to this organization right now; try again in a minute")
 
@@ -768,9 +820,9 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     from .provision import ProvisionDenied
     from .provision import ProvisionRateLimited
     t = p._now() if now is None else float(now)
-    _sso_client_guard(p, ip, now=t)
-    _count_unauthenticated_leg(p, ip, now=t)
     oid = _org(org_id)
+    _sso_client_guard(p, ip, org_id=oid, now=t)
+    _count_unauthenticated_leg(p, ip, now=t)
     cfgreg, directory = _registries(p)
     with _sso_gate(oid):
         _sign_in_budget_open(p, oid, ip=ip, now=t, reason="oidc")
@@ -792,7 +844,7 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     except ProvisionRateLimited:        # the SSO work bound (busy): retryable, not a failed sign-in
         raise
     except Exception:  # noqa: BLE001 — a refused token or an IdP/network fault: one fail-closed denial
-        _sso_client_failed(p, ip, now=t)
+        _sso_client_failed(p, ip, org_id=oid, now=t)
         _bounded_audit(p, "sso_login", org_id=oid, reason="oidc", outcome="denied", now=t)
         raise ProvisionDenied("single sign-on could not be verified")
     try:
@@ -800,10 +852,10 @@ def sso_oidc_finish(p, org_id: str, *, code: str, code_verifier: str, nonce: str
     except ProvisionDenied:
         raise
     except Exception:  # noqa: BLE001 — a non-member or a refused grant: the same fail-closed denial
-        _sso_client_failed(p, ip, now=t)
+        _sso_client_failed(p, ip, org_id=oid, now=t)
         p._audit("sso_login", org_id=oid, outcome="denied", reason="oidc")
         raise ProvisionDenied("single sign-on could not be verified")
-    _sso_client_ok(p, ip)
+    _sso_client_ok(p, ip, org_id=oid)
     p._audit("sso_login", requester=res.username, org_id=oid, target=res.username, outcome="ok", reason="oidc")
     return {"username": res.username, "org_id": res.org_id}
 
