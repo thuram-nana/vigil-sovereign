@@ -162,7 +162,7 @@ def _load(username: str, *, strict: bool) -> dict:
         return out
     for k in PREFERENCE_KEYS:                       # only allowlisted fields that are valid text are ever surfaced
         v = saved.get(k)
-        if _is_text(v):
+        if isinstance(v, str) and _is_text(v):
             out[k] = v
     return out
 
