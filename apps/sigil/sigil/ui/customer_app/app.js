@@ -3178,6 +3178,12 @@
       h("div.cust-member-actions", {}, [add]),
     ]);
   }
+  function teamSeats(seats) {
+    var s = seats.limit === 1 ? "" : "s";
+    var t = seats.used + " of " + seats.limit + " member seat" + s + " used";
+    if (seats.used >= seats.limit) { t += " — remove a member, or add a seat, to add more"; }
+    return h("p.cust-muted.cust-team-seats", { role: "status", text: t });
+  }
   function viewTeam() {
     var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
     var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
@@ -3198,7 +3204,9 @@
         return;
       }
       if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
-      VUI.mount(holder, [teamMembers((d && d.members) || [], act), teamAddCard(act)]);
+      var parts = (d && d.seats) ? [teamSeats(d.seats)] : [];     // "used of M seats" only when seats are on
+      parts.push(teamMembers((d && d.members) || [], act), teamAddCard(act));
+      VUI.mount(holder, parts);
     }
     async function send(path, body, done, name, btn) {
       say("");
