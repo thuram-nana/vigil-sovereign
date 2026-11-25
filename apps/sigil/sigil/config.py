@@ -721,6 +721,22 @@ def customer_posture_enabled() -> bool:
             and presentation_enabled())
 
 
+def customer_seats_enabled() -> bool:
+    """True iff per-workspace member SEAT limits are enforced (``VIGIL_CUSTOMER_SEATS`` affirmative). OFF by
+    default: no limit is applied and ``add_member`` / ``grant_member`` behave byte-identically. When ON, a NEW
+    member is refused once the workspace already holds ``customer_default_seats()`` members; a role change for
+    an existing member consumes no seat and is never limited. A later slice resolves the allowance per plan
+    from the owner catalog (mirroring ``monitor_hosts``)."""
+    return (os.environ.get("VIGIL_CUSTOMER_SEATS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_default_seats() -> int:
+    """The flat per-workspace member seat allowance enforced while ``customer_seats_enabled()``
+    (``VIGIL_CUSTOMER_DEFAULT_SEATS``, default 5). Read live so the owner can tune it at deploy; a later slice
+    resolves the allowance per plan from the owner catalog."""
+    return _int_env("VIGIL_CUSTOMER_DEFAULT_SEATS", 5)
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account

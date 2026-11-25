@@ -82,6 +82,10 @@ _ADD_NO_ACCOUNT = ("there is no VIGIL account for that email. Ask your teammate 
 _ADD_ALREADY_MEMBER = ("that person is already a member of this workspace. To give them another role, use Change role "
                        "on their row")
 _ADD_BAD_EMAIL = "enter the email address your teammate signs in to VIGIL with"
+# V12 seats: the refusal a customer reads when a NEW member would exceed the workspace's seat limit
+# (only while VIGIL_CUSTOMER_SEATS is on). {limit} is the current allowance.
+_SEAT_LIMIT_MSG = ("this workspace has reached its member limit ({limit}). Remove a member, or add a seat, "
+                   "before adding another")
 # The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
 # one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
 _SIGNUP_CODE_EMAIL = (
@@ -761,6 +765,18 @@ class Provisioner:
         if locked is not None:
             raise ProvisionRateLimited(locked)
         self.member_limiter.record_failure(f"member:org:{org_id}", now=now)
+
+    def _seat_guard(self, org_id: str) -> None:
+        """Refuse adding a NEW member once ``org_id`` is at its seat limit (V12). A no-op unless
+        ``VIGIL_CUSTOMER_SEATS`` is on, so the default is byte-identical. Called INSIDE the member lock,
+        immediately before the owner-signed grant, so the count it reads is the count the grant would grow —
+        no TOCTOU with a concurrent add. Only the NEW-member paths call it; a role change consumes no seat."""
+        from .. import config
+        if not config.customer_seats_enabled():
+            return
+        limit = config.customer_default_seats()
+        if self.orgs.member_count(org_id) >= limit:
+            raise ProvisionDenied(_SEAT_LIMIT_MSG.format(limit=limit))
 
     # -- enrolment hardening (customer_mfa_enroll_stepup_enabled; default OFF ⇒ all three are no-ops) ----
     def _enroll_hardening_on(self) -> bool:
@@ -1712,6 +1728,8 @@ class Provisioner:
             if (not role_can(role, "manage_members")
                     and self._member_admins(requester_org_id) == {member_username}):
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
+            if self.orgs.membership_role(member_username, requester_org_id) is None:
+                self._seat_guard(requester_org_id)   # V12: a NEW member consumes a seat; a role change does not
             # NH-3: durable audit BEFORE the owner-signed mutation — a critical-audit store failure then fails
             # CLOSED with no membership change (committed⟹audited), mirroring the signup audit-before-commit.
             self._audit("grant_member", requester=requester, org_id=requester_org_id, target=member_username,
@@ -1823,6 +1841,7 @@ class Provisioner:
             member_username = _member_target(acct.username)
             if self.orgs.membership_role(member_username, requester_org_id) is not None:
                 raise ProvisionDenied(_ADD_ALREADY_MEMBER)
+            self._seat_guard(requester_org_id)   # V12: refuse a NEW member once the workspace is at its seat limit
             # durable audit BEFORE the owner-signed grant (fail-closed; committed implies audited), as grant_member
             self._audit("add_member", requester=requester, org_id=requester_org_id, target=member_username,
                         outcome=f"role={role}", critical=True)
