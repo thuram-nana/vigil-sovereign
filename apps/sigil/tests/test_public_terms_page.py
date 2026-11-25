@@ -219,8 +219,17 @@ def test_terms_page_admits_individuals_and_states_the_consumer_right_of_withdraw
     assert "ask us to start supplying it immediately" in text
     assert "we refund the price of that purchase's credits you have not used, in proportion" in text
     assert "you lose the right of withdrawal for a purchase once all of its credits have been used" in text
-    # taxes: prices exclude tax, and checkout shows the taxes and the total before payment
-    assert "the checkout page shows them and the total you will pay before you pay" in text
+
+def test_terms_page_never_claims_the_checkout_computes_or_shows_tax():
+    # Owner, 2026-11-24: no tax or VAT computation at launch (no checkout asks the processor to compute one). §6 keeps
+    # the wording of the reviewed terms: prices exclude taxes, which are added where the law requires and are the
+    # customer's responsibility. It must not promise that the checkout adds or shows a tax line.
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    assert ("Prices are in US dollars (USD) and are shown on the Service and on the checkout page before you pay. "
+            "They exclude taxes. Applicable taxes, such as VAT, GST or sales tax, are added where the law requires "
+            "and are your responsibility.") in text
+    low = text.lower()
+    assert "checkout page shows them" not in low and "shows the tax" not in low and "shows taxes" not in low
 
 
 def test_terms_page_has_the_reviewed_notice_and_no_draft_banner():
