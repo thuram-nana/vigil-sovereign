@@ -185,6 +185,24 @@ owner's explicit authorisation.
 - **Dependencies:** the minor Dependabot bumps are batched through the hash-lock tooling; the Anthropic SDK major
   upgrade is its own tested PR.
 
+### 1.1d Owner decisions of 2026-11-24 (launch catalog)
+
+- **Credit packs in the catalog:** `governor/catalog.py` now sells exactly the decided packs: $5 / $10 / $16 / $25 / $50
+  / $100 for 500 / 1,000 / 1,600 / 2,500 / 5,000 / 10,000 credits, no volume bonus. The pre-launch placeholder $50 pack
+  (6,000 credits, a bonus) is retired: never sold again, still credited exactly if a late payment for it arrives.
+- **Monthly credit plans at launch** (this supersedes "discounted credit subscriptions only after costs are measured"
+  in §1): Starter $29 → 3,200 credits a month, Pro $99 → 12,000, Team $299 → 39,000, so each plan gives more credits
+  per dollar than the packs (+10%, +21%, +30%). Plan credits are spent first and expire at the end of each month
+  (non-rollover, `governor/metering.py`); purchased credits are spent next and never expire; when both run out a scan
+  pauses and the customer buys a pack. A cancelled plan runs to the end of the month already paid (no refund);
+  changes take effect at the next renewal. Sold with `VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED`, `VIGIL_CUSTOMER_PLANS`
+  and `VIGIL_CUSTOMER_PLAN_CHANGE` (deploy examples), behind the go-live `VIGIL_CUSTOMER_CHECKOUT_ENABLED`. The
+  margin check: at the rate card's ~2.5x of the AI cost, a fully used Team plan still pays about twice its AI cost.
+- **Trial:** 450 credits (`VIGIL_TRIAL_CREDITS=450` in the deploy example).
+- **Launch without the §4.6 purchase limits and without the custom amount:** packs only. The owner accepts the
+  stolen-card exposure of §4.6 for launch; the limits and the custom amount remain proposals until the owner asks
+  for them.
+
 ### 1.2 Open owner decisions
 
 | # | Open item | State in the code |

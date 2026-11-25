@@ -17,8 +17,14 @@ Each `CatalogEntry` maps a provider price/plan id to three things:
     `expected_amounts()`; the cross-check itself lands with the outbound checkout slice that establishes the
     price_id -> amount binding.
 
-THE NUMBERS BELOW ARE PLACEHOLDER (clearly-marked): the structure is authoritative; the owner sets the real
-prices/allotments and the real provider price/plan ids before production. The catalog is VALIDATED at import
+PRICES. The credit TOP-UPS are the owner's launch prices (decided 2026-11-11, confirmed 2026-11-24): $1 = 100
+credits, packs of $5 / $10 / $16 / $25 / $50 / $100, no volume bonus (docs/decisions/PRICING-RED-PEN-DESIGN.md §1).
+The credit SUBSCRIPTION plans are the owner's launch plans too (2026-11-24): Starter $29 / 3,200 credits, Pro $99 /
+12,000, Team $299 / 39,000 a month, sold while VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED is on. The AEGIS per-host prices
+are still PLACEHOLDER (clearly-marked) and not sold at launch: an AEGIS plan is offered only with
+VIGIL_CUSTOMER_MONITORING_ENABLED, and the owner sets its real price before turning it on. Checkout sends the
+catalog amount as inline price_data, so no provider price id is needed. A sold entry is never edited in place:
+it is retired (still mintable, no longer sold) and a new price_id is added. The catalog is VALIDATED at import
 (fail-closed): a malformed entry raises immediately, so a bad catalog can never ship (import + CI fail loudly).
 
 FATAL-2: sovereign-side (`assert_no_offense()` at import); imports only the billing `Entitlement`/kinds.
@@ -91,19 +97,30 @@ class MonitoringPlan:
 
 
 # ==================================================================================================
-# THE CATALOG. PLACEHOLDER numbers — the owner sets the real prices / allotments / provider ids.
+# THE CATALOG. Top-ups + credit plans = the owner's launch prices; AEGIS = PLACEHOLDER (not sold at launch).
 # ==================================================================================================
 _CATALOG: tuple[CatalogEntry, ...] = (
-    # one-time wallet top-ups (prepaid credits; EVENT_TOPUP -> wallet grant)
+    # one-time wallet top-ups (prepaid credits; EVENT_TOPUP -> wallet grant). Owner launch packs: $1 = 100 credits,
+    # no volume bonus.
+    CatalogEntry("vigil_topup_500", EVENT_TOPUP, "500 credit top-up", 500, "USD", credits=500),
     CatalogEntry("vigil_topup_1k", EVENT_TOPUP, "1,000 credit top-up", 1000, "USD", credits=1_000),
-    CatalogEntry("vigil_topup_6k", EVENT_TOPUP, "6,000 credit top-up", 5000, "USD", credits=6_000),
-    # monthly subscriptions (EVENT_SUBSCRIPTION_ACTIVE -> subscribe + per-period plan allotment)
-    CatalogEntry("vigil_research_monthly", EVENT_SUBSCRIPTION_ACTIVE, "Research (monthly)", 2900, "USD",
-                 plan_id="research", allotment=2_000, period_s=_PERIOD_MONTH_S),
+    CatalogEntry("vigil_topup_1600", EVENT_TOPUP, "1,600 credit top-up", 1600, "USD", credits=1_600),
+    CatalogEntry("vigil_topup_2500", EVENT_TOPUP, "2,500 credit top-up", 2500, "USD", credits=2_500),
+    CatalogEntry("vigil_topup_5k", EVENT_TOPUP, "5,000 credit top-up", 5000, "USD", credits=5_000),
+    CatalogEntry("vigil_topup_10k", EVENT_TOPUP, "10,000 credit top-up", 10000, "USD", credits=10_000),
+    # RETIRED 2026-11-24: the pre-launch placeholder $50 pack carried a volume bonus the owner's pricing excludes.
+    # Never sold again, still mintable (a late webhook for it is credited exactly as it was bought).
+    CatalogEntry("vigil_topup_6k", EVENT_TOPUP, "6,000 credit top-up", 5000, "USD", credits=6_000, retired=True),
+    # monthly credit plans (EVENT_SUBSCRIPTION_ACTIVE -> subscribe + per-period plan allotment). Owner launch plans
+    # (2026-11-24): each month's plan credits are spent FIRST and expire at period end (non-rollover); purchased
+    # credits are spent next and never expire. Each plan gives more credits per dollar than the packs, rising with
+    # the tier: Starter +10%, Pro +21%, Team +30% over $1 = 100 credits.
+    CatalogEntry("vigil_starter_monthly", EVENT_SUBSCRIPTION_ACTIVE, "Starter (monthly)", 2900, "USD",
+                 plan_id="starter", allotment=3_200, period_s=_PERIOD_MONTH_S),
     CatalogEntry("vigil_pro_monthly", EVENT_SUBSCRIPTION_ACTIVE, "Pro (monthly)", 9900, "USD",
-                 plan_id="pro", allotment=6_000, period_s=_PERIOD_MONTH_S),
+                 plan_id="pro", allotment=12_000, period_s=_PERIOD_MONTH_S),
     CatalogEntry("vigil_team_monthly", EVENT_SUBSCRIPTION_ACTIVE, "Team (monthly)", 29900, "USD",
-                 plan_id="team", allotment=20_000, period_s=_PERIOD_MONTH_S),
+                 plan_id="team", allotment=39_000, period_s=_PERIOD_MONTH_S),
     # AEGIS monitoring: priced PER PROTECTED HOST PER MONTH (amount = per-host price x included hosts). No credit
     # allotment (allotment=0 => no plan-credit refill); the plan buys host slots, and the respond tier buys block.
     CatalogEntry("vigil_aegis_observe_1h_monthly", EVENT_SUBSCRIPTION_ACTIVE, "AEGIS Observe, 1 host (monthly)",

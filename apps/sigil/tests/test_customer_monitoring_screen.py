@@ -511,7 +511,7 @@ out.lines = plans.map(p => [p.price_id, isMonitoringOffer(p), offerLine(p)]);
         True, "AEGIS Respond, 5 hosts — monthly: watches traffic, reports attacks and can block them")
     for pid in catalog.monitoring_price_ids():
         assert lines[pid][0] is True and "credit" not in lines[pid][1].lower(), pid
-    assert lines["vigil_pro_monthly"] == (False, "Plan: 6000 credits every 30 days")      # credit plans unchanged
+    assert lines["vigil_pro_monthly"] == (False, "Plan: 12000 credits every 30 days")     # credit plans unchanged
     assert lines["vigil_topup_1k"] == (False, "1000 credits")
 
 
