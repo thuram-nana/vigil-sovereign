@@ -220,6 +220,30 @@ def test_plan_withdraw_does_not_warn_when_every_refunded_credit_left(monkeypatch
     assert "WARNING" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("ended", [False, True])
+def test_plan_withdraw_of_an_ended_period_says_its_credits_had_expired_and_names_the_renewals(monkeypatch, capsys,
+                                                                                            ended):
+    # the plan renewed after the period the invoice paid (in_plan2, to _PE + 30 days): a withdrawal named by the
+    # first invoice removes the first period's credits only — expired ones once it ended — and must say so
+    import time
+    plan, fake = _seed_plan(monkeypatch)
+    owner = ensure_owner_keypair()
+    pe2 = _PE + 30 * 86400
+    plan.grant("acme", _ALLOT, period_end=pe2, entry_id=f"refill:acme:{pe2!r}", issued_at=_PE)
+    InvoiceRegistry(cli.SpineStore(), owner_key=owner).record(
+        "acme", invoice_id="in_plan2", kind="subscription", price_id="vigil_pro_monthly", amount_minor=_PRICE,
+        currency="USD", credits=_ALLOT, period_start=_PE, period_end=pe2, issued_at=_PE)
+    monkeypatch.setattr(time, "time", lambda: _PE + 5.0 if ended else _PE - 5.0)
+    cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))
+    out = capsys.readouterr().out
+    assert "12000 plan credits removed" in out and _left(plan) == 0
+    assert plan.remaining_for_period("acme", pe2) == _ALLOT                # the renewal's credits: untouched
+    assert ("this plan period ended on 1970-02-27 20:53 UTC: its plan credits had already expired, so no spendable "
+            "credit was removed" in out) is ended
+    assert ("the plan has renewed since: the plan period(s) of in_plan2 (to 1970-03-29, 12000 credits) are "
+            "untouched" in out) is ended
+
+
 def test_plan_withdraw_run_again_removes_nothing_more_and_sends_nothing(monkeypatch, capsys):
     plan, fake = _seed_plan(monkeypatch)
     cli.cmd_billing_reversal(_pw(credits=str(_PRICE)))

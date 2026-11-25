@@ -92,6 +92,11 @@ pays back. If step 5 prints `WARNING: the refund covers ... but only ... have le
 spent, or are held by a scan still running, before it ran: VIGIL does not take spent plan credits back. Run
 `unused` again, compare it with the refund, and reconcile the difference with the customer by hand.
 
+A withdrawal done in time falls inside the plan's first period. If the plan has renewed since, step 5 for the first
+invoice says that period has ended (its plan credits had expired, so nothing spendable was removed) and names the
+renewal invoices it leaves untouched. A plan the customer withdrew from must not renew: refund each renewal at
+Stripe and run `plan-withdraw` for each of those invoices too.
+
 ## What the drain does on its own
 
 With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from Stripe:

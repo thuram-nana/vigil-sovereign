@@ -3029,8 +3029,8 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
         _clean_note(reason)                       # the step's reason, checked before anything is sent to Stripe
     except ReversalRefused as exc:
         refuse(f"--reason: {exc}")
-    line = next((i for i in InvoiceRegistry(store, owner_key=owner).invoices(org)
-                 if i.invoice_id == invoice_id and i.kind == "subscription"), None)
+    lines = InvoiceRegistry(store, owner_key=owner).invoices(org)
+    line = next((i for i in lines if i.invoice_id == invoice_id and i.kind == "subscription"), None)
     if line is None or line.credits <= 0:
         refuse(f"{invoice_id!r} is not a credited plan invoice of {org} (a monitoring plan has no credits to remove)")
     if line.amount_minor <= 0:
@@ -3046,9 +3046,10 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
     except RuntimeError as exc:
         refuse(f"the plan still renews and nothing was removed: {exc}")
     credits = int(line.credits) * refunded_minor // int(line.amount_minor)
+    now = _time.time()
     try:
         res = ledger.reconcile_plan(org, invoice_id, cap=int(line.credits), period_end=float(line.period_end),
-                                    now=_time.time(), owner_refunded=credits, note=reason)
+                                    now=now, owner_refunded=credits, note=reason)
     except ReversalRefused as exc:
         refuse(f"the renewal IS stopped ({stopped}), but no plan credit was removed: {exc}")
     except ReversalRetry as exc:
@@ -3062,6 +3063,19 @@ def _plan_withdraw(org: str, invoice_id: str, refunded_minor: int, reason: str, 
     else:
         print(f"  {res.moved} plan credits removed from {org} (invoice {invoice_id}, owner refund of {credits} "
               f"credits, seq {res.seq}); return the money at Stripe if you have not")
+    pe = float(line.period_end)
+    if now >= pe:
+        # an ENDED period: its plan credits had expired, and the periods the plan renewed into are not this
+        # invoice's — say both, so the owner withdraws those too if the withdrawal covers them
+        print(f"  this plan period ended on {_time.strftime('%Y-%m-%d %H:%M UTC', _time.gmtime(pe))}: its plan "
+              f"credits had already expired, so no spendable credit was removed by this command")
+        later = sorted((i for i in lines if i.kind == "subscription" and i.credits > 0 and float(i.period_end) > pe),
+                       key=lambda i: float(i.period_end))
+        if later:
+            names = ", ".join(f"{i.invoice_id} (to {_time.strftime('%Y-%m-%d', _time.gmtime(float(i.period_end)))}"
+                              f", {i.credits} credits)" for i in later)
+            print(f"  the plan has renewed since: the plan period(s) of {names} are untouched; if the withdrawal "
+                  f"covers them, refund them at Stripe and run plan-withdraw for each")
     if res.removed < credits:
         # the refund covers more plan credits than were left to remove: some were spent (or are held by a running
         # scan) after `unused` sized the refund — never taken back silently
