@@ -508,3 +508,25 @@ def test_the_withdrawal_verbs_take_an_automatic_top_ups_payment_intent_id(monkey
     assert "750 of its 1000 credits unused" in out and "refund acme pi_auto1 750" in out
     cli.cmd_billing_reversal(_ns(topup="pi_auto1", credits="750", reason="withdrawal"))
     assert w.available("acme") == 0
+
+
+# ---- mutation-coverage pins (P1218 round-2 mutation review survivors) ------------------------------------------------
+# Each test below reds when its named guard is broken (mutate the guard -> the test fails -> restore). They promote the
+# round-2 review's survivor probes into committed coverage; they change no money logic.
+
+def test_plan_withdraw_removes_only_the_refunded_proportion_not_the_whole_allotment(monkeypatch, capsys):
+    # MEDIUM (C36/C37): a PARTIAL refund removes only its proportional share of the period's allotment, never the whole
+    # remaining allotment. A quarter of the $99.00 price ($24.75 = 2,475c) removes 12,000 * 2,475 / 9,900 = 3,000 of
+    # the 12,000 plan credits and leaves 9,000. Reds under C36 (`credits = int(line.credits)`) and C37
+    # (`owner_refunded=int(line.credits)` to reconcile_plan): both remove all 12,000 and record owner_refunded 12,000.
+    from sigil.governor.billing_reversal import plan_ref
+    plan, fake = _seed_plan(monkeypatch)                                 # 12,000 plan credits, none used, $99.00
+    cli.cmd_billing_reversal(_pw(credits="2475"))                        # a quarter of the price refunded at Stripe
+    out = capsys.readouterr().out
+    assert _left(plan) == _ALLOT - 3_000                                 # 9,000 left: only the proportional share
+    assert "3000 plan credits removed" in out and "owner refund of 3000 credits" in out
+    led = BillingReversalLedger(cli.SpineStore(), owner_key=ensure_owner_keypair(),
+                                wallet=WalletRegistry(cli.SpineStore(), owner_key=ensure_owner_keypair()))
+    st = led.purchase("acme", plan_ref(_INV))
+    assert st.owner_refunded == 3_000 and st.removed == 3_000           # the proportional amount, not the allotment
+
