@@ -62,6 +62,34 @@ res["calls"] = len(calls)
 print(json.dumps(res))
 """
 
+# a capture of a pruned home holding two customer profiles, one of them removed after the listing and before its read
+# (the unit's own files are read under the writer lock; the rest of the home, the profiles included, after it)
+VANISH = """
+import json, sys
+from sigil import backup, config
+from sigil.backup import BackupError, create_backup
+from sigil.governor.identity import ensure_owner_keypair
+from sigil.platform.vault import owner_vault
+from sigil.ui import preferences_store as store
+store.write_prefs("cust_keep", {"legal_entity_name": "Keep SARL"}, now=1.0)
+store.write_prefs("cust_gone", {"legal_entity_name": "Gone SARL"}, now=1.0)
+gone = config.CUSTOMER_PREFERENCES_DIR / store._name("cust_gone")
+real = backup._spine_files
+def listing(*a, **k):
+    res = real(*a, **k)
+    if gone.exists():
+        gone.unlink()
+    return res
+backup._spine_files = listing
+try:
+    res = create_backup(sys.argv[1], "pw-test-only", home=config.SIGIL_HOME, vault=owner_vault(),
+                        owner_key=ensure_owner_keypair())
+except Exception as e:  # noqa: BLE001 - reported, so the test names what failed
+    res = {"error": type(e).__name__ + ": " + str(e)}
+res["keep"], res["gone"] = store._name("cust_keep"), store._name("cust_gone")
+print(json.dumps(res))
+"""
+
 ROTATE = """
 import sys, time
 from sigil import config
@@ -174,6 +202,21 @@ def test_a_capture_that_never_settles_is_refused(pruned_home, tmp_path):
                                  SIGIL_SPINE_ARCHIVE_DIR=None).stdout.strip().splitlines()[-1])
     assert "kept changing" in res["error"] and res["calls"] == backup._CAPTURE_ATTEMPTS
     assert not dest.exists() and not dest.with_name(dest.name + ".tmp").exists()
+
+
+def test_a_profile_gone_before_its_read_is_left_out_of_a_pruned_capture(pruned_home, tmp_path):
+    """The pruned capture reads the rest of the home after the writer lock: a customer profile removed after the
+    listing and before its read is simply not in this backup — the backup succeeds and verifies, and the profile still
+    there is in it — never a crash."""
+    home = _copy(pruned_home, tmp_path)
+    dest = tmp_path / "bk.sglbk"
+    res = json.loads(run_in_home(home, VANISH, str(dest), SIGIL_PRUNED_RESTORE="1",
+                                 SIGIL_SPINE_ARCHIVE_DIR=None).stdout.strip().splitlines()[-1])
+    assert "error" not in res, res
+    body = open_backup(dest)
+    files, hashes = set(body["files"]), set(body["manifest"]["file_sha256"])
+    assert f"customer_preferences/{res['keep']}" in files and f"customer_preferences/{res['gone']}" not in files
+    assert files == hashes and body["manifest"]["prune_unit"]["verified_at_capture"] is True
 
 
 # ---- capture-time verification -------------------------------------------------------------------------------------

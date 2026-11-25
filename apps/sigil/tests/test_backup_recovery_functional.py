@@ -298,6 +298,85 @@ def test_customer_preferences_restored_owner_only(tmp_path):
     assert stat.S_IMODE((new / "qdrant" / "collection" / "storage.bin").stat().st_mode) == 0o644
 
 
+def test_a_profile_save_in_flight_never_fails_the_backup(tmp_path, monkeypatch):
+    """The cockpit saves a customer's General tab and serves the in-browser backup in the same process, so a backup
+    can list the home while a save is in flight. The interleaving is pinned: the save's temp file is written and
+    fsynced, the backup lists the home (the temp file is on disk), then the save renames it into place, then the
+    backup reads what it listed. The temp file is never state, so it is never listed: the backup succeeds and carries
+    the profile the save left. (It used to list the temp file and then fail the whole backup when it was gone.)"""
+    import threading
+
+    from sigil import config
+    from sigil.ui import preferences_store
+    src, v, owner, _w = _make_full_source(tmp_path)
+    monkeypatch.setattr(config, "CUSTOMER_PREFERENCES_DIR", src / "customer_preferences")
+    unit = src / "customer_preferences"
+    held, listed = threading.Event(), threading.Event()
+    real_replace, real_list = os.replace, backup._spine_files
+    seen, temps_at_listing = [], []
+
+    def replace(a, b):
+        if threading.current_thread().name == "saver":
+            held.set()
+            listed.wait(60)
+        return real_replace(a, b)
+
+    saver = threading.Thread(name="saver", target=lambda: preferences_store.write_prefs(
+        _PREFS_USER, {"legal_entity_name": "Saved SARL"}, now=2.0))
+
+    def spine_files(home, **kw):
+        out = real_list(home, **kw)
+        seen.extend(rel for _f, rel in out)
+        temps_at_listing.extend(p.name for p in unit.iterdir() if p.name.startswith("."))
+        listed.set()
+        saver.join(60)                          # the save lands before the backup reads a byte
+        return out
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(backup, "_spine_files", spine_files)
+    saver.start()
+    assert held.wait(60)
+    dest = tmp_path / "bk.sglbk"
+    create_backup(dest, PW, home=src, vault=v, owner_key=owner)
+    assert not saver.is_alive()
+    assert temps_at_listing and all(n.endswith(".tmp") for n in temps_at_listing)   # the save WAS in flight
+    rel = f"customer_preferences/{_prefs_name(_PREFS_USER)}"
+    assert [r for r in seen if r.startswith("customer_preferences/")] == [rel]       # its temp file never listed
+    stored = json.loads(base64.b64decode(_decrypt_body(dest)["files"][rel]))
+    assert stored["prefs"] == {**preferences_store.DEFAULTS, **_PREFS, "legal_entity_name": "Saved SARL"}
+
+
+def test_a_profile_file_gone_before_its_read_is_left_out_not_a_crash(tmp_path, monkeypatch):
+    """A profile file the backup listed but that is gone by the time it is read (removed since the listing) is simply
+    not in this backup: the backup succeeds, restores, and every other item is in it. Only that unit is read that way —
+    any other listed file that is gone still fails the backup, as before."""
+    src, v, owner, _w = _make_full_source(tmp_path)
+    rel = f"customer_preferences/{_prefs_name(_PREFS_USER)}"
+    real_list = backup._spine_files
+
+    def listing_then_removed(gone):
+        def spine_files(home, **kw):
+            out = real_list(home, **kw)
+            assert any(r == gone for _f, r in out)
+            (home / gone).unlink()                  # removed after the listing, before its read
+            return out
+        return spine_files
+
+    monkeypatch.setattr(backup, "_spine_files", listing_then_removed(rel))
+    dest = tmp_path / "bk.sglbk"
+    create_backup(dest, PW, home=src, vault=v, owner_key=owner)
+    body = _decrypt_body(dest)
+    assert rel not in body["files"] and rel not in body["manifest"]["file_sha256"]
+    assert {"spine/head.json", "budgets.json", "graph/current/kuzu.db"} <= set(body["files"])
+    new, _rv, _out = _restore(tmp_path, dest)
+    assert not (new / rel).exists() and (new / "budgets.json").is_file()
+    # any other file: gone before its read still fails the backup
+    other_src, other_v, other_owner, _ow = _make_full_source(tmp_path / "other")
+    monkeypatch.setattr(backup, "_spine_files", listing_then_removed("budgets.json"))
+    with pytest.raises(FileNotFoundError):
+        create_backup(tmp_path / "bk2.sglbk", PW, home=other_src, vault=other_v, owner_key=other_owner)
+
+
 # ---------------------------------------------------------------------------------------------------
 # PER-ITEM NEGATIVE CONTROL: drop one covered item FROM THE BACKUP → its functional check fails.
 # ---------------------------------------------------------------------------------------------------

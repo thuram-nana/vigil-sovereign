@@ -141,6 +141,12 @@ _STATE_DIRS = ("qdrant", "graph",
                "customer_preferences")
 # State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
 _PRIVATE_STATE_DIRS = ("customer_preferences",)
+# State subtrees a live process writes by temp-file-then-rename (spine.atomicio.atomic_write_text) while a backup may
+# be running — the customer profile is saved from the cockpit, the very process that also serves the in-browser backup.
+# An atomic write's temp file (spine.consistent_copy.transient) is never state: it exists only while that save is in
+# flight, so it is never captured; and a file of such a unit that is gone by the time it is read (renamed over or
+# removed since the listing) is simply not in this backup — never a crash that fails the whole backup.
+_ATOMIC_STATE_DIRS = ("customer_preferences",)
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -314,8 +320,8 @@ def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Pat
     out: list[tuple[Path, str]] = []
     spine = home / "spine"
     skip_dirs = []
+    from .spine.consistent_copy import transient
     if archive is not None:
-        from .spine.consistent_copy import transient
         skip_dirs = [(spine / "archive").resolve(), archive.resolve()]
     if spine.is_dir():
         for p in sorted(spine.rglob("*")):
@@ -351,8 +357,22 @@ def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Pat
             for p in sorted(d.rglob("*")):
                 if p.is_symlink() or not p.is_file() or p.name.endswith(".lock"):
                     continue
+                if state in _ATOMIC_STATE_DIRS and transient(p.name):    # a save in flight: never state
+                    continue
                 out.append((p, p.relative_to(home).as_posix()))
     return out
+
+
+def _read_listed(f: Path, rel: str) -> "bytes | None":
+    """The bytes of a file :func:`_spine_files` listed — or ``None`` for a file of an :data:`_ATOMIC_STATE_DIRS` unit
+    that is gone by the time it is read (a live save renamed over it or removed it since the listing): it is not in
+    this backup. Any other file that cannot be read fails the backup, as before."""
+    try:
+        return f.read_bytes()
+    except FileNotFoundError:
+        if rel.partition("/")[0] in _ATOMIC_STATE_DIRS:
+            return None
+        raise
 
 
 def _pruned_unit_digest(home: Path, archive: Path) -> str:
@@ -419,7 +439,12 @@ def _capture_pruned_unit(home: Path, work_parent: Path) -> "tuple[list[tuple[Pat
     else:
         raise BackupError("the spine kept changing during the backup (a concurrent sign or prune) — retry when it is "
                           "idle")
-    raw.update({rel: f.read_bytes() for f, rel in files if rel not in raw})
+    for f, rel in files:
+        if rel not in raw:
+            data = _read_listed(f, rel)
+            if data is not None:
+                raw[rel] = data
+    files = [(f, rel) for f, rel in files if rel in raw]      # a listed file gone before its read is not captured
     rep = _verify_captured_unit(raw, work_parent)
     if not rep.get("ok") or not rep.get("pruned"):
         why = failure_reason(rep)
@@ -486,7 +511,9 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     file_hashes: dict[str, str] = {}
     warden_rels: list[str] = []
     for f, rel in files:
-        raw = f.read_bytes() if raw_by_rel is None else raw_by_rel[rel]
+        raw = _read_listed(f, rel) if raw_by_rel is None else raw_by_rel[rel]
+        if raw is None:                                 # gone since the listing (see _read_listed): not captured
+            continue
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
         if rel.startswith("warden/"):
