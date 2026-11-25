@@ -35,7 +35,9 @@ process. That section is shared by every org, so what one org's token may make i
   * WRITES FOLD OUTSIDE IT: a write's folds (config, memberships, directory) run before the section is taken; on
     entry the records appended since the fold began are checked, and if any changed this org's state (a membership,
     org, SSO-config or directory record of this org, or an owner-key rotation) the fold is redone.
-  * BOUNDED HOLDS: inside, a request appends at most `ui.scim.MAX_RECORDS_PER_HOLD` (= 128) spine records per hold
+  * BOUNDED HOLDS: a group change's PLAN (its staged copy of the directory and every affected member's new role) is
+    computed with the section released (`_SharedSection.outside`, re-checked like a fold), so the section is held
+    only to append; inside, a request appends at most `ui.scim.MAX_RECORDS_PER_HOLD` (= 128) spine records per hold
     of the section; past that it releases the section between two members' changes (or two directory records),
     lets other requests run, and re-takes it — re-checking that nothing of this org changed meanwhile (else it
     stops with a retryable 503, every record so far landed in the safe order). A group change too large for one hold
@@ -610,6 +612,24 @@ class _SharedSection:
         self._enter()
         if tip is None or _org_state_changed(self.p.store, self.org_id, tip, self._member_ok):
             raise SectionLost("this organization's membership state changed while the request was paused")
+
+    def outside(self, fn):
+        """Run `fn` — pure computation over what the request folded (a group change's plan, `ui.scim._Req.outside`)
+        — with the section RELEASED, then re-take it; `SectionLost` (as `slice`) when it cannot be re-taken or this
+        org's state changed meanwhile, so a plan that is returned still holds. Work proportional to an org is never
+        done while holding the lock every org's membership change (and every spine append of the process) takes."""
+        from .scim import SectionLost
+        if self._flock is None:
+            return fn()
+        tip = _anchor(self.p.store)
+        self._exit()
+        try:
+            value = fn()
+        finally:
+            self._enter()
+        if tip is None or _org_state_changed(self.p.store, self.org_id, tip, self._member_ok):
+            raise SectionLost("this organization's state changed while the request was planning")
+        return value
 
     def close(self) -> None:
         self._exit()

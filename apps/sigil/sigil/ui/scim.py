@@ -75,6 +75,7 @@ FATAL-2: SOVEREIGN-side, imports NO `framework` / `strix` (`assert_no_offense()`
 """
 from __future__ import annotations
 
+import copy
 import functools
 import json
 import math
@@ -178,6 +179,9 @@ class _NoSection:
     def fold(self, fn):
         return fn()
 
+    def outside(self, fn):
+        return fn()
+
     def slice(self) -> None:
         return None
 
@@ -235,6 +239,11 @@ class _RequestOrgs(OrgRegistry):
             self._sorted = None
         elif self._sorted is not None:                     # a re-role keeps the order: update it in place
             self._sorted[self._pos[username]] = m
+
+    def granted_at(self, username: str) -> Optional[float]:
+        """The issued_at of `username`'s live membership grant in this request's org (None when it holds none)."""
+        m = self._mems.get(str(username or "")) if self._org is not None else None
+        return m.issued_at if m is not None else None
 
     def membership_role(self, username: str, org_id: str) -> Optional[str]:
         if org_id != self._oid:
@@ -705,6 +714,17 @@ class _Req:
             self.section.slice()
             self._hold_base = self.written()
 
+    def outside(self, fn):
+        """Run `fn` — PURE computation over the request's folded views (a group change's plan: the staged copy of the
+        directory and every affected member's new role, `_group_change`) — with the shared section RELEASED, then
+        re-take it (`section.outside`: `SectionLost` when it cannot be re-taken or this org's state changed meanwhile,
+        so the plan still holds once the section is back). A fresh hold begins after it. So no plan — over a group of
+        any size, or a pending job's whole window — is ever computed while holding the lock every org's membership
+        change takes; the section is held only to append."""
+        value = self.section.outside(fn)
+        self._hold_base = self.written()
+        return value
+
     def count_member_refs(self, n: int) -> None:
         """Count `n` more member references against the request's bound (`MAX_MEMBER_VALUES`, summed over every
         operation — a PATCH cannot multiply it by repeating an operation)."""
@@ -730,7 +750,6 @@ def _revoke(req: _Req, uid: str) -> None:
 
 
 _KEEP, _REVOKE = "keep", "revoke"
-_REROLE = "\x00rerole"                # a carried "re-role every member" mark (never a user id)
 
 
 def _target(req: _Req, uid: str, *, create: bool) -> str:
@@ -791,6 +810,10 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
     (directory first, then the grant): a failed grant leaves the member at the LOWER role it held (the fail-safe
     side), and the IdP's retry re-resolves every member it names, so the raise still lands.
 
+    PLANNED OUTSIDE THE SECTION: the staged copy, the change and every member's new role are computed with the shared
+    section RELEASED (`_Req.outside`), and the section is re-taken only once that plan is ready — re-checked for any
+    change of this org's state meanwhile — so the section is held to APPEND, never for work proportional to the org.
+
     BOUNDED HOLDS: the change is paced through the caller's section (`_Req.pace`), at most `MAX_RECORDS_PER_HOLD`
     records per hold, released only between two members' changes or two directory records. One that fits a single
     hold runs in one. A larger one (a rename that re-roles thousands of members, the delete of a large mapped group)
@@ -800,38 +823,40 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
     (`_resume_jobs`; `resume` is that job's end state when this call is its resumption).
 
     In a DEPROVISIONING request (`req.lower_only`) the raises are not applied: they are recorded in the group's
-    pending job (`touch`) for the org's next budgeted write. A group whose open job still has directory changes to land
+    pending job (`touch`, or — more than a job may list — `rerole` with the window `since` the deferring changes
+    began, `_job_from`) for the org's next budgeted write. A group whose open job still has directory changes to land
     (a budgeted change cut short) is not changed by such a request (`NeedsWriteBudget`); a job that only carries
     deferred raises is extended."""
     real = req.dir
-    carried: set = set()
-    if req.lower_only and resume is None and gid in real.jobs():
-        old = real.jobs()[gid]
-        scratch = req.dir = real.staged()
+
+    def plan() -> "tuple[Optional[dict], OrgDirectory, list]":
+        carried: Optional[dict] = None
+        if req.lower_only and resume is None and gid in real.jobs():
+            old = real.jobs()[gid]
+            scratch = req.dir = real.staged()
+            try:
+                _apply_job(req, gid, old)
+                pending = scratch.journaled()
+            except (_ScimFail, ScimError, DirectoryError):
+                pending = 1
+            finally:
+                req.dir = real
+            if pending:
+                raise NeedsWriteBudget("a pending change of this group must land before it is changed again")
+            carried = old
+        staged = req.dir = real.staged()
         try:
-            _apply_job(req, gid, old)
-            pending = scratch.journaled()
-        except (_ScimFail, ScimError, DirectoryError):
-            pending = 1
+            affected = change()
+            if resume is None and staged.authored_writes() > MAX_DIRECTORY_WRITES:   # refused WHOLE, nothing written
+                raise _ScimFail(400, f"one request may change at most {MAX_DIRECTORY_WRITES} directory records",
+                                "tooMany")
+            return carried, staged, [(uid, _target(req, uid, create=False)) for uid in sorted(affected)]
         finally:
             req.dir = real
-        if pending:
-            raise NeedsWriteBudget("a pending change of this group must land before it is changed again")
-        carried = set(old.get("touch", ()))
-        if old.get("rerole"):
-            carried.add(_REROLE)
-    staged = req.dir = real.staged()
-    try:
-        affected = change()
-        if resume is None and staged.authored_writes() > MAX_DIRECTORY_WRITES:   # refused WHOLE, nothing written
-            raise _ScimFail(400, f"one request may change at most {MAX_DIRECTORY_WRITES} directory records",
-                            "tooMany")
-        plan = [(uid, _target(req, uid, create=False)) for uid in sorted(affected)]
-    finally:
-        req.dir = real
-    lowering = [(uid, t) for uid, t in plan if _lowers(req, uid, t)]
+    carried, staged, targets = req.outside(plan)
+    lowering = [(uid, t) for uid, t in targets if _lowers(req, uid, t)]
     lowered = {uid for uid, _t in lowering}
-    raising = [(uid, t) for uid, t in plan if uid not in lowered and t != _KEEP]
+    raising = [(uid, t) for uid, t in targets if uid not in lowered and t != _KEEP]
     if req.lower_only and resume is not None:
         # a pending job resumed inside a DEPROVISIONING request: only its lowering steps; the directory commit and
         # the raises wait, with the job open, for the org's next budgeted write
@@ -840,7 +865,9 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
         return
     cost = 2 * len(lowering) + staged.journaled() + 2 * len(raising)
     job = resume
-    defer = req.lower_only and (bool(carried) or any(t != _REVOKE for _uid, t in raising))
+    carried_touch = set(carried.get("touch", ())) if carried is not None else set()
+    carried_rerole = bool(carried is not None and carried.get("rerole"))
+    defer = req.lower_only and (bool(carried_touch) or carried_rerole or any(t != _REVOKE for _uid, t in raising))
     if job is None and (defer or cost > req.room()):
         if cost <= MAX_RECORDS_PER_HOLD and not defer:
             req.pace(cost)                                     # a fresh hold takes it whole
@@ -848,9 +875,15 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
             # a durable pending job: it spans holds, or it carries raises a deprovisioning request may not land
             job = _job_spec(real, staged, gid)
             if defer:
-                touch = carried | {uid for uid, t in raising if t != _REVOKE}
-                if _REROLE in touch or len(touch) > _scim_dir.MAX_JOB_MEMBERS:
-                    job["rerole"] = True       # too many to list: the next budgeted write re-roles every member
+                touch = carried_touch | {uid for uid, t in raising if t != _REVOKE}
+                if carried_rerole or len(touch) > _scim_dir.MAX_JOB_MEMBERS:
+                    # too many to list: the job names its WINDOW instead — the users whose edge of this group a
+                    # deferring change wrote since it began (this change's removals, and the carried job's) — plus
+                    # the users an earlier, listed job carried; never every member of the org
+                    job["rerole"] = True
+                    job["since"] = _rerole_since(carried if carried_rerole else None, staged, gid)
+                    if carried_touch:
+                        job["touch"] = sorted(carried_touch)
                 else:
                     job["touch"] = sorted(touch)
             req.pace(1)
@@ -863,6 +896,16 @@ def _group_change(req: _Req, change: "Callable[[], set]", *, gid: str, resume: O
     if job is not None and not defer:
         req.pace(1)
         real.finish_job(gid, now=req.at())
+
+
+def _rerole_since(carried: Optional[dict], staged: OrgDirectory, gid: str) -> float:
+    """The window start of a re-role job (`_job_from`): the earliest issued_at among the edge records of group `gid`
+    this change journaled (its removed / deleted members), or the carried re-role job's own window start when that is
+    earlier — so the window covers every deferring change of the job. 0.0 (the group's whole history: no deferred
+    raise is ever lost) when neither is known."""
+    starts = [at for at in (staged.journaled_edges_from(gid), carried.get("since") if carried else None)
+              if isinstance(at, float)]
+    return min(starts) if starts else 0.0
 
 
 def _job_spec(real: OrgDirectory, staged: OrgDirectory, gid: str) -> dict:
@@ -885,10 +928,23 @@ def _job_spec(real: OrgDirectory, staged: OrgDirectory, gid: str) -> dict:
 
 def _apply_job(req: _Req, gid: str, job: dict) -> set:
     """Re-stage a pending job's end state onto `req.dir` (a staged copy of the directory as it stands now); returns
-    EVERY member before and after, so each one is re-resolved (what is already in step costs nothing)."""
-    touch = set(job.get("touch", ()))                 # users a deprovisioning request left to a budgeted write
-    if job.get("rerole"):                             # ... more than a job can list: every member of the org
-        touch |= {u.id for u in req.dir.users()}
+    every member whose role the job may move, so each one is re-resolved (what is already in step costs nothing).
+
+    The deferred RAISES a job carries — its listed `touch` users, and for a `rerole` job its WINDOW: the users whose
+    edge of this group was written since `since` (`OrgDirectory.edge_users_since`: exactly the members the deferring
+    requests removed from, or deleted with, the group — never the rest of the org, so a member no deferring change
+    touched, e.g. one the owner lowered by hand on the Team screen, is left as the owner set it) — are RAISE-ONLY: a
+    deprovisioning (`lower_only`) resume applies none of them, so it does not resolve them at all. They wait, with the
+    job open, for the org's next BUDGETED write or sign-in. Of them, a member whose LIVE grant is newer than the job
+    record is left untouched too: a change made after the job opened (an owner hand-change) is not reverted by it."""
+    touch: set = set()
+    if not req.lower_only:
+        touch = set(job.get("touch", ()))             # users a deprovisioning request left to a budgeted write
+        if job.get("rerole"):                         # ... more than a job can list: its window names them
+            touch |= req.dir.edge_users_since(gid, float(job.get("since", 0.0)))
+        if touch:
+            job_at = req.dir.job_issued_at(gid)
+            touch = {uid for uid in touch if (req.orgs.granted_at(uid) or 0.0) <= job_at}
     if job.get("delete"):
         return set(req.dir.delete_group(gid, now=req.at())) | touch
     before = set(req.dir.members(gid)) | touch
@@ -911,8 +967,15 @@ def _resume_jobs(req: _Req) -> None:
     higher role."""
     for gid, job in req.dir.jobs().items():
         try:
-            if not job.get("delete") and req.dir.group(gid) is None:
+            group_gone = req.dir.group(gid) is None
+            if not job.get("delete") and group_gone:
                 raise _ScimFail(404, "the pending job's group does not exist")
+            if req.lower_only and job.get("delete") and group_gone:
+                # the delete already landed (its group is gone), so only the deferred RAISES (touch / rerole) remain —
+                # which a deprovisioning request applies none of. Skipping it is a no-op for the spine and the job
+                # state (exactly what a `lower_only` resume of it does), and it spares every budget-exempt request a
+                # staged copy of the org while the job is open. The next budgeted write / sign-in lands it.
+                continue
             _group_change(req, functools.partial(_apply_job, req, gid, job), gid=gid, resume=job)
         except (_ScimFail, ScimError, DirectoryError):
             req.pace(1)
@@ -971,7 +1034,7 @@ def _user_resource(req: _Req, u: DirectoryUser) -> dict:
         out["displayName"] = u.display_name
     for k in ("name", "emails"):
         if u.profile.get(k):
-            out[k] = u.profile[k]
+            out[k] = copy.deepcopy(u.profile[k])     # never a reference into the directory's (shared) entities
     out["groups"] = [{"value": g.id, "display": g.display_name, "type": "direct"} for g in req.dir.groups_of(u.id)]
     role = req.role(u.id) if u.active else None
     out["roles"] = [{"value": role}] if role else []

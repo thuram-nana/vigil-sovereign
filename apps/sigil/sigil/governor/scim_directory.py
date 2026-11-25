@@ -246,16 +246,29 @@ def _group_from(org_id: str, rid: str, data: dict, at: float) -> Optional[Direct
         return None
 
 
+def _job_since(data: dict) -> "Optional[float]":
+    """A job's re-role window start (`since`, a finite issued_at >= 0), 0.0 when absent, None when malformed."""
+    since = data.get("since", 0.0)
+    if isinstance(since, bool) or not isinstance(since, (int, float)) or not math.isfinite(since) or since < 0:
+        return None
+    return float(since)
+
+
 def _job_from(data: object) -> Optional[dict]:
     """A pending group job's END STATE, normalized, or None for a malformed record (inert): {"delete": True}, or
     {"delete": False, "name", "ext"} plus either "members" (the final member list) or "add" / "remove" (the member
     delta against the group as it stands) — and, optionally, "touch": users whose role a deprovisioning request left
-    to a budgeted write (re-resolved when the job is finished), or "rerole": True when they were more than a job may
-    list (`MAX_JOB_MEMBERS`) — then EVERY member of the org is re-resolved when the job is finished."""
+    to a budgeted write (re-resolved when the job is finished), and/or "rerole": True when they were more than a job
+    may list (`MAX_JOB_MEMBERS`) — then every user whose membership EDGE of the job's group was written at or after
+    the job's window start "since" (an issued_at; 0.0 when absent) is re-resolved when the job is finished: exactly
+    the members the deferring requests removed from (or deleted with) the group, never the rest of the org."""
     if not isinstance(data, dict):
         return None
     rerole = data.get("rerole")
     if rerole is not None and rerole is not True:
+        return None
+    since = _job_since(data) if rerole else None
+    if rerole and since is None:
         return None
     if data.get("delete") is True:
         touch = data.get("touch")
@@ -267,6 +280,7 @@ def _job_from(data: object) -> Optional[dict]:
             out["touch"] = sorted(set(touch))
         if rerole:
             out["rerole"] = True
+            out["since"] = since
         return out
     try:
         out = {"delete": False, "name": _clean_str(data.get("name"), "name", required=True),
@@ -285,6 +299,7 @@ def _job_from(data: object) -> Optional[dict]:
         return None
     if rerole:
         out["rerole"] = True
+        out["since"] = since
     return out
 
 
@@ -303,6 +318,7 @@ class OrgDirectory:
         self._edges: "set[tuple[str, str]]" = edges
         self._hw: "dict[tuple[str, str], float]" = highwater
         self._jobs: "dict[str, dict]" = dict(jobs or {})
+        self._dir_writes = 0               # directory records (all but job records) written through this view
         self._index()
 
     def _index(self) -> None:
@@ -400,6 +416,20 @@ class OrgDirectory:
         """The pending group jobs, {group id: end state} (see the module docstring)."""
         return {g: dict(j) for g, j in sorted(self._jobs.items())}
 
+    def job_issued_at(self, group_id: str) -> float:
+        """The issued_at of group `group_id`'s pending job record (0.0 when none) — the moment the job was last
+        (re)opened. A resume leaves a deferred member whose LIVE membership grant is newer than this untouched, so an
+        owner hand-change made after the job is not reverted by it."""
+        return float(self._hw.get(("job", str(group_id or "")), 0.0))
+
+    def edge_users_since(self, group_id: str, since: float) -> "set[str]":
+        """The ids of the users whose membership EDGE of group `group_id` (added or removed) was last written at or
+        after `since` — what a re-role job's window names (`_job_from`): the members a deferring request removed from,
+        or deleted with, the group. A scan of this view's high-water map (no fold, no lock)."""
+        prefix = f"{group_id}|"
+        return {rid[len(prefix):] for (rtype, rid), at in self._hw.items()
+                if rtype == "member" and at >= since and rid.startswith(prefix)}
+
     # -- writes (owner-signed; in-memory view kept in step) --------------------------------------------------
     def _fresh(self, rtype: str, rid: str, now: float) -> float:
         hw = self._hw.get((rtype, rid), NO_HIGHWATER)
@@ -410,6 +440,8 @@ class OrgDirectory:
         at = self._fresh(rtype, rid, now)
         seq = self._reg._append(self.org_id, rtype, rid, state, data, issued_at=at)
         self._hw[(rtype, rid)] = at
+        if rtype != "job":
+            self._dir_writes += 1
         return seq
 
     def put_user(self, user_id: str, *, user_name: str, external_id: str = "", display_name: str = "",
@@ -524,26 +556,39 @@ class OrgDirectory:
 
     def commit(self, staged: "OrgDirectory", *, before_each=None) -> None:
         """Append, in order, every record `staged` (a `staged()` copy of THIS view, with no directory write here
-        since — a pending-job record is not one) journaled — each with the issued_at it was stamped with — then adopt
-        its state. `before_each()` (optional) is called before each record is appended."""
+        since — a pending-job record is not one) journaled — each with the issued_at it was stamped with — and fold
+        each one into this view as it lands (`_fold_entity`), so this view ends exactly where `staged` was. The cost is
+        the journaled records, never a copy of the org (a commit runs inside the shared membership section).
+        `before_each()` (optional) is called before each record is appended."""
         journal = staged._reg
-        if not isinstance(journal, _Journal) or journal.origin is not self \
-                or _without_jobs(journal.base_hw) != _without_jobs(self._hw):
+        if not isinstance(journal, _Journal) or journal.origin is not self or journal.base_writes != self._dir_writes:
             raise DirectoryError("a staged directory change commits only onto the unchanged view it was staged from")
         for org_id, rtype, rid, state, data, at in journal.records:
             if before_each is not None:
                 before_each()
             self._reg._append(org_id, rtype, rid, state, data, issued_at=at)
             self._hw[(rtype, rid)] = at
-        self._users, self._groups, self._edges = dict(staged._users), dict(staged._groups), set(staged._edges)
-        self._index()
+            if rtype != "job":
+                self._dir_writes += 1
+            _fold_entity(self.org_id, rtype, rid, state, data, at, users=self._users, groups=self._groups,
+                         edges=self._edges, jobs=self._jobs, by_group=self._by_group, by_user=self._by_user)
         journal.records = []
-        journal.base_hw = dict(self._hw)
+        journal.base_writes = self._dir_writes
 
     def journaled(self) -> int:
         """For a `staged()` copy: how many records `commit` would append (0 for a view that is not staged)."""
         journal = self._reg
         return len(journal.records) if isinstance(journal, _Journal) else 0
+
+    def journaled_edges_from(self, group_id: str) -> Optional[float]:
+        """For a `staged()` copy: the earliest issued_at among the membership-edge records of group `group_id` it has
+        journaled (a re-role job's window start, `ui.scim`), or None when it journaled none (or is not staged)."""
+        journal = self._reg
+        if not isinstance(journal, _Journal):
+            return None
+        prefix = f"{group_id}|"
+        ats = [at for _org, rtype, rid, _st, _d, at in journal.records if rtype == "member" and rid.startswith(prefix)]
+        return min(ats) if ats else None
 
     def authored_writes(self) -> int:
         """For a `staged()` copy: how many of the records it has journaled AUTHOR state — every record except the
@@ -571,17 +616,13 @@ class _Journal:
 
     def __init__(self, base: "ScimDirectoryRegistry", origin: OrgDirectory) -> None:
         self.base, self.origin = base, origin
-        self.base_hw = dict(origin._hw)
+        self.base_writes = origin._dir_writes          # the origin's directory writes when this was staged
         self.records: "list[tuple]" = []
 
     def _append(self, org_id: str, rtype: str, rid: str, state: str, data: dict, *, issued_at: float) -> int:
         self.base._check_record(org_id, rtype, rid, state)
         self.records.append((org_id, rtype, rid, state, dict(data), float(issued_at)))
         return 0
-
-
-def _without_jobs(hw: dict) -> dict:
-    return {k: v for k, v in hw.items() if k[0] != "job"}
 
 
 def _user_data(u: DirectoryUser) -> dict:
@@ -592,64 +633,141 @@ def _user_data(u: DirectoryUser) -> dict:
     return data
 
 
-def _directory_step(r, resolver, state: dict, data: dict, hw: dict) -> None:
-    """Fold ONE record into one org's (state, data, hw) — the loop body of `ScimDirectoryRegistry.directory`, shared by
-    its full fold and the cached one (the caller has matched the org)."""
+def _directory_accept(r, resolver, hw: dict) -> "Optional[tuple[str, str, str, dict, float]]":
+    """The (rtype, rid, state, data, issued_at) of record `r` when it is a well-formed, owner-signed directory record
+    that beats its key's high-water in `hw` (which it then raises), else None (inert: unsigned / forged / wrong-epoch
+    key / malformed / a replay or stale re-append). The caller has matched the org."""
     p = r.payload
     if not isinstance(p, dict) or p.get("signal") != SCIM_DIRECTORY_SIGNAL:
-        return
+        return None
     rtype, rid, st = p.get("rtype"), p.get("rid"), p.get("state")
     if rtype not in RTYPES or st not in _STATES or not isinstance(rid, str) or not _id_ok(rtype, rid):
-        return
+        return None
     if not verify_signed(p, _DIR_CORE, resolver.at(r.seq)):
-        return                                         # unsigned / forged / wrong-epoch key → inert
+        return None                                    # unsigned / forged / wrong-epoch key → inert
     at = as_issued_at(p.get("issued_at"))
     key = (rtype, rid)
     if at <= hw.get(key, NO_HIGHWATER):
-        return                                         # replay / stale re-append → refused
+        return None                                    # replay / stale re-append → refused
     hw[key] = at
-    state[key] = st
     d = p.get("data")
-    data[key] = (d if isinstance(d, dict) else {}, at)
+    return rtype, rid, st, (d if isinstance(d, dict) else {}), at
 
 
-def _materialize(oid: str, state: dict, data: dict, hw: dict) -> tuple:
-    """One org's folded (state, data, hw) as FRESH (users, groups, edges, highwater, jobs) — never a reference into
-    the fold's state (an `OrgDirectory` is mutated by its own writes)."""
+def _directory_step(r, resolver, state: dict, data: dict, hw: dict) -> None:
+    """Fold ONE record into one org's (state, data, hw) — the loop body of `ScimDirectoryRegistry.directory`'s full
+    fold (the caller has matched the org)."""
+    got = _directory_accept(r, resolver, hw)
+    if got is not None:
+        rtype, rid, st, d, at = got
+        state[(rtype, rid)] = st
+        data[(rtype, rid)] = (d, at)
+
+
+def _fold_entity(oid: str, rtype: str, rid: str, st: str, d: dict, at: float, *, users: dict, groups: dict,
+                 edges: set, jobs: dict, by_group: Optional[dict] = None, by_user: Optional[dict] = None) -> None:
+    """Fold the effect of ONE accepted record of key (rtype, rid) into one org's parsed entities, in place: the key's
+    entity is replaced by what this record makes of it (removed when it is deleted or does not parse). The entity of a
+    key depends only on the LAST accepted record of that key, so folding every accepted record in order through this
+    ends exactly where `_parse_active` over the final (state, data) does — the incremental form of that parse, used by
+    the cached fold (O(1) per record) and by `OrgDirectory.commit` (O(the records committed)). `by_group` / `by_user`
+    (an `OrgDirectory`'s edge index), when given, are kept in step."""
+    if rtype == "user":
+        users.pop(rid, None)
+        u = _user_from(oid, rid, d, at) if st == "active" else None
+        if u is not None:
+            users[rid] = u
+    elif rtype == "group":
+        groups.pop(rid, None)
+        g = _group_from(oid, rid, d, at) if st == "active" else None
+        if g is not None:
+            groups[rid] = g
+    elif rtype == "job":
+        jobs.pop(rid, None)
+        j = _job_from(d) if st == "active" else None
+        if j is not None:
+            jobs[rid] = j
+    else:
+        m = _EDGE_ID_RE.fullmatch(rid)
+        if not m:
+            return
+        g_id, u_id = m.group(1), m.group(2)
+        if st == "active":
+            edges.add((g_id, u_id))
+            if by_group is not None and by_user is not None:
+                by_group.setdefault(g_id, set()).add(u_id)
+                by_user.setdefault(u_id, set()).add(g_id)
+        else:
+            edges.discard((g_id, u_id))
+            if by_group is not None and by_user is not None:
+                by_group.get(g_id, set()).discard(u_id)
+                by_user.get(u_id, set()).discard(g_id)
+
+
+def _parse_active(oid: str, state: dict, data: dict) -> tuple:
+    """One org's folded (state, data) as FRESH (users, groups, edges, jobs): the per-record parse of the ACTIVE
+    records. Never a reference into the fold's state."""
     users: dict = {}
     groups: dict = {}
     edges: set = set()
     jobs: dict = {}
     for (rtype, rid), st in state.items():
-        if st != "active":
-            continue
-        d, at = data[(rtype, rid)]
-        if rtype == "job":
-            j = _job_from(d)
-            if j is not None:
-                jobs[rid] = j
-        elif rtype == "user":
-            u = _user_from(oid, rid, d, at)
-            if u is not None:
-                users[rid] = u
-        elif rtype == "group":
-            g = _group_from(oid, rid, d, at)
-            if g is not None:
-                groups[rid] = g
-        else:
-            m = _EDGE_ID_RE.fullmatch(rid)
-            if m:
-                edges.add((m.group(1), m.group(2)))
+        if st == "active":
+            d, at = data[(rtype, rid)]
+            _fold_entity(oid, rtype, rid, st, d, at, users=users, groups=groups, edges=edges, jobs=jobs)
+    return users, groups, edges, jobs
+
+
+def _materialize(oid: str, state: dict, data: dict, hw: dict) -> tuple:
+    """One org's folded (state, data, hw) as FRESH (users, groups, edges, highwater, jobs) — never a reference into
+    the fold's state (an `OrgDirectory` is mutated by its own writes)."""
+    users, groups, edges, jobs = _parse_active(oid, state, data)
     return users, groups, edges, dict(hw), jobs
 
 
+def _copy_job(j: dict) -> dict:
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in j.items()}
+
+
+class _OrgFold:
+    """ONE org's cached directory fold, kept PARSED: the high-water map plus the entities (`_fold_entity`), updated
+    record by record — so a read costs a copy of the containers, never a re-parse of the org."""
+
+    __slots__ = ("hw", "users", "groups", "edges", "jobs")
+
+    def __init__(self) -> None:
+        self.hw: "dict[tuple[str, str], float]" = {}
+        self.users: "dict[str, DirectoryUser]" = {}
+        self.groups: "dict[str, DirectoryGroup]" = {}
+        self.edges: "set[tuple[str, str]]" = set()
+        self.jobs: "dict[str, dict]" = {}
+
+    def read(self) -> tuple:
+        """FRESH (users, groups, edges, highwater, jobs) containers (the entities themselves are immutable values;
+        a job's lists are copied) — never a reference into the fold, which later reads extend in place."""
+        return (dict(self.users), dict(self.groups), set(self.edges), dict(self.hw),
+                {g: _copy_job(j) for g, j in self.jobs.items()})
+
+
 class _DirectoryView:
-    """The cached directory fold of EVERY org: org id -> (state, data, hw), exactly what `directory` folds for it."""
+    """The cached directory fold of EVERY org: org id -> its parsed fold (`_OrgFold`) — exactly what `directory` folds
+    for it. Every field folds deterministically from the records, so the S0d rebuild-and-compare audit
+    (`FoldCache.audit`) compares it whole."""
 
     __slots__ = ("orgs",)
 
     def __init__(self) -> None:
-        self.orgs: "dict[str, tuple[dict, dict, dict]]" = {}
+        self.orgs: "dict[str, _OrgFold]" = {}
+
+
+_EMPTY_FOLD = _OrgFold()
+
+
+def _read_cached(view: _DirectoryView, oid: str) -> tuple:
+    """ONE org's directory from the cached fold `view` (runs under the fold cache's entry lock, which every org's
+    directory read takes): a copy of the org's already-parsed containers — O(the org's containers), never a re-parse,
+    and nothing of any other org."""
+    return view.orgs.get(oid, _EMPTY_FOLD).read()
 
 
 def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
@@ -661,8 +779,10 @@ def _directory_cache_step(view: _DirectoryView, r, resolver) -> None:
         return
     folded = view.orgs.get(oid)
     if folded is None:
-        folded = view.orgs[oid] = ({}, {}, {})
-    _directory_step(r, resolver, *folded)
+        folded = view.orgs[oid] = _OrgFold()
+    got = _directory_accept(r, resolver, folded.hw)
+    if got is not None:
+        _fold_entity(oid, *got, users=folded.users, groups=folded.groups, edges=folded.edges, jobs=folded.jobs)
 
 
 _DIRECTORY_FOLD = FoldCache("governor.scim_directory", step=_directory_cache_step)
@@ -706,7 +826,7 @@ class ScimDirectoryRegistry:
         if self.cached:
             hit = cached_read(_DIRECTORY_FOLD, self.store, trusted_pubkey=self.trusted_pubkey,
                               seed=lambda snap: (_DirectoryView(), -1), live_window=True, force=True,
-                              reader=lambda v: _materialize(oid, *v.orgs.get(oid, ({}, {}, {}))))
+                              reader=lambda v: _read_cached(v, oid))
             if hit is not _UNCACHED:
                 users, groups, edges, cached_hw, jobs = hit
                 return OrgDirectory(self, oid, users=users, groups=groups, edges=edges, highwater=cached_hw,

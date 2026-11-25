@@ -79,6 +79,19 @@ def _acs(stack, org: str, b64: str, ip: str):
     return sso_provision.sso_saml_acs(build_provisioner(stack.store()), org, b64, request_id="_req1", ip=ip)
 
 
+def _assert_rerole_job(stack, gid: str, *, since_after: float, touch=None) -> dict:
+    """The org's only open job is group `gid`'s DELETE carrying the re-role mark, whose window starts with the
+    deferring request (`since` >= `since_after`, never in the future) — plus the listed `touch` users, when given."""
+    jobs = _jobs(stack, ORG_A)
+    job = jobs.get(gid) or {}
+    want = {"delete": True, "rerole": True, "since": job.get("since")}
+    if touch is not None:
+        want["touch"] = sorted(touch)
+    assert jobs == {gid: want}, jobs
+    assert isinstance(job["since"], float) and since_after <= job["since"] <= time.time(), (since_after, job)
+    return job
+
+
 # =====================================================================================================================
 # 1. one org's share of the SSO work bound; the replay ledger's spend is O(1) and its reaping is outside the bound
 # =====================================================================================================================
@@ -126,31 +139,47 @@ def _fill(led, scope: str, bucket: int, n: int) -> None:
         (d / f"{i:064x}").write_text(exp)
 
 
-def test_a_replay_spend_is_constant_time_and_the_reaping_is_bounded_per_call(tmp_path):
-    """A partition holding 30,000 live markers and 20,000 expired ones: a spend costs the same as in an empty one
-    (it reaps at most `_SPEND_REAP` itself), `maintain` reaps at most its limit per call, and replay protection is
-    intact (the spent id is refused)."""
+def test_a_replay_spend_is_constant_time_and_the_reaping_is_bounded_per_call(tmp_path, monkeypatch):
+    """A partition holding 30,000 live markers and 20,000 expired ones: a spend does a BOUNDED amount of filesystem
+    work — it reaps at most `_SPEND_REAP` expired markers itself plus its own temp file, so its unlinks per spend are
+    O(1), never O(partition) — and `maintain` reaps at most its limit per call; replay protection is intact. The
+    bounded-WORK assertion is the real O(1) guarantee and is robust on a loaded / ext4 host where wall time is not (a
+    partially reaped directory's `scandir` cost is a filesystem artefact, not the algorithm); a loose absolute wall
+    bound still catches a gross regression."""
     led = uisaml.SamlReplayLedger(tmp_path / "replay", max_outstanding=10 ** 6)
     now = 1_000_000_000.0
     live, dead = led._bucket_of(now + 24 * 3600), int(now // led._BUCKET_S) - 10
     _fill(led, "org", live, 30000)
     _fill(led, "org", dead, 20000)
     assert led.maintain("org", now=now, limit=1000) == 1000            # first call also builds the counts
+    unlinks = [0]
+    orig_unlink = uisaml.SamlReplayLedger._unlink
+
+    @staticmethod
+    def counting_unlink(path):
+        unlinks[0] += 1
+        return orig_unlink(path)
+    monkeypatch.setattr(uisaml.SamlReplayLedger, "_unlink", counting_unlink)
+    scans = [0]
+    orig_scan = uisaml.SamlReplayLedger._scan
+
+    def counting_scan(self, part, key):
+        scans[0] += 1
+        return orig_scan(self, part, key)
+    monkeypatch.setattr(uisaml.SamlReplayLedger, "_scan", counting_scan)
     t0 = time.time()
     for k in range(50):
+        unlinks[0] = 0
         assert led.try_spend(f"x{k}", now + 600, now=now, scope="org")
+        assert unlinks[0] <= led._SPEND_REAP + 1, (k, unlinks[0])      # O(1): <= _SPEND_REAP reaped + its own temp
     per_spend = (time.time() - t0) / 50
+    assert scans[0] == 0, scans                                        # ... and never a re-count of the partition
     part = led._partition("org")
     left_dead = sum(1 for _ in led._bucket_dir(part, dead).iterdir())
     assert left_dead == 20000 - 1000 - 50 * led._SPEND_REAP
-    empty = uisaml.SamlReplayLedger(tmp_path / "empty")
-    t0 = time.time()
-    for k in range(50):
-        assert empty.try_spend(f"x{k}", now + 600, now=now, scope="org")
-    baseline = (time.time() - t0) / 50
-    print(f"\nreplay spend: {per_spend * 1000:.2f} ms beside 50,000 markers vs {baseline * 1000:.2f} ms in an empty "
-          f"partition")
-    assert per_spend < max(3 * baseline, 0.02), (per_spend, baseline)
+    print(f"\nreplay spend: {per_spend * 1000:.2f} ms/spend beside 50,000 markers, "
+          f"<= {led._SPEND_REAP + 1} unlinks each")
+    assert per_spend < 1.0, per_spend                                  # a loose absolute bound: never seconds per spend
     assert led.try_spend("x0", now + 600, now=now + 1, scope="org") is False     # a replay is still refused
     while led.maintain("org", now=now, limit=5000):
         pass
@@ -335,11 +364,12 @@ def test_a_group_delete_deferring_more_raises_than_a_job_may_list_lowers_everyon
     for u in both:
         d.add_member(xg, u, now=time.time())
     _overdraw(stack, monkeypatch)
+    t0 = time.time()
     r = _scim(stack, ORG_A, "DELETE", f"/Groups/{xg}")
     assert r["status"] == 204, r
     roles = _roles(stack, ORG_A)
     assert {roles[u] for u in xonly} == {"viewer"} and {roles[u] for u in both} == {"viewer"}
-    assert _jobs(stack, ORG_A) == {xg: {"delete": True, "rerole": True}}
+    _assert_rerole_job(stack, xg, since_after=t0)
     _repay(monkeypatch)
     assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("z@acme.com", "00u-z"))["status"] == 201
     roles = _roles(stack, ORG_A)
@@ -359,11 +389,12 @@ def test_the_deferral_bound_at_its_real_value(stack, monkeypatch):
     for i, u in enumerate(eng):
         d.add_member(cg, u, now=t + i * 1e-4)
     _resign(stack, {"Contractors": "analyst", "Engineering": "org_admin"})
+    t0 = time.time()
     r = _scim(stack, ORG_A, "DELETE", f"/Groups/{cg}")
     assert r["status"] == 204, r
     roles = _roles(stack, ORG_A)
     assert {roles[x] for x in conly} == {"viewer"}
-    assert _jobs(stack, ORG_A) == {cg: {"delete": True, "rerole": True}}
+    _assert_rerole_job(stack, cg, since_after=t0)
     assert _scim(stack, ORG_A, "DELETE", f"/Groups/{cg}")["status"] == 404               # a retry: never a 400
     _repay(monkeypatch)                     # the ~4,100 records the DELETE appended are owed to the write budget
     assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("z@acme.com", "00u-z"))["status"] == 201
@@ -483,8 +514,9 @@ def test_CSRFLOCK_one_orgs_idp_failures_never_lock_another_orgs_sign_ins(stack, 
 def test_CSRFLOCK_over_the_edge_a_hostile_idp_never_locks_a_victim_out_of_another_org(stack, signed):
     """CSRFLOCK over the REAL edge (the rvH7 reviewer's probe, promoted): a victim lured to a hostile tenant's page is
     walked through five rounds of (start org A, org A's IdP auto-posts a garbage SAMLResponse with the fresh
-    RelayState). That locks the victim's address out of org A ONLY — its own start of org A is refused — while the victim's start
-    of its own org B still goes to org B's IdP (round 7 answered it '/#sso=err', locked across every org)."""
+    RelayState). That locks the victim's address out of org A ONLY — its own start of org A is refused — while the
+    victim's start of its own org B still goes to org B's IdP (round 7 answered it '/#sso=err', locked across every
+    org)."""
     stack.saml_org(ORG_A)                       # the hostile tenant (its IdP is the attacker's page)
     stack.saml_org(ORG_B)                       # the victim's own org
     _cookie, user = edge._saml_sign_in(stack, ORG_B, name_id="victim@beta.example")     # calm: the victim signs in
@@ -501,7 +533,7 @@ def test_CSRFLOCK_over_the_edge_a_hostile_idp_never_locks_a_victim_out_of_anothe
 
 
 @pytest.mark.parametrize("locked_ip,neighbour_ip", [
-    ("64:ff9b::198.51.100.7", "64:ff9b::198.51.100.8"),          # two IPv4 clients behind one NAT64 / SIIT front
+    ("64:ff9b::198.51.100.7", "64:ff9b::198.51.100.8"),          # two IPv4 clients behind one NAT64 front
     ("2001:db8:7:7::1", "2001:db8:7:7::2"),                      # two hosts of one shared IPv6 /64 (a LAN prefix)
 ])
 def test_CSRFLOCK_two_clients_behind_one_front_are_never_locked_together(stack, signed, locked_ip, neighbour_ip):
@@ -782,3 +814,448 @@ def test_a_spent_marker_outlives_its_accept_until_at_every_bucket_alignment(tmp_
     for now in (x - 600, x - 300, x - 1, x):
         led.maintain("o", now=now, limit=10 ** 6)
         assert led.try_spend("a", x, now=now, scope="o") is False, now
+
+
+# =====================================================================================================================
+# rvH7 round-8 regressions — BURST/DIRCPU, REROLE-HOLD, REROLE-SCOPE, and the three surviving round-7 mutation gaps
+# =====================================================================================================================
+def _count_user_parses(monkeypatch, org: str) -> list:
+    """Count the per-record USER parses (`scim_directory._user_from`) made for `org` — the O(org) work a directory read
+    used to redo on every read."""
+    n = [0]
+    orig = gdir._user_from
+
+    def counted(oid, rid, data, at):
+        if oid == org:
+            n[0] += 1
+        return orig(oid, rid, data, at)
+    monkeypatch.setattr(gdir, "_user_from", counted)
+    return n
+
+
+def test_BURST_a_cached_directory_read_parses_only_what_changed(stack, monkeypatch):
+    """BURST/DIRCPU, the root — the cached directory fold is kept PARSED, record by record: a repeated read of an
+    unchanged directory parses nothing, another org's write parses nothing of this org, and after this org's write of
+    ONE user record the next read parses exactly that record — never the org. (Round 7 re-parsed the org's WHOLE
+    directory on every read, under the fold cache's entry lock that every org's directory read takes; a memo keyed
+    by the org's version would still re-parse the whole org after each of its in-budget writes.)"""
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B, scim_token=TOKEN_B)
+    _seed(stack, ORG_A, 300, group="Admins", role="org_admin", prefix="a")
+    reg = ScimDirectoryRegistry(stack.store(), cached=True)
+    assert len(reg.directory(ORG_A).users()) == 300                          # warm
+    parses = _count_user_parses(monkeypatch, ORG_A)
+    for _ in range(3):
+        assert len(reg.directory(ORG_A).users()) == 300
+    assert parses[0] == 0, parses
+    assert _scim(stack, ORG_B, "POST", "/Users", _okta_user("x@beta.com", "00u-x"))["status"] == 201
+    assert len(ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A).users()) == 300
+    assert parses[0] == 0, parses                                             # B's write: nothing of A re-parsed
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("y@acme.com", "00u-y"))["status"] == 201
+    before = parses[0]
+    assert len(ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A).users()) == 301
+    assert parses[0] - before == 1, (before, parses)                          # ONE user record folded, not 301
+
+
+def test_BURST_the_parsed_fold_matches_a_full_fold_after_random_activity(stack):
+    """The incremental parsed fold is EXACTLY the full fold: after random directory activity (users, groups, edges,
+    jobs — created, rewritten, deleted, re-created; a replayed stale record; a signed record whose data does not
+    parse), read incrementally in between, the cached view equals a full fold of the spine, and the S0d
+    rebuild-and-compare audit matches."""
+    import random
+
+    from sigil.governor import fold_read
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    rng = random.Random(8)
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    users = [f"sso_{i:024x}" for i in range(10)]
+    groups = [f"grp_{i:024x}" for i in range(4)]
+    early = None
+    for step in range(240):
+        op = rng.choice(["put", "put", "del", "group", "delgroup", "add", "add", "rm", "job", "finish", "bad"])
+        u, g, t = rng.choice(users), rng.choice(groups), time.time()
+        if op == "put":
+            d.put_user(u, user_name=f"{u}@acme.example", display_name=f"n{step}", active=rng.random() < 0.8,
+                       selectors=[rng.choice(["Admins", "Staff"])], profile={"name": {"givenName": f"g{step}"}},
+                       now=t)
+        elif op == "del":
+            d.delete_user(u, now=t)
+        elif op == "group":
+            d.put_group(g, display_name=f"G{groups.index(g)}-{step % 3}", now=t)
+        elif op == "delgroup":
+            d.delete_group(g, now=t)
+        elif op == "add":
+            d.add_member(g, u, now=t)
+        elif op == "rm":
+            d.remove_member(g, u, now=t)
+        elif op == "job":
+            d.put_job(g, {"delete": True, "touch": [u], **({"rerole": True, "since": t} if step % 2 else {})},
+                      now=t)
+        elif op == "finish":
+            d.finish_job(g, now=t)
+        else:                                           # an owner-signed record whose data does not parse: inert
+            at = d._fresh("user", u, t)
+            d._reg._append(ORG_A, "user", u, "active", {"userName": ""}, issued_at=at)
+            d._hw[("user", u)] = at
+            d._users.pop(u, None)
+        if step == 20:
+            early = next(r for r in reversed(list(stack.store().iter_records()))
+                         if isinstance(r.payload, dict) and r.payload.get("signal") == gdir.SCIM_DIRECTORY_SIGNAL)
+        if step % 7 == 0:
+            ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)      # incremental catch-up in between
+    stack.store().append(kind=early.kind, source=early.source, actor=early.actor, payload=dict(early.payload))
+    cached = ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)
+    full = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    assert cached.users() == full.users() and cached.groups() == full.groups()
+    assert cached._edges == full._edges and cached.jobs() == full.jobs() and cached._hw == full._hw
+    assert {g: cached.members(g) for g in groups} == {g: full.members(g) for g in groups}
+    rep = fold_read.audit_with(lambda: ScimDirectoryRegistry(SpineStore(stack.spine), cached=True).directory(ORG_A))
+    assert [r["status"] for r in rep if r["fold"] == "governor.scim_directory"] == ["match"], rep
+
+
+def test_BURST_one_orgs_heavy_traffic_leaves_another_orgs_sign_in_burst_unrefused(stack, signed, monkeypatch):
+    """BURST/DIRCPU, the behaviour — a large directory-managed org A runs in-budget SCIM reads AND writes back to back
+    while another org B's burst of 16 sign-ins arrives at once: none of B's sign-ins is refused (round 7: every one of
+    A's reads re-parsed its whole directory under the shared entry lock, and B's burst — one slot of the SSO work
+    bound per org — turned that slowdown into 503s), and A's traffic parses only what it wrote (O(delta)), never its
+    directory."""
+    import os
+    monkeypatch.setattr(config, "SCIM_READS_PER_MIN", 10 ** 6)
+    monkeypatch.setattr(config, "SCIM_OPS_PER_MIN", 10 ** 6)
+    monkeypatch.setattr(config, "SSO_SIGNINS_PER_MIN", 10 ** 6)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A)
+    stack.saml_org(ORG_B)
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "fsync", lambda fd: None)
+        _ga, auids = _seed(stack, ORG_A, 2500, group="Admins", role="org_admin", prefix="a")
+    ScimDirectoryRegistry(stack.store(), cached=True).directory(ORG_A)         # warm
+    b = [_assertion_b64(stack, ORG_B, f"b{k}@beta.example") for k in range(16)]
+    parses = _count_user_parses(monkeypatch, ORG_A)
+    stop = threading.Event()
+    wrote = [0, 0]                                      # PATCH attempts (each writes at most one user record), 200s
+    a_status: dict = {}
+
+    def a_reads():
+        while not stop.is_set():
+            r = _scim(stack, ORG_A, "GET", "/Users?count=1", ip="203.0.113.77")
+            a_status[r["status"]] = a_status.get(r["status"], 0) + 1
+
+    def a_writes():
+        k = 0
+        while not stop.is_set():
+            wrote[0] += 1
+            r = _scim(stack, ORG_A, "PATCH", f"/Users/{auids[k % len(auids)]}", {"Operations": [
+                {"op": "replace", "path": "displayName", "value": f"renamed {k}"}]}, ip="203.0.113.78")
+            wrote[1] += r["status"] == 200
+            k += 1
+    a_threads = [threading.Thread(target=a_reads, daemon=True), threading.Thread(target=a_writes, daemon=True)]
+    for t in a_threads:
+        t.start()
+    time.sleep(0.5)
+    out: dict = {}
+
+    def one(k):
+        try:
+            _acs(stack, ORG_B, b[k], f"198.18.7.{k + 1}")
+            out[k] = "ok"
+        except ProvisionBusy:
+            out[k] = "503"
+        except Exception as e:  # noqa: BLE001
+            out[k] = type(e).__name__
+    burst = [threading.Thread(target=one, args=(k,)) for k in range(16)]
+    for t in burst:
+        t.start()
+    for t in burst:
+        t.join(120)
+    stop.set()
+    for t in a_threads:
+        t.join(60)
+    assert sorted(out.values()) == ["ok"] * 16, out                           # not one of B's sign-ins refused
+    assert a_status.get(200, 0) > 0 and wrote[1] > 0, (a_status, wrote)       # A really was busy meanwhile
+    # each of A's user writes is parsed twice (its own put_user, then once by the next read's catch-up)
+    assert parses[0] <= 2 * wrote[0] + 2, (parses, wrote)
+
+
+def _plan_work(monkeypatch) -> dict:
+    """Count the PLAN work of a group change / a pending job (`OrgDirectory.staged`, a re-role window scan, a group
+    member's `ui.scim._target`) — split by whether THIS thread held the shared membership section meanwhile."""
+    from sigil.ui import scim as uiscim
+    n = {"staged": 0, "window": 0, "target": 0, "staged_outside": 0, "window_outside": 0, "target_outside": [],
+         "user_target": 0}
+    orig_staged, orig_window, orig_target = gdir.OrgDirectory.staged, gdir.OrgDirectory.edge_users_since, \
+        uiscim._target
+
+    def staged(self):
+        n["staged" if provision.members_section_held() else "staged_outside"] += 1
+        return orig_staged(self)
+
+    def window(self, gid, since):
+        n["window" if provision.members_section_held() else "window_outside"] += 1
+        return orig_window(self, gid, since)
+
+    def target(req, uid, *, create):
+        if create:
+            n["user_target"] += 1                       # a user write's own reconcile (O(1)), not a group plan
+        elif provision.members_section_held():
+            n["target"] += 1
+        else:
+            n["target_outside"].append(uid)
+        return orig_target(req, uid, create=create)
+    monkeypatch.setattr(gdir.OrgDirectory, "staged", staged)
+    monkeypatch.setattr(gdir.OrgDirectory, "edge_users_since", window)
+    monkeypatch.setattr(uiscim, "_target", target)
+    return n
+
+
+def _rerole_org(stack, monkeypatch, *, others: int = 60) -> tuple:
+    """Org A with Contractors (3 contractor-only analysts + 6 hand-lowered admins also in it) and `others` further
+    admins; a budget-exempt DELETE of Contractors (scaled `MAX_JOB_MEMBERS` 4) then leaves a re-role job open."""
+    monkeypatch.setattr(gdir, "MAX_JOB_MEMBERS", 4)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A, group_role_map={"Admins": "org_admin", "Contractors": "analyst"})
+    xg, xonly = _seed(stack, ORG_A, 3, group="Contractors", role="analyst", prefix="c")
+    ag, both = _seed(stack, ORG_A, 6, group="Admins", role="viewer", prefix="b")      # below what Admins implies
+    _og, rest = _seed(stack, ORG_A, others, group="Staff", role="viewer", prefix="o")
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    for u in both:
+        d.add_member(xg, u, now=time.time())
+    _overdraw(stack, monkeypatch)
+    t0 = time.time()
+    assert _scim(stack, ORG_A, "DELETE", f"/Groups/{xg}")["status"] == 204
+    _assert_rerole_job(stack, xg, since_after=t0)
+    return xg, xonly, ag, both, rest
+
+
+def test_REROLE_HOLD_a_budget_exempt_request_does_no_plan_work_under_the_section(stack, monkeypatch):
+    """REROLE-HOLD — while a re-role job is open, budget-exempt deprovisioning requests (a 404 DELETE of a nonexistent
+    user; a group PATCH removing a non-member, the sibling shape) do NO plan work while holding the shared section:
+    no staged copy of the directory, no re-role window scan, no member re-resolved under it (round 7 re-resolved
+    EVERY member of the org inside the section on each such request). The job stays open for a budgeted write."""
+    xg, _xonly, ag, _both, _rest = _rerole_org(stack, monkeypatch)
+    job = _jobs(stack, ORG_A)[xg]
+    n = _plan_work(monkeypatch)
+    for _ in range(3):
+        assert _scim(stack, ORG_A, "DELETE", f"/Users/sso_{'0' * 24}")["status"] == 404
+    assert _scim(stack, ORG_A, "PATCH", f"/Groups/{ag}", {"Operations": [
+        {"op": "remove", "path": f'members[value eq "sso_{"1" * 24}"]'}]})["status"] == 200
+    assert (n["staged"], n["window"], n["target"]) == (0, 0, 0), n          # nothing O(org) under the section
+    assert n["window_outside"] == 0 and n["target_outside"] == [], n        # nor a re-role resolve at all
+    assert n["staged_outside"] == 1, n                  # only the PATCH's own plan: the gone group's job is skipped
+    assert _jobs(stack, ORG_A) == {xg: job}                                  # still open (a budgeted write lands it)
+
+
+def test_REROLE_HOLD_an_open_rerole_job_never_slows_an_unrelated_append(stack, monkeypatch):
+    """REROLE-HOLD, cross-org — an unrelated append (another org's record through the same process-wide spine lock)
+    runs while org A floods budget-exempt 404 DELETEs with a re-role job open: A's requests do no plan work under the
+    section (the deterministic guard), and the unrelated appends are never held behind A for long (a loose absolute
+    bound — the host may be loaded; round 7 held the lock O(org) per request: 0.58 s p50 at 40k users)."""
+    _rerole_org(stack, monkeypatch, others=400)
+    n = _plan_work(monkeypatch)
+    stop = threading.Event()
+
+    def flood():
+        while not stop.is_set():
+            _scim(stack, ORG_A, "DELETE", f"/Users/sso_{'0' * 24}")
+    th = threading.Thread(target=flood, daemon=True)
+    th.start()
+    lat = []
+    store = stack.store()
+    try:
+        time.sleep(0.2)
+        for k in range(30):
+            t0 = time.perf_counter()
+            store.append(kind="message", source="x", actor="user", payload={"text": f"unrelated {k}"})
+            lat.append(time.perf_counter() - t0)
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        th.join(60)
+    print(f"\nunrelated append during A's flood: p50 {statistics.median(lat) * 1000:.1f} ms, "
+          f"max {max(lat) * 1000:.1f} ms")
+    assert (n["staged"], n["window"], n["target"]) == (0, 0, 0), n
+    assert max(lat) < 2.0, lat
+
+
+def test_a_group_change_whose_org_changed_while_it_was_planned_is_refused_whole(stack, monkeypatch):
+    """The plan of a group change runs with the section RELEASED (`_SharedSection.outside`), so it is re-checked when
+    the section is re-taken: an owner act on one of the org's directory members landing meanwhile makes the request
+    stop with a retryable 503, and nothing of the planned change is written (the group not renamed, no role moved)."""
+    from sigil.ui import scim as uiscim
+    stack.saml_org(ORG_A, scim_token=TOKEN_A, group_role_map={"Admins": "org_admin"})
+    sg, uids = _seed(stack, ORG_A, 3, group="Staff", role="viewer", prefix="p")
+    fired: list = []
+    orig = uiscim._target
+
+    def target(req, uid, *, create):
+        if not create and not fired:                    # mid-plan: the owner changes a member by hand
+            fired.append(provision.members_section_held())
+            OrgRegistry(stack.store()).grant_membership(ORG_A, uids[0], "analyst", issued_at=time.time())
+        return orig(req, uid, create=create)
+    monkeypatch.setattr(uiscim, "_target", target)
+    n0 = _n(stack)
+    r = _scim(stack, ORG_A, "PATCH", f"/Groups/{sg}", {"Operations": [
+        {"op": "replace", "path": "displayName", "value": "Admins"}]})
+    assert r["status"] == 503 and fired == [False], (r, fired)      # planned outside the section, then refused
+    assert ScimDirectoryRegistry(stack.store()).directory(ORG_A).group(sg).display_name == "Staff"
+    assert _n(stack) == n0 + 1                                       # only the owner's own grant landed
+    roles = _roles(stack, ORG_A)
+    assert roles[uids[0]] == "analyst" and {roles[u] for u in uids[1:]} == {"viewer"}
+
+
+def test_REROLE_HOLD_the_budgeted_close_of_a_rerole_job_resolves_only_its_window_outside_the_section(stack,
+                                                                                                    monkeypatch):
+    """The budgeted write that closes a re-role job resolves only the job's WINDOW (the deleted group's former
+    members), all of it with the section released — never the org's other members, never under the section."""
+    xg, xonly, _ag, both, rest = _rerole_org(stack, monkeypatch)
+    n = _plan_work(monkeypatch)
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("q@acme.com", "00u-q"))["status"] == 201
+    assert (n["staged"], n["window"], n["target"]) == (0, 0, 0), n
+    assert n["window_outside"] >= 1 and set(n["target_outside"]) <= set(both) | set(xonly), n
+    assert not set(n["target_outside"]) & set(rest), n                       # the rest of the org: never resolved
+    roles = _roles(stack, ORG_A)
+    assert {roles[u] for u in both} == {"org_admin"} and _jobs(stack, ORG_A) == {}
+    _never_above_the_directory(stack, ORG_A)
+
+
+def test_REROLE_HOLD_a_lower_only_resume_of_a_group_present_rerole_job_resolves_only_the_group(stack, monkeypatch):
+    """A crash can leave a 'delete + re-role' job open while its group still EXISTS (the delete had not committed).
+    A deprovisioning (lower_only) resume lands only the LOWERINGS the delete implies — its group's own members, with
+    the section released — never the job's window of deferred raises, nor the rest of the org."""
+    monkeypatch.setattr(gdir, "MAX_JOB_MEMBERS", 4)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A, group_role_map={"Admins": "org_admin", "Contractors": "analyst"})
+    xg, xmembers = _seed(stack, ORG_A, 6, group="Contractors", role="analyst", prefix="c")
+    _og, _others = _seed(stack, ORG_A, 60, group="Admins", role="org_admin", prefix="o")
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    d.put_job(xg, {"delete": True, "rerole": True, "since": 0.0}, now=time.time())   # a group-present job (crash)
+    assert _jobs(stack, ORG_A).get(xg) == {"delete": True, "rerole": True, "since": 0.0}
+    n = _plan_work(monkeypatch)
+    assert _scim(stack, ORG_A, "DELETE", f"/Users/sso_{'0' * 24}")["status"] == 404     # budget-exempt: resumes it
+    assert (n["staged"], n["window"], n["target"]) == (0, 0, 0), n
+    assert n["window_outside"] == 0 and set(n["target_outside"]) == set(xmembers), n
+    assert {_roles(stack, ORG_A)[u] for u in xmembers} == {"viewer"}          # its lowerings landed
+    assert ScimDirectoryRegistry(stack.store()).directory(ORG_A).group(xg) is not None     # the delete still waits
+
+
+@pytest.mark.parametrize("bound", [4, 4096])
+def test_REROLE_SCOPE_a_rerole_job_leaves_members_it_never_touched_alone(stack, monkeypatch, bound):
+    """REROLE-SCOPE (the rvH7 reviewer's probe, promoted): an admin the owner lowered by hand on the Team screen BEFORE
+    the deprovisioning request, and in no group it changed — or one who left the deleted group long before it — is
+    NOT raised back when the re-role job is finished, exactly as with the touch list under the bound; the members the
+    request deferred are raised (round 7's mark re-resolved every member of the org and reverted the demotions)."""
+    monkeypatch.setattr(gdir, "MAX_JOB_MEMBERS", bound)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A, group_role_map={"Admins": "org_admin", "Contractors": "analyst"})
+    xg, _x = _seed(stack, ORG_A, 3, group="Contractors", role="analyst", prefix="c")
+    _ag, both = _seed(stack, ORG_A, 6, group="Admins", role="viewer", prefix="b")
+    _g2, (bystander, old) = _seed(stack, ORG_A, 2, group="Admins", role="org_admin", prefix="z")
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    for u in both:
+        d.add_member(xg, u, now=time.time())
+    d.add_member(xg, old, now=time.time())              # `old` left Contractors long BEFORE the request ...
+    d.remove_member(xg, old, now=time.time())
+    for u in (bystander, old):                          # ... and the owner lowered both admins by hand
+        OrgRegistry(stack.store()).grant_membership(ORG_A, u, "viewer", issued_at=time.time())
+    _overdraw(stack, monkeypatch)
+    assert _scim(stack, ORG_A, "DELETE", f"/Groups/{xg}")["status"] == 204
+    job = _jobs(stack, ORG_A)[xg]
+    assert (job.get("rerole") is True) == (bound == 4) and (bound == 4 or len(job["touch"]) == 6), job
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("q@acme.com", "00u-q"))["status"] == 201
+    roles = _roles(stack, ORG_A)
+    assert roles[bystander] == "viewer" and roles[old] == "viewer", roles      # the owner's demotions stand
+    assert {roles[u] for u in both} == {"org_admin"} and _jobs(stack, ORG_A) == {}
+    _never_above_the_directory(stack, ORG_A)
+
+
+def test_REROLE_SCOPE_an_owner_change_after_the_job_is_not_reverted_by_it(stack, monkeypatch):
+    """REROLE-SCOPE — a deferred member the owner changes by hand AFTER the job opened keeps the owner's role when the
+    job is finished (its live grant is newer than the job); the other deferred members are still raised."""
+    _xg, _xonly, _ag, both, _rest = _rerole_org(stack, monkeypatch)
+    OrgRegistry(stack.store()).grant_membership(ORG_A, both[0], "analyst", issued_at=time.time())   # AFTER the job
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("q@acme.com", "00u-q"))["status"] == 201
+    roles = _roles(stack, ORG_A)
+    assert roles[both[0]] == "analyst", roles[both[0]]                         # the owner's later change stands
+    assert {roles[u] for u in both[1:]} == {"org_admin"} and _jobs(stack, ORG_A) == {}
+    _never_above_the_directory(stack, ORG_A)
+
+
+def test_REROLE_SCOPE_a_listed_job_that_overflows_into_a_window_keeps_its_listed_members(stack, monkeypatch):
+    """Two deprovisioning removals from one group: the first defers 3 raises (a listed job), the second 3 more — 6,
+    more than a job may list (scaled 4), so the job becomes a re-role WINDOW (from the second removal on) that still
+    LISTS the first three. The next budgeted write raises all six; an admin no removal touched (the owner lowered
+    them by hand) stays as the owner set them."""
+    monkeypatch.setattr(gdir, "MAX_JOB_MEMBERS", 4)
+    stack.saml_org(ORG_A, scim_token=TOKEN_A, group_role_map={"Admins": "org_admin", "Contractors": "analyst"})
+    xg, _none = _seed(stack, ORG_A, 0, group="Contractors", role="analyst", prefix="c")
+    _ag, both = _seed(stack, ORG_A, 6, group="Admins", role="viewer", prefix="b")
+    _g2, (bystander,) = _seed(stack, ORG_A, 1, group="Admins", role="viewer", prefix="z")
+    d = ScimDirectoryRegistry(stack.store()).directory(ORG_A)
+    for u in both:
+        d.add_member(xg, u, now=time.time())
+    _overdraw(stack, monkeypatch)
+    for half in (both[:3], both[3:]):
+        assert _scim(stack, ORG_A, "PATCH", f"/Groups/{xg}", {"Operations": [
+            {"op": "remove", "path": "members", "value": [{"value": u} for u in half]}]})["status"] == 200
+    job = _jobs(stack, ORG_A)[xg]
+    assert job.get("rerole") is True and job.get("touch") == sorted(both[:3]), job
+    assert {_roles(stack, ORG_A)[u] for u in both} == {"viewer"}              # every raise deferred so far
+    _repay(monkeypatch)
+    assert _scim(stack, ORG_A, "POST", "/Users", _okta_user("q@acme.com", "00u-q"))["status"] == 201
+    roles = _roles(stack, ORG_A)
+    assert {roles[u] for u in both} == {"org_admin"} and roles[bystander] == "viewer" and _jobs(stack, ORG_A) == {}
+    _never_above_the_directory(stack, ORG_A)
+
+
+def test_a_rerole_jobs_window_start_is_validated():
+    """A re-role job's window start `since` is a finite issued_at >= 0 (0.0 when absent): anything else makes the
+    record malformed (inert)."""
+    spec = {"delete": True, "rerole": True}
+    assert gdir._job_from(spec) == {"delete": True, "rerole": True, "since": 0.0}
+    assert gdir._job_from({**spec, "since": 12.5}) == {"delete": True, "rerole": True, "since": 12.5}
+    for bad in (-1.0, float("nan"), float("inf"), True, "12", None):
+        assert gdir._job_from({**spec, "since": bad}) is None, bad
+    assert gdir._job_from({"delete": False, "name": "G", "ext": "", "members": [], "rerole": True, "since": 3.0}) == \
+        {"delete": False, "name": "G", "ext": "", "members": [], "rerole": True, "since": 3.0}
+
+
+def test_MUT_an_in_use_per_org_sso_share_survives_eviction():
+    """Mutation gap — a per-org SSO share that is currently referenced is NEVER evicted, even when more than the cap of
+    other org ids are named: a second leg of the held org still waits on the SAME semaphore."""
+    sso_provision._SSO_ORG_GATES.clear()
+    try:
+        with sso_provision._sso_org_semaphore_ref("org_held") as held:
+            for i in range(sso_provision._SSO_ORG_GATES_MAX + 50):
+                with sso_provision._sso_org_semaphore_ref(f"org_evict_{i}"):
+                    pass
+            assert sso_provision._sso_org_semaphore("org_held") is held      # not evicted while referenced
+    finally:
+        sso_provision._SSO_ORG_GATES.clear()
+
+
+def test_MUT_the_sso_failure_lockout_doubles_each_time():
+    """Mutation gap — the SSO failure lockout DOUBLES on each successive lockout (60s, 120, 240, ... up to the cap), so
+    a repeat offender is held longer each time."""
+    fl = sso_provision._FailLock(max_fails=3, window_s=10_000.0, base_lock_s=60.0, max_lock_s=3600.0)
+    t, locks = 0.0, []
+    for _round in range(8):
+        for _ in range(3):
+            fl.record_failure(("s", "x"), now=t)
+        w = fl.locked(("s", "x"), now=t)
+        locks.append(round(w))
+        t += w + 1
+    assert locks == [60, 120, 240, 480, 960, 1920, 3600, 3600], locks
+
+
+def test_MUT_a_partial_reap_decrements_the_bucket_count(tmp_path):
+    """Mutation gap — when `_reap` stops at its limit PART-WAY through a bucket (the bucket is not removed), the
+    in-memory per-bucket count is decremented for every marker it unlinked, so `total()` reflects what was removed."""
+    led = uisaml.SamlReplayLedger(tmp_path / "replay", max_outstanding=10 ** 6)
+    now = 1_000_000_000.0
+    dead = int(now // led._BUCKET_S) - 10
+    _fill(led, "org", dead, 100)
+    part = led._partition("org")
+    state = led._state(part)
+    assert state.buckets.get(dead) == 100
+    assert led._reap(part, state, now, 30) == 30                     # stop part-way: 30 of 100, bucket NOT removed
+    assert state.buckets.get(dead) == 70, state.buckets.get(dead)    # 100 - 30 unlinked, decremented
+    assert led._bucket_dir(part, dead).exists()                      # the bucket itself is still there
