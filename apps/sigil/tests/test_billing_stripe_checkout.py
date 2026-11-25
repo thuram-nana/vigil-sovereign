@@ -410,3 +410,39 @@ def test_a_session_that_echoes_the_exact_terms_text_is_accepted(monkeypatch, pla
     assert _checkout(_provider(api), **kw).hosted_link
     sent = api.calls[0][0]["custom_text"]["terms_of_service_acceptance"]["message"]
     assert next(iter(api.sessions.values()))["custom_text"]["terms_of_service_acceptance"]["message"] == sent
+
+
+def _monitoring_entry():
+    from sigil.governor import catalog
+    return next(e for e in catalog._CATALOG if e.monitor_hosts and e.allotment == 0)
+
+
+def test_a_monitoring_plan_session_carries_the_plain_terms_agreement_with_no_credit_wording(monkeypatch):
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    mon = _monitoring_entry()
+    api = _StripeConsent()
+    p = StripeBillingProvider(_WHSEC, fetcher=lambda kind, oid: {}, expected_mode="test",
+                              enable_reference_adapter=True, checkout_creator=api.create,
+                              plan_periods={mon.price_id: mon.period_s})
+    assert p.create_checkout("acme", mon.price_id, expected={mon.price_id: (mon.amount_minor, mon.currency)},
+                             redirect_url=_RETURN, nonce="n1", payment_plan=mon.price_id).hosted_link
+    params = api.calls[0][0]
+    assert params["consent_collection"] == {"terms_of_service": "required"}
+    msg = params["custom_text"]["terms_of_service_acceptance"]["message"]
+    assert msg == "I agree to the VIGIL [Terms of Service](https://vigilguard.net/terms)."
+    assert "credit" not in msg.lower() and "withdrawal" not in msg.lower()
+
+
+def test_a_credit_plan_and_a_top_up_keep_the_immediate_supply_wording(monkeypatch):
+    from sigil.governor import catalog
+    monkeypatch.setenv("VIGIL_STRIPE_TERMS_CONSENT", "1")
+    plan = next(e for e in catalog._CATALOG if e.allotment > 0)
+    api = _StripeConsent()
+    p = StripeBillingProvider(_WHSEC, fetcher=lambda kind, oid: {}, expected_mode="test",
+                              enable_reference_adapter=True, checkout_creator=api.create,
+                              plan_periods={plan.price_id: plan.period_s})
+    p.create_checkout("acme", plan.price_id, expected={plan.price_id: (plan.amount_minor, plan.currency)},
+                      redirect_url=_RETURN, nonce="n1", payment_plan=plan.price_id)
+    _checkout(_provider(api), nonce="n2")
+    for params, _k in api.calls:
+        assert "credits I am buying" in params["custom_text"]["terms_of_service_acceptance"]["message"]

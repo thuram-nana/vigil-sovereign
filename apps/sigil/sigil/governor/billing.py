@@ -282,6 +282,9 @@ _STRIPE_TERMS_CONSENT_MESSAGE = (
     f"I agree to the VIGIL [Terms of Service]({_STRIPE_TERMS_URL}). I ask SIGIL SARL to start supplying the service "
     "as soon as I use the credits I am buying, and I understand that I lose my right of withdrawal for this purchase "
     "once all of its credits have been used.")
+# An AEGIS monitoring plan buys host monitoring, not credits (allotment 0): its box carries the plain agreement to the
+# Terms, with no credit wording.
+_STRIPE_TERMS_AGREEMENT_MESSAGE = f"I agree to the VIGIL [Terms of Service]({_STRIPE_TERMS_URL})."
 StripeCheckoutCreator = Callable[..., Mapping[str, Any]]      # (params, *, idempotency_key) -> session
 
 
@@ -402,8 +405,8 @@ class StripeBillingProvider(BillingProvider):
         link stops being payable before the provisioner's pending plan-checkout record lapses; the response must
         then echo that same `expires_at`. A plan session is card-only (`payment_method_types`), and the response
         must echo that too; a top-up's payload is unchanged. With `VIGIL_STRIPE_TERMS_CONSENT` on, the session
-        requires the Terms of Service box with VIGIL's text, and the response must echo both the requirement and
-        exactly that text. Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
+        requires the Terms of Service box with VIGIL's text (a monitoring plan's carries the plain agreement, no
+        credit wording), and the response must echo both the requirement and exactly that text. Fail-closed throughout: any refusal raises `UnsupportedCapability` / `ValueError`."""
         self.require(CAP_HOSTED_CHECKOUT)
         creator = self._checkout_creator
         if creator is None:                            # unreachable once require() passed; kept for type narrowing
@@ -469,8 +472,11 @@ class StripeBillingProvider(BillingProvider):
         if _config.stripe_terms_consent_enabled():
             # the customer must tick the required terms box to pay; its text is VIGIL's (it replaces Stripe's default
             # agreement text) and links the Terms
+            from .catalog import monitoring_price_ids
+            monitoring = price_id in monitoring_price_ids()
             params["consent_collection"] = {"terms_of_service": "required"}
-            params["custom_text"] = {"terms_of_service_acceptance": {"message": _STRIPE_TERMS_CONSENT_MESSAGE}}
+            params["custom_text"] = {"terms_of_service_acceptance": {
+                "message": _STRIPE_TERMS_AGREEMENT_MESSAGE if monitoring else _STRIPE_TERMS_CONSENT_MESSAGE}}
         if session_minutes is not None:
             sm, (lo, hi) = session_minutes, _STRIPE_SESSION_MIN_RANGE
             if not isinstance(sm, int) or not lo <= sm <= hi:      # (a bool is below the range's floor)
