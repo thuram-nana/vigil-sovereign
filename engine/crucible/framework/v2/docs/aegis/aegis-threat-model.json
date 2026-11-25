@@ -1,0 +1,45 @@
+{
+  "artifact": "aegis-threat-model",
+  "slice": "AS-0 (governance foundation)",
+  "visibility": "public",
+  "spec": "VIGIL plan parsed-popping-lemur.md \u00a74.2 (threat register), \u00a74.1 (zones/boundaries), \u00a74.3 (what stays trustworthy), \u00a74.4 (origin and edge-chain declarations), \u00a74.7 (publication).",
+  "publication_policy": {
+    "rule": "This repository is public. Per plan \u00a74.7 only fixed-state governance is published: entries whose mitigation is a decided, committed architecture decision or a shipped control. Open / un-mitigated entries are NOT published here.",
+    "public": "aegis-threat-model.json and aegis-threat-model.md \u2014 fixed state only.",
+    "private": "Open entries live in the private handoff register (vigil-handoff), per plan \u00a74.7 and the publication rule (HANDOFF:83).",
+    "drift_test": "Plan \u00a74.7 requires a drift test asserting every threat id exists in exactly one of the two registers (public or private).",
+    "as25_gate": "Plan \u00a74.7 line 639: an entry may be marked 'mitigated' only with a current AS-25 demonstration record (\u00a713.3). In this AS-0 governance publication, record_ref makes the record state explicit: a shipped engineering record (e.g. 'AS-27a / PR#1228'), or 'pending-AS-25' where the decided mitigation's signed AS-25 demonstration record is scheduled but not yet built."
+  },
+  "status_vocabulary": {
+    "mitigated": "Fixed state: either a shipped control with an engineering record, or a decided-and-committed architecture decision. This is the only status permitted in the public register; open threats are omitted (they stay in the private register)."
+  },
+  "record_ref_semantics": {
+    "AS-27a / PR#1228": "Shipped: the break-glass fail-open fixes merged in slice AS-27a (first gateway PR), covered by framework/v2/aegis/tests/test_gateway_breakglass.py.",
+    "pending-AS-25": "Decided and committed architecture whose signed AS-25 demonstration record (\u00a713.3) is scheduled but not yet built. The drift/DONE gate will require the AS-25 record before the entry is demonstration-complete."
+  },
+  "private_register_note": "This file is the PUBLIC threat register and carries only fixed-state (mitigated / decided-and-committed) entries. Open, un-mitigated, or sensitive threat entries are maintained in the private handoff register (vigil-handoff) per plan \u00a74.7; they are intentionally absent here. When an open entry is closed by a decided mitigation it is moved into this file described as the DECISION and the MITIGATION, never as a live weakness. The following DECIDED-but-not-yet-shipped threats are kept in the private register until their slice ships and earns an engineering/AS-25 record, at which point they move here: AEGIS-T-PXY-EDGE, AEGIS-T-XO-BIND, AEGIS-T-ISO-UNIT (edge routing AS-2d, origin binding AS-2g, unit isolation AS-2j).",
+  "threats": [
+    {
+      "id": "AEGIS-T-BG-KILLSWITCH",
+      "title": "Break-glass kill-switch unreadable must not keep the gateway blocking",
+      "zone": "Z2E",
+      "attacker": "A4 operator or A3 RCE-in-unit, or a control-plane read fault",
+      "vector": "The enforce gate consults the kill-switch (break-glass) subsystem; a read, import, or path fault on that subsystem leaves the enforce decision ambiguous, and reading it as CLEAR would keep the gateway blocking on a switch it cannot read.",
+      "status": "mitigated",
+      "mitigation": "AS-27a makes the gateway wrapper treat an unreadable kill-switch subsystem (is_tripped raising, or KillSwitch construction failing) as TRIPPED, so enforcement drops to pass-through rather than continuing to block on a switch it cannot read. The downgrade is honest: enforcement_status() reports enforcing=false, kill_switch_tripped=true, downgraded=true, and names the kill-switch as the downgrade reason. Register alias T-BG / T-FO; TT-STG negative 'unreadable kill switch -> no block'.",
+      "record_ref": "AS-27a / PR#1228",
+      "spec_ref": "plan \u00a74.2 (T-BG/T-FO, L551), \u00a73 B10 (L474), AS-27a (L937); test framework/v2/aegis/tests/test_gateway_breakglass.py"
+    },
+    {
+      "id": "AEGIS-T-BG-MODEFILE",
+      "title": "Break-glass mode-file glitch must not silently escalate to enforce",
+      "zone": "Z2E",
+      "attacker": "A4 operator, or a control-plane / filesystem fault",
+      "vector": "The gateway reads a live mode-override control file; a present-but-unreadable file (permission error, a directory at the path, a path-subsystem failure) is ambiguous, and treating it as 'no override' would fall through to the startup --mode, which may be enforce.",
+      "status": "mitigated",
+      "mitigation": "AS-27a classifies a present-but-unreadable mode file as a glitch, not 'no override': it falls back to the last cleanly-read override, and if none to OBSERVE \u2014 it never silently escalates to the startup --mode. A cleared or invalidated override is not resurrected by a later glitch (cache-invalidation guard). ENOENT/ENOTDIR are treated as 'absent' (startup mode, cache cleared); EACCES and a path-subsystem failure are glitches (hold last-known-good, else observe).",
+      "record_ref": "AS-27a / PR#1228",
+      "spec_ref": "plan \u00a74.2 (T-BG/T-FO, L551), AS-27a (L937); test framework/v2/aegis/tests/test_gateway_breakglass.py"
+    }
+  ]
+}
