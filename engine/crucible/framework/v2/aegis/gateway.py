@@ -208,23 +208,50 @@ class GatewaySettings:
         return ok
 
     def _killswitch_tripped(self) -> bool:
+        """Is the break-glass hard-stop engaged for this slug? A tripped kill-switch drops enforcement to
+        pass-through, so this term must fail toward NOT blocking. ``KillSwitch.is_tripped`` is itself
+        fail-closed (an ambiguous stat ⇒ TRIPPED); mirror that here for the one case it cannot cover — the
+        kill-switch SUBSYSTEM being unreadable (an import / path-construction error). An unreadable
+        kill-switch reads as TRIPPED, never CLEAR: the operator trips it precisely to stop the gateway
+        blocking, so if we cannot read it we must assume it is set. Returning False here would instead let
+        ``enforce`` keep blocking on an unreadable kill-switch — the exact fail-OPEN the break-glass
+        mechanism exists to prevent (AS-27a)."""
         try:
             from ..authority.killswitch import KillSwitch
             return bool(KillSwitch(self.slug).is_tripped())
         except Exception:
-            return False   # a kill-switch read error must not itself start blocking traffic
+            return True   # subsystem unreadable ⇒ assume tripped ⇒ pass-through (availability-first break-glass)
 
     def _mode_override(self) -> str | None:
         """LIVE mode override, re-read per request from a control file the console writes — the exact
-        cross-process, restart-free pattern the kill-switch uses. Returns 'observe'/'enforce' when the
-        file holds a valid value, else None (fall back to the configured startup mode). Any read error
-        -> None (availability-first: a control-file glitch never silently starts blocking)."""
+        cross-process, restart-free pattern the kill-switch uses.
+
+        Returns 'observe'/'enforce' when the file is read cleanly and holds a valid value (and remembers it
+        as the last-known-good live override); None when NO override file is set, so the caller falls back to
+        the configured startup --mode.
+
+        AS-27a break-glass (availability-first): a file that is PRESENT but unreadable — a permission / IO
+        glitch, or the mode subsystem itself failing — must never let a control-plane glitch silently
+        escalate to enforce. In that case fall back to the LAST mode read cleanly, and if none was ever read,
+        to OBSERVE — never to the startup --mode, which may itself be enforce. A genuinely absent file
+        (FileNotFoundError) is the normal 'no live override' state, not a glitch, and yields None."""
         try:
             from ..common.paths import aegis_mode_path
-            raw = aegis_mode_path(self.slug).read_text(encoding="utf-8").strip()
-            return raw if raw in ("observe", "enforce") else None
+            path = aegis_mode_path(self.slug)
         except Exception:
-            return None
+            # the mode subsystem itself is unavailable (import / path construction) -> a glitch, not "no override".
+            return getattr(self, "_last_good_mode", None) or "observe"
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None                        # no live override set -> configured startup --mode (the normal path)
+        except Exception:
+            # present-but-unreadable: break-glass, never escalate to enforce on a transient read error.
+            return getattr(self, "_last_good_mode", None) or "observe"
+        if raw in ("observe", "enforce"):
+            self._last_good_mode = raw         # remember the last cleanly-read live override
+            return raw
+        return None                            # present but invalid content -> ignore the override (startup mode)
 
     def intended_mode(self) -> str:
         """The mode the operator has asked for: the live console-set override if present, else the
