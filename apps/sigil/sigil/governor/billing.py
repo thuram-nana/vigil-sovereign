@@ -97,8 +97,8 @@ class UnaccountedPayment(ValueError):
 
 class ReversalUnaccounted(ValueError):
     """W5 — a SIGNED processor reversal (a dispute or a refund) VIGIL cannot account for: the charge is neither a
-    credited top-up nor the refund of a credited plan period (an unknown payment, a disputed plan charge, a plan
-    period with no credits), its dispute has a status this build does not know, more than one dispute, checkout
+    credited top-up (from a checkout or an automatic top-up) nor the refund of a credited plan period (an unknown
+    payment, a disputed plan charge or automatic top-up, a plan period with no credits), its dispute has a status this build does not know, more than one dispute, checkout
     session or invoice claims it, or its currency differs from the purchase's. Nothing moves; the drain QUARANTINES
     the envelope and the owner reconciles it by hand (never a guessed removal)."""
 
@@ -312,7 +312,8 @@ class StripeBillingProvider(BillingProvider):
         filtered lists -> EVENT_REVERSAL for the top-up (session) that charge paid, carrying how much is refunded and
         how much an open (or lost) dispute holds. A REFUND of a charge no checkout session paid maps through the
         charge's invoice to the subscription (tenant + plan price) and that plan period -> EVENT_REVERSAL for the
-        period (``plan_invoice``). Anything it cannot account for raises ``ReversalUnaccounted``.
+        period (``plan_invoice``), or, when no invoice names it either, to the automatic top-up its PaymentIntent is
+        (A1) -> EVENT_REVERSAL for that top-up. Anything it cannot account for raises ``ReversalUnaccounted``.
       * Anything else -> None.
 
     Tenant: `client_reference_id` / `metadata.tx_ref` (`vigil:<org>:<nonce>`) and `metadata.org_id`; when more than
@@ -678,7 +679,9 @@ class StripeBillingProvider(BillingProvider):
         """The reversal facts of a re-fetched CHARGE (pure but for the authoritative lists and objects): how much of it
         is refunded, how much a dispute that holds the funds covers, and the top-up (Checkout Session) and tenant it
         paid for — or, for a charge no checkout session paid, the plan period its invoice paid
-        (``_map_plan_reversal``). Anything VIGIL cannot account for raises ``ReversalUnaccounted`` (quarantine)."""
+        (``_map_plan_reversal``), or with no invoice either, the automatic top-up its PaymentIntent is
+        (``_map_auto_topup_reversal``). Anything VIGIL cannot account for raises ``ReversalUnaccounted``
+        (quarantine)."""
         cid = str(charge["id"])
         amount, refunded = charge.get("amount"), charge.get("amount_refunded")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or isinstance(refunded, bool) \
@@ -710,9 +713,16 @@ class StripeBillingProvider(BillingProvider):
             raise ReversalUnaccounted(f"Stripe charge {cid} was not paid through a checkout top-up")
         sessions = self._listed("checkout_sessions_for_payment_intent", pi, "checkout.session")
         if not sessions:
-            # no checkout session paid this charge: the refund of a PLAN period maps through its invoice instead
+            # no checkout session paid this charge: the refund of a PLAN period maps through its invoice; a charge
+            # with no invoice either may be an automatic top-up's own PaymentIntent (A1), which names its pack
+            pays = None
+            if _stripe_ref(charge.get("invoice")) is None:
+                pays = self._listed("invoice_payments_for_payment_intent", pi, "invoice_payment")
+                if not pays:
+                    return self._map_auto_topup_reversal(charge, pi, trigger=trigger, disputed=bool(disputes),
+                                                         amount=amount, refunded=refunded, ccy=ccy, created=created)
             return self._map_plan_reversal(charge, pi, trigger=trigger, disputed=bool(disputes), amount=amount,
-                                           refunded=refunded, ccy=ccy, created=created)
+                                           refunded=refunded, ccy=ccy, created=created, pays=pays)
         if len(sessions) != 1:
             raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one checkout session")
         sess = sessions[0]
@@ -730,14 +740,47 @@ class StripeBillingProvider(BillingProvider):
                                   "disputed_minor": min(disputed, amount), "dispute_status": status,
                                   "trigger": trigger, "tx_ref": sess.get("client_reference_id")})
 
-    def _charge_invoice(self, charge: "Mapping[str, Any]", pi: str) -> str:
+    def _map_auto_topup_reversal(self, charge: "Mapping[str, Any]", pi: str, *, trigger: str, disputed: bool,
+                                 amount: int, refunded: int, ccy: str, created: float) -> BillingEvent:
+        """A REFUND of a charge that no checkout session and no invoice paid, whose PaymentIntent is an AUTOMATIC
+        top-up (A1: an off-session PaymentIntent VIGIL created, marked ``metadata.vigil_auto_topup``): the PaymentIntent
+        is re-fetched; the pack is that PaymentIntent (its id is the top-up's billing-history id and grant entry, as
+        ``_map_payment_intent`` minted it) and the tenant is its metadata, exactly as minted. The signer then removes
+        the pack's credits like a checkout top-up's. Only a succeeded PaymentIntent this one charge paid in full, in
+        the charge's currency, maps; any other PaymentIntent, a dispute of an automatic top-up, or anything else
+        raises ``ReversalUnaccounted`` (quarantine, nothing moves)."""
+        cid = str(charge["id"])
+        intent = self._fetched("payment_intent", pi, "payment_intent")
+        if intent is None or _stripe_meta(intent.get("metadata"), "vigil_auto_topup") != "1":
+            raise ReversalUnaccounted(f"Stripe charge {cid} does not belong to one paid invoice or automatic top-up")
+        pid = str(intent["id"])
+        if trigger != "refund" or disputed:
+            raise ReversalUnaccounted(f"Stripe charge {cid} paid an automatic top-up and is disputed: a dispute of an "
+                                      f"automatic top-up is reconciled by hand")
+        received, received_ccy = _stripe_amount(intent.get("amount_received"), intent.get("currency"))
+        if intent.get("status") != "succeeded" or received != amount or received_ccy != ccy:
+            raise ReversalUnaccounted(f"Stripe charge {cid} is not the whole succeeded payment of automatic top-up "
+                                      f"{pid}: reconcile its refund by hand")
+        meta = intent.get("metadata")
+        org = _stripe_tenant(None, meta)
+        if org is None:
+            raise ReversalUnaccounted(f"Stripe automatic top-up {pid} has no single recoverable tenant")
+        return BillingEvent(event_id=f"reversal:{cid}", kind=EVENT_REVERSAL, org_id=org, created=created,
+                            price_id=_stripe_meta(meta, "price_id"), amount_minor=amount, currency=ccy,
+                            data={"topup": pid, "charge": cid, "refunded_minor": min(refunded, amount),
+                                  "disputed_minor": 0, "dispute_status": "", "trigger": trigger,
+                                  "tx_ref": _stripe_meta(meta, "tx_ref")})
+
+    def _charge_invoice(self, charge: "Mapping[str, Any]", pi: str,
+                        pays: "Optional[list[Mapping[str, Any]]]" = None) -> str:
         """The invoice a re-fetched charge paid. API versions before 2025-03-31 name it on the charge (``invoice``);
-        later ones list it as the one paid ``invoice_payment`` of the charge's PaymentIntent. Raises
-        ``ReversalUnaccounted`` unless exactly one invoice is named."""
+        later ones list it as the one paid ``invoice_payment`` of the charge's PaymentIntent (``pays``: that list,
+        when the caller already read it). Raises ``ReversalUnaccounted`` unless exactly one invoice is named."""
         cid = str(charge["id"])
         ref = _stripe_ref(charge.get("invoice"))
         if ref is None:
-            pays = self._listed("invoice_payments_for_payment_intent", pi, "invoice_payment")
+            if pays is None:
+                pays = self._listed("invoice_payments_for_payment_intent", pi, "invoice_payment")
             pay = pays[0] if len(pays) == 1 else None
             payment = pay.get("payment") if pay is not None else None
             if (pay is None or pay.get("status") != "paid" or not isinstance(payment, Mapping)
@@ -749,7 +792,8 @@ class StripeBillingProvider(BillingProvider):
         return ref
 
     def _map_plan_reversal(self, charge: "Mapping[str, Any]", pi: str, *, trigger: str, disputed: bool, amount: int,
-                           refunded: int, ccy: str, created: float) -> BillingEvent:
+                           refunded: int, ccy: str, created: float,
+                           pays: "Optional[list[Mapping[str, Any]]]" = None) -> BillingEvent:
         """A REFUND of a charge that paid a PLAN period: charge -> its invoice -> the invoice's subscription, whose
         metadata names the tenant and the plan price (set at our checkout), exactly as ``invoice.paid`` minted the
         period. Only a paid new-period invoice that this one charge paid in full maps (the ones VIGIL credits); the
@@ -760,7 +804,7 @@ class StripeBillingProvider(BillingProvider):
         if trigger != "refund" or disputed:
             raise ReversalUnaccounted(f"Stripe charge {cid} is not a checkout top-up and is disputed: a dispute of a "
                                       f"plan charge is reconciled by hand")
-        iid = self._charge_invoice(charge, pi)
+        iid = self._charge_invoice(charge, pi, pays)
         inv = self._fetched("invoice", iid, "invoice")
         if inv is None or inv.get("status") != "paid" or inv.get("billing_reason") not in _STRIPE_NEW_PERIOD_REASONS:
             raise ReversalUnaccounted(f"Stripe charge {cid} did not pay a plan period VIGIL credits ({iid})")

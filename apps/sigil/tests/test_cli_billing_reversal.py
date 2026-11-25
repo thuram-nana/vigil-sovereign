@@ -491,3 +491,20 @@ def test_the_drain_signer_and_its_reversal_ledger_share_one_plan_ledger(monkeypa
     assert signer.reversals.wallet is signer.wallet
     monkeypatch.delenv("VIGIL_BILLING_REVERSALS")
     assert cli._billing_signer(provider, cli.SpineStore(), alarm=True).reversals is None
+
+
+def test_the_withdrawal_verbs_take_an_automatic_top_ups_payment_intent_id(monkeypatch, capsys):
+    # a pack bought by automatic top-up is named in the billing history by its PaymentIntent id (pi_...)
+    monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
+    owner = ensure_owner_keypair()
+    s = cli.SpineStore()
+    w = WalletRegistry(s, owner_key=owner)
+    w.grant("acme", 1000, "topup", entry_id="pi_auto1", issued_at=1.0)
+    InvoiceRegistry(s, owner_key=owner).record("acme", invoice_id="pi_auto1", kind="topup", price_id="vigil_topup_1k",
+                                               amount_minor=1000, currency="USD", credits=1000, issued_at=1.0)
+    w.debit("acme", 250, entry_id="spend", issued_at=1.5)
+    cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup="pi_auto1", credits=None))
+    out = capsys.readouterr().out
+    assert "750 of its 1000 credits unused" in out and "refund acme pi_auto1 750" in out
+    cli.cmd_billing_reversal(_ns(topup="pi_auto1", credits="750", reason="withdrawal"))
+    assert w.available("acme") == 0

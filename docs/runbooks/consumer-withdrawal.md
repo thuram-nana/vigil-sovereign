@@ -21,9 +21,10 @@ run from its first purchase, and a plan the customer withdraws from does not ren
   `charge.dispute.updated`, `charge.dispute.closed`, `charge.dispute.funds_withdrawn` and
   `charge.dispute.funds_reinstated`. Without them the drain never sees a refund (the owner verbs below still
   work).
-- The restricted Stripe key can read Charges, Refunds, Disputes, Invoices and Subscriptions. For VIGIL to stop a
-  plan's renewal itself it also needs write access to Subscriptions; without it, cancel the subscription in the
-  Stripe Dashboard (step P4) and the verb only confirms it.
+- The restricted Stripe key can read Charges, Refunds, Disputes, Invoices and Subscriptions, and PaymentIntents
+  when automatic top-up is on (it already needs them; the drain reads them to trace an automatic top-up's
+  refund). For VIGIL to stop a plan's renewal itself it also needs write access to Subscriptions; without it,
+  cancel the subscription in the Stripe Dashboard (step 4 of a monthly plan) and the verb only confirms it.
 - The shell that runs `plan-withdraw` has the cockpit's `SIGIL_HOME`, `VIGIL_STRIPE_SECRET_KEY` and
   `VIGIL_STRIPE_API_VERSION`. Without the Stripe values the verb cannot confirm the renewal is stopped, so it
   refuses and prints the Stripe step instead.
@@ -51,19 +52,20 @@ run from its first purchase, and a plan the customer withdraws from does not ren
 
 `sigil billing-reversal unused <org> <purchase>` prints the unused credits, the purchased balance remaining (for
 a pack) and the refund, and the verb to run next. It writes nothing. The purchase is the billing-history id: a
-pack's Stripe Checkout Session id (`cs_...`), a plan period's Stripe invoice id (`in_...`).
+pack's Stripe Checkout Session id (`cs_...`), or its PaymentIntent id (`pi_...`) for a pack bought by automatic
+top-up, and a plan period's Stripe invoice id (`in_...`).
 
 ## A credit pack
 
 1. Check the request: the customer is a consumer and wrote within 14 days of the purchase. Note the date you
    received it.
-2. `sigil billing-reversal unused <org> <cs_...>` — note the unused credits `N` and the refund `R`. When it says
-   every credit is used, the right of withdrawal has ended: tell the customer, nothing else to do.
+2. `sigil billing-reversal unused <org> <cs_... or pi_...>` — note the unused credits `N` and the refund `R`.
+   When it says every credit is used, the right of withdrawal has ended: tell the customer, nothing else to do.
 3. In the Stripe Dashboard open the payment and refund `R` to the original payment method.
-4. `sigil billing-reversal refund <org> <cs_...> <N> --reason "withdrawal received <date>"` — removes the `N`
-   unused credits (refused if the balance no longer covers them: run step 2 again). Run it once per refund: each
-   run adds to the refunded credits. The drain also removes credits when Stripe's refund event arrives; the two
-   converge on one removal, whichever comes first.
+4. `sigil billing-reversal refund <org> <cs_... or pi_...> <N> --reason "withdrawal received <date>"` — removes
+   the `N` unused credits (refused if the balance no longer covers them: run step 2 again). Run it once per
+   refund: each run adds to the refunded credits. The drain also removes credits when Stripe's refund event
+   arrives; the two converge on one removal, whichever comes first.
 
 ## A monthly plan
 
@@ -101,10 +103,10 @@ Stripe and run `plan-withdraw` for each of those invoices too.
 
 With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from Stripe:
 
-- a refund of a credit pack removes that pack's credits in the refunded proportion, rounded in the customer's
-  favour (a refund of the whole price removes all of them): the refund `unused` prints for `N` credits never
-  removes more than `N`, so it and the owner's `refund` verb converge. A part already spent is owed and puts
-  the org on a billing hold until a later purchase repays it;
+- a refund of a credit pack, bought at checkout or by automatic top-up, removes that pack's credits in the
+  refunded proportion, rounded in the customer's favour (a refund of the whole price removes all of them): the
+  refund `unused` prints for `N` credits never removes more than `N`, so it and the owner's `refund` verb
+  converge. A part already spent is owed and puts the org on a billing hold until a later purchase repays it;
 - a refund of a plan payment is traced from the charge to its invoice and to the subscription that names the
   org, and removes the refunded proportion of that period's allotment (allotment x refunded / price), taken
   from the plan credits that remain in the period (never more than remain; a spent part is never owed);
@@ -112,10 +114,10 @@ With `VIGIL_BILLING_REVERSALS` on, the Stripe drain re-fetches every refund from
   refund covers: a scan that held plan credits when the refund was applied gives back what it did not use when
   it ends, and those credits must not stay spendable (a period that has ended is left alone: its credits
   expired);
-- a refund VIGIL cannot trace to one credited purchase (a disputed plan payment, a monitoring plan, a payment
-  that paid only part of its invoice or not the plan's price, an unknown charge) is quarantined for you to
-  reconcile by hand. A refund never adds credits: if a plan refund later goes down (a failed refund), the drain
-  quarantines it and the removed plan credits are not given back.
+- a refund VIGIL cannot trace to one credited purchase (a disputed plan payment or automatic top-up, a
+  monitoring plan, a payment that paid only part of its invoice or not the plan's price, an unknown charge) is
+  quarantined for you to reconcile by hand. A refund never adds credits: if a plan refund later goes down (a
+  failed refund), the drain quarantines it and the removed plan credits are not given back.
 
 ## Keep a record
 
