@@ -980,6 +980,20 @@ out.clicks = card.querySelector("ol.cust-tour-clicks").querySelectorAll("li").ma
 """)["clicks"]
     assert told["0"] == st["clicks"] and told["1"] == st["alt"]["clicks"]
     assert "Account security" not in " ".join(told["0"]) and "Account security & sign-in" in told["1"][-1]
+    # the Guide screen lists a switch-named step only where BOTH agree: the app's flag(when) says its switch is on,
+    # and shown(route) says this deployment shows its screen — either one saying no leaves it out
+    both = _node(_guide_app("1") + r"""
+const listed = env => {
+  const g = G.viewGuide(Object.assign({ h, username: "ana", storage: null, nav: r => navs.push(r), chapter: "workspace" },
+                                      env));
+  return g.querySelectorAll("span.cust-guide-step-title").map(e => text(e)).indexOf("Record your organization's details") >= 0;
+};
+out.both = listed({ flag: () => true, shown: () => true });
+out.flagOnly = listed({ flag: () => true, shown: r => r !== "#/settings" });
+out.shownOnly = listed({ flag: () => false, shown: () => true });
+out.neither = listed({});
+""")
+    assert both == {"both": True, "flagOnly": False, "shownOnly": False, "neither": False}
 
 
 # =====================================================================================================================
