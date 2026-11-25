@@ -445,3 +445,60 @@ def test_the_sweep_reports_a_period_it_cannot_price_and_still_sweeps_the_others(
     d.plan.grant("acme", 18_900, period_end=PE, entry_id="settle-plan:s1:n1", issued_at=2_500.0)
     assert d.signer.sweep_plan_reversals(3_000.0) == [("acme", INV, 18_900)]
     assert "invoice in_ghost1 of org 'acme' has no matching billing-history line" in capsys.readouterr().err
+
+
+# ---- mutation-coverage pins (P1218 round-2 mutation review survivors) ------------------------------------------------
+# Each test below reds when its named guard is broken (mutate the guard -> the test fails -> restore). They promote the
+# round-2 review's survivor probes into committed coverage; they change no money logic.
+
+def test_a_partial_plan_refund_rounds_the_removed_credits_down():
+    # LOW (S13): the drain removes allotment * min(refunded, price) / price rounded DOWN. A $33.00 refund of the
+    # $99.00 charge on a 20,000-credit period removes 20,000 * 3,300 / 9,900 = 6,666.67 -> 6,666. Reds under S13
+    # (round up -> 6,667).
+    d = _Drain(charge=_charge(refunded=3_300))
+    d.send()
+    assert d.L.purchase("acme", plan_ref(INV)).removed == 20_000 * 3_300 // 9_900 == 6_666
+
+
+def test_the_fold_rejects_a_plan_step_that_books_arrears_even_when_credits_equal_the_wallet_debit():
+    # LOW (R7): a plan_remove step counts only when owed == 0. A step whose owed is non-zero but whose credits still
+    # equal its wallet debit (credits == wallet == 100, owed == 50) must NOT be counted. Reds under R7 (dropping the
+    # `owed == 0` arm of the well-formed check).
+    st = ReversalFold()
+    apply_billing_reversal(_signed_step(None, owed=50), OWNER.public_key_b64, st)
+    assert ("acme", plan_ref(INV)) not in st.refs
+
+
+def test_the_fold_rejects_an_empty_plan_step():
+    # LOW (R5): a plan_remove step counts only when its credits >= 1. A zero-credit step (credits == wallet == 0) must
+    # NOT be counted. Reds under R5 (dropping the `credits >= 1` arm of the well-formed check).
+    st = ReversalFold()
+    apply_billing_reversal(_signed_step(None, credits=0, wallet=0), OWNER.public_key_b64, st)
+    assert ("acme", plan_ref(INV)) not in st.refs
+
+
+def test_the_signer_rejects_a_dispute_triggered_plan_reversal_even_when_no_dispute_is_listed():
+    # LOW (S2): the signer's plan-reversal step applies only for trigger == "refund". A dispute-triggered event (even
+    # one whose disputed total is 0) must raise ReversalUnaccounted and move nothing. Reds under S2 (dropping the
+    # `trigger == "refund"` arm, so a dispute event is applied like a refund).
+    from sigil.governor.billing import EVENT_REVERSAL, BillingEvent
+    d = _Drain()
+    ev = BillingEvent(event_id="reversal:ch_plan1", kind=EVENT_REVERSAL, org_id="acme", created=2000.0,
+                      price_id="vigil_pro_monthly", amount_minor=PRICE, currency="USD",
+                      data={"plan_invoice": INV, "charge": "ch_plan1", "refunded_minor": PRICE, "disputed_minor": 0,
+                            "dispute_status": "", "trigger": "dispute", "subscription": "sub_plan1", "tx_ref": ""})
+    with pytest.raises(ReversalUnaccounted):
+        d.signer._apply_plan_reversal(ev, now=2000.0)
+    assert _left(d.plan) == ALLOT
+
+
+def test_the_provider_rejects_a_dispute_event_on_a_plan_charge_that_lists_no_dispute_yet():
+    # LOW (B28): the provider maps a plan charge to a reversal only for trigger == "refund". A dispute event — here on
+    # a charge whose dispute list is still empty, so `disputed` is False — must raise ReversalUnaccounted. Reds under
+    # B28 (replacing the trigger+dispute guard with `if disputed:`, which no longer fires for an empty dispute list).
+    d = _Drain(disputes=[])
+    disp = {"object": "dispute", "id": "du_p1", "livemode": False, "charge": "ch_plan1", "status": "needs_response",
+            "amount": PRICE, "currency": "usd"}
+    d.objects["du_p1"] = disp
+    with pytest.raises(ReversalUnaccounted):
+        d.signer.provider._reversal("charge.dispute.created", {"data": {"object": {"id": "du_p1"}}})

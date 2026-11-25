@@ -223,6 +223,21 @@ def test_terms_page_admits_individuals_and_states_the_consumer_right_of_withdraw
     assert "we refund the price of that purchase's credits you have not used, in proportion" in text
     assert "you lose the right of withdrawal for a purchase once all of its credits have been used" in text
 
+def test_terms_page_pins_the_consumer_refund_window_and_protection_sentences():
+    # D3/D4/D5 (P1218 round-2 mutation review): the sentences the owner/counsel settled for consumers. Pinned verbatim
+    # so deleting or inverting any of them fails CI. The generic "within 14 days" assertions above are also satisfied
+    # by the earlier "within 14 days of it", so these three are asserted in full rather than by a shared fragment.
+    text = re.sub(r"\s+", " ", TERMS.read_text(encoding="utf-8"))
+    # §8 refunds: the refund window and method
+    assert "We refund within 14 days of receiving your withdrawal, to the payment method you used." in text   # D3
+    # §8 refunds: a plan's 14 days run from its first purchase, and a withdrawn plan does not renew
+    assert ("For a plan, the 14 days run from its first purchase, and a plan you withdraw from does not renew."
+            in text)                                                                                           # D4
+    # §2 eligibility: the consumer-protection bullet (the law's non-excludable protection still applies)
+    assert ("the points of these terms marked for consumers apply to you, and so does the consumer protection that "
+            "the law of the country where you live gives you and that cannot be excluded by contract.") in text  # D5
+
+
 def test_terms_page_never_claims_the_checkout_computes_or_shows_tax():
     # Owner, 2026-11-24: no tax or VAT computation at launch (no checkout asks the processor to compute one). §6 keeps
     # the wording of the reviewed terms: prices exclude taxes, which are added where the law requires and are the

@@ -530,3 +530,75 @@ def test_plan_withdraw_removes_only_the_refunded_proportion_not_the_whole_allotm
     st = led.purchase("acme", plan_ref(_INV))
     assert st.owner_refunded == 3_000 and st.removed == 3_000           # the proportional amount, not the allotment
 
+
+
+def test_plan_withdraw_rounds_the_removed_plan_credits_down_on_a_non_exact_proportion(monkeypatch, capsys):
+    # LOW (C34): the removed plan credits are allotment * refunded / price rounded DOWN. 9,000 left of 12,000; a
+    # 7,424c refund is 12,000 * 7,424 / 9,900 = 8,998.78 -> 8,998 removed (2 left). Reds under C34 (round up -> 8,999).
+    plan, _f = _seed_plan(monkeypatch, used=3_000)
+    cli.cmd_billing_reversal(_pw(credits="7424"))
+    assert _left(plan) == 9_000 - 8_998
+
+
+def test_unused_of_a_monitoring_plan_line_refuses_cleanly_not_a_crash(monkeypatch, capsys):
+    # LOW (C25): `unused` of a monitoring (0-credit) plan line refuses cleanly with exit 2, never a ZeroDivision or
+    # other traceback. Reds under C25 (dropping the `line.credits <= 0` arm of the `unused` guard).
+    _seed_plan(monkeypatch)
+    InvoiceRegistry(cli.SpineStore(), owner_key=ensure_owner_keypair()).record(
+        "acme", invoice_id="in_mon1", kind="subscription", price_id="vigil_aegis_observe_1h_monthly",
+        amount_minor=_PRICE, currency="USD", credits=0, period_start=1.0, period_end=_PE, issued_at=1.0)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup="in_mon1", credits=None))
+    assert e.value.code == 2 and "not a purchase" in capsys.readouterr().err
+
+
+def test_unused_purchased_balance_excludes_what_a_refund_already_removed(monkeypatch, capsys):
+    # LOW (C21): the printed "purchased balance remaining" counts bought credits LESS what refunds already removed.
+    # trial 450 + a 1,000 pack, an owner refund of 200 of the pack -> 800 purchased remaining (never 1,000, and the
+    # 450 trial credits never count). Reds under C21 (`bought_left = sum(credits)` without subtracting `removed`).
+    monkeypatch.setenv("VIGIL_BILLING_REVERSALS", "1")
+    owner, s, w = _seed(credits=1000)
+    w.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    BillingReversalLedger(s, wallet=w).reconcile("acme", "cs_1", cap=1000, reason="refund", now=2.0,
+                                                 owner_refund=200, unused_only=True)
+    cli.cmd_billing_reversal(_ns(reversal_cmd="unused", credits=None))
+    assert "purchased balance remaining: 800 " in capsys.readouterr().out
+
+
+def test_unused_purchased_balance_excludes_a_plan_allotment(monkeypatch, capsys):
+    # LOW (C22): a plan period's allotment is plan-ledger credit, never part of the wallet's purchased balance. With a
+    # 12,000-credit plan period on the books plus a 1,000 pack and 450 trial, the pack's "purchased balance remaining"
+    # is 1,000 (not 1,450, and the plan allotment never counts). Reds under C22 (bought includes subscription lines).
+    plan, _f = _seed_plan(monkeypatch)                                  # a 12,000-credit plan period on the books
+    owner = ensure_owner_keypair()
+    s = cli.SpineStore()
+    w = WalletRegistry(s, owner_key=owner)
+    w.grant("acme", 1000, "topup", entry_id="cs_1", issued_at=1.0)
+    InvoiceRegistry(s, owner_key=owner).record("acme", invoice_id="cs_1", kind="topup", price_id="p",
+                                               amount_minor=1000, currency="USD", credits=1000, issued_at=1.0)
+    w.grant("acme", 450, "trial", entry_id="trial:acme", issued_at=0.5)
+    cli.cmd_billing_reversal(_ns(reversal_cmd="unused", topup="cs_1", credits=None))
+    assert "purchased balance remaining: 1000 " in capsys.readouterr().out
+
+
+def test_plan_withdraw_of_an_undelivered_or_pruned_period_stops_nothing(monkeypatch, capsys):
+    # LOW (C32): plan-withdraw refuses when the named invoice's plan period has no delivered tranche on the spine
+    # (never credited, or an old period pruned away) — it stops no renewal and removes nothing. Reds under C32
+    # (dropping the "a tranche of this period was delivered" guard, which then stops the renewal for nothing).
+    plan, fake = _seed_plan(monkeypatch)
+    InvoiceRegistry(cli.SpineStore(), owner_key=ensure_owner_keypair()).record(
+        "acme", invoice_id="in_plan2", kind="subscription", price_id="vigil_pro_monthly", amount_minor=_PRICE,
+        currency="USD", credits=_ALLOT, period_start=1.0, period_end=_PE + 1.0, issued_at=1.0)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_billing_reversal(_pw(topup="in_plan2", credits=str(_PRICE)))
+    assert e.value.code == 2 and fake.updates == []
+
+
+def test_the_withdrawal_runbook_pins_the_customer_favourable_pack_rule_and_the_14_day_deadline():
+    # D1/D2: the customer-favourable reading the owner/counsel settled — trial credits are spent first and never count
+    # as purchased, and every withdrawal step is done inside the 14-day window. Pinned so inverting D1 or deleting D2
+    # in docs/runbooks/consumer-withdrawal.md fails CI.
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[3] / "docs" / "runbooks" / "consumer-withdrawal.md").read_text("utf-8")
+    assert "trial credits count as spent **first** and never count as purchased;" in text          # D1
+    assert "Do every step below inside that time." in text                                          # D2
