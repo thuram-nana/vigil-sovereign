@@ -144,7 +144,8 @@ let renders = 0; function render() { renders++; }
 let whoRefreshes = 0; async function refreshWho() { whoRefreshes++; }
 function shell(inner, current) { return h("div.shell", { dataset: { current: current } }, inner); }
 var GUIDE_ON = false;
-var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, SETTINGS_ON = false;   // every other page flag: off
+var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false;   // every other page flag: off
+var ATTACK_PATH_ON = false, BLIND_VULN_ON = false;   // PR-L (Area 11) flags: off here (shell reads ATTACK_PATH_ON)
 const VUI = window.VUI;
 const calls = [], toasts = [], errs = [];
 let server = {};            // "GET <path>" / "POST <path>" -> {data} | {status, data} | {wait: <promise>}
@@ -510,7 +511,7 @@ out.lines = plans.map(p => [p.price_id, isMonitoringOffer(p), offerLine(p)]);
         True, "AEGIS Respond, 5 hosts — monthly: watches traffic, reports attacks and can block them")
     for pid in catalog.monitoring_price_ids():
         assert lines[pid][0] is True and "credit" not in lines[pid][1].lower(), pid
-    assert lines["vigil_pro_monthly"] == (False, "Plan: 6000 credits every 30 days")      # credit plans unchanged
+    assert lines["vigil_pro_monthly"] == (False, "Plan: 12000 credits every 30 days")     # credit plans unchanged
     assert lines["vigil_topup_1k"] == (False, "1000 credits")
 
 
@@ -623,5 +624,8 @@ process.stdout.write(JSON.stringify(out));
     src = _src()
     assert "shown: routeShown" in _fn(src, "viewGuideScreen")
     assert re.search(r'function routeShown\(route\) \{ return \(route !== "#/monitoring" \|\| MONITORING_ON\) '
-                     r'&& \(route !== "#/code" \|\| CODE_ON\) '
-                     r'&& \(route !== "#/settings" \|\| SETTINGS_ON\); \}', src)
+                     r'&& \(route !== "#/code" \|\| CODE_ON\) && \(route !== "#/connect" \|\| CONNECT_ON\) '
+                     r'&& \(route !== "#/fix-first" \|\| POSTURE_ON\)'
+                     r'( && [^;]*)?; \}', src)   # (PR-G appends Plans/Reports after PR-B's Fix first)
+    assert re.search(r'function routeShown\(route\) \{[^\n]* && \(route !== "#/settings" \|\| SETTINGS_ON\); \}',
+                     src)   # (lgS1 appends Settings last)

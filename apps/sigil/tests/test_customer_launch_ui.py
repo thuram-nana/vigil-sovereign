@@ -714,3 +714,124 @@ def test_the_guide_launch_and_follow_steps_name_the_real_labels():
     # Retest is left as is (a later slice)
     retest = steps[("assess", "retest")]["clicks"]
     assert any("Retest" in c for c in retest)
+
+
+# --------------------------------------------------------------------------- PR-F: "queued" (VIGIL_CUSTOMER_FAIR_QUEUE) ----
+def _job_file(org, slug, nonce, seq, *, running=False):
+    """One engine job-queue file, exactly as `vigil launch-drain` → EngagementScheduler writes it for a customer
+    launch (a SecurityJob: tenant_id = the lease's org, engagement_slug = its slug, extra.nonce = its nonce), under
+    the default queue root <VIGIL_BASE_DIR>/jobs."""
+    from vigil_core.seam_base import resolve_seam_base
+    d = Path(resolve_seam_base()) / "jobs" / ("running" if running else "queue")
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"slug": slug, "seed_url": f"https://{slug}/", "job_id": f"job{seq}", "seq": seq,
+           "params": {"tenant_id": org, "source": "api", "engagement_slug": slug,
+                      "extra": {"nonce": nonce, "org_id": org}}}
+    (d / f"{seq:015d}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _started(p, org, host):
+    lease, slug, nonce = _reserve(p, org=org, host=host)
+    assert p.launch_start("u", org, lease, now=_IN_WINDOW)["slug"] == slug
+    return slug, nonce
+
+
+def test_a_started_launch_still_in_the_job_queue_shows_how_many_go_first(monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
+    s = _store()
+    _setup(s, "org_a", "apme.cm")
+    p = _prov(s)
+    slug, nonce = _started(p, "org_a", "apme.cm")
+    # another tenant queued two jobs FIRST (seq 1, 2); org_a's job is third in arrival order. The fair claim serves
+    # org_other's oldest, then org_a (never served, nothing running) — so ONE job goes before org_a's, not two.
+    _job_file("org_other", "cust_other1", "o1", 1)
+    _job_file("org_other", "cust_other2", "o2", 2)
+    _job_file("org_a", slug, nonce, 3)
+    row = next(l for l in _launches(p)["launches"] if l["slug"] == slug)
+    assert row["state"] == "running" and row["queued"] == {"ahead": 1}
+
+
+def test_queued_carries_a_count_and_never_another_tenants_identity(monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
+    s = _store()
+    _setup(s, "org_a", "apme.cm")
+    p = _prov(s)
+    slug, nonce = _started(p, "org_a", "apme.cm")
+    _job_file("org_other", "cust_secretslug", "secretnonce", 1)
+    _job_file("org_a", slug, nonce, 2)
+    blob = json.dumps(_launches(p))
+    for leaked in ("org_other", "cust_secretslug", "secretnonce", "job1"):
+        assert leaked not in blob, f"{leaked!r} reached another tenant's launches read"
+
+
+def test_queued_idor_each_org_sees_only_its_own_launches_position(monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
+    s = _store()
+    _setup(s, "org_a", "apme.cm")
+    _setup(s, "org_b", "bpme.cm")
+    p = _prov(s)
+    sa, na = _started(p, "org_a", "apme.cm")
+    sb, nb = _started(p, "org_b", "bpme.cm")
+    _job_file("org_a", sa, na, 1)
+    _job_file("org_b", sb, nb, 2)
+    a = _launches(p, org="org_a")["launches"]
+    b = _launches(p, org="org_b")["launches"]
+    assert [(l["slug"], l["queued"]) for l in a] == [(sa, {"ahead": 0})]
+    assert [(l["slug"], l["queued"]) for l in b] == [(sb, {"ahead": 1})]
+    # a job file claiming to be org_b's but naming org_a's slug + nonce gives org_b nothing: org_b's read only
+    # annotates org_b's own verified leases, and org_a's row keys on (slug, nonce) of ITS tenant only.
+    _job_file("org_b", sa, na, 0)
+    assert [l["slug"] for l in _launches(p, org="org_b")["launches"]] == [sb]
+
+
+def test_a_launch_whose_job_is_running_or_paused_is_not_marked_queued(monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_FAIR_QUEUE", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", "1")
+    s = _store()
+    _setup(s, "org_a", "apme.cm")
+    _setup(s, "org_a", "cpme.cm")
+    p = _prov(s)
+    s1, n1 = _started(p, "org_a", "apme.cm")
+    _job_file("org_a", s1, n1, 1, running=True)                    # claimed by a worker: running, not queued
+    lease2, s2, n2 = _reserve(p, org="org_a", host="cpme.cm")
+    assert p.launch_start("u", "org_a", lease2, now=_IN_WINDOW)["slug"] == s2
+    _job_file("org_a", s2, n2, 2)
+    assert p.launch_pause("u", "org_a", lease2, now=_IN_WINDOW)["slug"] == s2   # paused: its state says so
+    rows = {l["slug"]: l for l in _launches(p)["launches"]}
+    assert "queued" not in rows[s1] and rows[s1]["state"] == "running"
+    assert "queued" not in rows[s2] and rows[s2]["state"] == "paused"
+
+
+def test_with_the_fair_queue_flag_off_the_read_never_touches_the_queue(monkeypatch):
+    monkeypatch.delenv("VIGIL_CUSTOMER_FAIR_QUEUE", raising=False)
+    import sigil.governor.fair_queue as fq
+    s = _store()
+    _setup(s, "org_a", "apme.cm")
+    p = _prov(s)
+    slug, nonce = _started(p, "org_a", "apme.cm")
+    before = _launches(p)
+    _job_file("org_a", slug, nonce, 1)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("flag OFF read the job queue")
+
+    monkeypatch.setattr(fq, "read_launch_positions", _boom)
+    after = _launches(p)
+    assert after == before and all("queued" not in l for l in after["launches"])   # byte-identical to no queue
+
+
+def test_the_spa_shows_a_queued_launch_with_its_position_and_otherwise_renders_as_before():
+    out = _run(_ser() + r"""
+out.q0 = ser(launchRow({ slug: "s", launch: "n", state: "running", queued: { ahead: 0 }, actions: [], lease: {} }));
+out.q3 = ser(launchRow({ slug: "s", launch: "n", state: "running", depth: "deep", queued: { ahead: 3 },
+                         actions: ["pause"], lease: {} }));
+out.plain = ser(launchRow({ slug: "s", launch: "n", state: "running", actions: ["pause"], lease: {} }));
+out.junk = ser(launchRow({ slug: "s", launch: "n", state: "running", queued: { ahead: "3" }, actions: [], lease: {} }));
+out.pausedq = ser(launchRow({ slug: "s", launch: "n", state: "paused", queued: { ahead: 2 }, actions: [], lease: {} }));
+""")
+    assert "Queued" in out["q0"] and "queued at position 1" in out["q0"] and "next to start" in out["q0"]
+    assert "Queued · Deep" in out["q3"] and "queued at position 4" in out["q3"] and "3 ahead of it" in out["q3"]
+    assert "Pause" in out["q3"]                                    # the server's actions still render
+    for plain in (out["plain"], out["junk"]):                      # no / malformed `queued`: exactly as before
+        assert "Running" in plain and "Queued" not in plain and "queued at position" not in plain
+    assert "Paused" in out["pausedq"] and "Queued" not in out["pausedq"]

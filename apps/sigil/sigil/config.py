@@ -305,6 +305,28 @@ def redpen_enabled() -> bool:
     return (os.environ.get("VIGIL_REDPEN_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_fix_it_enabled() -> bool:
+    """True iff the customer one-click "Fix it for me" DISPATCH (consumer Area 10 / PR-K) is ON
+    (`VIGIL_CUSTOMER_FIX_IT` affirmative). OFF by default and NESTED under `VIGIL_REDPEN_ENABLED` (which gates the
+    whole Code screen): with it off the Code screen's Fix this action keeps returning the honest inert "coming"
+    answer — byte-identical to a build without the dispatch — and the overview advertises `fix` as unavailable;
+    nothing is reserved, metered or published to the `redpen-actions` seam.
+
+    With it ON (and `VIGIL_REDPEN_ENABLED` also on), an explicit customer "Fix this" on ONE reproduced finding
+    DISPATCHES to the already-built offense Fix worker (`vigil_integration.jobs.redpen_fix`) by publishing a
+    validated action marker to the dedicated `redpen-actions` seam — but ONLY after the full sovereign guard
+    chain that was already present: the `manage_code` admit (decision O-4), the E3c step-up (a fix opens a PR —
+    sensitive), and a `reserve_redpen_review` that re-verifies the active owner-signed connected-repo record +
+    the wallet floor + the per-repo monthly limit and METERS the model spend with no estimate. The dispatch
+    GRANTS NO BYPASS: the marker is an untrusted trigger and the offense plane re-checks every authority where it
+    WRITES (the owner-signed repo-exact `"pr"` grant + the signed-spine FACT), re-reviews the patch, and opens
+    only a gated, m-of-n-quorum PR from a fix branch — VIGIL never merges. It mints NO fact and implies NO
+    clearance: a clearance is the signed NEGATIVE remediation cert the independent verification path earns, never
+    a button's claim. Read at call time; a pure env read (FATAL-2 clean — this sovereign accessor loads no
+    offense module, and the offense plane reads the same master `VIGIL_REDPEN_ENABLED` through its own helper)."""
+    return (os.environ.get("VIGIL_CUSTOMER_FIX_IT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def presentation_enabled() -> bool:
     """True iff the APEX PR-A presentation spine is ON (`VIGIL_APEX_PRESENTATION` affirmative). OFF by default
     (mirrors `redpen_enabled`): with it off the customer Posture read (``/api/customer/assessments/posture`` →
@@ -322,6 +344,35 @@ def presentation_enabled() -> bool:
     return (os.environ.get("VIGIL_APEX_PRESENTATION") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_attack_path_enabled() -> bool:
+    """True iff the customer Attack-path storytelling screen is ON (`VIGIL_CUSTOMER_ATTACK_PATH` affirmative). OFF
+    by default (Area 11 UI): with it off the ``#/attack-path`` SPA route is the home screen (exactly as an unknown
+    route), no nav link is shown, the page's ``__VIGIL_ATTACK_PATH__`` switch is "0", and the sovereign findings
+    projection NEVER surfaces the inert ``attack_path`` cert field — so the server is byte-identical to a build
+    without the feature.
+
+    PURE PRESENTATION: ``attack_path`` is additive, purely-descriptive signed DATA that rides the EXISTING
+    tenant-scoped finding projection (``assessments._finding_json``); it restates oracles that already fired for
+    the org's OWN proven findings, is NEVER read for any verdict, and can promote nothing. The screen only draws
+    a chain the signed data already established — it invents no finding and asserts no impact the cert did not.
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ATTACK_PATH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_blind_vuln_enabled() -> bool:
+    """True iff the customer blind-vulnerability (out-of-band) confirmation badge is ON (`VIGIL_CUSTOMER_BLIND_VULN`
+    affirmative). OFF by default (Area 11 UI): with it off the finding card renders byte-identically (no badge),
+    the page's ``__VIGIL_BLIND_VULN__`` switch is "0", and the sovereign findings projection NEVER surfaces the
+    inert ``oob_attestation`` cert field — so the server is byte-identical to a build without the feature.
+
+    PURE PRESENTATION: ``oob_attestation`` is the EXISTING signed, independent out-of-band callback receipt
+    (pinned-collector-key attested) carried on the finding cert as inert DATA. The badge only SURFACES that a
+    proven finding was confirmed out of band (a vuln with no visible response); it re-verifies nothing, promotes
+    nothing, and is shown ONLY when the signed attestation is present — absence is never rendered as "clean".
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_BLIND_VULN") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_assistant_enabled() -> bool:
     """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
     (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
@@ -333,6 +384,52 @@ def customer_assistant_enabled() -> bool:
     key). Read at call time. Even ON, a turn still fails closed unless the model gateway is reachable and an owner key
     is present to mint the turn's grant."""
     return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_assistant_wallet_enabled() -> bool:
+    """True iff every customer security-assistant turn is ACCOUNTED to the asking org (PR-J2,
+    `VIGIL_CUSTOMER_ASSISTANT_WALLET` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the assistant
+    is exactly PR-J's — refused while metered billing is on, otherwise metered against its grant's cap — the model
+    gateway's allowance source never answers for an assistant grant, the customer statement carries no assistant line
+    and the reservation sweep has no assistant leg: byte-identical to a build without it. ON (with
+    `VIGIL_CUSTOMER_ASSISTANT`), in EVERY billing mode a turn is admitted only within the org's rate limit and daily
+    turn budget (`assistant_turns_per_hour` / `assistant_turns_per_day`; over either ⇒ rate limited) and only after an
+    owner-signed audit record of it (who asked, for which org, under which grant — `governor.assistant_turns`) is on the
+    spine. With `VIGIL_METERED_BILLING` on it is also BILLED to the org's own credits: before its one model request the
+    turn HOLDS that request's worst case (an owner-signed reserve keyed by the turn's grant nonce — refused, with nothing
+    held, when the exact balance or the credit line cannot cover it), the gateway admits the request only within that
+    hold, and the turn then settles EXACTLY (its confirmed metered charge kept to the milli-credit, the rest returned)
+    with a "Security assistant" line on the statement (`ui.assistant_wallet`). With metered billing off nothing is
+    drawn (flat billing: VIGIL bears the model cost, bounded per org per day by the turn budget times the grant's cap).
+    Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT_WALLET") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def assistant_turns_per_hour() -> int:
+    """PR-J2 — the most security-assistant turns ONE org may have answered in any rolling hour
+    (`VIGIL_ASSISTANT_TURNS_PER_HOUR`, default 20), counted from the owner-signed turn ledger
+    (`governor.assistant_turns`); a turn past it is refused as rate limited. Consulted only while
+    `customer_assistant_wallet_enabled()`. A junk/out-of-range value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_HOUR") or "").strip()
+    try:
+        n = int(raw) if raw else 20
+    except ValueError:
+        return 20
+    return n if 1 <= n <= 10_000 else 20
+
+
+def assistant_turns_per_day() -> int:
+    """PR-J2 — the daily turn BUDGET of ONE org's security assistant: the most turns it may have answered in any
+    rolling day (`VIGIL_ASSISTANT_TURNS_PER_DAY`, default 100), from the same ledger as `assistant_turns_per_hour`. With
+    each turn's model spend capped by its grant (`assistant_cap_nano_usd`), a flat-billed org can cost VIGIL at most
+    this many times that cap a day. Consulted only while `customer_assistant_wallet_enabled()`. A junk/out-of-range
+    value falls back to the default (never "unlimited")."""
+    raw = (os.environ.get("VIGIL_ASSISTANT_TURNS_PER_DAY") or "").strip()
+    try:
+        n = int(raw) if raw else 100
+    except ValueError:
+        return 100
+    return n if 1 <= n <= 100_000 else 100
 
 
 def customer_notify_enabled() -> bool:
@@ -528,6 +625,102 @@ def customer_retest_reproof_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_RETEST_REPROOF") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_connect_enabled() -> bool:
+    """True iff the unified customer CONNECT surface is ON (`VIGIL_CUSTOMER_CONNECT` affirmative; consumer PR-C).
+    OFF by default (mirrors `redpen_enabled`): with it off EVERY connect action is absent (404 exactly as an
+    unknown route) — the one-screen connect overview, the single-asset ownership poll, and the read-only cloud-grant
+    connect / verify / disconnect all refuse, nothing is minted and no cloud grant is recorded — so the server is
+    byte-identical to a build without PR-C.
+
+    This flag gates only the one-screen connect site/repo/cloud SURFACE; it never changes how an asset is TESTED.
+    CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER BY ITSELF AUTHORIZES LIVE OFFENSE: a live customer run
+    still rides the UNCHANGED `vigil_core.posture.customer_prod_execution_enabled()` (VIGIL_CUSTOMER_PROD_EXECUTION)
+    owner gate PLUS a current host-ownership proof PLUS the owner-signed EngagementAuthority, and a cloud grant is
+    READ-ONLY (running cloud posture against it is a separate, separately-gated engagement — not unlocked here).
+
+    The cloud leg has its OWN flag on top of this one (`customer_cloud_connect_enabled`). Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_cloud_connect_enabled() -> bool:
+    """True iff the connect surface's CLOUD leg is ON: `VIGIL_CUSTOMER_CLOUD_CONNECT` affirmative AND the master
+    `customer_connect_enabled()` (the cloud leg is part of the connect surface and can never be on without it).
+    OFF by default: the cloud routes are absent (404 exactly as an unknown route), the connect overview carries no
+    cloud leg, and no cloud challenge / grant can be recorded.
+
+    Even when ON, connecting an account still fails CLOSED until the owner provisions VIGIL's own read-only AWS
+    connector identity (`cloud_connect_fetcher` / `cloud_connect_aws_principal_arn` below) — the identity the
+    customer's role trusts. A grant is READ-ONLY and authorizes no offense. Read at call time."""
+    if not customer_connect_enabled():
+        return False
+    return (os.environ.get("VIGIL_CUSTOMER_CLOUD_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-C — the connect surface's durable limiters (their own marker dirs under SIGIL_HOME, never shared with
+# the login limiter). CONNECT_CHECK = the per-(org, host) automatic ownership re-check CADENCE; CONNECT_ORG = the
+# per-org ceiling on ownership fetches across all hosts; CLOUD_CONNECT = the per-org ceiling on cloud verifications
+# (each one is three STS calls under VIGIL's connector identity).
+CONNECT_CHECK_RATELIMIT_DIR = _customer / "connect_check_ratelimit"
+CONNECT_ORG_RATELIMIT_DIR = _customer / "connect_org_ratelimit"
+CLOUD_CONNECT_RATELIMIT_DIR = _customer / "cloud_connect_ratelimit"
+
+# --- AWS STS OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) -----------------------
+# The ONLY host the cloud-connect fetcher (`ui.cloud_fetch`) may reach, enforced BEFORE any socket opens (mirrors
+# GITHUB_APP_EGRESS_ALLOWLIST). No endpoint override: the credential-holding egress can only ever reach AWS STS
+# (the global endpoint, SigV4 region us-east-1). A customer supplies only a role ARN — a PARAMETER of the signed
+# request, never a URL — so the customer can never steer this egress anywhere.
+AWS_STS_EGRESS_ALLOWLIST = frozenset({"sts.amazonaws.com"})
+
+# VIGIL's connector principal (an IAM role or user in the aws partition) — the exact `Principal` a customer's
+# read-only role trusts. Validated so a malformed value can never be printed into a customer's trust policy.
+_AWS_PRINCIPAL_ARN_RE = re.compile(r"arn:aws:iam::[0-9]{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,512}")
+
+
+def cloud_connect_aws_principal_arn() -> str:
+    """VIGIL's AWS connector principal ARN (`VIGIL_CLOUD_CONNECT_AWS_PRINCIPAL_ARN`), format-checked, or "" when
+    unset/malformed (the cloud leg then offers nothing — fail closed, never a trust policy naming a bad principal)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_PRINCIPAL_ARN") or "").strip()
+    return raw if _AWS_PRINCIPAL_ARN_RE.fullmatch(raw) else ""
+
+
+def cloud_connect_fetcher():
+    """The live AWS cloud-connect fetcher (``ui.cloud_fetch.AwsStsConnectFetcher``: assume the customer's role with
+    the issued external id, read the caller identity, and run the same-shape negative control) when the cloud leg is
+    ON and the owner has provisioned VIGIL's connector credentials + principal, else None (fail closed: the
+    provisioner then offers and verifies nothing). Credentials: `VIGIL_CLOUD_CONNECT_AWS_ACCESS_KEY_ID` +
+    `VIGIL_CLOUD_CONNECT_AWS_SECRET_ACCESS_KEY` (+ optional `VIGIL_CLOUD_CONNECT_AWS_SESSION_TOKEN`) — an identity
+    whose only permission is `sts:AssumeRole`. Lazily imports the stdlib-only fetcher so `config` stays import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_aws_principal_arn():
+        return None
+    key_id = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_ACCESS_KEY_ID") or "").strip()
+    secret = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_SECRET_ACCESS_KEY") or "").strip()
+    token = (os.environ.get("VIGIL_CLOUD_CONNECT_AWS_SESSION_TOKEN") or "").strip()
+    if not key_id or not secret:
+        return None
+    from .ui.cloud_fetch import AwsStsConnectFetcher
+    return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
+
+
+def customer_posture_enabled() -> bool:
+    """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
+    Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of
+    what to fix first — each open finding's plain-language impact, its standards chips and its exact remediation — read
+    from the edge's ``api/customer/posture`` (the cockpit's ``customer_posture`` action) and
+    ``api/customer/posture/trend`` (``posture_trend``, which also feeds the Overview's Posture card).
+
+    Effective ONLY together with `presentation_enabled()` (VIGIL_APEX_PRESENTATION): that is the master switch over
+    the consumer posture surface and the signed presentation block this screen renders, so this flag on with it off
+    is OFF. OFF by default (mirrors `redpen_enabled`): both routes and both cockpit actions are absent (404, exactly
+    as an unknown route), the page's ``data-posture`` switch is "0", there is no Fix first tab, ``#/fix-first`` is
+    the home screen exactly as an unknown route, and the Overview has no Posture card and makes no posture read — so
+    the app is byte-identical to a build without it. Everything shown is a read-only projection of the org's OWN
+    oracle-confirmed findings (``ui/customer_posture.py``): it mints nothing, decides no verdict and makes no model
+    call. Read by the customer edge when it starts (it is written into the page) and by the edge and the cockpit on
+    every request for the routes — set the SAME value in customer.env and cockpit.env."""
+    return ((os.environ.get("VIGIL_CUSTOMER_POSTURE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+            and presentation_enabled())
+
+
 def customer_team_ui_enabled() -> bool:
     """True iff the customer app's Team screen is on (`VIGIL_CUSTOMER_TEAM_UI` affirmative): the member list (the edge's
     ``GET api/customer/members`` → provision ``members_list``), Add member by the email of an existing VIGIL account
@@ -612,22 +805,27 @@ def multi_shard_enabled() -> bool:
 
 
 def customer_fair_queue_enabled() -> bool:
-    """True iff the customer FAIR cross-tenant launch QUEUE + shard-placement-on-signup are on
-    (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative; consumer PR-F). OFF by default (mirrors `redpen_enabled` /
-    `customer_monitoring_enabled`): with it off a sign-up mints NO shard assignment (the historical
-    single-placement deployment), the launch surface shows NO cross-tenant queue position, and every surface is
-    byte-identical to a build without PR-F.
+    """True iff consumer PR-F is on (`VIGIL_CUSTOMER_FAIR_QUEUE` affirmative). OFF by default (mirrors
+    `redpen_enabled` / `customer_monitoring_enabled`): the job queue claims in arrival order, the launches read shows
+    no queue position, a sign-up mints no shard assignment — every surface byte-identical to a build without PR-F.
+    Read at call time. The consumer plan named this flag VIGIL_FAIR_QUEUE; it ships under the VIGIL_CUSTOMER_* name
+    every consumer-wave flag uses.
 
-    When ON (together with `multi_shard_enabled()` AND an owner-set `shard_ids()` topology) a sign-up is placed on
-    a shard by the OWNER-signed provisioner — a tenant NEVER self-assigns (the shard is server-chosen from owner
-    topology + current load, exactly like a launch AMOUNT is server-decided), and the launch surface may show an
-    honest cross-tenant "queued" position so load surfaces as a truthful wait, never a silent drop.
+    ON, three things change, each wired on its production path:
+      * FAIR CLAIM — the engine job queue (`framework.v2.engagement_scheduler.EngagementScheduler.claim_next`, which
+        reads this same env var offense-side) claims the oldest job of the tenant with the fewest jobs running, then
+        the least recent service (`vigil_core.fair_share`), so one tenant's backlog never starves another's launch.
+      * QUEUED — the customer launches read (`ui.customer_launches`) marks a started launch still waiting in that
+        queue with how many jobs are claimed before it (a count; never whose).
+      * SHARD ON SIGN-UP — with `multi_shard_enabled()` AND an owner `shard_ids()` topology also set, every sign-up
+        path owner-signs the new org's shard placement (`Provisioner._place_on_signup`; a tenant NEVER chooses its
+        shard). Coupled to THIS flag on purpose: `VIGIL_MULTI_SHARD` alone is Front C's ROUTING switch, whose owner
+        places tenants explicitly; an owner who runs that keeps exactly that until they also opt in to automatic
+        placement, which writes an owner-signed record per sign-up (see LIMIT-consumer-shard-on-signup-ops).
 
-    Fairness is a cross-TENANT ORDERING only: it NEVER parallelizes one target (per-target scan stays SERIAL — the
-    engine's slug lease / serial-proof-per-host governor is untouched) and it mints NO FACT (only the oracle mints
-    facts; a queue position is a UI notice, never a finding). The elastic we-host k8s/Firecracker fleet these
-    shards map to is OWNER-GATED infra, out of this code's scope — this flag gates only the in-repo placement +
-    ordering. Read at call time."""
+    Fairness orders work and nothing else: one target is never parallelized (a job whose slug is running waits; the
+    slug lease + run gate are untouched), and a queue position mints NO FACT. The elastic we-host fleet the shard ids
+    name is owner deploy work, deploy-gated and outside this flag (LIMIT-frontc-shard-cross-host-deploy)."""
     return (os.environ.get("VIGIL_CUSTOMER_FAIR_QUEUE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
@@ -643,8 +841,8 @@ def shard_ids() -> "tuple[str, ...]":
     topology the provisioner places NOTHING on sign-up (fail-safe — a tenant is never guessed onto a shard, and
     routing then fails closed for it), so even with the flags on, shard-on-signup stays inert until the owner
     names the shards. A malformed entry (not a safe single path component) is DROPPED, so a bad owner value can
-    never traverse a path. The owner stands up the matching cross-HOST fleet separately — that elastic we-host
-    k8s/Firecracker infra is OWNER-GATED and out of this code's scope. Read at call time."""
+    never traverse a path. Standing up the matching cross-HOST fleet is owner deploy work, deploy-gated and outside
+    this reader (LIMIT-frontc-shard-cross-host-deploy). Read at call time."""
     raw = (os.environ.get("VIGIL_SHARD_IDS") or "").strip()
     if not raw:
         return ()
@@ -1636,3 +1834,100 @@ def apex_oob_enabled() -> bool:
     FACT still requires the full collector provisioning (an owner-pinned collector pubkey + the deployment
     collector private key + a verified owner-signed authority), exactly like every other out-of-band class."""
     return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# ---- consumer PR-G (Area 6): the Plans screen + plan change, the report export, the compliance view ----------
+# Each capability is default-OFF and read at CALL time (mirrors `redpen_enabled`): with a flag off its edge routes and
+# cockpit actions are absent (404 exactly as an unknown route), the page writes "0" for it, and nothing else changes.
+PLAN_CHANGE_DIR = _customer / "plan_change"             # owner-signed scheduled plan-change records (display only)
+REPORT_RATELIMIT_DIR = _customer / "report_ratelimit"   # the per-org/per-requester report-export limiter's markers
+
+
+def customer_plans_enabled() -> bool:
+    """True iff the customer Plans screen is ON (`VIGIL_CUSTOMER_PLANS` affirmative). OFF by default: the
+    ``api/customer/billing/plans`` read and its ``billing_plans`` cockpit action are absent (404 exactly as an unknown
+    route) and the page writes data-plans="0" (no tab). ON, the screen compares the OWNER CATALOG's credit plans (price,
+    credits per period, period) with the trial and pay-as-you-go, marks the workspace's current plan and offers the
+    one-click upgrade through the EXISTING hosted checkout (which still needs VIGIL_CUSTOMER_CHECKOUT_ENABLED +
+    VIGIL_CUSTOMER_PLAN_CHECKOUT_ENABLED). A pure read: it mints nothing and never decides money."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLANS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_plan_change_enabled() -> bool:
+    """True iff a customer may CHANGE or CANCEL their credit plan self-serve (`VIGIL_CUSTOMER_PLAN_CHANGE`
+    affirmative). OFF by default: the ``api/customer/billing/plan-change`` route and its ``billing_plan_change`` action
+    are absent (404). Effective only together with the Plans screen and the base + plan checkout flags. ON, a change is
+    scheduled on the processor's subscription to take effect AT THE NEXT RENEWAL (no mid-period charge or refund — the
+    renewal invoice is then exactly the new catalog price, which the EXISTING verified webhook drain credits through the
+    EXISTING owner catalog); a cancel ends the plan at the end of the period it already paid for. Stripe only."""
+    return (os.environ.get("VIGIL_CUSTOMER_PLAN_CHANGE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_report_export_enabled() -> bool:
+    """True iff the shareable assessment REPORT export is ON (`VIGIL_CUSTOMER_PDF_REPORT` affirmative). OFF by default:
+    the ``api/customer/report`` / ``api/customer/report/pdf`` reads and their cockpit actions are absent (404) and the
+    page writes data-report-export="0". ON, a member who may read assessments downloads a deterministic, self-contained
+    HTML report of the workspace's PROVEN findings (no script, no external reference, every value escaped); the PDF of
+    the same report additionally needs the owner's renderer (`report_pdf_renderer`), and fails closed without it."""
+    return (os.environ.get("VIGIL_CUSTOMER_PDF_REPORT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_compliance_map_enabled() -> bool:
+    """True iff the customer COMPLIANCE view is ON (`VIGIL_CUSTOMER_COMPLIANCE_MAP` affirmative). OFF by default: the
+    ``api/customer/compliance`` read and its ``compliance_view`` action are absent (404) and the page writes
+    data-compliance="0". ON, the OWASP Top 10 / PCI DSS / SOC 2 controls the workspace's PROVEN findings implicate are
+    rolled up per framework — it never states that a control is met, covered or compliant."""
+    return (os.environ.get("VIGIL_CUSTOMER_COMPLIANCE_MAP") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def report_pdf_renderer() -> str:
+    """The owner/ops-provisioned HTML→PDF renderer (`VIGIL_REPORT_PDF_RENDERER`): the ABSOLUTE path of an executable
+    that reads the report's HTML on stdin and writes a PDF to stdout. It must live OUTSIDE the customer venv (a headless
+    renderer is an ops-layer dependency, never a sovereign one). Unset (the default) = no PDF: the PDF export refuses
+    and the HTML report stays available. Read at call time."""
+    return (os.environ.get("VIGIL_REPORT_PDF_RENDERER") or "").strip()
+
+
+def customer_proof_badge_enabled() -> bool:
+    """True iff the customer PROOF BADGE + per-finding PCF export (consumer PR-I, Area 8) are ON
+    (`VIGIL_CUSTOMER_PROOF_BADGE` affirmative). OFF by default (mirrors `redpen_enabled`): with it off the edge
+    download route (``/api/customer/assessments/proof``) and the ``proof_export`` cockpit action are absent (404
+    exactly as an unknown route), the findings read carries NO ``proof`` overlay, the page's
+    ``__VIGIL_PROOF_BADGE__`` switch is "0" and the public site's ``/verify`` explainer is absent — so the server is
+    byte-identical to a build without the feature. A PURE sovereign projection of already-signed data: it mints no
+    FACT, touches no target and makes no model call. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_PROOF_BADGE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_proof_delegation_paths() -> "tuple[Path, ...]":
+    """The owner-signed OFFENSE-GOVERNANCE delegation certs (`VIGIL_CUSTOMER_PROOF_DELEGATIONS`: ABSOLUTE paths
+    separated by ``os.pathsep``) the proof badge derives its governance trust root(s) from — normally the same file
+    the finding drain admits findings under (``VIGIL_FINDING_GOV_DELEGATION``), plus the previous one(s) during a
+    governance-key rotation. A relative / unexpanded (``%``) entry is dropped (fail-closed: it can never resolve to
+    a different file than the operator meant). Each listed cert is still verified at use against the CURRENT owner
+    key, its role, the finding's engagement scope and the CURRENT clock (an expired delegation vouches for
+    nothing), so this list can only ever narrow what verifies, never widen it. Empty → no finding is badged and no
+    proof bundle is produced. Read at call time."""
+    raw = os.environ.get("VIGIL_CUSTOMER_PROOF_DELEGATIONS") or ""
+    out: "list[Path]" = []
+    for part in raw.split(os.pathsep):
+        v = part.strip()
+        if not v or "%" in v or not Path(v).is_absolute():
+            continue
+        out.append(Path(v))
+    return tuple(out)
+
+
+def proof_published_fingerprints() -> "tuple[str, ...]":
+    """The governance trust-root fingerprints VIGIL PUBLISHES for auditors (`VIGIL_PROOF_PUBLISHED_FINGERPRINTS`:
+    ``sha256:<64 lowercase hex>`` values separated by commas and/or whitespace). The public ``/verify`` explainer
+    prints them (the out-of-band channel an auditor pins from), and, when the list is non-empty, the proof export
+    refuses a bundle whose trust root is not on it — so a customer is never handed a badge an auditor could not
+    re-check against the published pin. A malformed entry is dropped (never "fixed up"). Read at call time."""
+    import re as _re
+    raw = os.environ.get("VIGIL_PROOF_PUBLISHED_FINGERPRINTS") or ""
+    seen: "list[str]" = []
+    for tok in _re.split(r"[\s,]+", raw.strip()):
+        if _re.fullmatch(r"sha256:[0-9a-f]{64}", tok) and tok not in seen:
+            seen.append(tok)
+    return tuple(seen)

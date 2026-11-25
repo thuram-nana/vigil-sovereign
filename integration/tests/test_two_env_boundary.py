@@ -81,6 +81,15 @@ assert "framework" not in __import__("sys").modules, "redpen_system* must not im
 assert "strix" not in __import__("sys").modules, "redpen_system* must not import strix at module scope"
 import sigil.ui.redpen_scheduler              # R4: the sovereign System-review producer (owner key) stays offense-free
 assert "framework" not in __import__("sys").modules, "redpen_scheduler must not import framework at module scope"
+import sigil.governor.cloud_connect           # PR-C: the READ-ONLY cloud-grant registry (owner key) — SOVEREIGN
+assert "framework" not in __import__("sys").modules, "cloud_connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "cloud_connect must not import strix at module scope"
+import sigil.ui.connect                        # PR-C: the unified connect read projection (sites + repos + cloud)
+assert "framework" not in __import__("sys").modules, "ui.connect must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "ui.connect must not import strix at module scope"
+import sigil.ui.cloud_fetch                    # PR-C: the live AWS STS connect fetcher (stdlib SigV4) — SOVEREIGN
+assert "framework" not in __import__("sys").modules, "ui.cloud_fetch must not import framework at module scope"
+assert "strix" not in __import__("sys").modules, "ui.cloud_fetch must not import strix at module scope"
 import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
 _m = __import__("sys").modules
 assert "framework" not in _m, "warden_gate must not import framework at module scope"
@@ -93,6 +102,12 @@ assert "strix" not in _m, "model_gateway must not import strix at module scope"
 import sigil.ui.assistant                      # PR-J: the customer security assistant (sovereign; grounded + metered)
 assert "framework" not in _m, "ui.assistant must not import framework at module scope"
 assert "strix" not in _m, "ui.assistant must not import strix at module scope"
+import sigil.ui.assistant_wallet               # PR-J2: the assistant turn's admission, wallet draw + exact settle
+assert "framework" not in _m, "ui.assistant_wallet must not import framework at module scope"
+assert "strix" not in _m, "ui.assistant_wallet must not import strix at module scope"
+import sigil.governor.assistant_turns          # PR-J2: the owner-signed assistant-turn ledger (audit + rate limit)
+assert "framework" not in _m, "governor.assistant_turns must not import framework at module scope"
+assert "strix" not in _m, "governor.assistant_turns must not import strix at module scope"
 import sigil.config                           # APEX PR-1: the sovereign autonomous-driver flag accessor (pure env read)
 assert hasattr(sigil.config, "apex_autonomous_enabled"), "sigil.config must expose apex_autonomous_enabled"
 assert "framework" not in _m, "sigil.config must not import framework at module scope"
@@ -221,6 +236,10 @@ assert "strix" not in _m, "remediation.apex_pcr must not import strix at module 
 import vigil_integration.jobs.apex_retest_scheduler  # APEX PR-3: the continuous retest scheduler — the live re-fire is INJECTED
 assert "framework" not in _m, "jobs.apex_retest_scheduler must not import framework at module scope (the re-fire is injected)"
 assert "strix" not in _m, "jobs.apex_retest_scheduler must not import strix at module scope"
+import sigil.ui.proof_export                  # PR-I: the per-finding PCF export + proof badge (sovereign; re-states signed bytes)
+assert "framework" not in _m, "proof_export must not import framework at module scope"
+assert "strix" not in _m, "proof_export must not import strix at module scope"
+assert "_vigil_shipped_verify_pcf" not in _m, "proof_export must load the shipped verifier lazily, never at import"
 import sigil.governor.notify_channels   # PR-D: the SSRF-guarded customer FACT-delivery egress (SOVEREIGN; READ-only spine)
 assert "framework" not in _m, "notify_channels must not import framework at module scope"
 assert "strix" not in _m, "notify_channels must not import strix at module scope"
@@ -230,12 +249,30 @@ assert "strix" not in _m, "issue_sync must not import strix at module scope"
 import vigil_integration.jobs.notify_drain  # PR-D: the notify orchestrator — STDLIB ONLY, ALL sovereign logic injected
 assert "framework" not in _m, "jobs.notify_drain must not import framework at module scope"
 assert "strix" not in _m, "jobs.notify_drain must not import strix at module scope"
+import sigil.ui.customer_posture       # PR-B: the customer Fix-first read + posture trend (SOVEREIGN; read-only spine)
+assert "framework" not in _m, "ui.customer_posture must not import framework at module scope"
+assert "strix" not in _m, "ui.customer_posture must not import strix at module scope"
 import sigil.governor.fair_queue  # PR-F: the SOVEREIGN pure fair cross-tenant queue (stdlib only, reuses the scheduler CONCEPT)
 assert "framework" not in _m, "governor.fair_queue must not import framework at module scope (pure sovereign, no engine)"
 assert "strix" not in _m, "governor.fair_queue must not import strix at module scope"
 import sigil.governor.shard_on_signup  # PR-F: the SOVEREIGN owner-side shard-placement-on-signup policy
 assert "framework" not in _m, "governor.shard_on_signup must not import framework at module scope (owner-signed, no engine)"
 assert "strix" not in _m, "governor.shard_on_signup must not import strix at module scope"
+import sigil.governor.plan_change  # PR-G: the self-serve credit-plan change (processor-side only; the drain still mints)
+assert "framework" not in _m, "governor.plan_change must not import framework at module scope"
+assert "strix" not in _m, "governor.plan_change must not import strix at module scope"
+import sigil.ui.plans  # PR-G: the Plans screen read (a pure projection of the owner catalog + the org's own plan)
+assert "framework" not in _m, "ui.plans must not import framework at module scope"
+assert "strix" not in _m, "ui.plans must not import strix at module scope"
+import sigil.ui.compliance_view  # PR-G: the OWASP/PCI/SOC2 roll-up of PROVEN findings (renders via the mirror)
+assert "framework" not in _m, "ui.compliance_view must not import framework at module scope"
+assert "strix" not in _m, "ui.compliance_view must not import strix at module scope"
+import sigil.ui.report_export  # PR-G: the deterministic, self-contained HTML report of PROVEN findings
+assert "framework" not in _m, "ui.report_export must not import framework at module scope"
+assert "strix" not in _m, "ui.report_export must not import strix at module scope"
+import sigil.ui.report_pdf  # PR-G: the PDF seam — the owner's renderer runs OUT of this venv, never imported
+assert "framework" not in _m, "ui.report_pdf must not import framework at module scope"
+assert "strix" not in _m, "ui.report_pdf must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

@@ -96,7 +96,8 @@ _STEP_UP_SAID = ("For your security, this change needs a fresh second-factor che
 @pytest.fixture(autouse=True)
 def _no_flags(monkeypatch):
     for var in (FLAG, SLUG, "VIGIL_CUSTOMER_STEPUP_REQUIRED", "VIGIL_GITHUB_APP_ID", "VIGIL_GITHUB_APP_PRIVATE_KEY",
-                "VIGIL_GITHUB_APP_PRIVATE_KEY_SSM", "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "VIGIL_TRIAL_PREVIEW_ENABLED"):
+                "VIGIL_GITHUB_APP_PRIVATE_KEY_SSM", "VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "VIGIL_TRIAL_PREVIEW_ENABLED",
+                "VIGIL_CUSTOMER_FIX_IT"):   # PR-K dispatch is default-off; keep these tests on the inert "coming" path
         monkeypatch.delenv(var, raising=False)
 
 
@@ -130,7 +131,8 @@ _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogle
           "viewSecurityScreen")
 # Every page flag the extracted code may reference, off. CODE_ON is then re-read from the page by app.js's own line.
 _FLAGS_OFF = ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-              "LAUNCH_ON = false, CODE_ON = false, SETTINGS_ON = false;")
+              "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, ATTACK_PATH_ON = false, BLIND_VULN_ON = false, "
+              "SETTINGS_ON = false;")
 
 
 def _wiring(flag: str, script: str) -> dict:

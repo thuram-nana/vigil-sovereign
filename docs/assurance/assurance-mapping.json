@@ -3615,6 +3615,7 @@
       "residual_limitations": [
         "LIMIT-audit-package-reproduction",
         "LIMIT-cloud-exploit-fixture-proven",
+        "LIMIT-customer-cloud-posture-run",
         "LIMIT-dns-oob-proves-resolution-not-completed-connection",
         "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
         "LIMIT-dns-oob-resolver-ip-not-target-ip",
@@ -3624,6 +3625,7 @@
         "LIMIT-llm-redteam-tools-deferred",
         "LIMIT-posture-no-structured-findings",
         "LIMIT-profile-packs-incremental",
+        "LIMIT-proofbadge-clearance-cert-unsurfaced",
         "LIMIT-sanitizer-output-synthesis",
         "LIMIT-spine-seal-at-capture",
         "LIMIT-symbolic-crash-repair",
@@ -3774,9 +3776,12 @@
       "residual_limitations": [
         "LIMIT-a11y-capture-unwired",
         "LIMIT-agent-body-scaffold",
+        "LIMIT-cloud-connect-gcp-azure-verdict",
+        "LIMIT-consumer-shard-on-signup-ops",
         "LIMIT-external-audit-team",
         "LIMIT-frontc-shard-cross-host-deploy",
         "LIMIT-gesture-native-inject-unwired",
+        "LIMIT-report-pdf-renderer-unprovisioned",
         "LIMIT-restore-hard-pruned-spine",
         "LIMIT-sigil-voice-probe-egress-not-gatewayed"
       ]

@@ -574,9 +574,88 @@
       "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-cloud-connect-gcp-azure-verdict",
+      "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
+      "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/cloud_connect.py",
+        "symbol": "_VERIFIABLE_PROVIDERS"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-customer-cloud-posture-run",
+      "title": "A customer's connected cloud account is recorded read-only, but no gated posture run consumes the grant yet",
+      "summary": "Consumer PR-C records an owner-signed READ-ONLY cloud grant and exposes CloudConnectRegistry.assume_target, the default-deny read a later cloud-posture engagement consumes (the role + external id of an active, unexpired, owner-signed grant of a verifiable provider, for exactly that org/account). The engine-side consumer is not built: the existing live cloud sensor (engine/crucible/framework/v2/sensors/cloud_live.py) reads the HOST's own ambient identity, not a customer's cross-account role. Running posture for a customer is an engagement with the same owner go-live bar as live external targets (owner-signed authority + the posture gate + VIGIL_CUSTOMER_PROD_EXECUTION) and must pass build_offense_gate -> conjunctive_decide. Until it lands a connected account is an owner-verified asset record only: nothing reads the customer's cloud beyond the three STS calls of the connect proof itself, and a grant authorizes no offense.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/cloud_connect.py",
+        "symbol": "CloudConnectRegistry.assume_target"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
+      "title": "The customer proof badge covers the positive finding certificate only: a remediation's signed negative clearance certificate is not surfaced to the customer",
+      "summary": "The customer proof badge and per-finding PCF export (consumer PR-I, Area 8) surface the governance-signed POSITIVE finding certificate only. A remediation's signed NEGATIVE clearance certificate (vigil-remediation-cert-v2, minted offense-side by the APEX PCR close-the-loop and the prove driver) does not reach the customer (sovereign) plane: nothing carries it across the offense-to-sovereign seam until the Area 10 fix-it wiring (consumer PR-K) dispatches the fix worker and carries its certificate, which then surfaces through this same export (plan Area 10, step 2). Fail-closed meanwhile: the badge and the bundle assert nothing about a fix, and a retest's 'fixed' verdict is shown as the retest's own result, never as a signed clearance.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/proof_export.py"
+      },
+      "marker": false,
+      "check": "file-exists",
+      "source_doc": "apps/sigil/sigil/ui/proof_export.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-consumer-shard-on-signup-ops",
+      "title": "Shard-placement-on-sign-up pins hard-prune: the spine snapshot seed does not yet carry shard-assignment rows",
+      "summary": "With VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD on and an owner shard topology (VIGIL_SHARD_IDS), every sign-up owner-signs a ShardPlacement (apps/sigil/sigil/governor/shard_on_signup.assign_on_signup, under the cross-process placement_lock), and 'sigil shard backfill' places tenants created before the switch was on -- all built and tested (test_shard_on_signup, test_shard_on_signup_provision). The operational limit of turning placement on: carrying shard-assignment rows into the spine snapshot seed is not yet built, so a hard prune (spine.prune) FAILS CLOSED past any active placement until the owner re-signs it above the prune point. It is fail-safe (a placement is never silently dropped by a prune), not a data-loss path; the only consequence is that, with a placement per sign-up, the oldest active placement bounds how far hard-prune advances until the seed carries shard rows. Default-OFF: with the flag off no placement is minted and prune is unaffected (byte-identical).",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+        "symbol": "assign_on_signup"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-report-pdf-renderer-unprovisioned",
+      "title": "The customer report's PDF download needs an owner-provisioned HTML-to-PDF renderer that lives outside the customer venv",
+      "summary": "PR-G (Area 6). The shareable assessment report is built in the sovereign venv as a deterministic, self-contained HTML document that is complete on its own (VIGIL_CUSTOMER_PDF_REPORT, default OFF). Its PDF form needs a headless HTML-to-PDF renderer: a large native dependency that must NOT be installed in the customer/sovereign venv (FATAL-2 and dependency hygiene), so providing it is an owner/ops step: install the reference wrapper tools/report_pdf/render_pdf.py with its library in a dedicated environment and set VIGIL_REPORT_PDF_RENDERER to its absolute path. Until then the PDF download REFUSES with a customer-safe message (fail-closed) and the HTML download is unaffected. The seam itself is built and tested with a stand-in renderer: the path must be absolute, a regular executable that no group/other may write, and outside the running venv; it runs with a fixed argv (no shell), a minimal environment (no secret reaches it), a private temporary directory, a wall-clock timeout that kills its whole process group, an output-size cap, and a %PDF-/%%EOF check on what it returns. No real renderer runs in CI, so the visual fidelity of the PDF is not claimed here.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/report_pdf.py",
+        "symbol": "renderer_path"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "tools/report_pdf/render_pdf.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
-  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
+  "honest_limit_sites_note":"The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
   "honest_limit_sites": [
     {
       "file": "engine/crucible/framework/v2/attest/__init__.py",
@@ -810,6 +889,34 @@
       "snippet": "Not wired by the factory yet",
       "kind": "non-debt",
       "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
+    },
+    {
+      "file": "apps/sigil/sigil/ui/proof_export.py",
+      "snippet": "clearance certificate does not yet reach this plane",
+      "kind": "debt",
+      "limit_id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
+      "note": "Consumer PR-I proof badge: the module docstring states that a remediation's signed NEGATIVE clearance certificate is not surfaced by the badge/export because no clearance certificate crosses to the customer plane until PR-K (Area 10) carries it; the badge and bundle speak for the positive finding certificate only."
+    },
+    {
+      "file": "apps/sigil/sigil/config.py",
+      "snippet": "deploy-gated and outside",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "customer_fair_queue_enabled + shard_ids docstrings: standing up the elastic we-host shard fleet the shard ids name is owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "deploy-gated and outside this module",
+      "kind": "debt",
+      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+      "note": "module docstring: standing up / scaling the cross-HOST we-host fleet, and the cross-host dispatch/copy, are owner deploy work (Front C cross-host)."
+    },
+    {
+      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+      "snippet": "not yet built",
+      "kind": "debt",
+      "limit_id": "LIMIT-consumer-shard-on-signup-ops",
+      "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
     }
   ]
 }

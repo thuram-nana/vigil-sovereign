@@ -1761,6 +1761,16 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # APEX consumer PR-B — the Fix-first screen's reads: the posture + worst-first list + trend, and the trend alone
+        # (the Overview's Posture card). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_POSTURE is on together
+        # with its master flag VIGIL_APEX_PRESENTATION; requester = the hop principal, org = the edge SESSION's.
+        if action in ("customer_posture", "posture_trend"):
+            from .. import config as _config
+            if not _config.customer_posture_enabled():
+                return None
+            if action == "customer_posture":
+                return p.customer_posture(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_posture_trend(requester, str(body.get("org_id", "")), ip=ip)
         # C6 — the customer Code (Red-Pen) screen. Absent (unknown action -> 404) unless VIGIL_REDPEN_ENABLED is on, the
         # same master flag that gates the edge routes. requester is the hop principal and org the edge SESSION's (never a
         # free body field) — except redpen_connect_record, the GitHub post-install callback, which has no session and
@@ -1830,10 +1840,83 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
                                             str(body.get("question", "")), ip=ip)
+        # Consumer PR-C — the unified CONNECT surface. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_CONNECT is on
+        # (the cloud actions also need VIGIL_CUSTOMER_CLOUD_CONNECT), the same flags that gate the edge routes; requester
+        # is the hop principal, org from the edge SESSION (never a free body field). Booleans are strict (`is True`): a
+        # string can never affirm authorization or start a re-check.
+        if action in ("connect_overview", "connect_ownership_poll"):
+            from .. import config as _config
+            if not _config.customer_connect_enabled():
+                return None
+            if action == "connect_overview":
+                return p.customer_connect_overview(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_ownership_poll(requester, str(body.get("org_id", "")), str(body.get("host") or ""),
+                                             method=str(body.get("method") or ""),
+                                             recheck=body.get("recheck") is True,
+                                             authorized=body.get("authorized") is True,
+                                             ip=ip, mfa_at=body.get("mfa_at"))
+        if action in ("cloud_connect_challenge", "cloud_connect_verify", "cloud_disconnect"):
+            from .. import config as _config
+            if not _config.customer_cloud_connect_enabled():
+                return None
+            org = str(body.get("org_id", ""))
+            prov, acct = str(body.get("provider") or ""), str(body.get("account_id") or "")
+            if action == "cloud_connect_challenge":
+                return p.cloud_connect_challenge(requester, org, prov, acct, ip=ip)
+            if action == "cloud_connect_verify":
+                return p.cloud_connect_verify(requester, org, prov, acct, str(body.get("role_ref") or ""), ip=ip,
+                                              mfa_at=body.get("mfa_at"))
+            return p.cloud_disconnect(requester, org, prov, acct, ip=ip)
+
+        # PR-I — the per-finding PROOF BUNDLE download (the governance-signed certificate + the shipped verifier, a ZIP
+        # re-verifiable offline). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_PROOF_BADGE is on; org from the
+        # edge SESSION, the finding's identity (slug + certificate digest, as the badge gave it) from the body.
+        if action == "proof_export":
+            from .. import config as _config
+            if not _config.customer_proof_badge_enabled():
+                return None
+            return p.customer_proof_export(requester, str(body.get("org_id", "")),
+                                           engagement_slug=str(body.get("engagement_slug") or ""),
+                                           cert_digest=str(body.get("cert_digest") or ""), ip=ip)
+
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        # PR-G (Area 6) — Plans + plan change, the report export, the compliance view. Each absent (unknown action ->
+        # 404) unless its own flag is on (the same flag that serves its edge route); org from the edge SESSION.
+        if action in self._AREA6_ACTIONS:
+            return self._area6_dispatch(p, action, requester, body, ip)
+        return None
+
+    _AREA6_ACTIONS = frozenset({"billing_plans", "billing_plan_change", "report_export", "report_export_pdf",
+                                "compliance_view"})
+
+    @staticmethod
+    def _area6_dispatch(p, action: str, requester: str, body: dict, ip: str):
+        """PR-G — the Area-6 provisioner actions over a CLOSED exact-match set, each behind its own flag (off -> None ->
+        404). The org is the edge SESSION's; the only body fields read are the plan choice (``price_id`` / ``cancel``,
+        validated against the owner catalog sovereign-side) and the session's step-up stamp."""
+        from .. import config as _config
+        org = str(body.get("org_id", ""))
+        if action == "billing_plans":
+            if not _config.customer_plans_enabled():
+                return None
+            return p.customer_billing_plans(requester, org, ip=ip)
+        if action == "billing_plan_change":
+            if not (_config.customer_plans_enabled() and _config.customer_plan_change_enabled()):
+                return None
+            return p.billing_plan_change(requester, org, price_id=str(body.get("price_id") or ""),
+                                         cancel=body.get("cancel") is True, ip=ip, mfa_at=body.get("mfa_at"))
+        if action in ("report_export", "report_export_pdf"):
+            if not _config.customer_report_export_enabled():
+                return None
+            return p.customer_report_export(requester, org, fmt="pdf" if action == "report_export_pdf" else "html",
+                                            ip=ip)
+        if action == "compliance_view":
+            if not _config.customer_compliance_map_enabled():
+                return None
+            return p.customer_compliance(requester, org, ip=ip)
         return None
 
     @staticmethod
@@ -2119,6 +2202,11 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     from . import billing_alerts
     if billing_alerts.start_background(srv.store) is not None:
         print("  (low-balance alerts: emailing billing admins once per crossing)")
+    # PR-J2: with VIGIL_CUSTOMER_ASSISTANT_WALLET (and metered billing), settle in the background any assistant turn a
+    # crash left holding credit — exactly, once its grant can no longer be used. A no-op when off.
+    from . import assistant_wallet
+    if assistant_wallet.start_background(srv.store) is not None:
+        print("  (assistant turns: a turn a crash left holding credit is settled in the background)")
     # PRICING M1c: with VIGIL_MODEL_GATEWAY_ENABLED, the sovereign model gateway every metered customer run's
     # model requests go through (loopback; holds the provider key; meters per launch). A no-op when disabled.
     from .. import model_gateway

@@ -1709,7 +1709,7 @@ CRUCIBLE is **dual-licensed: PolyForm Noncommercial 1.0.0 or a Commercial Licens
 
 - **Source-available — PolyForm Noncommercial 1.0.0 ([`/LICENSE`](../../LICENSE)):** free to use, run, study, modify, and share for any NONCOMMERCIAL purpose (for non-government users). You may **not** sell it or use it commercially / in production for free.
 - **⚠️ Government / public-sector use is EXCLUDED from the free grant** (a Government-Use Supplemental Term layered over PolyForm-NC): any government / agency / military / law-enforcement / public-authority / state-owned entity needs a **Commercial License**, even for an otherwise-noncommercial purpose.
-- **Commercial:** for commercial / production / government use, to keep modifications private, to embed CRUCIBLE in a product or hosted service, or for warranty/indemnity/support, purchase a commercial license. Contact **thuram@thuramnana.com** / **https://thuramnana.com** (subject: `VIGIL commercial license`).
+- **Commercial:** for commercial / production / government use, to keep modifications private, to embed CRUCIBLE in a product or hosted service, or for warranty/indemnity/support, purchase a commercial license. Contact **info@sigilsovereign.com** / **https://thuramnana.com** (subject: `VIGIL commercial license`).
 
 If you have not signed a commercial agreement, your (non-government, noncommercial) use is governed by the PolyForm Noncommercial License 1.0.0 as modified by the Government-Use Supplemental Term. Contributions are accepted under PolyForm-NC plus a grant allowing commercial relicensing (see [`LICENSING.md`](./LICENSING.md#contributions)). This summary is not legal advice; the binding terms are the repo-root [`/LICENSE`](../../LICENSE) and any signed commercial agreement.
 

@@ -4,7 +4,7 @@
 #
 #     browser ─▶ Caddy (public TLS edge) ─▶ pubui  127.0.0.1:8735
 #                  landing · /vs compare · /tools + CVSS calculator · /trust · /support · /privacy ·
-#                  /cookies · /careers · /blog · /cve browser + read-only /api/cve
+#                  /terms · /cookies · /careers · /blog · /cve browser + read-only /api/cve
 #
 # The pubui listener is NOT public: it binds loopback (or a private/tunnel IP) and FAILS CLOSED on a public
 # bind. This Caddy site is the ONLY thing on a public port — it terminates TLS and forwards over loopback.

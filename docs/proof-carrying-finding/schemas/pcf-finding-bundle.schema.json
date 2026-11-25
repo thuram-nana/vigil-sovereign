@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/pcf-finding-bundle.schema.json",
+  "title": "PcfFindingBundle",
+  "description": "A single signed-finding bundle (SPEC section 8): ONE governance-signed SignedEvidence plus the TrustRoot it verifies under, as a VIGIL customer downloads it for one finding. It carries no engagement chain, no retained oracle_context and no raw evidence. Verified standalone by `verify_pcf.py finding --bundle <file> --trust-root-fingerprint <out-of-band pin>`. The optional convenience members (trust_root_fingerprint, cert_digest, finding_ref) are never trust anchors: a conforming verifier refuses the bundle when any present one disagrees with the value it recomputes from the signed certificate / trust root.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "signed_evidence", "trust_root"],
+  "properties": {
+    "format": {
+      "const": "vigil.pcf-finding-bundle/1",
+      "description": "The bundle format tag. A verifier refuses any other value."
+    },
+    "signed_evidence": {
+      "$ref": "signed-evidence.schema.json",
+      "description": "The one signed certificate and its m-of-n governance signatures (SPEC section 4)."
+    },
+    "trust_root": {
+      "$ref": "trust-root.schema.json",
+      "description": "The governance trust root (PUBLIC keys + threshold). A convenience copy: its authenticity is anchored by the fingerprint the operator publishes out-of-band."
+    },
+    "trust_root_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "OPTIONAL convenience copy of \"sha256:\" + digest_payload(trust_root). Never the anchor: pin the value the operator publishes out-of-band."
+    },
+    "cert_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "OPTIONAL convenience copy of digest_payload(signed_evidence.certificate)."
+    },
+    "finding_ref": {
+      "type": "string",
+      "description": "OPTIONAL convenience copy of signed_evidence.certificate.finding_ref."
+    },
+    "about": {
+      "type": "string",
+      "description": "OPTIONAL human-readable note. Never verified, never a claim."
+    }
+  }
+}

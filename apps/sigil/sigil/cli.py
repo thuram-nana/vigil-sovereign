@@ -2020,6 +2020,9 @@ def cmd_ops_sweep(a) -> None:
         # listing above — under the same report-by-default / --apply gates (rows only when there are any).
         out["items"].extend(ops_sweeps.sweep_superseded_reservations(
             gate, now=now, ttl_s=a.ttl, apply=a.apply, completion_spool=(a.completion_spool or None))["items"])
+        # PR-J2: customer security-assistant turns a crash left unsettled — behind VIGIL_CUSTOMER_ASSISTANT_WALLET
+        # (off: no rows), under the same report-by-default / --apply gates
+        out["items"].extend(ops_sweeps.sweep_assistant_turns(gate, now=now, apply=a.apply)["items"])
     elif a.sweep_cmd == "reconcile":
         # REPORT-ONLY (PP-4): per-org invoiced-vs-paid vs real consumption; flags uninvoiced
         # consumption / outstanding / overdue. Retiring abandoned reserves is the EXISTING owner-keyed
@@ -2878,6 +2881,37 @@ def cmd_trial(a) -> None:
                               canonical=canonical_email, issued_at=_time.time())
     print(f"  trial claims: {r['claimed']} claimed, {r['skipped']} already claimed, "
           f"{r['unusable']} without a usable mailbox")
+
+
+def cmd_shard(a) -> None:
+    """`sigil shard backfill` — owner-sign a shard placement for every active org that has none (consumer PR-F): the
+    catch-up for orgs created before placement-on-sign-up was switched on. Least-loaded over the owner topology,
+    idempotent (a placed org is never moved), and each placement holds the cross-process placement lock a sign-up
+    holds, so a concurrent sign-up and this sweep never place one org twice. Refuses (rc 2, nothing placed) unless
+    VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD are on and VIGIL_SHARD_IDS names a topology. Prints counts only;
+    rc 1 when any org could not be placed."""
+    import time as _time
+
+    from . import config
+    from .governor.orgs import OrgRegistry
+    from .governor.shard_assignment import ShardAssignmentRegistry
+    from .governor.shard_on_signup import backfill_placements, placement_lock
+    if not (config.customer_fair_queue_enabled() and config.multi_shard_enabled()):
+        print("sigil shard backfill: shard placement is off (VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD) — "
+              "refusing (nothing placed)", file=sys.stderr)
+        sys.exit(2)
+    shard_ids = config.shard_ids()
+    if not shard_ids:
+        print("sigil shard backfill: no owner shard topology (VIGIL_SHARD_IDS) — refusing (nothing placed)",
+              file=sys.stderr)
+        sys.exit(2)
+    store = SpineStore()
+    r = backfill_placements(ShardAssignmentRegistry(store), [o.org_id for o in OrgRegistry(store).orgs()],
+                            shard_ids=shard_ids, issued_at=_time.time(), lock=lambda: placement_lock(store))
+    print(f"  shard placements: {r['placed']} placed, {r['already']} already placed, "
+          f"{r['failed']} could not be placed")
+    if r["failed"]:
+        sys.exit(1)
 
 
 def cmd_monitoring_reconcile(a) -> None:
@@ -4694,6 +4728,12 @@ def main(argv=None) -> None:
                                 help="owner-sign an email trial claim for every existing customer (idempotent; "
                                      "run before AND right after enabling VIGIL_TRIAL_PREVIEW_ENABLED)")
     ptr_bf.set_defaults(fn=cmd_trial)
+    psh = sub.add_parser("shard", help="owner shard-placement operations (consumer PR-F; default-OFF)")
+    psh_sub = psh.add_subparsers(dest="shard_cmd", required=True)
+    psh_bf = psh_sub.add_parser("backfill",
+                                help="owner-sign a shard placement for every active org that has none (idempotent; "
+                                     "needs VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD + VIGIL_SHARD_IDS)")
+    psh_bf.set_defaults(fn=cmd_shard)
     pmr = sub.add_parser("monitoring-reconcile",
                          help="retire AEGIS monitoring grants the org's monitoring plan no longer covers "
                               "(lapse / cancel / past_due / tier / slots; keyless; default-OFF)")

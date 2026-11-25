@@ -1,4 +1,4 @@
 # VIGIL public site
 User-agent: *
 Allow: /
-Sitemap: https://www.vigil.example/sitemap.xml
+Sitemap: https://vigilguard.net/sitemap.xml

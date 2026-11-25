@@ -223,6 +223,23 @@ unset. The SSE endpoints (`/sovereign/api/stream`, `/offense/api/events`,
 `/offense/api/blackboard`) get buffering-off + a long read timeout in both
 templates.
 
+**Payment webhooks — a dedicated host, never the console.** The payment processor
+cannot be on the console's private network, so its webhooks get their own
+public host (`hooks.vigil.example.com`; live: `hooks.vigilguard.net`), fronted
+by `deploy/reverse-proxy/vigil-hooks.nginx.conf` (or `vigil-hooks.Caddyfile`,
+or the hooks site in `infra/edge/Caddyfile.example`). That vhost forwards ONLY
+`POST /webhooks/stripe` and `POST /webhooks/billing` to the `vigil up` proxy on
+`127.0.0.1:8770` — exact path, byte-exact on the raw request line, POST only, a
+1 MB body cap, `Host` and `Stripe-Signature` unchanged — and answers 404 to
+everything else (421 for a foreign `Host`). Register the webhook in Stripe as
+`https://<hooks host>/webhooks/stripe`. The proxy's webhook routes answer ahead
+of its Host/Origin gate, so the hooks `Host` is accepted there and nowhere else;
+no `--domain` or allow-list change is needed. It is safe because the body never
+credits anything: the proxy checks the `Stripe-Signature` HMAC, and the billing
+drain re-verifies it and re-fetches every object from Stripe with the restricted
+key before the owner catalog mints. The console and cockpit vhosts carry no
+webhook path at all.
+
 > The single URL includes `?token=<token>` (the sovereign cockpit's session
 > token, kept to the terminal/journal — never embedded where a cross-origin page
 > can read it). Keep it private, exactly like the standalone cockpit token.
@@ -249,6 +266,7 @@ the loopback/private bind + TLS at the edge. A clean production split:
 vigil.example.com         →  pubui    127.0.0.1:8735   (public: everyone can see)
 console.vigil.example.com →  vigil up  127.0.0.1:8770   (operator cockpit; keep private/SSO/VPN)
 app.vigil.example.com     →  custui    127.0.0.1:8734   (tenant app; its own vhost)
+hooks.vigil.example.com   →  vigil up  127.0.0.1:8770   (ONLY the two payment-webhook POSTs)
 ```
 
 ---
@@ -265,6 +283,8 @@ app.vigil.example.com     →  custui    127.0.0.1:8734   (tenant app; its own v
       forwarded as `Host`, SSE paths (`/sovereign/api/stream`, `/offense/api/events`,
       `/offense/api/blackboard`) buffering-off + long read timeout, and
       `CRUCIBLE_API_KEY` set when the offense api is internet-fronted.
+- [ ] Payment webhooks on their own host (`vigil-hooks.nginx.conf` / `vigil-hooks.Caddyfile`):
+      only `POST /webhooks/stripe` + `/webhooks/billing`; the console keeps no webhook path.
 - [ ] Public site (`sigil serve-public`) on its **own** public origin, loopback bind,
       TLS at the edge (`vigil-public.Caddyfile`/`vigil-public.nginx.conf`) — never
       sharing the operator cockpit's hostname.

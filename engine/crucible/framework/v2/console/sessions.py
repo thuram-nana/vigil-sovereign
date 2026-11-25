@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -175,8 +176,9 @@ def _write(rec: dict) -> None:
 
 
 def _public(rec: dict) -> dict:
-    """The UI-facing view of a session record (all fields are non-secret)."""
-    return {
+    """The UI-facing view of a session record (all fields are non-secret). ``folder_id`` is present only
+    while session FOLDERS are ON, so with the flag off every sessions payload is byte-identical."""
+    out = {
         "id": rec.get("id", ""),
         "name": rec.get("name", "") or "(unnamed session)",
         "kind": rec.get("kind", "engagement"),
@@ -189,6 +191,9 @@ def _public(rec: dict) -> dict:
         "updated_seq": int(rec.get("updated_seq", 0)),
         "updated": float(rec.get("updated_ts", 0.0)),
     }
+    if folders_enabled():
+        out["folder_id"] = str(rec.get("folder_id") or "")
+    return out
 
 
 # --- CRUD ------------------------------------------------------------------------------------------
@@ -334,6 +339,189 @@ def link_run(session_id: str, run_id: str, *, slug: str = "") -> dict:
     # the link — the partition is a rebuildable derived view, and the spine (the authority) is untouched.
     _try_project_session_graph(sid)
     return result
+
+
+# --- FOLDERS (operator organisation of sessions) ----------------------------------------------------
+# A FOLDER is an operator-named group of sessions (chats, engagements, mixed) — organisation ONLY. Like the
+# registry, folders mint no fact, read no tier/grant and authorize nothing: a folder is a name, and a
+# session's membership is its own ``folder_id`` field. The folder index is ONE file beside the registry's
+# ``.seq`` — ``<sessions>/.folders.json`` (0600 under the 0700 registry dir, unique temp + atomic replace) —
+# which ``list_sessions`` never reads (it globs ``*/session.json``). Folder ids are minted from the
+# registry's monotonic ``seq`` (``fld-<seq>``): no wallclock/rng, like every other id here. Deleting a
+# folder NEVER deletes a session — its members are unfiled FIRST, then the folder is removed, so a crash in
+# between leaves at worst an empty folder. A ``folder_id`` naming a folder that no longer exists is shown
+# as unfiled. Default-OFF behind ``VIGIL_SESSION_FOLDERS`` (read at call time): when off the routes are
+# absent (404) and no payload carries ``folder_id`` — the sessions surface is byte-identical.
+
+_FOLDERS_ENV = "VIGIL_SESSION_FOLDERS"
+_FOLDERS_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+_MAX_FOLDERS = 200
+_FOLDER_ID_RE = re.compile(r"fld-[1-9][0-9]{0,17}")
+
+
+def folders_enabled() -> bool:
+    """True iff session FOLDERS are ON (``VIGIL_SESSION_FOLDERS`` affirmative), read at CALL time. OFF (the
+    default) ⇒ the folder routes 404 and no session payload carries ``folder_id`` (byte-identical)."""
+    return (os.environ.get(_FOLDERS_ENV) or "").strip().lower() in _FOLDERS_AFFIRMATIVE
+
+
+def _safe_folder_id(raw: str) -> str:
+    """A folder id is only ever one this registry minted (``fld-<seq>``). Anything else is a clean
+    ValueError (→ 404), never a lookup keyed on caller-shaped text. EXACT match: no normalisation, so
+    ``"fld-1\\n"`` or ``" fld-1"`` is refused rather than quietly read as ``fld-1``."""
+    fid = str(raw or "")
+    if not _FOLDER_ID_RE.fullmatch(fid):
+        raise ValueError(f"unsafe folder id {fid[:40]!r}")
+    return fid
+
+
+def _folders_path() -> Path:
+    return _sessions_dir() / ".folders.json"
+
+
+def _read_folders() -> list[dict]:
+    """The folder index (lock-free read; a missing/corrupt file is an empty index, and an entry whose id
+    this registry could not have minted is dropped — fail-safe, never a raise into a handler)."""
+    try:
+        doc = json.loads(_folders_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = doc.get("folders") if isinstance(doc, dict) else None
+    return [f for f in (rows if isinstance(rows, list) else [])
+            if isinstance(f, dict) and _FOLDER_ID_RE.fullmatch(str(f.get("id", "")))]
+
+
+def _write_folders(rows: list[dict]) -> None:
+    """Atomically persist the folder index (0600, unique temp + atomic replace). Called under ``_LOCK``."""
+    p = _folders_path()
+    fd, tmp = tempfile.mkstemp(prefix=".folders.", suffix=".tmp", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"folders": rows}, fh, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _public_folder(f: dict) -> dict:
+    """The UI-facing view of a folder (all fields are non-secret)."""
+    return {
+        "id": str(f.get("id", "")),
+        "name": str(f.get("name", "")),
+        "created_seq": int(f.get("created_seq", 0)),
+        "updated_seq": int(f.get("updated_seq", 0)),
+        "updated": float(f.get("updated_ts", 0.0)),
+    }
+
+
+def _folder_name_taken(rows: list[dict], name: str, *, except_id: str = "") -> bool:
+    """Folder names are unique case-insensitively, so the "Move to folder" picker is never ambiguous."""
+    key = name.casefold()
+    return any(str(f.get("name", "")).casefold() == key and f.get("id") != except_id for f in rows)
+
+
+def list_folders() -> dict:
+    """Every folder, by name (case-insensitive) then creation order. Read-only; never a secret."""
+    rows = sorted(_read_folders(),
+                  key=lambda f: (str(f.get("name", "")).casefold(), int(f.get("created_seq", 0))))
+    return {"folders": [_public_folder(f) for f in rows[:_MAX_FOLDERS]]}
+
+
+def create_folder(name: str) -> dict:
+    """Create a named folder. Returns ``{"ok": True, "folder": <public>}`` or ``{"error": ...}`` (an empty or
+    duplicate name, or the folder cap)."""
+    nm = _safe_name(name)              # the session display-name rules: strip, no control chars, ≤ _MAX_NAME
+    if not nm:
+        return {"error": "a folder needs a name"}
+    with _LOCK:                        # cap + duplicate check + seq-mint + write is ONE critical section
+        rows = _read_folders()
+        if len(rows) >= _MAX_FOLDERS:
+            return {"error": f"folder limit reached ({_MAX_FOLDERS})"}
+        if _folder_name_taken(rows, nm):
+            return {"error": f"a folder named {nm!r} already exists"}
+        seq = _next_seq()
+        now = time.time()
+        folder = {"id": f"fld-{seq}", "name": nm, "created_seq": seq, "updated_seq": seq,
+                  "created_ts": now, "updated_ts": now}
+        rows.append(folder)
+        _write_folders(rows)
+        return {"ok": True, "folder": _public_folder(folder)}
+
+
+def rename_folder(folder_id: str, name: str) -> dict:
+    fid = _safe_folder_id(folder_id)
+    nm = _safe_name(name)
+    if not nm:
+        return {"error": "a folder needs a name"}
+    with _LOCK:
+        rows = _read_folders()
+        folder = next((f for f in rows if f.get("id") == fid), None)
+        if folder is None:
+            return {"error": f"no such folder {fid!r}"}
+        if _folder_name_taken(rows, nm, except_id=fid):
+            return {"error": f"a folder named {nm!r} already exists"}
+        folder["name"] = nm
+        folder["updated_seq"] = _next_seq()
+        folder["updated_ts"] = time.time()
+        _write_folders(rows)
+        return {"ok": True, "folder": _public_folder(folder)}
+
+
+def delete_folder(folder_id: str) -> dict:
+    """Remove a folder. Its sessions are NEVER deleted: every member (soft-deleted ones included) is
+    unfiled FIRST, then the folder is removed. Returns how many sessions were unfiled."""
+    fid = _safe_folder_id(folder_id)
+    with _LOCK:
+        rows = _read_folders()
+        if not any(f.get("id") == fid for f in rows):
+            return {"error": f"no such folder {fid!r}"}
+        unfiled = 0
+        for p in _sessions_dir().glob("*/session.json"):
+            try:
+                rec = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict) and "id" in rec and rec.get("folder_id") == fid:
+                rec.pop("folder_id", None)
+                _write(rec)
+                unfiled += 1
+        _write_folders([f for f in rows if f.get("id") != fid])
+        return {"ok": True, "deleted": fid, "unfiled": unfiled}
+
+
+def set_session_folder(session_id: str, folder_id: str) -> dict:
+    """File a session into a folder, move it to another, or unfile it (an empty ``folder_id``). The target
+    folder must exist (fail-closed). A legacy chat transcript the registry has not adopted yet is adopted
+    first (keeping its title), as renaming/linking it would. Organising is not activity: ``updated_seq`` /
+    ``updated_ts`` are left alone, so a filed chat keeps its place in the recent order."""
+    sid = _safe_session_id(session_id)
+    target = str(folder_id or "")             # "" unfiles; anything else must be an exact, minted folder id
+    fid = _safe_folder_id(target) if target else ""
+    with _LOCK:
+        if fid and not any(f.get("id") == fid for f in _read_folders()):
+            return {"error": f"no such folder {fid!r}"}
+        rec = _read(sid)
+        if rec is None:
+            legacy = _legacy_chat_entry(sid)
+            if legacy is not None:
+                title = str(legacy.get("name") or "")
+                create_session(name="" if title == "(chat)" else title, kind="chat", session_id=sid)
+                rec = _read(sid)
+        if rec is None:
+            return {"error": f"no such session {sid!r}"}
+        if rec.get("deleted"):
+            return {"error": f"session {sid!r} is deleted"}
+        if fid:
+            rec["folder_id"] = fid
+        else:
+            rec.pop("folder_id", None)
+        _write(rec)
+        return {"ok": True, "session": _public(rec)}
 
 
 # --- per-session GRAPH partition (a pure, ONE-WAY projection of the signed spine) -------------------
@@ -601,9 +789,12 @@ def _legacy_chat_entry(chat_id: str) -> Optional[dict]:
                     pass
     except OSError:
         return None
-    return {"id": chat_id, "name": name or "(chat)", "kind": "chat", "run_ids": [], "slug": "",
-            "connections": [], "deleted": False, "created_seq": 0, "updated_seq": 0,
-            "updated": p.stat().st_mtime, "legacy": True}
+    entry = {"id": chat_id, "name": name or "(chat)", "kind": "chat", "run_ids": [], "slug": "",
+             "connections": [], "deleted": False, "created_seq": 0, "updated_seq": 0,
+             "updated": p.stat().st_mtime, "legacy": True}
+    if folders_enabled():
+        entry["folder_id"] = ""            # a legacy chat is never filed: filing it materialises a real entry
+    return entry
 
 
 def list_sessions(*, include_deleted: bool = False) -> dict:

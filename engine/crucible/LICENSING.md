@@ -55,8 +55,8 @@ warranty / indemnity / support / SLA.
 
 ### How to obtain a commercial license
 
-- **Web:** https://thuramnana.com
-- **Email:** thuram@thuramnana.com  ·  **Subject:** `VIGIL commercial license`
+- **Web:** https://sigilsovereign.com
+- **Email:** info@sigilsovereign.com  ·  **Subject:** `VIGIL commercial license`
 - Please include: your company, the product / use case, deployment model (internal / SaaS /
   distributed), and expected scale.
 
@@ -74,7 +74,7 @@ governed by that grant for that copy.
 *(Maintainer: this is a licensing-model change with legal consequences — prior AGPL grants,
 contribution history, and vendored dependencies. Have an attorney review it before relying on
 it for commercial sales, and confirm the copyright-holder legal name and that
-`thuram@thuramnana.com` is a monitored mailbox.)*
+`info@sigilsovereign.com` is a monitored mailbox.)*
 
 ---
 

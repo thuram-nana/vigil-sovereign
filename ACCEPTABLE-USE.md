@@ -199,7 +199,7 @@ maintainer for it (`engine/crucible/DISCLAIMER.md` §§ 3-6). Making a tool avai
 authorization to attack anyone.
 
 **Reporting misuse.** If you believe VIGIL is being used against systems whose owners did
-not authorise it, contact `thuram@thuramnana.com`. To report a vulnerability *in VIGIL*,
+not authorise it, contact `info@sigilsovereign.com`. To report a vulnerability *in VIGIL*,
 follow [`SECURITY.md`](SECURITY.md) instead.
 
 ---

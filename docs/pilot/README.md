@@ -5,7 +5,7 @@
 > is **EXCLUDED from the free noncommercial grant** and requires a **Commercial License** — including a
 > pilot run by, for, on behalf of, or funded by any government / agency / ministry / military /
 > law-enforcement / public-authority / state-owned entity. Arrange licensing before a pilot:
-> **thuram@thuramnana.com** (subject: `VIGIL commercial license`). See [`LICENSING.md`](../../LICENSING.md).
+> **info@sigilsovereign.com** (subject: `VIGIL commercial license`). See [`LICENSING.md`](../../LICENSING.md).
 >
 > The Licensor is **SIGIL SARL** (*Sovereign Integrity Governance Infrastructure Labs*), a private
 > limited company registered in the Republic of Cameroon; founder & CEO Junior Thuram Nana.

@@ -24,10 +24,11 @@ then `make deploy-console` / `bootstrap.sh` on the box).
         │                                                          ▼
         │                                                   AWS SSM SendCommand
         │                                                          ▼
-        └── three DNS records ──> Caddy (TLS) ──>  EC2:  tools/remote-deploy.sh
+        └── four DNS records ──> Caddy (TLS) ──>   EC2:  tools/remote-deploy.sh
               vigil.<you>            :443              git reset --hard origin/main
               app.vigil.<you>                          make deploy-console / restart unit
               console.vigil.<you>                      make smoke  (+ optional health probe)
+              hooks.vigil.<you>  (payment webhooks only)
                                                         └─ on failure: roll back to prior commit, fail
 ```
 
@@ -50,7 +51,7 @@ loopback; Caddy is the only public listener.
 ### A2. Security group
 | Port | Source | Why |
 |------|--------|-----|
-| 443 (and 80) | `0.0.0.0/0` | Caddy — public TLS for the three origins. 80 is for the ACME challenge + redirect. |
+| 443 (and 80) | `0.0.0.0/0` | Caddy — public TLS for the three origins and the webhook host. 80 is for the ACME challenge + redirect. |
 | 22 | **your IP only**, or none | optional break-glass SSH. With SSM you can omit 22 entirely. |
 | 8734 / 8735 / 8770 | **nowhere** | the app ports stay on `127.0.0.1`; never put them in the SG. |
 
@@ -75,14 +76,19 @@ Confirm it serves locally: `curl -fsS http://127.0.0.1:8770/healthz` (console) s
 > set `VIGIL_DEPLOY_DIR` to it and it uses `make deploy-console` (mirror + restart) instead.
 
 ### A4. DNS + TLS
-Point three records at the instance's elastic IP:
+Point four records at the instance's elastic IP:
 ```
 vigil.<you>            A   <EIP>
 app.vigil.<you>        A   <EIP>
 console.vigil.<you>    A   <EIP>
+hooks.vigil.<you>      A   <EIP>
 ```
-Copy `infra/edge/Caddyfile.example` to `/etc/caddy/Caddyfile`, set the three hostnames and the console
+Copy `infra/edge/Caddyfile.example` to `/etc/caddy/Caddyfile`, set the four hostnames and the console
 allow-list CIDR, then `sudo systemctl reload caddy`. Caddy fetches + renews certificates automatically.
+The console stays behind its allow-list with no exception. The payment processor delivers to the hooks site
+instead, which forwards ONLY `POST /webhooks/stripe` and `POST /webhooks/billing` (exact path) to the console
+proxy and answers 404 to everything else: register `https://hooks.vigil.<you>/webhooks/stripe` in Stripe
+(go-live quickstart §9b).
 
 ### A5. Secrets
 Set the real secrets as the go-live quickstart describes (owner Ed25519 key, Stripe keys, provisioning hop
@@ -162,7 +168,7 @@ cd ~/vigil && git reset --hard <good-sha> && make deploy-console   # (or: system
 - [ ] Launch the EC2 (NitroTPM on; SSM instance-profile attached)
 - [ ] Security group: 443/80 public, 22 your-IP-or-none, app ports closed
 - [ ] `git clone` + `./bootstrap.sh --production --yes` + `enable-linger`
-- [ ] 3 DNS records → Caddy (`Caddyfile.example`) → reload
+- [ ] 4 DNS records (incl. `hooks`) → Caddy (`Caddyfile.example`) → reload
 - [ ] Set real secrets + flip the go-live flags you want on
 - [ ] (CD) deploy `github-oidc-deploy-role.cfn.yaml`, set the 3 repo variables
 - [ ] Merge a trivial PR and watch `deploy-ec2` roll it out

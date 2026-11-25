@@ -25,7 +25,7 @@
 <main id="main" class="section">
   <div class="wrap prose">
     <p class="eyebrow">Cookies &amp; local data</p>
-    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">Cookies &amp; local data</h1>
+    <h1>Cookies &amp; local data</h1>
     <p class="muted">Short version: this public site sets no cookies at all, and the product uses only
       strictly-necessary session cookies. There is no analytics, no advertising, and no cross-site tracking —
       so there's nothing to consent to, and no consent banner to click through.</p>
@@ -37,8 +37,8 @@
 
     <h2>The product (strictly-necessary only)</h2>
     <p>When you sign in to a VIGIL surface, a small number of session cookies are required for
-      authentication and security. They are HttpOnly and <code>SameSite=Strict</code> (and Secure over
-      HTTPS):</p>
+      authentication and security. They are HttpOnly and <code>SameSite=Strict</code>
+      (<code>SameSite=Lax</code> for the short-lived sign-in binding cookie), and Secure on the hosted service:</p>
     <div class="matrix-scroll"><table class="matrix">
       <thead><tr><th scope="col">Cookie</th><th scope="col">Purpose</th><th scope="col">Category</th></tr></thead>
       <tbody>

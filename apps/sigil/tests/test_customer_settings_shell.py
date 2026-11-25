@@ -245,7 +245,7 @@ VUI.sse = u => { raw.push(["sse", String(u)]); return { close() {} }; };
 const writes = [];
 const toasts = []; VUI.toast = m => { toasts.push(m); };
 const banners = []; VUI.errorBanner = m => { banners.push(m); };
-var GUIDE = null, GUIDE_ON = false, MONITORING_ON = false, CODE_ON = false;
+var GUIDE = null, GUIDE_ON = false, MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, POSTURE_ON = false;
 function shell(inner, current) { return h("div.cust-shell", { dataset: { current: current } }, inner); }
 function viewLogin() { return h("div.cust-login"); }
 function viewDashboard() { return h("div.cust-dash"); }
@@ -757,10 +757,11 @@ def test_10_backup_captures_the_profile_and_toggle_off_is_byte_identical(tmp_pat
 _GUIDE_WORLD = r"""
 document.body.dataset.settings = __FLAG__;
 const VUI = window.VUI, G = window.VIGIL_GUIDE, navs = [];
-var MONITORING_ON = false, CODE_ON = false;          // the other screens routeShown answers for: off here
-// The Guide screen as app.js mounts it (viewGuideScreen passes shown: routeShown): every chapter tab in turn, serialized.
+var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, POSTURE_ON = false;   // routeShown's other screens: off
+// The Guide screen as app.js mounts it (viewGuideScreen passes shown: routeShown, flag: pageFlag): every chapter tab in
+// turn, serialized.
 function guideTabs(shown) {
-  const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown });
+  const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown, flag: pageFlag });
   document.body.appendChild(g);
   const seen = {};
   for (const title of G.CHAPTERS.map(c => c.title).concat(["Questions"])) {
@@ -786,7 +787,7 @@ def test_11_the_guide_covers_settings_only_while_it_is_shown():
     test_customer_onboarding.py::test_the_guide_covers_every_screen_of_the_app), in the screen's own words — and, like
     the screen, only while the flag is on: the step names its page switch (``when: "settings"``, the very name
     SETTINGS_ON reads), routeShown hides #/settings while the flag is off, and the Guide screen lists a switch-named step
-    only where routeShown shows its screen. So with the flag off every chapter of the Guide screen is byte-identical to
+    only where app.js's ``flag`` (pageFlag) says the switch is on and routeShown shows its screen. So with the flag off every chapter of the Guide screen is byte-identical to
     the guide without the step; the tour never visits it; with the flag on the step is listed and leads to #/settings."""
     _need_node()
     src = APP_JS.read_text(encoding="utf-8")
@@ -820,7 +821,7 @@ out.navs = navs;
     # flag on: the step is listed on its chapter, and its "Go to Settings" opens the hub
     on = _node(_guide_app("1") + r"""
 out.shown = [routeShown("#/settings"), routeShown("#/billing")];
-const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown: routeShown,
+const g = G.viewGuide({ h, username: "ana", storage: null, nav: r => navs.push(r), shown: routeShown, flag: pageFlag,
                         chapter: "workspace" });
 document.body.appendChild(g);
 out.titles = g.querySelectorAll("span.cust-guide-step-title").map(e => text(e));

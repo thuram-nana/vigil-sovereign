@@ -241,7 +241,7 @@ it is refused, before and after the migration. Run the migration before you remo
 `VIGIL_SETTLE_BASE_DIR`, and never delete the former directory: it stays the rollback and re-migration source, and
 it holds the cockpit's own passkey store and bootstrap token.
 
-## 7. Reverse proxy + TLS (three separate origins)
+## 7. Reverse proxy + TLS (three separate origins + the webhook host)
 
 Each surface gets its own TLS vhost (templates in `apps/sigil/deploy/reverse-proxy/`), forwarding to the
 loopback bind. Separate origins give the strongest cookie/CSRF isolation.
@@ -250,7 +250,15 @@ loopback bind. Separate origins give the strongest cookie/CSRF isolation.
 vigil.example.com         → vigil-public.nginx.conf   → 127.0.0.1:8735  (pubui; public)
 app.vigil.example.com     → vigil-customer.nginx.conf  → 127.0.0.1:8734  (custui; tenant app)
 console.vigil.example.com → vigil.nginx.conf           → 127.0.0.1:8770  (vigil up; keep private)
+hooks.vigil.example.com   → vigil-hooks.nginx.conf     → 127.0.0.1:8770  (ONLY POST /webhooks/stripe + /webhooks/billing)
 ```
+
+The payment processor cannot reach the private console, so its webhooks get their own public host. The hooks
+vhost forwards exactly `POST /webhooks/stripe` and `POST /webhooks/billing` to the `vigil up` proxy (byte-exact on
+the raw request line, 1 MB body cap, `Host` and `Stripe-Signature` unchanged) and answers 404 to everything else.
+The console vhost keeps no webhook path and no exception to its privacy. Behind Cloudflare this is
+`hooks.vigilguard.net` (`AWS-DEPLOY.md` §3); with Caddy, the hooks site in `infra/edge/Caddyfile.example` or
+`vigil-hooks.Caddyfile`.
 
 Edit each vhost's `server_name` + cert paths, obtain certs (`certbot certonly --nginx -d <host>`), then
 `nginx -t && systemctl reload nginx`. Forward `Host`, `Origin`, `Referer` **unchanged** on the customer
@@ -390,9 +398,15 @@ ever minted from the webhook body. Every setting below is default-OFF; secrets c
    `adaptive_pricing` setting: every session VIGIL creates turns it off). Turn **Adaptive Pricing off** in the
    Dashboard as well (the charge must be in the catalog currency). Stripe checkout charges only currencies whose
    Stripe minor unit is confirmed to match the catalog's (USD today), and a plan (subscription) checkout accepts
-   card only. Add a webhook endpoint at `https://<operator ingress>/webhooks/stripe`
-   subscribed to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   card only. Add a webhook endpoint at exactly `https://<hooks host>/webhooks/stripe` — the webhook host of §7,
+   live: `https://hooks.vigilguard.net/webhooks/stripe` — with no trailing slash, no query string and no other
+   path (anything else is 404 at the hooks vhost). Never point it at the console host: the console is private.
+   Subscribe it to exactly: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, `invoice.paid`, `invoice.payment_failed`.
+   The proxy's webhook routes answer before its Host/Origin gate, so they accept the hooks host's `Host` header
+   with no proxy setting; every console path still refuses it. Opening them to the internet is safe because the
+   body never credits anything: the proxy checks the `Stripe-Signature` HMAC before it spools a byte, and the
+   drain re-verifies it and re-fetches every object from Stripe with the restricted key.
 2. **Proxy route.** Set `VIGIL_STRIPE_WEBHOOK_SPOOL` (e.g. `$SIGIL_HOME/stripe-billing-spool`) and
    `VIGIL_STRIPE_WEBHOOK_SECRET` (the endpoint's signing secret; it must differ from the Flutterwave one).
 3. **Drain.** Install `infra/systemd/vigil-billing-drain-stripe.{service,timer}` with its env file:

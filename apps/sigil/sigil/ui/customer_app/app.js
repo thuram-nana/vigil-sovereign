@@ -51,6 +51,13 @@
  * re-runs that finding's proof against the host and marks it fixed only when the proof stops working, else still
  * vulnerable — no price, no new scan. Off, retestBadge / retestControls return null and a finding card is exactly as
  * before (the kit drops the null children).
+ * FIX FIRST. When the edge has the Fix-first screen on (data-posture="1", VIGIL_CUSTOMER_POSTURE together with its
+ * master switch VIGIL_APEX_PRESENTATION — the switch that also serves api/customer/posture and its trend), the top bar
+ * has Fix first (#/fix-first): the workspace's 0-100 security posture over its OPEN oracle-confirmed findings, its
+ * trend over twelve weeks (a sparkline with a table view), and every open finding worst first — what it is, what
+ * VIGIL's check proved, what that kind of weakness can lead to, the standards it touches and exactly how to fix it,
+ * each shown only when the server sent it — with Retest where the workspace may retest; the Overview gets a Posture
+ * card. Off, there is no tab, #/fix-first is the home screen exactly as any unknown route, and no posture read is made.
  * MONITORING. When the edge has customer monitoring on (data-monitoring="1", VIGIL_CUSTOMER_MONITORING_ENABLED — the same
  * switch that serves the monitoring routes), the top bar has a Monitoring screen (#/monitoring): the workspace's hosts
  * and their AEGIS monitoring, Turn on / Turn off, and the events AEGIS reported, refreshed while the screen is in view.
@@ -73,6 +80,18 @@
  * Retest, and Disconnect (confirmed in the page) — each offered only where the server says this deployment runs it. The
  * server decides who may manage code review; this page sends only a repository the server listed and the choice. Off,
  * there is no tab, #/code is the home screen exactly as any unknown route, and no call is made.
+ *
+ * PLANS AND REPORTS (PR-G). With data-plans="1" (VIGIL_CUSTOMER_PLANS) the top bar has Plans (#/plans): the owner's
+ * plans compared, the workspace's plan, a one-click choice through the existing checkout and, where the server allows
+ * it, a switch or cancellation that takes effect at the next renewal. With data-report-export="1" (VIGIL_CUSTOMER_PDF_
+ * REPORT) or data-compliance="1" (VIGIL_CUSTOMER_COMPLIANCE_MAP) it has Reports (#/reports): the downloadable report of
+ * the proven findings and the standards they implicate. Off, each is absent exactly as an unknown route.
+ *
+ * CONNECT. When the edge has the Connect screen on (data-connect="1", VIGIL_CUSTOMER_CONNECT — the same switch that serves
+ * api/customer/connect), the top bar has Connect (#/connect): one place to prove a website (the method pre-selected, Copy
+ * buttons, automatic re-checking until it is verified, a half-finished proof resumed from the server), connect GitHub,
+ * and — with data-cloud-connect="1" too — connect an AWS account read-only. Off, there is no tab, #/connect is the home
+ * screen exactly as any unknown route, and no call or timer is made.
  */
 (function () {
   "use strict";
@@ -155,12 +174,13 @@
     var w = state.get().who || {};
     return shell(h("div", {}, [h("h2", { text: "Guide" }),
       GUIDE.viewGuide({ h: h, username: w.username, storage: guideStore(), nav: nav, replayTour: openGuideTour,
-                        shown: routeShown })]),
+                        shown: routeShown, flag: pageFlag })]),   // flag: PR-G's guide steps that need a page switch
     "#/guide");
   }
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/settings" || SETTINGS_ON); }
+  // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -631,6 +651,8 @@
       overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
       overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
     ];
+    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does).
+    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
     // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
     if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
     cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
@@ -873,6 +895,8 @@
     if (u && u.bought_mc != null) rows.push(kv("Credits bought", mc2(u.bought_mc)));
     if (u && u.trial_mc) rows.push(kv("Trial credits", mc2(u.trial_mc)));
     rows.push(kv("Credits used", (u && u.credits != null) ? u.credits : "—"));
+    // PR-J2: of which the security assistant (its turns are "Security assistant" lines on the statement)
+    if (u && u.assistant) rows.push(kv("Security assistant", (u.assistant.credits != null) ? u.assistant.credits : "—"));
     return VUI.card("Usage", null, rows);
   }
   function runningScansCard(running) {
@@ -1286,14 +1310,195 @@
     if (!fs.length) { return h("div.card.cust-soon", { text: "No findings for " + host + "." }); }
     var cards = fs.map(function (f) {
       return VUI.card(f.title || f.finding_ref || "Finding", f.severity || null, h("div", {}, [
+        blindVulnBadge(f),                             // PR-L: "Confirmed out-of-band" (null, so dropped, when off/none)
         kv("Severity", f.severity), kv("Class", f.bug_class), kv("Surface", f.surface), kv("Confidence", f.confidence),
         f.summary ? h("p", { text: f.summary }) : null,
         f.how_to_verify ? h("p.cust-muted", { text: "Verify offline: " + f.how_to_verify }) : null,
         retestBadge(f.retest),                         // C1b: the persisted verdict (null, so dropped, when off/none)
         retestControls(f),                             // C1b: the Retest button + its result (null when off)
+        proofBadge(f),                                 // PR-I: "Independently verifiable" (null when off/unverified)
       ]));
     });
     return h("div", {}, [h("h3", { text: "Findings — " + host }), h("div.cust-grid", {}, cards)]);
+  }
+
+  // ---- Blind-vuln (out-of-band) confirmation badge (PR-L, Area 11) ---------------------------------------------
+  // Shown only while the edge writes data-blind-vuln="1" (VIGIL_CUSTOMER_BLIND_VULN) AND the finding carries a
+  // signed out-of-band attestation (oob_attestation). VIGIL proved this vulnerability by an INDEPENDENT, signed
+  // out-of-band callback — a vuln with no visible response that most scanners miss. The badge only SURFACES the
+  // signed attestation already on a PROVEN finding (every finding the read returns is oracle-confirmed): it
+  // re-verifies nothing, promotes nothing, and is absent (null -> the kit drops it) when off or when no
+  // attestation is present — never rendered as "clean". Off: blindVulnBadge returns null and findingsBlock
+  // renders exactly the pre-PR-L card.
+  var BLIND_VULN_ON = pageFlag("blindVuln");
+  function isEmptyObj(o) { for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) return false; } return true; }
+  function shortId(s) {
+    s = (s == null) ? "" : String(s);
+    return (s.length > 22) ? (s.slice(0, 12) + "…" + s.slice(-6)) : s;
+  }
+  function oobMethodLabel(m) {
+    m = String(m || "").toLowerCase();
+    if (m === "dns") return "DNS callback";
+    if (m === "http" || m === "https") return "HTTP callback";
+    return m ? m : null;                              // an unknown method shows as-is (textContent — safe); empty -> dropped
+  }
+  function oobWhen(ts) {
+    var n = Number(ts);
+    if (!isFinite(n) || n <= 0) return null;
+    try { return new Date((n < 1e12 ? n * 1000 : n)).toISOString().replace("T", " ").replace(/\..*/, " UTC"); }
+    catch (e) { return null; }
+  }
+  function oobDetail(att) {
+    // Each line is kv() (textContent — never innerHTML), so a hostile value can never inject. Dropped when absent.
+    var rows = [kv("Confirmation", "Out-of-band signed callback"),
+                kv("Method", oobMethodLabel(att.method)),
+                kv("Independent collector", shortId(att.collector_key_id)),
+                kv("Correlation canary", shortId(att.canary || att.token)),
+                kv("Callback received", oobWhen(att.received_at)),
+                kv("Receipt digest", shortId(att.receipt_digest || att.signature))];
+    rows.push(h("p.cust-muted", { text: "An independent collector signed this callback; the receipt re-verifies "
+      + "offline against the pinned collector key — VIGIL cannot forge it." }));
+    return rows;
+  }
+  function blindVulnBadge(f) {
+    if (!BLIND_VULN_ON) return null;                 // flag OFF: ignored even if a read carried an attestation
+    var att = f && f.oob_attestation;
+    if (!att || typeof att !== "object" || isEmptyObj(att)) return null;   // no signed attestation -> no badge
+    var panel = h("div.cust-oob-detail", { hidden: true }, oobDetail(att));
+    var btn = h("button.cust-link-btn", { type: "button", "aria-expanded": "false", text: "How we proved it",
+      onClick: function () {
+        var open = panel.hidden;
+        panel.hidden = !open;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        btn.textContent = open ? "Hide proof" : "How we proved it";
+      } });
+    return h("div.cust-oob", {}, [
+      h("div.cust-oob-head", {}, [
+        h("span.cust-badge.cust-badge-oob", { text: "✓ Confirmed out-of-band" }),
+        h("span.cust-oob-sub", { text: "No visible response — proven by an independent, offline-verifiable callback. "
+          + "Most scanners miss this." }),
+      ]),
+      h("div.row", {}, [btn]),
+      panel,
+    ]);
+  }
+
+  // ---- Attack-path storytelling (PR-L, Area 11) ---------------------------------------------------------------
+  // Shown only while the edge writes data-attack-path="1" (VIGIL_CUSTOMER_ATTACK_PATH). A visual narrative of how
+  // the org's PROVEN findings chain into real impact (e.g. SSRF -> cloud metadata -> credentials -> data access).
+  // Built ENTIRELY from the inert, signed attack_path field already on a finding (every step restates an oracle
+  // that fired): it invents no chain and asserts no impact the cert did not. Each chain renders as an SVG ribbon
+  // (static markup, every dynamic value escaped — no inline handler) plus an accessible step list with real
+  // buttons. Empty -> an honest "no chains surfaced yet" (never "you are safe"). Off: #/attack-path is the home
+  // screen and no nav link is shown (byte-identical).
+  var ATTACK_PATH_ON = pageFlag("attackPath");
+  function svgEsc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;";
+    });
+  }
+  function clip(s, n) { s = String(s == null ? "" : s); return (s.length > n) ? (s.slice(0, n - 1) + "…") : s; }
+  function attackStep(s) {
+    if (!s || typeof s !== "object") return null;
+    var src = String(s.src || ""), dst = String(s.dst || ""), edge = String(s.edge || s.technique || "");
+    if (!dst && !src) return null;                   // a step with no endpoints carries nothing to draw
+    return { src: src, dst: dst, edge: edge, technique: String(s.technique || ""),
+             oracle: String(s.oracle || ""), finding_ref: String(s.finding_ref || "") };
+  }
+  function attackChainOf(f) {
+    // Normalise a finding's inert attack_path into a drawable chain, or null. Pure projection of signed DATA.
+    var ap = f && f.attack_path;
+    if (!ap || typeof ap !== "object") return null;
+    var raw = ap.steps;
+    if (!Array.isArray(raw) || !raw.length) return null;
+    var steps = raw.map(attackStep).filter(function (s) { return s; });
+    if (!steps.length) return null;
+    // Nodes = the first step's source, then each step's destination (the ordered reachability the proof walked).
+    var nodes = [];
+    if (steps[0].src) nodes.push({ label: steps[0].src, kind: "start", edge: "", prov: "" });
+    steps.forEach(function (s, i) {
+      nodes.push({ label: s.dst || ("step " + (i + 1)), kind: (i === steps.length - 1) ? "impact" : "node",
+                   edge: s.edge, prov: s.oracle || s.finding_ref });
+    });
+    var destination = String(ap.destination || (steps[steps.length - 1] || {}).dst || "");
+    if (destination && nodes.length) { nodes[nodes.length - 1].label = destination; }
+    return { title: f.title || f.finding_ref || "Finding", host: f.surface || "",
+             slug: f.engagement_slug || "", impact: String(ap.impact || ""), steps: steps, nodes: nodes };
+  }
+  function chainSvg(c) {
+    // A VERTICAL kill-chain ribbon: node boxes top-to-bottom joined by labelled arrows. Static markup built as a
+    // trusted string (the icon pattern); EVERY dynamic value passes through svgEsc, so a hostile finding title or
+    // step label can neither break the markup nor inject. Mobile-first: fixed narrow width, grows vertically.
+    var W = 300, PAD = 8, BOXH = 46, GAP = 46, BOXW = W - PAD * 2;
+    var n = c.nodes.length, H = PAD * 2 + n * BOXH + (n - 1) * GAP;
+    var parts = ['<svg class="cust-chain-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H
+      + '" role="img" aria-label="Attack chain to impact" xmlns="http://www.w3.org/2000/svg">'];
+    var defs = '<defs><marker id="apArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" '
+      + 'orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>';
+    parts.push(defs);
+    for (var i = 0; i < n; i++) {
+      var y = PAD + i * (BOXH + GAP), cx = W / 2, nd = c.nodes[i];
+      if (i > 0) {                                    // the arrow + edge label from the previous node into this one
+        var y0 = y - GAP, ymid = y0 + GAP / 2;
+        parts.push('<line x1="' + cx + '" y1="' + y0 + '" x2="' + cx + '" y2="' + (y - 2)
+          + '" stroke="currentColor" stroke-width="1.5" marker-end="url(#apArrow)" class="cust-chain-edge"/>');
+        if (nd.edge) {
+          parts.push('<text x="' + (cx + 8) + '" y="' + (ymid + 4) + '" class="cust-chain-edgelbl">'
+            + svgEsc(clip(nd.edge, 30)) + '</text>');
+        }
+      }
+      var cls = nd.kind === "impact" ? "cust-chain-box impact" : nd.kind === "start" ? "cust-chain-box start"
+        : "cust-chain-box";
+      parts.push('<rect x="' + PAD + '" y="' + y + '" width="' + BOXW + '" height="' + BOXH + '" rx="8" class="'
+        + cls + '"/>');
+      parts.push('<title>' + svgEsc(nd.label) + (nd.prov ? (" — proven: " + svgEsc(nd.prov)) : "") + '</title>');
+      var ty = y + (nd.kind === "impact" || nd.kind === "start" ? BOXH / 2 + 4 : BOXH / 2 + 4);
+      var pfx = nd.kind === "impact" ? "◎ " : "✓ ";
+      parts.push('<text x="' + cx + '" y="' + ty + '" text-anchor="middle" class="cust-chain-lbl">'
+        + svgEsc(pfx + clip(nd.label, 34)) + '</text>');
+    }
+    parts.push('</svg>');
+    return parts.join("");
+  }
+  function chainStepList(c) {
+    // The accessible, interactive twin of the SVG: each step is a real button (CSP-safe; no inline handler) that
+    // links to Assessments where its proven finding lives. Screen-reader friendly and never truncated beyond clip.
+    var items = c.steps.map(function (s, i) {
+      var label = (s.src ? (clip(s.src, 26) + " ") : "") + "→" + (s.edge ? (" [" + clip(s.edge, 26) + "] ") : " ")
+        + "→ " + clip(s.dst, 26);
+      var prov = s.oracle ? ("proven by " + s.oracle) : (s.finding_ref ? ("finding " + s.finding_ref) : "proven step");
+      return h("button.cust-chain-step", { type: "button", onClick: function () { nav("#/assessments"); } }, [
+        h("span.cust-chain-step-n", { text: String(i + 1) }),
+        h("span.cust-chain-step-main", {}, [h("span", { text: label }), h("span.cust-muted", { text: prov })]),
+      ]);
+    });
+    return h("div.cust-chain-steps", {}, items);
+  }
+  function chainCard(c) {
+    var impact = c.impact ? h("span.cust-chain-impact", { text: "Business impact: " + c.impact }) : null;
+    return VUI.card("How this chains to impact", null, h("div", {}, [
+      h("div.cust-kv", {}, [h("span.k", { text: "Finding" }), h("span", { text: c.title })]),
+      c.host ? kv("Entry surface", c.host) : null,
+      impact,
+      h("div.cust-chain-wrap", { html: chainSvg(c) }),
+      chainStepList(c),
+      h("div.row", {}, [h("button.btn", { type: "button", text: "View findings",
+        onClick: function () { nav("#/assessments"); } })]),
+    ]));
+  }
+  function viewAttackPath() {
+    return dataView("#/attack-path", "Attack path", API + "/assessments/findings", function (d) {
+      var findings = (d && d.findings) || [];
+      var chains = findings.map(attackChainOf).filter(function (c) { return c; });
+      var intro = h("p.cust-muted", { text: "How your proven findings chain into real impact. Each node is a step "
+        + "VIGIL confirmed; the final node is the business impact a real attacker reaches." });
+      if (!chains.length) {
+        return h("div", {}, [intro, h("div.card.cust-soon", { text: "No attack chains have been surfaced for your "
+          + "authorized assessments yet. A chain appears here when VIGIL proves that findings combine into real "
+          + "impact — it is not a statement that no chain exists." })]);
+      }
+      return h("div", {}, [intro, h("div", {}, chains.map(chainCard))]);
+    });
   }
 
   // ---- Assessments: retest a finding (C1b) ----------------------------------------------------------------------
@@ -1380,6 +1585,72 @@
   }
   // ---- end of retest (C1b) --------------------------------------------------------------------------------------
 
+  // ---- Assessments: the proof badge + "verify it yourself" (PR-I) -----------------------------------------------
+  // Shown only while the edge writes data-proof-badge="1" (VIGIL_CUSTOMER_PROOF_BADGE). A finding card shows the
+  // "Independently verifiable" badge ONLY when the server's findings read says that finding's OWN signed certificate
+  // verified (f.proof.verifiable === true: two independent verifiers, against VIGIL's owner-delegated governance keys);
+  // anything else — no proof field, false, a malformed digest — shows no badge at all, never a softer one. The badge
+  // opens a panel: what is signed (the two anchors, in plain words), the evidence and certificate digests, a Download
+  // proof bundle link (a ZIP the customer checks OFFLINE with the shipped verifier) and the exact command. The page
+  // asserts nothing itself: every value shown is the server's, and the download is the server's verified bytes. Off:
+  // proofBadge returns null, so the kit drops it and findingsBlock renders exactly the card it always did.
+  var PROOF_ON = pageFlag("proofBadge");
+  function proofHex64(v) { return typeof v === "string" && /^[0-9a-f]{64}$/.test(v); }
+  function proofFingerprint(v) { return typeof v === "string" && /^sha256:[0-9a-f]{64}$/.test(v); }
+  function proofBadge(f) {
+    var p = f && f.proof;
+    if (!PROOF_ON || !p || p.verifiable !== true || !f.engagement_slug || !proofHex64(p.cert_digest)
+        || !proofFingerprint(p.trust_root_fingerprint)) return null;
+    var panel = h("div.cust-proof-panel", { role: "region", "aria-label": "Verify this finding yourself" });
+    panel.hidden = true;
+    var btn = h("button.cust-badge.cust-badge-verified.cust-proof-badge", { type: "button", "aria-expanded": "false",
+      text: "✓ Independently verifiable", onClick: function () {
+        var opening = panel.hidden;
+        if (opening && !panel.firstChild) VUI.mount(panel, proofPanel(f, p));
+        panel.hidden = !opening;
+        btn.setAttribute("aria-expanded", opening ? "true" : "false");
+      } });
+    return h("div.cust-proof", {}, [btn, panel]);
+  }
+  function proofDownloadHref(f, p) {
+    // the finding's identity exactly as the read gave it (never an org or a user: the server takes those from the session)
+    return API + "/assessments/proof?engagement_slug=" + encodeURIComponent(f.engagement_slug)
+      + "&cert_digest=" + encodeURIComponent(p.cert_digest);
+  }
+  function proofPanel(f, p) {
+    var need = Number(p.threshold) > 0 ? Number(p.threshold) : 1;
+    var cmd = "python3 verify_pcf.py finding --bundle proof-bundle.json --trust-root-fingerprint " + p.trust_root_fingerprint;
+    return h("div", {}, [
+      h("h4", { text: "Verify this finding yourself" }),
+      h("p", { text: "Don't take our word for it: this finding carries a cryptographic proof you can check yourself, "
+        + "offline, without a VIGIL account." }),
+      h("p.cust-muted", { text: "What is signed:" }),
+      h("ul.cust-proof-anchors", {}, [
+        h("li", { text: "VIGIL's governance keys signed this exact finding — at least " + need + " key"
+          + (need === 1 ? "" : "s") + " had to agree. Anyone can check this with the proof bundle below." }),
+        h("li", { text: "It is recorded in your account's tamper-evident ledger, chained under a ledger head the owner "
+          + "key signs. VIGIL checks this side on its servers; it is not part of the download." }),
+      ]),
+      f.oracle_context_digest ? kv("Evidence fingerprint", f.oracle_context_digest) : null,
+      kv("Certificate", p.cert_digest),
+      kv("Trust-root fingerprint", p.trust_root_fingerprint),
+      h("p.cust-muted", { text: "Pin the trust-root fingerprint from VIGIL's public verify page (/verify), not from this "
+        + "screen: the fingerprint is what makes the check independent of VIGIL." }),
+      h("div.row", {}, [h("a.btn.cust-proof-download", { href: proofDownloadHref(f, p), download: true,
+        text: "Download proof bundle" })]),
+      h("p.cust-muted", { text: "Unzip it, then run the verifier inside it (it needs only Python 3 and the "
+        + "cryptography package):" }),
+      h("pre.cust-proof-cmd", {}, [h("code", { text: cmd })]),
+      h("p.cust-muted", { text: "A verified result proves the signed certificate is authentic and unchanged since VIGIL "
+        + "signed it. It does not re-run the test against your host." }),
+      // a retest's "fixed" is the retest's own verdict: the bundle proves the finding, never the fix
+      f.retest && f.retest.status === "fixed" ? h("p.cust-muted", { text: "Your retest shows this finding fixed. That "
+        + "is the retest's own result and is not part of this bundle, which proves the finding as VIGIL first proved "
+        + "it." }) : null,
+    ]);
+  }
+  // ---- end of proof badge (PR-I) --------------------------------------------------------------------------------
+
   // ---- Assessments: launch and control them (C1a) ----------------------------------------------------------------
   // Shown only while the edge writes data-launch-ui="1" (VIGIL_CUSTOMER_LAUNCH_UI). Each verified host gets Launch:
   // one of the depths the SERVER offers this workspace (api/customer/launches lists them — never a price, credits or
@@ -1464,10 +1735,23 @@
     var note = launchUi.notes[a.slug];
     return mine.map(launchRow).concat([note ? launchNote(note) : null, mine.length ? null : launchPicker(a)]);
   }
+  // PR-F: a started launch still waiting in the job queue. The server sends `queued` only while its fair queue is on,
+  // and only a count — how many runs the scheduler starts first, never whose.
+  function launchQueued(l) {
+    return l.state === "running" && !!l.queued && typeof l.queued.ahead === "number" && l.queued.ahead >= 0;
+  }
+  function queuedNote(ahead) {
+    var n = Math.floor(ahead);
+    return "The system is busy, so this assessment is queued at position " + (n + 1)
+      + (n ? " (" + n + " ahead of it)" : " (next to start)") + ". It starts on its own; there is nothing to do.";
+  }
   function launchRow(l) {
     var key = l.slug + ":" + l.launch;
     var depth = own(DEPTH_LABELS, l.depth);
-    var rows = [h("p.cust-launch-status", { text: own(STATE_LABELS, l.state) + (depth ? " · " + depth : "") })];
+    var queued = launchQueued(l);
+    var rows = [h("p.cust-launch-status", { text: (queued ? "Queued" : own(STATE_LABELS, l.state))
+      + (depth ? " · " + depth : "") })];
+    if (queued) rows.push(h("p.cust-muted", { text: queuedNote(l.queued.ahead) }));
     if (l.expired) {
       rows.push(h("p.cust-muted", { text: "This launch can no longer start. Cancel it to release its credits." }));
     }
@@ -1731,6 +2015,325 @@
   }
   // ---- end of launching and controlling assessments (C1a) -------------------------------------------------------
 
+  // ---- Fix first: the posture, its trend and what to fix first (APEX consumer PR-B) ---------------------------------
+  // #/fix-first, only while the edge writes data-posture="1" (VIGIL_CUSTOMER_POSTURE, on only together with its master
+  // switch VIGIL_APEX_PRESENTATION — the switch that also serves api/customer/posture and api/customer/posture/trend).
+  // It renders ONLY what the server sent for the SESSION workspace (this page never sends an org id): the 0-100 posture
+  // over its OPEN oracle-confirmed findings, the trend over twelve weeks, and the open findings worst first — what each
+  // is, what VIGIL's check proved and what that kind of weakness can lead to (each only when the certificate signed it,
+  // the first and last only when a plain-language description is on file), the standards it touches, and exactly how
+  // to fix it (likewise signed) — with C1b's own Retest controls where the workspace may retest. A trial whose report
+  // is locked sees the one finding the trial reveals in full and the others without their proof or fix, as Assessments
+  // shows them. A role that may not read findings, a failed read and an ended session are told in fixed words, never
+  // the server's own, and nothing is mounted into a screen the customer has left. No estimate, price or engine name is
+  // ever shown, and the score says plainly that it is a way to decide what to fix first, not a certified rating. The
+  // top bar and the Overview read the page flag through pageFlag("posture"), so the shared code they run needs no new
+  // name.
+  var POSTURE_ON = pageFlag("posture");
+  var FIX_PAGE = 20;                                   // findings drawn at a time; "Show more" draws the next ones
+  var FIX_SEVERITY = { critical: "Critical", high: "High", unrated: "Unrated", medium: "Medium", low: "Low",
+                       info: "Info" };
+  var FIX_TIER = ["Fix now: a quick win on a serious finding", "Fix next", "Harden", "When convenient"];
+  var FIX_EFFORT = { S: "Small fix", M: "Moderate fix", L: "Larger fix", XL: "Major change" };
+  // The standards each finding shows as chips; every mapped framework is one tap away under "All standards".
+  var FIX_CHIPS = ["owasp", "pci_dss", "soc2", "iso27001", "cwe"];
+  var POSTURE_SVG = "http://www.w3.org/2000/svg";
+  var POSTURE_BOX = { w: 288, h: 64, pad: 8 };         // the sparkline: 24px of width per weekly point
+
+  function viewFixFirst() {
+    var at = "#/fix-first";
+    var holder = h("div.cust-fix", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/posture"); }
+      catch (e) {
+        if (here() !== at) { return; }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403)
+          ? "Your role does not have access to findings. The founder can see them, and so can a teammate VIGIL has "
+            + "made an Operator."
+          : "Could not load your posture right now." }));
+        return;
+      }
+      if (here() !== at) { return; }                 // the customer left before the read came back
+      VUI.mount(holder, fixFirstBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Fix first" }),
+      h("p.cust-muted", { text: "Your security posture and what to fix first, from the findings VIGIL proved on your "
+        + "verified hosts: worst first, each with what it means, the standards it touches and exactly how to fix it." }),
+      holder]), at);
+  }
+  function fixFirstBody(d) {
+    if (!d.measured) {                               // never a score before VIGIL has tested anything
+      var hosts = parseInt(d.hosts_total, 10) || 0;
+      return h("div.card.cust-soon", {}, [
+        h("p", { text: hosts ? "No results yet. Your posture appears here once VIGIL has tested one of your verified hosts."
+                             : "No results yet. Prove you control a host in Assets, then test it: your posture appears here." }),
+        h("div.row", {}, [h("button.btn", { type: "button", text: hosts ? "Go to Assessments" : "Go to Assets",
+          onClick: function () { nav(hosts ? "#/assessments" : "#/assets"); } })]),
+      ]);
+    }
+    var locked = !!(d.preview && d.preview.locked);
+    var open = Array.isArray(d.fix_first) ? d.fix_first : [];
+    var fixed = Array.isArray(d.fixed) ? d.fixed : [];
+    return h("div.cust-fix-body", {}, [
+      postureTile(d),
+      locked ? fixPreviewNote(d.preview) : null,
+      h("h3", { text: "What to fix first" }),
+      open.length ? fixList(open, d.open_total, locked)
+        : h("div.card.cust-soon", { text: "Nothing to fix right now: no open oracle-confirmed findings on your verified "
+          + "hosts." }),
+      fixed.length ? fixFixed(fixed, d.fixed_total) : null,
+    ]);
+  }
+  // The posture tile: the score (the one hero figure of the screen), its change over the window, the sparkline with
+  // its readout, what it is made of, how it is worked out, and the trend's table view.
+  function postureTile(d) {
+    var trend = d.trend || {};
+    var points = Array.isArray(trend.points) ? trend.points : [];
+    var score = typeof d.posture_score === "number" ? d.posture_score : null;
+    return VUI.card("Security posture", null, h("div.cust-posture", {}, [
+      h("div.cust-posture-figure", {}, [
+        h("span.cust-posture-score", { text: score === null ? "—" : String(score) }),
+        h("span.cust-posture-max", { text: "/100" }),
+      ]),
+      postureDelta(trend),
+      postureTrend(points),
+      h("p.cust-muted", { text: postureCounts(d) }),
+      postureHow(d.basis),
+      postureTable(points),
+    ]));
+  }
+  // The change since the first scored point of the window, signed and named ("Up 7 since 2026-08-26"). The arrow carries
+  // the direction in color (up is good for a posture); the words carry it for everyone.
+  function postureDelta(trend) {
+    var c = trend && trend.change;
+    if (typeof c !== "number" || !trend.since) { return null; }
+    var since = " since " + fmtDate(trend.since);
+    if (c === 0) { return h("p.cust-posture-delta", { text: "No change" + since }); }
+    var up = c > 0;
+    return h("p.cust-posture-delta." + (up ? "up" : "down"), {}, [
+      h("span.cust-posture-arrow", { text: up ? "▲" : "▼", "aria-hidden": "true" }),
+      h("span", { text: (up ? "Up " : "Down ") + Math.abs(c) + since }),
+    ]);
+  }
+  function postureTrend(points) {
+    var readout = h("p.cust-posture-readout", { "aria-live": "polite" });
+    var spark = postureSpark(points, readout);
+    return spark ? h("div.cust-posture-trend", {}, [spark, readout]) : null;
+  }
+  function postureSvg(tag, attrs) {
+    var el = document.createElementNS(POSTURE_SVG, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, String(attrs[k])); });
+    return el;
+  }
+  // What one point says, in words: the readout on hover or focus, and each week's accessible name.
+  function posturePointText(p, isNow) {
+    var when = isNow ? "Now" : "On " + fmtDate(p.at);
+    if (typeof p.posture_score !== "number") { return when + ": not measured yet"; }
+    return when + ": " + p.posture_score + "/100 · " + (parseInt(p.open, 10) || 0) + " open · "
+      + (parseInt(p.fixed, 10) || 0) + " fixed";
+  }
+  // The twelve-week sparkline, built node by node (no markup string): one 2px line in the recessive ink, the current
+  // point as an accent dot ringed in the card's surface, and a hairline baseline across the whole window, so weeks before
+  // the first measurement read as no data, never as a score. The y range is the scores' own, padded and at least 20
+  // points tall, so a change shows without a small one being blown up; the exact numbers are in the readout and the
+  // table. Each week is a 24px-wide focusable target: a pointer over it or keyboard focus on it shows a crosshair at that
+  // week and its numbers in the readout.
+  function postureSpark(points, readout) {
+    var n = points.length, B = POSTURE_BOX, scored = [];
+    points.forEach(function (p, i) { if (p && typeof p.posture_score === "number") { scored.push([i, p.posture_score]); } });
+    if (!n || !scored.length) { return null; }
+    var vals = scored.map(function (s) { return s[1]; });
+    var lo = Math.max(0, Math.floor((Math.min.apply(null, vals) - 5) / 10) * 10);
+    var hi = Math.min(100, Math.ceil((Math.max.apply(null, vals) + 5) / 10) * 10);
+    if (hi - lo < 20) { if (hi >= 100) { lo = 80; } else { hi = lo + 20; } }
+    var colW = B.w / n;
+    var x = function (i) { return (colW * i + colW / 2).toFixed(1); };
+    var y = function (v) { return (B.pad + (hi - v) / (hi - lo) * (B.h - 2 * B.pad)).toFixed(1); };
+    var box = postureSvg("svg", { viewBox: "0 0 " + B.w + " " + B.h, width: B.w, height: B.h, "class": "cust-posture-spark",
+      role: "group", "aria-label": "Your posture over the last " + n + " weeks" });
+    box.appendChild(postureSvg("line", { x1: 0, y1: B.h - 0.5, x2: B.w, y2: B.h - 0.5, "class": "cust-posture-base" }));
+    box.appendChild(postureSvg("polyline", { "class": "cust-posture-line",
+      points: scored.map(function (s) { return x(s[0]) + "," + y(s[1]); }).join(" ") }));
+    var cross = postureSvg("line", { x1: 0, y1: 0, x2: 0, y2: B.h, "class": "cust-posture-cross", visibility: "hidden" });
+    var dot = postureSvg("circle", { cx: 0, cy: 0, r: 4, "class": "cust-posture-hover", visibility: "hidden" });
+    var now = scored[scored.length - 1];
+    box.appendChild(cross);
+    box.appendChild(postureSvg("circle", { cx: x(now[0]), cy: y(now[1]), r: 4, "class": "cust-posture-now" }));
+    box.appendChild(dot);
+    points.forEach(function (p, i) {
+      var label = posturePointText(p, i === n - 1);
+      var hit = postureSvg("rect", { x: (colW * i).toFixed(1), y: 0, width: colW.toFixed(1), height: B.h,
+        "class": "cust-posture-hit", tabindex: 0, role: "img", "aria-label": label });
+      var show = function () {
+        cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+        var scoredHere = typeof p.posture_score === "number";
+        if (scoredHere) { dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(p.posture_score)); }
+        dot.setAttribute("visibility", scoredHere ? "visible" : "hidden");
+        readout.textContent = label;
+      };
+      var hide = function () {
+        cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); readout.textContent = "";
+      };
+      ["pointerenter", "focus"].forEach(function (t) { hit.addEventListener(t, show); });
+      ["pointerleave", "blur"].forEach(function (t) { hit.addEventListener(t, hide); });
+      box.appendChild(hit);
+    });
+    return box;
+  }
+  function postureCounts(d) {
+    var open = parseInt(d.open_total, 10) || 0, hosts = parseInt(d.hosts_total, 10) || 0;
+    var fixed = parseInt(d.fixed_total, 10) || 0;
+    return "From " + open + " open finding" + (open === 1 ? "" : "s") + " on " + hosts + " verified host"
+      + (hosts === 1 ? "" : "s") + (fixed ? " · " + fixed + " fixed by a retest" : "") + ".";
+  }
+  // How the score is worked out, in plain words, from the weights the server used (nothing is recomputed here).
+  function postureHow(basis) {
+    var w = (basis && basis.weights) || {};
+    var parts = ["critical", "high", "unrated", "medium", "low", "info"].filter(function (s) {
+      return typeof w[s] === "number";
+    }).map(function (s) { return FIX_SEVERITY[s] + " " + w[s]; });
+    return h("details.cust-posture-how", {}, [h("summary", { text: "How the score works" }),
+      h("p", { text: "Each open finding lowers the score by its severity" + (parts.length ? " (" + parts.join(", ") + ")" : "")
+        + ". The score is 100 × 100 ÷ (100 + those amounts added up), so 100 means nothing is open." }),
+      h("p", { text: (basis && basis.counts_fixes)
+        ? "A finding stops counting once a retest shows its proof no longer works."
+        : "Retests are not part of this workspace's score: every proven finding counts." }),
+      h("p", { text: "It is a way to decide what to fix first, not a certified rating." }),
+    ]);
+  }
+  // The trend's table view: the sparkline's numbers for anyone who cannot, or would rather not, read a chart.
+  function postureTable(points) {
+    if (!points.length) { return null; }
+    return h("details.cust-posture-table", {}, [h("summary", { text: "Show the numbers" }),
+      h("table.cust-table", {}, [
+        h("thead", {}, h("tr", {}, ["Date", "Posture", "Open", "Fixed"].map(function (t) { return h("th", { text: t }); }))),
+        h("tbody", {}, points.map(function (p, i) {
+          var scored = typeof p.posture_score === "number";
+          return h("tr", {}, [h("td", { text: i === points.length - 1 ? "Now" : fmtDate(p.at) }),
+            h("td", { text: scored ? p.posture_score + "/100" : "Not measured yet" }),
+            h("td", { text: scored ? String(parseInt(p.open, 10) || 0) : "—" }),
+            h("td", { text: scored ? String(parseInt(p.fixed, 10) || 0) : "—" })]);
+        })),
+      ])]);
+  }
+  function fixPreviewNote(p) {
+    return h("div.card.cust-fix-preview", {}, [
+      h("p", { text: "During your trial you see every finding, and one of them in full. Your first purchase unlocks the "
+        + "proof and the fix of every finding." }),
+      (p && p.can_buy)
+        ? h("div.row", {}, [h("button.btn", { type: "button", text: "Go to Billing", onClick: function () { nav("#/billing"); } })])
+        : h("p.cust-muted", { text: "Someone who manages billing for this workspace can buy credits in Billing." }),
+    ]);
+  }
+  // The open findings, worst first as the server ordered them, FIX_PAGE at a time.
+  function fixList(entries, total, reportLocked) {
+    var list = h("div.cust-fix-list", {}), more = h("div.row", {}), shown = 0;
+    function draw() {
+      entries.slice(shown, shown + FIX_PAGE).forEach(function (e) { list.appendChild(fixEntry(e, reportLocked)); });
+      shown = Math.min(entries.length, shown + FIX_PAGE);
+      var left = entries.length - shown;
+      VUI.mount(more, left > 0 ? h("button.btn", { type: "button", text: "Show " + Math.min(left, FIX_PAGE) + " more",
+        onClick: draw }) : null);
+    }
+    draw();
+    var all = parseInt(total, 10) || 0;
+    return h("div", {}, [list, more, all > entries.length
+      ? h("p.cust-muted", { text: "Showing the " + entries.length + " most urgent of " + all + " open findings." }) : null]);
+  }
+  // One open finding. The plain-language parts and the fix appear only when the server sent them (signed on the
+  // certificate); a finding the trial keeps locked says its proof and fix unlock with the full report.
+  function fixEntry(e, reportLocked) {
+    var sev = FIX_SEVERITY[e.severity] ? e.severity : "unrated";
+    var pi = (e.plain_impact && typeof e.plain_impact === "object") ? e.plain_impact : {};
+    var described = pi.description_on_file === true;
+    var where = [e.host, e.surface].filter(Boolean).map(String).join(" · ");
+    // a severity the certificate did not carry is rated from the class of weakness (finding_preview's table): say so
+    var meta = [FIX_TIER[e.tier] || null, FIX_EFFORT[e.effort] || null,
+                e.severity_basis && e.severity_basis !== "certificate" ? "severity rated from the kind of weakness" : null]
+      .filter(Boolean);
+    return h("div.card.cust-fix-entry", {}, [
+      h("div.cust-fix-head", {}, [
+        h("span.sev.sev-" + sev, { text: FIX_SEVERITY[sev] }),
+        h("strong.cust-fix-title", { text: String(e.title || e.bug_class || "Finding") }),
+        e.status === "still_vulnerable" ? h("span.cust-badge.cust-badge-expired", { text: "⚠ Still vulnerable after a retest" })
+                                        : null,
+      ]),
+      where ? h("p.cust-fix-where", { text: where }) : null,
+      meta.length ? h("p.cust-fix-meta", { text: meta.join(" · ") }) : null,
+      described && pi.what ? fixSection("What it is", pi.what) : null,
+      pi.established ? fixSection("What VIGIL's check proved", pi.established) : null,
+      described && pi.category_consequence ? fixSection("What this kind of weakness can lead to", pi.category_consequence)
+                                           : null,
+      fixStandards(e.standards_chips),
+      e.remediation ? fixSection("How to fix it", e.remediation) : null,
+      e.locked ? h("p.cust-muted", { text: "Its proof and fix unlock with the full report." }) : null,
+      e.locked && e.class_guidance ? h("p.cust-muted", { text: String(e.class_guidance) }) : null,
+      !e.locked && !e.remediation ? h("p.cust-muted", { text: "Its proof and how to verify it are on Assessments." }) : null,
+      // C1b's own Retest button + verdict (null while retest is off); a locked trial cannot retest, so none is offered
+      (!reportLocked && !e.locked) ? retestControls({ finding_ref: e.finding_ref, engagement_slug: e.engagement_slug,
+                                                      oracle_context_digest: e.oracle_context_digest || "" }) : null,
+    ]);
+  }
+  function fixSection(label, text) {
+    return h("div.cust-fix-sec", {}, [h("span.k", { text: label }), h("p", {}, fixRich(text))]);
+  }
+  // Text exactly as the server sent it, with its `quoted` spans shown as code — every piece a text node, never markup.
+  function fixRich(s) {
+    return String(s).split("`").map(function (part, i) { return i % 2 ? h("code", { text: part }) : part; });
+  }
+  function fixStandards(chips) {
+    var all = (Array.isArray(chips) ? chips : []).filter(function (c) {
+      return c && c.framework && Array.isArray(c.ids) && c.ids.length;
+    });
+    if (!all.length) { return null; }
+    var shown = all.filter(function (c) { return FIX_CHIPS.indexOf(c.framework) >= 0; });
+    return h("div.cust-fix-sec", {}, [h("span.k", { text: "Standards it touches" }),
+      shown.length ? h("div.cust-fix-chips", {}, shown.map(fixChip)) : null,
+      h("details.cust-fix-all", {}, [h("summary", { text: "All standards (" + all.length + ")" }),
+        h("p.cust-muted", { text: "The controls this kind of weakness relates to — a guide to why it matters, not an "
+          + "audit result." }),
+        // each line's full citation (the standard and its version) rides in its tooltip, not in the line itself
+        h("ul", {}, all.map(function (c) {
+          return h("li", { title: c.version ? String(c.version) : null },
+            [h("strong", { text: String(c.label || c.framework) }), " " + c.ids.map(String).join(", ")]);
+        })),
+      ]),
+    ]);
+  }
+  function fixChip(c) {
+    var ids = c.ids.map(String).join(", ");
+    return h("span.chip.cust-fix-chip", { text: c.framework === "cwe" ? ids : String(c.label || c.framework) + " " + ids,
+      title: c.version ? String(c.version) : null });
+  }
+  // What a retest proved fixed, newest first, folded away under its count.
+  function fixFixed(entries, total) {
+    return h("details.card.cust-fix-fixed", {}, [
+      h("summary", { text: "Fixed (" + (parseInt(total, 10) || entries.length) + ")" }),
+      h("p.cust-muted", { text: "A retest showed each proof no longer works, so these no longer count against your "
+        + "posture." }),
+      h("ul.cust-fix-fixedlist", {}, entries.map(function (e) {
+        var meta = [e.host, e.status_at ? "fixed " + fmtDate(e.status_at) : null].filter(Boolean).map(String).join(" · ");
+        return h("li", {}, [h("span.cust-badge.cust-badge-verified", { text: "✓ Fixed" }),
+          h("strong", { text: " " + String(e.title || e.bug_class || "Finding") }),
+          meta ? h("span.cust-muted", { text: " · " + meta }) : null]);
+      })),
+    ]);
+  }
+  // The Overview's Posture card, from the trend read: the current score, what is open now and the change, with the way
+  // to Fix first. Before the first measurement it says so — never a score.
+  function postureFill(d) {
+    var points = (d && Array.isArray(d.points)) ? d.points : [];
+    var last = points.length ? points[points.length - 1] : null;
+    var rows = (d && typeof d.current === "number")
+      ? [kv("Posture", d.current + "/100"), kv("Open findings", last ? (parseInt(last.open, 10) || 0) : null), postureDelta(d)]
+      : [h("p.cust-muted", { text: "No results yet." })];
+    rows.push(overviewLink("Fix first", "#/fix-first"));
+    return h("div", {}, rows);
+  }
+  // ---- end of Fix first (PR-B) -----------------------------------------------------------------------------------
+
   // ---- Monitoring (AEGIS) -------------------------------------------------------------------------------------------
   // #/monitoring, only while the edge has customer monitoring on. GET api/customer/monitoring answers for the SESSION
   // workspace: the hosts with monitoring (grants) and can_manage (the founder or an admin — the server decides); only to
@@ -1964,6 +2567,441 @@
     if (!holder) { return; }
     mon.loaded = true;
     VUI.mount(holder, monEventsList(d && d.events));
+  }
+
+  // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
+  // Shown only while the edge writes data-connect="1" — VIGIL_CUSTOMER_CONNECT, the switch that also serves
+  // api/customer/connect and api/customer/connect/*, so the screen and its API are never out of step. Off: no Connect
+  // tab, #/connect is the home screen exactly as an unknown route, and nothing is fetched or timed. The SERVER decides
+  // everything: GET api/customer/connect lists the session workspace's sites, its repositories (only to someone the Code
+  // screen itself admits) and its cloud accounts (only while data-cloud-connect="1"), plus `available` — what this
+  // deployment really runs — so a tile offers only a flow that can finish.
+  //   * WEBSITE — "Prove you own it": the server pre-selects the method (a DNS TXT record for a bare domain, a meta tag
+  //     for a subdomain; the person can switch), the screen shows exactly what to publish with Copy buttons, and once
+  //     the person confirms they are authorized to test the site, "Check now" starts AUTOMATIC re-checking: one POST
+  //     api/customer/connect/ownership {recheck: true} every 10 s (the server itself runs at most one check per site per
+  //     10 s, whoever asks), a live status line, and the card flips to Verified on its own. It stops on Verified, on any
+  //     refusal, when the screen is left, and after about five minutes (then "Check again"); it waits while the page is
+  //     hidden. A proof started earlier — on any device — is listed with "Continue": the challenge lives on the server,
+  //     so a reload resumes exactly where it stopped.
+  //   * CODE REPOSITORY — Connect GitHub (the Code screen's own install flow, codeConnect) and the connected repositories.
+  //   * CLOUD ACCOUNT (AWS) — the account id, then the exact trust policy to paste (VIGIL's principal + the external id),
+  //     AWS's read-only SecurityAudit policy, the role's ARN, Verify. VIGIL records a READ-ONLY connection only when the
+  //     role lands in that account AND refuses any other external id; nothing here runs a test. A connection started
+  //     earlier is listed as "Not finished" with Continue (the server hands back the SAME external id, so a role already
+  //     created keeps working) and Cancel; an expired one offers Connect again.
+  // Nothing here shows a price, an estimate or a model name. A sensitive request goes through the step-up when this
+  // build has it (withStepUp).
+  var CONNECT_ON = pageFlag("connect");
+  var CLOUD_CONNECT_ON = CONNECT_ON && pageFlag("cloudConnect");
+  var CONNECT_POLL_MS = 10000;          // one automatic re-check every 10 s while a proof is pending (the server's cadence)
+  var CONNECT_POLL_MAX = 30;            // then pause (about five minutes): "Check again" resumes it
+  var CONNECT_METHODS = [["meta-tag", "HTML meta tag"], ["dns-txt", "DNS TXT record"], ["well-known", "File on your site"]];
+  var connectUi = { gen: 0, timer: null };
+
+  function viewConnect() {
+    stopConnectPoll();
+    var holder = h("div#connect-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/connect"); }
+      catch (e) {
+        if (here() !== "#/connect") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) {
+          return VUI.mount(holder, h("div.card.cust-soon", { text: "Connecting assets is for the people who test in "
+            + "this workspace: its founder, or an Operator VIGIL has added. Billing roles cannot connect or test assets." }));
+        }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Connect"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/connect") return;              // the person navigated away before the load resolved
+      VUI.mount(holder, connectBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Connect" }),
+      h("p.cust-muted", { text: "Connect what you own — a website, a code repository, a cloud account — in one place. "
+        + "Connecting proves you own it; it never runs a test by itself." }),
+      holder]), "#/connect");
+  }
+
+  function connectBody(d) {
+    var av = d.available || {};
+    var tiles = [connectSiteTile(d, av), connectRepoTile(d, av)];
+    if (CLOUD_CONNECT_ON) tiles.push(connectCloudTile(d, av));
+    return h("div", {}, [h("div.cust-grid.cust-connect-tiles", {}, tiles), h("div#connect-flow")]);
+  }
+  function connectFlowBox() { return VUI.$("#connect-flow"); }
+  function connectButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // One Connect request, sent once; with the step-up in this build, a "fresh second factor needed" answer opens the
+  // inline check and the request is sent ONCE more (as codePost does).
+  function connectPost(path, body, where) {
+    function send() { return VUI.postJSON(API + path, body); }
+    return typeof withStepUp === "function" ? withStepUp(send, where) : send();
+  }
+  // A value the person copies into their DNS / web page / AWS console: shown verbatim (a <code>, never re-worded) with
+  // a Copy button. A browser without the clipboard API says so; the text is still there to select.
+  function connectCode(value) { return h("code.cust-connect-code", { text: String(value == null ? "" : value) }); }
+  function connectCopy(value) {
+    var b = h("button.btn.cust-copy", { type: "button", text: "Copy" });
+    b.addEventListener("click", function () {
+      var v = String(value == null ? "" : value);
+      function done() { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500); }
+      function fail() { VUI.toast("Select the text and copy it."); }
+      try {
+        var cb = window.navigator && window.navigator.clipboard;
+        if (cb && typeof cb.writeText === "function") { cb.writeText(v).then(done, fail); return; }
+      } catch (e) { /* no clipboard: fall through */ }
+      fail();
+    });
+    return b;
+  }
+  function connectCopyRow(label, value) {
+    return h("div.cust-connect-copy", {}, [h("span.k", { text: label }), connectCode(value), connectCopy(value)]);
+  }
+  // Why a request did not go through: fixed words, then the server's own reason (as the Code screen does).
+  async function connectFailed(e, lead) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (e && e.stepUpCancelled) return;                    // the person closed the check: nothing was sent again
+    if (status === 401 && d.step_up_required) {
+      return err("For your security, this needs a fresh second-factor check. Verify with your authenticator, then try "
+        + "again.");
+    }
+    if (status === 401) { await refreshWho(); nav("#/login"); return; }
+    if (status === 429) { return err(lead + ": too many checks just now. Wait a few minutes, then try again."); }
+    if (status === 503 && d.error === "updating") { return err(lead + ": VIGIL is updating. Try again in a moment."); }
+    var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
+      .replace(/\.$/, "");
+    err(lead + (why ? ": " + why : "") + ".");
+  }
+
+  // ---- the Website tile + the proof panel (auto-selected method, copy, confirm, automatic re-check) ----
+  function connectSiteTile(d, av) {
+    var sites = (Array.isArray(d.sites) ? d.sites : []).filter(function (s) { return s && s.host; });
+    var body = [h("h3", { text: "Website" }),
+      h("p.cust-muted", { text: "Prove you control a site or domain: publish one short code, VIGIL checks it." })];
+    if (sites.length) {
+      body.push(h("div.cust-connect-list", {}, sites.map(function (s) {
+        var row = [h("span.host", { text: String(s.host) }), statusBadge(s.status)];
+        if (s.status !== "verified" && av.site_check) {
+          row.push(connectButton(s.status === "expired" ? "Prove again" : "Continue",
+            function () { connectSiteFlow(String(s.host)); }));
+        }
+        return h("div.cust-asset-head", {}, row);
+      })));
+    } else {
+      body.push(h("p.cust-muted", { text: "No website connected yet." }));
+    }
+    body.push(av.site_check
+      ? h("div.cust-mon-actions", {}, connectButton("Connect a website", function () { connectSiteFlow(""); }, "primary"))
+      : h("p.cust-muted", { text: "Proving a website is not available on this deployment yet. Contact VIGIL." }));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+  function connectSiteFlow(host) {
+    stopConnectPoll();
+    var box = connectFlowBox();
+    if (!box) return;
+    if (host) return connectShowProof(host, "");
+    var input = h("input#connect-host", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "app.example.com" });
+    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect a website" }),
+      h("label", { for: "connect-host", text: "Site or domain" }), input,
+      h("div.cust-mon-actions", {}, connectButton("Get my verification code",
+        function (b) { connectStartSite(b, input); }, "primary"))]));
+  }
+  async function connectStartSite(btn, input) {
+    clearErr();
+    var host = String(input.value || "").trim().toLowerCase();
+    if (!host) return err("Enter a site or domain, for example app.example.com.");
+    btn.disabled = true;
+    try { await connectPost("/target/challenge", { host: host }, btn.parentNode); }   // the EXISTING challenge request
+    catch (e) { btn.disabled = false; return connectFailed(e, "The verification code was not issued"); }
+    return connectShowProof(host, "");
+  }
+  async function connectShowProof(host, method) {
+    var box = connectFlowBox();
+    if (!box) return;
+    VUI.mount(box, loadingHolder("Loading…"));
+    var st;
+    try { st = await VUI.postJSON(API + "/connect/ownership", { host: host }); }   // a read: no re-check asked
+    catch (e) { VUI.mount(box, null); return connectFailed(e, "Could not load " + host); }
+    if (here() !== "#/connect" || box !== connectFlowBox()) return;
+    VUI.mount(box, connectProofCard(st || {}, method));
+  }
+  function connectProofCard(st, method) {
+    var host = String(st.host || "");
+    if (st.status === "verified") {
+      return h("div.card", {}, [h("div.cust-asset-head", {}, [h("span.host", { text: host }), statusBadge("verified")]),
+        h("p", { text: "Ownership is proven. You can authorize assessments of this site." })]);
+    }
+    if (st.status === "invalid") {
+      return h("div.card.cust-soon", { text: String(st.detail || "That is not an address VIGIL can verify.") });
+    }
+    var methods = st.methods || {};
+    if (!own(methods, "meta-tag")) {                      // no code issued (or it was replaced): get one first
+      return h("div.card", {}, [h("h3", { text: host }), h("p", { text: "Get a verification code to prove this site." }),
+        h("div.cust-mon-actions", {}, connectButton("Get my verification code", function (b) {
+          b.disabled = true;
+          connectPost("/target/challenge", { host: host }, b.parentNode).then(function () { connectShowProof(host, ""); },
+            function (e) { b.disabled = false; connectFailed(e, "The verification code was not issued"); });
+        }, "primary"))]);
+    }
+    var picked = own(methods, method) ? method : (own(methods, st.selected_method) ? st.selected_method : "meta-tag");
+    var tabs = h("div.cust-connect-methods", {}, CONNECT_METHODS.map(function (m) {
+      var on = m[0] === picked;
+      var b = h("button.btn" + (on ? ".primary" : ""), { type: "button", text: m[1], "aria-pressed": on ? "true" : "false" });
+      b.addEventListener("click", function () { stopConnectPoll(); VUI.mount(connectFlowBox(), connectProofCard(st, m[0])); });
+      return b;
+    }));
+    var place = own(methods, picked) || {};
+    var how;
+    if (picked === "dns-txt") {
+      how = [h("p", { text: "Add this TXT record in your DNS:" }), connectCopyRow("Name", place.dns_name),
+        connectCopyRow("Value", place.dns_value)];
+    } else if (picked === "well-known") {
+      how = [h("p", { text: "Publish a plain-text file at this address:" }), connectCopyRow("URL", place.well_known_url),
+        connectCopyRow("Contents", place.well_known_body)];
+    } else {
+      how = [h("p", { text: "Add this tag inside the <head> of https://" + host + "/ (the page itself, not a redirect):" }),
+        connectCopyRow("Tag", place.meta_tag)];
+    }
+    var box = h("input#connect-authz", { type: "checkbox" });
+    var status = h("p.cust-connect-status", { role: "status" });
+    var again = connectButton("Check again", function () { again.hidden = true; startConnectPoll(host, picked, status, again); });
+    again.hidden = true;
+    var check = connectButton("Check now", function () {
+      clearErr();
+      if (!box.checked) { status.textContent = "Please confirm you are authorized to test this site first."; return; }
+      check.hidden = true;
+      startConnectPoll(host, picked, status, again);
+    }, "primary");
+    return h("div.card.cust-connect-proof", {}, [
+      h("div.cust-asset-head", {}, [h("span.host", { text: host }), statusBadge(st.status)]),
+      h("p.cust-muted", { text: "Publish ONE of these. We picked the one that is usually quickest for this address; "
+        + "choose another if it suits you better." }),
+      tabs, h("div.cust-connect-how", {}, how),
+      h("label.cust-connect-authz", {}, [box, h("span.cust-muted", { text: "I confirm I am authorized to test this asset. "
+        + "Controlling a domain is not the same as being allowed to test it — only check this if you have authorization." })]),
+      h("div.cust-mon-actions", {}, [check, again]), status]);
+  }
+
+  // The automatic re-check: one request per CONNECT_POLL_MS (or sooner when the server says when), each its own
+  // generation so leaving the screen, switching method or starting again ends the old chain at its next step.
+  function stopConnectPoll() {
+    connectUi.gen++;
+    if (connectUi.timer) { clearTimeout(connectUi.timer); connectUi.timer = null; }
+  }
+  function startConnectPoll(host, method, status, again) {
+    stopConnectPoll();
+    connectCheck({ gen: connectUi.gen, host: host, method: method, tries: 0, status: status, again: again });
+  }
+  function connectSchedule(run, ms) {
+    connectUi.timer = setTimeout(function () { connectUi.timer = null; connectCheck(run); }, ms);
+  }
+  async function connectCheck(run) {
+    if (run.gen !== connectUi.gen) return;
+    if (here() !== "#/connect") { stopConnectPoll(); return; }
+    if (document.hidden) { connectSchedule(run, CONNECT_POLL_MS); return; }   // wait while hidden (not counted)
+    run.tries++;
+    run.status.textContent = "Checking " + run.host + "…";
+    var r;
+    try {
+      r = await connectPost("/connect/ownership",
+        { host: run.host, method: run.method, recheck: true, authorized: true }, run.status.parentNode);
+    } catch (e) {
+      if (run.gen !== connectUi.gen) return;
+      stopConnectPoll();
+      run.status.textContent = "Automatic checking stopped.";
+      run.again.hidden = false;
+      return connectFailed(e, "Checking stopped");
+    }
+    if (run.gen !== connectUi.gen) return;
+    if (r && r.status === "verified") {
+      stopConnectPoll();
+      run.status.textContent = "Verified — " + run.host + " is connected.";
+      VUI.toast("Ownership verified for " + run.host);
+      if (here() === "#/connect") render();             // the Website tile now lists it as Verified
+      return;
+    }
+    var c = (r && r.checked) || {};
+    var why = (c.ran && c.ok === false && c.reason) ? String(c.reason).replace(/\.$/, "") : "";
+    if (run.tries >= CONNECT_POLL_MAX) {
+      stopConnectPoll();
+      run.status.textContent = "Not found yet" + (why ? " (" + why + ")" : "") + ". Automatic checking paused — "
+        + "publish it, then select Check again.";
+      run.again.hidden = false;
+      return;
+    }
+    var nx = Number(r && r.recheck && r.recheck.next_in);
+    var ms = (nx > 0 && nx <= 60) ? Math.max(1000, Math.round(nx * 1000)) : CONNECT_POLL_MS;
+    run.status.textContent = (why ? "Not found yet: " + why : "Waiting for your change to appear")
+      + ". Checking again in " + Math.round(ms / 1000) + " s.";
+    connectSchedule(run, ms);
+  }
+
+  // ---- the Code repository tile ----
+  function connectRepoTile(d, av) {
+    var body = [h("h3", { text: "Code repository" })];
+    if (!av.repos) {
+      body.push(h("p.cust-muted", { text: CODE_ON
+        ? "Only the founder of this workspace, or an Operator VIGIL has added, can connect repositories."
+        : "Connecting repositories is not available on this deployment yet." }));
+      return h("div.card.cust-connect-tile", {}, body);
+    }
+    var repos = (Array.isArray(d.repos) ? d.repos : []).filter(function (r) { return r && r.repo; });
+    body.push(h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect." }));
+    body.push(repos.length
+      ? h("div.cust-connect-list", {}, repos.map(function (r) {
+          return h("div.cust-asset-head", {}, [h("span.host", { text: String(r.repo) }),
+            h("span.cust-badge.cust-badge-on", { text: "Connected" })]);
+        }))
+      : h("p.cust-muted", { text: "No repository connected yet." }));
+    var acts = [];
+    if (av.repo_connect) acts.push(connectButton("Connect GitHub", function (b) { codeConnect(b); }, "primary"));
+    else body.push(h("p.cust-muted", { text: "Connecting GitHub is not available on this deployment yet. Contact VIGIL." }));
+    acts.push(connectButton("Open Code", function () { nav("#/code"); }));
+    body.push(h("div.cust-mon-actions", {}, acts));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+
+  // ---- the Cloud account tile (AWS) ----
+  function connectCloudTile(d, av) {
+    var accts = (Array.isArray(d.cloud) ? d.cloud : []).filter(function (c) { return c && c.account_id; });
+    var body = [h("h3", { text: "Cloud account" }),
+      h("p.cust-muted", { text: "Give VIGIL read-only access to an AWS account through a role you create. VIGIL never "
+        + "changes anything in your account." })];
+    if (accts.length) {
+      body.push(h("div.cust-connect-list", {}, accts.map(function (c) { return connectCloudRow(c, av); })));
+    } else {
+      body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
+    }
+    body.push(av.cloud_connect
+      ? h("div.cust-mon-actions", {}, connectButton("Connect an AWS account", connectCloudFlow, "primary"))
+      : h("p.cust-muted", { text: "Connecting a cloud account is not available on this deployment yet. Contact VIGIL." }));
+    return h("div.card.cust-connect-tile", {}, body);
+  }
+  // One account: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a connection started earlier
+  // and not finished (Continue + Cancel). Continue / Connect again ask the server for the connection's steps: it hands
+  // back the SAME external ID while the connection is outstanding, so a role already created keeps working.
+  function connectCloudRow(c, av) {
+    var st = c.status === "connected" || c.status === "expired" ? c.status : "pending";
+    var foot = h("div.cust-mon-actions", {});
+    function idle() {
+      var acts = [];
+      if (st !== "connected" && av.cloud_connect) {
+        acts.push(connectButton(st === "pending" ? "Continue" : "Connect again",
+          function (b) { connectCloudResume(b, c); }, "primary"));
+      }
+      acts.push(connectButton(st === "pending" ? "Cancel" : "Disconnect",
+        function () { connectCloudConfirm(c, foot, st, idle); }));
+      VUI.mount(foot, acts);
+    }
+    idle();
+    var badge = { connected: ["verified", "✓ Connected (read-only)"], expired: ["expired", "⚠ Expired — connect again"],
+      pending: ["pending", "… Not finished"] }[st];
+    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
+      h("span.cust-badge.cust-badge-" + badge[0], { text: badge[1] })])];
+    if (st === "pending") {
+      rows.push(h("p.cust-muted", { text: "You started connecting this account. Continue to see the same steps again." }));
+    } else {
+      rows.push(kv("Role", c.role_ref), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
+    }
+    rows.push(foot);
+    return h("div.cust-connect-acct", {}, rows);
+  }
+  function connectCloudConfirm(c, foot, st, idle) {
+    var pending = st === "pending";
+    VUI.mount(foot, [h("span.cust-muted", { text: pending
+        ? "Cancel connecting AWS " + c.account_id + "? The external ID VIGIL gave you stops working; starting again "
+          + "gives you a new one."
+        : "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; delete the role in AWS to remove the "
+          + "access entirely." }),
+      connectButton(pending ? "Cancel connection" : "Disconnect", async function (b) {
+        b.disabled = true;
+        try {
+          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || "aws"),
+            account_id: String(c.account_id) }, foot);
+        } catch (e) { b.disabled = false; return connectFailed(e, pending ? "The connection was not cancelled"
+          : "The account was not disconnected"); }
+        VUI.toast("AWS account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
+        if (here() === "#/connect") render();
+      }, "danger"),
+      connectButton("Keep it", idle)]);
+  }
+  async function connectCloudResume(btn, c) {
+    clearErr();
+    stopConnectPoll();
+    btn.disabled = true;
+    var r;
+    try {
+      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || "aws"),
+        account_id: String(c.account_id) }, btn.parentNode);
+    } catch (e) { btn.disabled = false; return connectFailed(e, "The connection could not be continued"); }
+    btn.disabled = false;
+    var box = connectFlowBox();
+    if (!box || here() !== "#/connect") return;
+    VUI.mount(box, connectCloudSteps(r || {}));
+  }
+  function connectCloudFlow() {
+    stopConnectPoll();
+    var box = connectFlowBox();
+    if (!box) return;
+    var acct = h("input#connect-aws-account", { type: "text", inputmode: "numeric", autocomplete: "off",
+      placeholder: "123456789012" });
+    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect an AWS account" }),
+      h("label", { for: "connect-aws-account", text: "AWS account ID (12 digits)" }), acct,
+      h("div.cust-mon-actions", {}, connectButton("Continue", function (b) { connectCloudStart(b, acct); }, "primary"))]));
+  }
+  async function connectCloudStart(btn, input) {
+    clearErr();
+    var account = String(input.value || "").replace(/[\s-]/g, "");
+    if (!/^[0-9]{12}$/.test(account)) return err("An AWS account ID is 12 digits.");
+    btn.disabled = true;
+    var r;
+    try { r = await connectPost("/connect/cloud/challenge", { provider: "aws", account_id: account }, btn.parentNode); }
+    catch (e) { btn.disabled = false; return connectFailed(e, "The connection was not started"); }
+    var box = connectFlowBox();
+    if (!box || here() !== "#/connect") return;
+    VUI.mount(box, connectCloudSteps(r || {}));
+  }
+  function connectCloudSteps(r) {
+    var hint = String(r.role_name_hint || "VigilSecurityAudit");
+    var role = h("input#connect-aws-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "arn:aws:iam::" + String(r.account_id || "") + ":role/" + hint });
+    var lead = [h("h3", { text: "Connect AWS account " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the trust policy and external ID are "
+        + "unchanged. If you already created the role, just paste its ARN below." }));
+    }
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, [
+        h("li", {}, [h("p", { text: "In that account's IAM, create a role (for example " + hint + ") with this trust "
+          + "policy. It lets only VIGIL assume the role, and only with your external ID:" }),
+          h("pre.cust-connect-policy", { text: String(r.trust_policy || "") }), connectCopy(r.trust_policy)]),
+        h("li", {}, [h("p", { text: "Attach AWS's read-only managed policy to the role:" }),
+          connectCopyRow("Policy", r.permissions_policy_arn)]),
+        h("li", {}, [h("label", { for: "connect-aws-role", text: "Paste the role's ARN, then verify:" }), role,
+          h("div.cust-mon-actions", {}, connectButton("Verify connection",
+            function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      ]),
+      h("p.cust-muted", { text: "VIGIL connects the account only if the role is in account " + String(r.account_id || "")
+        + " and refuses any other external ID — to check that, it makes one attempt with a random external ID, which "
+        + "your CloudTrail shows as denied. The connection is read-only and never runs a test by itself." })]));
+  }
+  async function connectCloudVerify(btn, r, input) {
+    clearErr();
+    var arn = String(input.value || "").trim();
+    if (!arn) return err("Paste the role's ARN.");
+    btn.disabled = true;
+    try {
+      await connectPost("/connect/cloud/verify", { provider: "aws", account_id: String(r.account_id || ""),
+        role_ref: arn }, btn.parentNode);
+    } catch (e) { btn.disabled = false; return connectFailed(e, "The account was not connected"); }
+    VUI.toast("AWS account " + r.account_id + " connected (read-only)");
+    if (here() === "#/connect") render();
   }
 
   // ---- Team (VIGIL_CUSTOMER_TEAM_UI): the workspace's members — add, change a role, remove -------------------------
@@ -2460,6 +3498,359 @@
     err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
   }
 
+  // ---- Plans, Reports and the standards mapping (PR-G, Area 6) -----------------------------------------------------
+  // PLANS (data-plans="1", VIGIL_CUSTOMER_PLANS — the switch that also serves api/customer/billing/plans): #/plans
+  // compares the trial, pay as you go and every plan the owner sells — its price, the credits it adds each period and
+  // the period — from that one read, and marks the workspace's plan and any change already set for its renewal. A plan
+  // is chosen with the EXISTING checkout (startCheckout: this page sends only the plan's price_id, never an amount). A
+  // workspace with a plan switches or ends it with billing/plan-change ({price_id} or {cancel: true}), asked first in the
+  // page and sent through the step-up: the change takes effect at the next renewal, so nothing is charged or refunded on
+  // the day. Only the actions the read lists are offered; the server decides who may take them.
+  // REPORTS (data-report-export="1", VIGIL_CUSTOMER_PDF_REPORT; data-compliance="1", VIGIL_CUSTOMER_COMPLIANCE_MAP):
+  // #/reports downloads the workspace's report (api/customer/report as HTML, api/customer/report/pdf as a PDF where the
+  // deployment renders one) and shows the OWASP Top 10 / PCI DSS / SOC 2 controls its PROVEN findings implicate
+  // (api/customer/compliance) — never a claim that a control is met. Off: no tab, the route is the home screen exactly
+  // as an unknown route, and nothing is fetched. Nothing here shows an estimate or an engine name.
+  var PLANS_ON = pageFlag("plans");
+  var REPORT_EXPORT_ON = pageFlag("reportExport");
+  var COMPLIANCE_ON = pageFlag("compliance");
+  var REPORTS_ON = REPORT_EXPORT_ON || COMPLIANCE_ON;
+  // The server's own fixed sentence (ui/compliance_view.STATEMENT), kept here so the screen never shows other words.
+  var COMPLIANCE_STATEMENT = "This view lists only the controls that weaknesses VIGIL proved in this workspace "
+    + "implicate. It never states that a control is met or compliant: a control with no proven weakness here was not "
+    + "assessed for compliance, and the absence of a finding is not evidence that the control is in place.";
+  var COMPLIANCE_STATUS = { weakness_proven: "Proven weakness", weakness_fixed: "Fixed (retest)",
+                            no_proven_weakness: "No proven weakness", not_mapped: "Not mapped by VIGIL's checks" };
+
+  // A label from one of the tables above for a value the server sent — never an inherited member.
+  function area6Label(table, key) {
+    var k = String(key == null ? "" : key);
+    return Object.prototype.hasOwnProperty.call(table, k) ? table[k] : "";
+  }
+  function plansButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  function plansDays(n) {
+    var d = Number(n);
+    if (!isFinite(d) || d <= 0) return "—";
+    return (d >= 28 && d <= 31) ? "month" : (String(d) + " days");
+  }
+  // One screen read: a holder now, the read's body when it lands. 401 asks for sign-in, 403 is `forbidden`, anything
+  // else an honest "could not load" — never the server's words. A read that lands after the person left changes nothing.
+  function area6View(current, title, lead, path, forbidden, renderOk) {
+    var holder = h("div#cust-area6", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(path); }
+      catch (e) {
+        if (here() !== current) return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403) ? forbidden
+          : "Could not load " + title + " right now." }));
+      }
+      if (here() !== current) return;
+      VUI.mount(holder, renderOk(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: title }), h("p.cust-muted", { text: lead }), holder]), current);
+  }
+
+  function viewPlans() {
+    return area6View("#/plans", "Plans", "Compare plans and choose the one that fits. A plan adds credits at the start "
+      + "of each period; it never sets what an assessment costs.", API + "/billing/plans",
+      "Only members who can see billing — the founder or an admin — can compare plans.", plansBody);
+  }
+  function plansBody(d) {
+    var tiers = (Array.isArray(d.tiers) ? d.tiers : []).filter(function (t) { return t && t.price_id; });
+    var cards = [plansTrialCard(d), plansPaygCard(d)].concat(tiers.map(function (t) { return plansTierCard(d, t); }));
+    var depths = (Array.isArray(d.depths) ? d.depths : []).filter(function (x) { return x && x.name; });
+    return h("div", {}, [
+      plansCurrentCard(d),
+      h("div.cust-grid", {}, cards),
+      depths.length ? h("p.cust-muted", { text: "Every plan runs the same assessments: "
+        + depths.map(function (x) { return x.name; }).join(", ") + "." }) : null,
+    ]);
+  }
+  function plansCurrentCard(d) {
+    var cur = d.current, sch = d.scheduled_change, acts = d.actions || {};
+    var rows = [], foot = h("div.cust-mon-actions", {});
+    if (cur) {
+      rows.push(kv("Plan", (cur.name || cur.plan_id) + (cur.retired ? " (no longer sold)" : "")));
+      // `active` is the server's word that the plan is in force now; a plan past its period has ended, whatever its
+      // last recorded status.
+      var ended = !cur.active && cur.status !== "past_due";
+      rows.push(kv("Status", cur.active ? "Active" : (ended ? "Ended" : "Payment past due")));
+      rows.push(kv(ended ? "Ended on" : (cur.active && !(sch && sch.kind === "cancel") ? "Renews on"
+        : "Period ends on"), fmtDate(cur.period_end)));
+      rows.push(kv("Credits each period", groupInt(cur.credits_per_period)));
+    } else {
+      rows.push(h("p.cust-muted", { text: (d.trial && d.trial.preview_locked)
+        ? "This workspace is on its trial. Choose a plan, or buy credits on Billing, to unlock every finding in full."
+        : "This workspace has no plan: it buys credits as it needs them." }));
+    }
+    if (sch && cur) {
+      rows.push(h("div.cust-launch-note", { role: "status" }, h("p", { text: sch.kind === "cancel"
+        ? "Your plan ends on " + fmtDate(sch.effective_at) + ". It will not renew."
+        : "Your plan changes to " + (sch.name || "a new plan") + " on " + fmtDate(sch.effective_at) + "." })));
+      if (acts.change && cur.price_id) {
+        foot.appendChild(plansButton("Keep my current plan", function (b) {
+          plansChange({ price_id: cur.price_id }, b, foot); }));
+      }
+    }
+    if (cur && acts.cancel) {
+      foot.appendChild(plansButton("Cancel plan", function () { plansConfirmCancel(d, foot); }, "danger"));
+    }
+    if (cur && !acts.change && acts.change_unavailable_reason && d.can_manage) {
+      rows.push(h("p.cust-muted", { text: "Changing this plan here is not possible right now: "
+        + acts.change_unavailable_reason + "." }));
+    }
+    if (!d.can_manage) rows.push(h("p.cust-muted", { text: "Only the founder or an admin can change the plan." }));
+    rows.push(foot);
+    return VUI.card("Your plan", null, rows);
+  }
+  function plansTrialCard(d) {
+    var t = d.trial || {};
+    if (!(Number(t.credits) > 0) && !t.had_trial) return null;
+    var rows = [kv("Trial credits", groupInt(t.credits))];
+    (t.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    if (t.preview_locked) rows.push(h("span.cust-badge.cust-badge-pending", { text: "This workspace" }));
+    return VUI.card("Trial", null, rows);
+  }
+  function plansPaygCard(d) {
+    var p = d.pay_as_you_go || {};
+    var rows = (p.packs || []).filter(function (x) { return x && x.price_id; }).map(function (x) {
+      return kv(groupInt(x.credits) + " credits", money(x.amount_minor, x.currency));
+    });
+    (p.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    rows.push(h("div.cust-mon-actions", {}, plansButton("Buy credits on Billing", function () { nav("#/billing"); })));
+    return VUI.card("Pay as you go", null, rows);
+  }
+  function plansTierCard(d, t) {
+    var foot = h("div.cust-mon-actions", {});
+    VUI.mount(foot, plansAction(d, t, foot));
+    var rows = [h("p.cust-plan-price", { text: money(t.amount_minor, t.currency) + " per " + plansDays(t.period_days) }),
+                kv("Credits each period", groupInt(t.credits_per_period)), kv("Billing period", plansDays(t.period_days))];
+    (t.rules || []).forEach(function (r) { rows.push(h("p.cust-muted", { text: String(r) })); });
+    rows.push(foot);
+    return VUI.card(String(t.name || t.price_id), null, rows);
+  }
+  // The one action a plan card offers, exactly as the read listed it (never one the server would refuse).
+  function plansAction(d, t, foot) {
+    if (t.current) return h("span.cust-badge.cust-badge-verified", { text: "Current plan" });
+    if (t.scheduled) return h("span.cust-badge.cust-badge-pending", { text: "Starts at your renewal" });
+    if (t.action === "checkout") {
+      return plansButton("Choose " + String(t.name || "this plan"), function (b) {
+        startCheckout({ price_id: t.price_id }, b); }, "primary");
+    }
+    if (t.action === "upgrade" || t.action === "downgrade") {
+      return plansButton(t.action === "upgrade" ? "Upgrade" : "Downgrade", function () { plansConfirm(d, t, foot); },
+        t.action === "upgrade" ? "primary" : "");
+    }
+    return null;
+  }
+  // A switch is asked here first, in place of its button; nothing is sent until it is confirmed.
+  function plansConfirm(d, t, foot) {
+    var when = fmtDate(d.current && d.current.period_end);
+    VUI.mount(foot, h("div.cust-mon-confirm", { role: "group", "aria-label": "Switch to " + t.name }, [
+      h("p", { text: "Switch to " + t.name + " at your next renewal, on " + when + "? Until then you keep your current "
+        + "plan and its credits. From then on the plan costs " + money(t.amount_minor, t.currency) + " per "
+        + plansDays(t.period_days) + " and adds " + groupInt(t.credits_per_period) + " credits each period. "
+        + "Nothing is charged today." }),
+      t.action === "upgrade" ? h("p.cust-muted", { text: "Need more credits before then? Buy a credit pack on "
+        + "Billing: bought credits never expire." }) : null,
+      h("div.cust-mon-actions", {}, [
+        plansButton("Yes, switch at renewal", function (b) { plansChange({ price_id: t.price_id }, b, foot); },
+          "primary"),
+        plansButton("Not now", function () { VUI.mount(foot, plansAction(d, t, foot)); }),
+      ]),
+    ]));
+  }
+  function plansConfirmCancel(d, foot) {
+    var when = fmtDate(d.current && d.current.period_end);
+    VUI.mount(foot, h("div.cust-mon-confirm", { role: "group", "aria-label": "Cancel plan" }, [
+      h("p", { text: "End your plan on " + when + "? It will not renew, and nothing more is charged for it. You keep "
+        + "its credits until then, and credits you bought separately never expire." }),
+      h("div.cust-mon-actions", {}, [
+        plansButton("Yes, cancel", function (b) { plansChange({ cancel: true }, b, foot); }, "danger"),
+        plansButton("Keep my plan", function () { if (here() === "#/plans") render(); }),
+      ]),
+    ]));
+  }
+  async function plansChange(body, btn, where) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      var r = await withStepUp(function () { return VUI.postJSON(API + "/billing/plan-change", body); }, where);
+      var when = fmtDate(r && r.effective_at);
+      VUI.toast(r && r.kind === "cancel" ? "Your plan ends on " + when + "."
+        : (r && r.kind === "keep" ? "Your plan stays as it is." : "Your plan changes to " + ((r && r.name) || "the new plan")
+          + " on " + when + ". Nothing was charged today."));
+      if (here() === "#/plans") render();
+    } catch (e) { btn.disabled = false; await plansFailed(e); }
+  }
+  // Why a change did not go through: fixed words for each answer, and the server's own reason for a refusal it
+  // explained (it is written for customers). When the outcome is not known, the screen is read again.
+  async function plansFailed(e) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (e && e.stepUpCancelled) return;
+    if (status === 401 && d.step_up_required) {
+      return err("For your security, changing a plan needs a fresh second-factor check. Verify with your "
+        + "authenticator, then try again. Nothing was changed.");
+    }
+    if (status === 401) { await refreshWho(); nav("#/login"); return; }
+    if (status === 404) return err("Changing plans is not available on this deployment. Nothing was changed.");
+    if (status === 429) return err("Too many attempts — wait a moment and try again. Nothing was changed.");
+    if (status === 503) return err("VIGIL is updating. Try again in a moment. Nothing was changed.");
+    var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
+      .replace(/\.$/, "");
+    if (!status || status >= 500 || why.indexOf("did not confirm") >= 0) {
+      err("VIGIL could not confirm the change" + (why ? ": " + why : "") + ". This screen now shows your plan as it is.");
+      if (here() === "#/plans") render();
+      return;
+    }
+    err("The plan was not changed" + (why ? ": " + why : "") + ".");
+  }
+
+  function viewReports() {
+    var parts = [h("h2", { text: "Reports" }), h("p.cust-muted", { text: "Reports of this workspace's proven "
+      + "findings, to keep or to hand to an auditor or a customer. Only proven findings are in them." })];
+    if (REPORT_EXPORT_ON) parts.push(reportsDownloadCard());
+    if (COMPLIANCE_ON) parts.push(complianceSection());
+    return shell(h("div", {}, parts), "#/reports");
+  }
+  function reportsDownloadCard() {
+    var note = h("div", { role: "status" });
+    return VUI.card("Download a report", null, [
+      h("p.cust-muted", { text: "Every proven finding, worst first and in plain language: what to fix first, how to "
+        + "fix each one, the standards it touches and the command that re-runs its proof without VIGIL." }),
+      h("div.cust-mon-actions", {}, [
+        plansButton("Download report", function (b) { reportsDownload("", b, note); }, "primary"),
+        plansButton("Download PDF", function (b) { reportsDownload("/pdf", b, note); }),
+      ]),
+      note]);
+  }
+  // The file the server built, saved as it is: an HTML document, or a PDF where this deployment renders one.
+  function reportsBlob(r) {
+    if (r && r.format === "html" && typeof r.html === "string") {
+      return new Blob([r.html], { type: "text/html;charset=utf-8" });
+    }
+    if (r && r.format === "pdf" && typeof r.pdf_b64 === "string") {
+      try {
+        var bin = atob(r.pdf_b64), u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return new Blob([u8], { type: "application/pdf" });
+      } catch (e) { return null; }
+    }
+    return null;
+  }
+  function reportsSave(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = h("a", { href: url, download: name });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+  async function reportsDownload(suffix, btn, note) {
+    clearErr();
+    btn.disabled = true;
+    VUI.mount(note, h("p.cust-muted", { text: "Preparing your report…" }));
+    try {
+      var r = await VUI.getJSON(API + "/report" + suffix);
+      var blob = reportsBlob(r);
+      if (!blob) {
+        VUI.mount(note, h("p.cust-muted", { text: "The report VIGIL sent could not be read, so nothing was saved. "
+          + "Try again." }));
+      } else {
+        var name = String((r && r.filename) || "vigil-report").replace(/[^A-Za-z0-9._-]/g, "-");
+        reportsSave(blob, name);
+        VUI.mount(note, h("p.cust-muted", { text: "Saved " + name + "." }));
+      }
+    } catch (e) {
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(note, reportsFailed(e, suffix === "/pdf"));
+    }
+    btn.disabled = false;
+  }
+  // Fixed words for each refusal, chosen from what the server refused — never its own text.
+  function reportsFailed(e, pdf) {
+    var status = e && e.status, why = String((e && e.data && e.data.error) || "").toLowerCase();
+    if (why.indexOf("unlocks with your first purchase") >= 0) {
+      return h("div", {}, [h("p.cust-muted", { text: "The full report unlocks with your first purchase. Buy credits "
+        + "in Billing to download it." }),
+        plansButton("Go to Billing", function () { nav("#/billing"); })]);
+    }
+    if (pdf && why.indexOf("pdf") >= 0) {
+      return h("p.cust-muted", { text: "A PDF is not available on this deployment right now. Download the report "
+        + "instead and print it to PDF from your browser." });
+    }
+    if (status === 403) {
+      return h("p.cust-muted", { text: "Only members who can read assessments — the founder, or an Operator VIGIL "
+        + "has added — can download the report." });
+    }
+    if (status === 404) return h("p.cust-muted", { text: "Downloading a report is not available right now." });
+    if (status === 429) return h("p.cust-muted", { text: "Too many reports in a short time — try again later." });
+    return h("p.cust-muted", { text: "The report could not be prepared just now. Try again in a moment." });
+  }
+
+  function complianceSection() {
+    var holder = h("div#cust-compliance", {}, loadingHolder("Loading your standards mapping…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/compliance"); }
+      catch (e) {
+        if (here() !== "#/reports") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: (e && e.status === 403)
+          ? "Only members who can read assessments can see the standards mapping."
+          : "Could not load the standards mapping right now." }));
+      }
+      if (here() !== "#/reports") return;
+      VUI.mount(holder, complianceBody(d || {}));
+    })();
+    return h("div", {}, [h("h3", { text: "Standards mapping" }), holder]);
+  }
+  function complianceBody(d) {
+    var fws = (Array.isArray(d.frameworks) ? d.frameworks : []).filter(function (f) { return f && f.framework; });
+    return h("div", {}, [
+      h("p.cust-muted", { text: COMPLIANCE_STATEMENT }),
+      Number(d.findings_total) > 0 ? null
+        : h("p.cust-muted", { text: "No proven findings yet, so no control is implicated." }),
+      h("div.cust-grid", {}, fws.map(complianceCard)),
+    ]);
+  }
+  function complianceCard(fw) {
+    var controls = (Array.isArray(fw.controls) ? fw.controls : []).filter(function (c) { return c && c.id; });
+    var hit = controls.filter(function (c) {
+      return c.status === "weakness_proven" || c.status === "weakness_fixed"; });
+    // OWASP lists every Top 10 category; the other frameworks list only the controls a proven weakness implicates.
+    var shown = fw.framework === "owasp" ? controls : hit;
+    var rows = [h("p.cust-muted", { text: String(fw.version || "") })];
+    shown.forEach(function (c) {
+      var fs = Array.isArray(c.findings) ? c.findings : [];
+      rows.push(h("div.cust-kv", {}, [h("span.k", { text: c.id + (c.name ? " — " + c.name : "") }),
+        h("span", { text: area6Label(COMPLIANCE_STATUS, c.status) + (fs.length ? " · " + fs.length + " finding(s)"
+          : "") })]));
+      if (fs.length) {
+        rows.push(h("p.cust-muted", { text: fs.map(function (f) {
+          return String(f.title || f.finding_ref || "Finding") + (f.host ? " on " + f.host : "")
+            + (f.retest === "fixed" ? " (fixed)" : ""); }).join("; ") }));
+      }
+    });
+    if (!hit.length) {
+      rows.push(h("p.cust-muted", { text: "No proven weakness in this workspace implicates a control of this "
+        + "framework." }));
+    }
+    var others = controls.length - hit.length;
+    if (fw.framework !== "owasp" && others > 0) {
+      rows.push(h("p.cust-muted", { text: others + " other control(s) VIGIL's checks map have no proven weakness "
+        + "here. That is not an assessment that they are met." }));
+    }
+    return VUI.card(String(fw.label || fw.framework), null, rows);
+  }
+  // ---- end of Plans, Reports and the standards mapping (PR-G) ------------------------------------------------------
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -2783,8 +4174,14 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(pageFlag("posture") ? [navLink("Fix first", "#/fix-first")] : [])      // PR-B: the Fix-first screen
+        .concat(ATTACK_PATH_ON ? [navLink("Attack path", "#/attack-path")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
+        // PR-G (Area 6): the same page switches PLANS_ON / REPORTS_ON hold, read here so the top bar stays self-contained
+        .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
+        .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
@@ -2856,11 +4253,20 @@
     "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewAssets() : viewLogin(); },
     "#/assessments": function () { return authed() ? viewAssessments() : viewLogin(); },
+    // the Fix-first screen off: #/fix-first is the home screen, exactly as any unknown route is
+    "#/fix-first": function () { return authed() ? (POSTURE_ON ? viewFixFirst() : viewDashboard()) : viewLogin(); },
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
+    "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
     "#/code": function () { return authed() ? (CODE_ON ? viewCode() : viewDashboard()) : viewLogin(); },
+    // PR-G (Area 6) off: #/plans and #/reports are the home screen, exactly as any unknown route is
+    "#/plans": function () { return authed() ? (PLANS_ON ? viewPlans() : viewDashboard()) : viewLogin(); },
+    "#/reports": function () { return authed() ? (REPORTS_ON ? viewReports() : viewDashboard()) : viewLogin(); },
+    // Connect off: #/connect is the home screen, exactly as any unknown route is
+    "#/connect": function () { return authed() ? (CONNECT_ON ? viewConnect() : viewDashboard()) : viewLogin(); },
     // the guide off: #/guide is the home screen, exactly as any unknown route is
     "#/guide": function () { return authed() ? (GUIDE_ON ? viewGuideScreen() : viewDashboard()) : viewLogin(); },
     // the security screens off: #/security is the home screen, exactly as any unknown route is

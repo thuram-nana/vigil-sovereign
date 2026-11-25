@@ -27,9 +27,9 @@ public issue, pull request, or discussion**:
   choose **"Report a vulnerability"**. This opens a private advisory visible only to you and
   the maintainer. (If the button is not present, GitHub private vulnerability reporting has
   not yet been enabled for this repository — use email below, and it will be enabled.)
-- **Email.** Send to **thuram@thuramnana.com** with a subject line beginning
-  `VIGIL SECURITY:`. This is the maintainer's monitored mailbox (also used for licensing at
-  [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)). No PGP key is published yet; if you need
+- **Email.** Send to **info@sigilsovereign.com** with a subject line beginning
+  `VIGIL SECURITY:`. This is the monitored contact mailbox of SIGIL SARL, which provides the
+  hosted VIGIL service. No PGP key is published yet; if you need
   an encrypted channel, say so in a first (non-sensitive) message and one will be arranged.
 
 There is no paid bug-bounty programme. Good-faith reporters who follow this policy are
@@ -149,7 +149,7 @@ sha256:f2f1254d298412b147019166db8f8201b30b635b79c40800964713e0ebbeca21
 
 | Verifier | sha256 |
 |---|---|
-| `docs/proof-carrying-finding/verify_pcf.py` | `6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6` |
+| `docs/proof-carrying-finding/verify_pcf.py` | `cd79863729e9910706c930a23b9b4de4aa73fb588494fd0c24eff46287a5891c` |
 | `docs/proof-carrying-finding/verify_vf.py` | `54b27fccffa79c87c9a3d609c76e5388051f786a42d2bf96085224644a4aba56` |
 | `engine/crucible/framework/v2/evidence/audit_offline_verifier.py` | `32e134c20d60bb34b34ba4bf28dbdd959114d14d2366d5aadd364764681d9de6` |
 

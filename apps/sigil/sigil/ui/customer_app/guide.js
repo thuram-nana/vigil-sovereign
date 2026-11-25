@@ -22,9 +22,12 @@
   // ---- the guide's content ---------------------------------------------------------------------------------------
   // Each chapter is a sequence the customer follows in order. A step names the screen it happens on (`where`: the
   // label shown, and `route`: the app's own hash when the screen exists in the top bar), the clicks, in order
-  // (`clicks`), and what VIGIL does meanwhile (`why`). A step on a screen a page switch turns on also names that switch
-  // (`when`: the name app.js reads with pageFlag); the Guide screen lists such a step only where app.js says its screen
-  // is shown (viewGuide's `shown`), so with the switch off the guide is exactly what it was without the step.
+  // (`clicks`), and what VIGIL does meanwhile (`why`). A step marked `onlyIfShown` describes a screen a deployment may
+  // not have: the Guide screen lists it only when the app says that screen is shown (`shown(route)`), so a deployment
+  // without it sees exactly the guide it always had. A step on a screen a page switch turns on also names that switch
+  // (`when`: the name app.js reads with pageFlag); the Guide screen lists such a step only where app.js's `flag(when)`
+  // says the switch is on AND its `shown(route)` says the screen is shown, so with the switch off the guide is exactly
+  // what it was without the step.
   var CHAPTERS = [
     {
       id: "start", title: "Get started",
@@ -119,7 +122,21 @@
                    "Plan credits are used first and expire at the end of their period. Credits you buy separately never expire.",
                    "Your plan, its status and its credits for this period appear under Subscription on Billing.",
                    "A workspace has one plan at a time. To change plans, contact VIGIL."],
+          // PR-G: where this deployment shows Plans, the same step's clicks with the last one pointing there instead.
+          alt: { when: "plans",
+                 clicks: ["Under Buy credits, a plan adds a set of credits at the start of every billing period.",
+                          "Plan credits are used first and expire at the end of their period. Credits you buy separately never expire.",
+                          "Your plan, its status and its credits for this period appear under Subscription on Billing.",
+                          "A workspace has one plan at a time. To change it, use Plans in the top bar."] },
           why: "A plan's credits and a pack's credits are spent the same way; only their expiry differs." },
+        // PR-G: shown only where this deployment shows Plans (`when`: the page switch, asked of the app's `flag`).
+        { id: "compare", title: "Compare plans and change yours", where: "Plans", route: "#/plans", when: "plans",
+          clicks: ["Select Plans in the top bar to compare the trial, pay as you go and every plan: its price, the credits it adds each period and how long a period lasts.",
+                   "With no plan yet, select Choose on a plan and pay on the payment processor's secure page, as when you buy credits.",
+                   "With a plan, select Upgrade or Downgrade on another plan, then Yes, switch at renewal. The new plan starts at your next renewal; until then you keep your current plan and its credits, and nothing is charged that day.",
+                   "Select Cancel plan, then Yes, cancel, to end it when the period you paid for ends. Keep my current plan undoes a switch or a cancellation before the renewal.",
+                   "Only the founder or an admin can change the plan, and VIGIL may ask for a fresh code from your authenticator app."],
+          why: "A plan change never cuts short a period you paid for and never charges you twice. A plan sets how many credits arrive each period, not what an assessment costs." },
         { id: "trial", title: "Trial credits", where: "Billing", route: "#/billing",
           clicks: ["A new workspace may start with trial credits: one trial per email address and per domain.",
                    "Trial credits are spent like any others, and you still prove you control a host before testing it.",
@@ -169,6 +186,12 @@
                    "Otherwise select Re-issue challenge and publish the new token.",
                    "A host whose proof has expired cannot be tested or monitored until it is verified again."],
           why: "Re-checking before the 90 days are up keeps your assessments and monitoring running without a gap." },
+        { id: "connect", title: "Or connect everything in one place", where: "Connect", route: "#/connect", onlyIfShown: true,
+          clicks: ["Select Connect in the top bar. It lists your workspace's websites, code repositories and cloud accounts, each with its proof state.",
+                   "Under Website, select Connect a website, or Continue on one you started earlier. VIGIL picks the proof that is usually quickest for that address; choose another if it suits you better, and use Copy to copy each value exactly.",
+                   "Tick I confirm I am authorized to test this asset, then select Check now. VIGIL checks again every few seconds and the site turns Verified by itself, with no reload.",
+                   "Under Code repository, Connect GitHub opens the same install as the Code screen. Under Cloud account, when it is offered, Connect an AWS account shows the exact read-only role to create in that account."],
+          why: "Connecting proves you own something; it never starts a test by itself. A cloud account is connected read-only, and VIGIL never changes anything in it." },
       ],
     },
     {
@@ -194,12 +217,39 @@
                    "Each finding shows its severity, its class, where it was found and how strong the proof is.",
                    "Use Verify offline to re-run the proof yourself, without VIGIL."],
           why: "VIGIL lists a finding only when a deterministic check confirmed it on evidence your host produced. Anything it could not prove is never shown as a finding." },
+        // PR-B: `when` names the page switch (data-posture) the Fix first screen is served under.
+        { id: "fixfirst", title: "Fix the worst first", where: "Fix first", route: "#/fix-first", when: "posture",
+          clicks: ["Select Fix first in the top bar. At the top is your security posture: a score out of 100 for the findings still open on your verified hosts, and how it changed over the last twelve weeks.",
+                   "Below it, every open finding is listed worst first. Each says what the weakness is, what VIGIL's check proved, the standards it touches and exactly how to fix it.",
+                   "Fix the first one on your side, then select Retest on it. When its proof no longer works, it moves to Fixed and your score goes up.",
+                   "Select How the score works to see how each finding counts, or Show the numbers to read the trend as a table."],
+          why: "The score is a way to decide what to fix first, not a certified rating. It counts only findings VIGIL proved on your own hosts." },
+        { id: "attackpath", title: "See how findings chain into impact", where: "Attack path", route: "#/attack-path",
+          clicks: ["When VIGIL proves that separate findings combine, select Attack path in the top bar.",
+                   "Each chain reads top to bottom: a confirmed step leads to the next, ending in the real-world impact an attacker reaches.",
+                   "Every node is a step VIGIL confirmed — it draws only chains it proved, never a guess, and claims no impact it did not establish.",
+                   "A finding confirmed out of band also shows a Confirmed out-of-band badge in its card, with the signed callback you can check yourself.",
+                   "Select View findings to open the findings behind a chain."],
+          why: "A chain shows the real-world consequence of findings that look minor on their own — exactly how an attacker would combine them into a breach." },
         { id: "retest", title: "Confirm a fix", where: "Assessments", route: "#/assessments",
           clicks: ["Fix the weakness on your side.",
                    "Open the finding and select Retest. VIGIL re-runs that finding's proof against your host.",
                    "When the proof no longer works, the finding is marked fixed.",
                    "Or launch a new assessment of the host to check everything again."],
           why: "A finding counts as fixed only when its proof stops working." },
+        // PR-G: each shown only where this deployment offers that part of Reports (`when`: its page switch).
+        { id: "report", title: "Download a report", where: "Reports", route: "#/reports", when: "reportExport",
+          clicks: ["Select Reports in the top bar, then Download report.",
+                   "The report lists every proven finding worst first, in plain language: what it is, how to fix it, the standards it touches and the command that re-runs its proof without VIGIL.",
+                   "Select Download PDF for the same report as a PDF, where your workspace offers one.",
+                   "During a trial, the full report unlocks with your first purchase."],
+          why: "The report holds only what VIGIL proved, so you can hand it to an auditor or a customer as it is." },
+        { id: "standards", title: "See the standards your findings touch", where: "Reports", route: "#/reports",
+          when: "compliance",
+          clicks: ["On Reports, Standards mapping lists the OWASP Top 10 categories, PCI DSS requirements and SOC 2 criteria that your proven findings implicate, each with the findings behind it.",
+                   "A finding whose retest shows its proof no longer works is marked fixed.",
+                   "A control with no proven weakness is only that: VIGIL never states that a control is met or that you are compliant."],
+          why: "The mapping comes only from proven findings, never from a guess." },
       ],
     },
     {
@@ -343,6 +393,8 @@
       a: "A finding is confirmed by a deterministic check that fired on evidence from your host, and it includes the steps to re-run that check yourself. Anything VIGIL could not prove is never presented as a finding." },
     { q: "Who in my organization can see our findings?",
       a: "The founder, and any teammate VIGIL has made an Operator. Admins see billing, the team and monitoring, but not findings. Analysts and viewers see neither billing nor findings." },
+    { q: "Can I give our results to an auditor or a customer?", when: "reportExport",   // PR-G: only with the report
+      a: "Yes. On Reports, select Download report. It holds only the findings VIGIL proved, each with the command that re-checks it without VIGIL, and the standards they touch. VIGIL never states that you are compliant: the mapping shows only what proven findings implicate." },
     { q: "How do I see this guide again?",
       a: "Select Guide in the top bar. Replay the welcome tour shows the tour again." },
   ];
@@ -497,17 +549,27 @@
 
   // ---- the Guide screen ----------------------------------------------------------------------------------------------
   function stepKey(username, chapterId, stepId) { return STEP_PREFIX + String(username || "") + "." + chapterId + "." + stepId; }
+  // Whether the Guide screen lists a step: always, unless it is marked onlyIfShown — then only when the app says its
+  // screen is shown (no `shown`, or a hidden screen, leaves it out: the guide never describes a screen it cannot vouch for).
+  function stepListed(s, env) {
+    return !s.onlyIfShown || (!!s.route && typeof env.shown === "function" && !!env.shown(s.route));
+  }
+
+  // PR-G: a step, a question or a step's `alt` clicks that carry `when` (the name of a page switch, e.g. "plans") exist
+  // only where the app's `flag(when)` says the edge turned that switch on; without a `flag`, never. Nothing else moves.
+  function guideWhen(env, when) { return !when || (typeof env.flag === "function" && env.flag(when) === true); }
 
   /** Whether the Guide screen lists step `s`: always, unless it names a page switch (`when`) — then only where
    *  `shown(route)` says this deployment shows its screen (no `shown` at all: not listed, the safe direction). */
   function listed(s, shown) { return !s.when || (typeof shown === "function" && !!shown(s.route)); }
 
   /**
-   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown}. Chapter tabs on top; each
-   * step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
+   * The Guide screen's body. env: {h, username, storage, nav, replayTour, chapter, shown, flag}. Chapter tabs on top;
+   * each step of the chapter is a card that opens to its clicks, in order, with "Go to <screen>" and a per-step "Mark as
    * done". `shown(route)` (optional) says whether this deployment shows that screen: no "Go to" leads to one it hides,
    * and a step that names a page switch (`when`) is listed only where shown(route) says its screen is shown (with no
    * shown(), never) — so a switched-off screen leaves the guide exactly as it was without that step.
+   * `flag(name)` (optional) answers a page switch, for the steps and questions that carry `when` (see guideWhen).
    */
   function viewGuide(env) {
     var h = env.h;
@@ -526,18 +588,19 @@
       if (!ch) {                                            // the Questions tab
         clear(root);
         root.appendChild(h("div.cust-guide-tabs", { role: "group", "aria-label": "Guide chapters" }, tabs));
-        root.appendChild(h("div.cust-guide-steps", {}, FAQ.map(function (f) {
+        root.appendChild(h("div.cust-guide-steps", {}, FAQ.filter(function (f) { return guideWhen(env, f.when); }).map(function (f) {
           return h("details.card.cust-guide-faq", {}, [h("summary", { text: f.q }), h("p.cust-tour-why", { text: f.a })]);
         })));
         return;
       }
-      var steps = ch.steps.filter(function (s) { return listed(s, env.shown); });
+      var steps = ch.steps.filter(function (s) { return guideWhen(env, s.when) && stepListed(s, env) && listed(s, env.shown); });
       var cards = steps.map(function (s, n) {
         var key = stepKey(env.username, ch.id, s.id);
         var isDone = !!safeGet(env.storage, key);
         var open = n === 0;
+        var clicks = (s.alt && s.alt.when && guideWhen(env, s.alt.when)) ? s.alt.clicks : s.clicks;
         var detail = h("div.cust-guide-detail", {}, [
-          h("ol.cust-tour-clicks", {}, s.clicks.map(function (c) { return h("li", { text: c }); })),
+          h("ol.cust-tour-clicks", {}, clicks.map(function (c) { return h("li", { text: c }); })),
           h("p.cust-tour-why", { text: s.why }),
         ]);
         detail.hidden = !open;
