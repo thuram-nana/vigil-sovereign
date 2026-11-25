@@ -639,6 +639,22 @@
       "w16_issue": null
     },
     {
+      "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
+      "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
+      "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/saml.py",
+        "symbol": "signxml_sig_verifier"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "apps/sigil/sigil/ui/saml.py",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
       "id": "LIMIT-report-pdf-renderer-unprovisioned",
       "title": "The customer report's PDF download needs an owner-provisioned HTML-to-PDF renderer that lives outside the customer venv",
       "summary": "PR-G (Area 6). The shareable assessment report is built in the sovereign venv as a deterministic, self-contained HTML document that is complete on its own (VIGIL_CUSTOMER_PDF_REPORT, default OFF). Its PDF form needs a headless HTML-to-PDF renderer: a large native dependency that must NOT be installed in the customer/sovereign venv (FATAL-2 and dependency hygiene), so providing it is an owner/ops step: install the reference wrapper tools/report_pdf/render_pdf.py with its library in a dedicated environment and set VIGIL_REPORT_PDF_RENDERER to its absolute path. Until then the PDF download REFUSES with a customer-safe message (fail-closed) and the HTML download is unaffected. The seam itself is built and tested with a stand-in renderer: the path must be absolute, a regular executable that no group/other may write, and outside the running venv; it runs with a fixed argv (no shell), a minimal environment (no secret reaches it), a private temporary directory, a wall-clock timeout that kills its whole process group, an output-size cap, and a %PDF-/%%EOF check on what it returns. No real renderer runs in CI, so the visual fidelity of the PDF is not claimed here.",
