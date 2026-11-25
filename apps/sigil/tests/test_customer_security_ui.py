@@ -1054,7 +1054,7 @@ const state = { get: () => ({ who }) };
 function authed() { return !!(who && who.authenticated); }
 const trace = [];
 function nav(r) { trace.push(["nav", r]); }
-function doLogout() {} function doLogin() {} function ntfWidget() { return null; } function googleBlock() { return null; }
+function doLogout() {} function doLogin() {} function ntfWidget() { return null; } function googleBlock() { return null; } function ssoBlock() { return null; }
 function clearErr() {} function err(m) { trace.push(["err", m]); }
 function refreshWho() { trace.push(["refreshWho"]); return Promise.resolve(); }
 const API = "api/customer";
