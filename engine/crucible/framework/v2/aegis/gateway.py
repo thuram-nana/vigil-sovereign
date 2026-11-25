@@ -24,6 +24,7 @@ read-only ``observe``.
 
 from __future__ import annotations
 
+import errno
 import itertools
 import socket
 import threading
@@ -39,6 +40,12 @@ from .models import AegisConfig, BeliefRef, Verdict
 from .response_policy import feed_and_score, feed_oob_correlation, graduated_action
 
 _log = get_logger("aegis.gateway")
+
+# The errnos that PROVE a slug-keyed control file is genuinely ABSENT (vs present-but-unreadable). Kept
+# byte-identical to authority.killswitch.KillSwitch._ABSENT_ERRNOS so the live-mode file and the kill-switch
+# agree on what "no file" means: any OTHER read error is an ambiguous glitch that must fail toward NOT
+# blocking, never be mistaken for "the operator cleared this control file".
+_MODE_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG})
 
 
 # /readyz is UNAUTHENTICATED, so an untrusted caller could hammer it. Each check does a live TCP connect
@@ -226,32 +233,45 @@ class GatewaySettings:
         """LIVE mode override, re-read per request from a control file the console writes — the exact
         cross-process, restart-free pattern the kill-switch uses.
 
-        Returns 'observe'/'enforce' when the file is read cleanly and holds a valid value (and remembers it
-        as the last-known-good live override); None when NO override file is set, so the caller falls back to
-        the configured startup --mode.
+        Returns 'observe'/'enforce' when the file is read cleanly and holds a valid value; None when the
+        override is genuinely ABSENT (or present-but-invalid), so the caller falls back to the configured
+        startup --mode. The last cleanly-observed VALID override is remembered in ``_last_good_mode``.
 
         AS-27a break-glass (availability-first): a file that is PRESENT but unreadable — a permission / IO
-        glitch, or the mode subsystem itself failing — must never let a control-plane glitch silently
-        escalate to enforce. In that case fall back to the LAST mode read cleanly, and if none was ever read,
-        to OBSERVE — never to the startup --mode, which may itself be enforce. A genuinely absent file
-        (FileNotFoundError) is the normal 'no live override' state, not a glitch, and yields None."""
+        glitch, a decode error, or the mode subsystem itself failing — must never let a control-plane glitch
+        silently ESCALATE to enforce. On such a glitch, hold the last cleanly-observed override, and if none,
+        OBSERVE — never the startup --mode, which may itself be enforce.
+
+        'Absent' vs 'glitch' is decided by errno, mirroring ``KillSwitch._ABSENT_ERRNOS`` so the mode file and
+        the kill-switch agree on what 'no file' means: only an errno that PROVES the file cannot be there
+        counts as absent. CRUCIALLY, whenever the live override is observed to be GONE (absent) or no longer a
+        valid value (invalid content), ``_last_good_mode`` is CLEARED — otherwise a long-lived gateway keeps a
+        stale 'enforce' after the operator has cleared the override and a later read glitch would resurrect it,
+        silently resuming blocking against current intent (the exact availability-first violation AS-27a
+        closes)."""
         try:
             from ..common.paths import aegis_mode_path
             path = aegis_mode_path(self.slug)
         except Exception:
-            # the mode subsystem itself is unavailable (import / path construction) -> a glitch, not "no override".
+            # the mode subsystem itself is unavailable (import / path construction): a glitch, not a reliable
+            # 'no override' signal -> hold the last cleanly-observed override, else observe.
             return getattr(self, "_last_good_mode", None) or "observe"
         try:
             raw = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            return None                        # no live override set -> configured startup --mode (the normal path)
+        except OSError as e:
+            if e.errno in _MODE_ABSENT_ERRNOS:
+                self._last_good_mode = None        # the override is genuinely gone -> forget it, never resurrect
+                return None                        # -> the configured startup --mode (the normal no-override path)
+            # present-but-unreadable (permission, IsADirectory, I/O, ...): a glitch -> never escalate to enforce.
+            return getattr(self, "_last_good_mode", None) or "observe"
         except Exception:
-            # present-but-unreadable: break-glass, never escalate to enforce on a transient read error.
+            # a non-OSError read failure (e.g. a decode error on a corrupt file): present but unreadable -> glitch.
             return getattr(self, "_last_good_mode", None) or "observe"
         if raw in ("observe", "enforce"):
-            self._last_good_mode = raw         # remember the last cleanly-read live override
+            self._last_good_mode = raw             # remember the last cleanly-read valid override
             return raw
-        return None                            # present but invalid content -> ignore the override (startup mode)
+        self._last_good_mode = None                # present but INVALID -> no valid live override to hold
+        return None                                # -> the configured startup --mode
 
     def intended_mode(self) -> str:
         """The mode the operator has asked for: the live console-set override if present, else the

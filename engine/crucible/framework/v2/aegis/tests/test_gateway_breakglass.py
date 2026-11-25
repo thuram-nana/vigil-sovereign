@@ -16,6 +16,8 @@ the mode-file path monkeypatched, so the assertions are about the gate's fail di
 """
 from __future__ import annotations
 
+import errno
+
 import pytest
 
 from framework.v2.aegis.gateway import GatewaySettings
@@ -116,3 +118,91 @@ def test_a_mode_file_glitch_falls_back_to_the_last_known_good(tmp_path, monkeypa
     p.unlink()
     p.mkdir()                                            # now a glitch at the same path
     assert s.intended_mode() == "observe"               # held at the last-known-good 'observe', not startup enforce
+
+
+# ---------------------------------------------------------------------------- the resurrection guard (the HIGH)
+
+def test_a_cleared_override_is_not_resurrected_by_a_later_glitch(mode_path):
+    """THE AS-27a resurrection guard. Once the operator CLEARS the live override (the file is removed), a
+    later read glitch must NOT bring the previously-set mode back from cache. With startup=enforce: a clean
+    'enforce' read caches it; the delete is observed (absent ⇒ startup mode AND cache cleared); a subsequent
+    glitch must read 'observe' — not the stale, resurrected 'enforce'. Before the cache-invalidation fix this
+    returned 'enforce' and the gateway silently resumed blocking against current intent."""
+    s = _settings("enforce")
+    mode_path.write_text("enforce", encoding="utf-8")
+    assert s.intended_mode() == "enforce"                # clean read -> caches 'enforce'
+    mode_path.unlink()
+    assert s.intended_mode() == "enforce"                # absent (ENOENT) -> startup 'enforce', and clears the cache
+    mode_path.mkdir()                                    # now a present-but-unreadable glitch at the same path
+    assert s.intended_mode() == "observe"               # cache forgotten -> observe, NOT a resurrected 'enforce'
+
+
+def test_an_invalidated_override_is_not_resurrected_by_a_later_glitch(mode_path):
+    """Same guard via the invalid-content path: a clean 'enforce' read, then the file is overwritten with a
+    value that is not a valid mode (so there is no longer a valid live override), then a glitch — the gate
+    must read 'observe', never the stale 'enforce'. Startup is 'observe' here so a resurrected enforce would
+    be unmistakable."""
+    s = _settings("observe")
+    mode_path.write_text("enforce", encoding="utf-8")
+    assert s.intended_mode() == "enforce"                # caches 'enforce'
+    mode_path.write_text("garbage-not-a-mode", encoding="utf-8")
+    assert s.intended_mode() == "observe"                # invalid content -> startup 'observe', and clears the cache
+    mode_path.unlink(); mode_path.mkdir()               # glitch
+    assert s.intended_mode() == "observe"               # not resurrected to 'enforce'
+
+
+# ---------------------------------------------------------------------------- the glitch branches, by cause
+
+def test_a_mode_subsystem_failure_is_a_glitch_not_an_absent_override(monkeypatch):
+    """The first except branch: if resolving the mode path itself fails (import / path-construction error),
+    that is an ambiguous glitch, not a reliable 'no override' — it must hold last-known-good / observe, never
+    fall through to a startup enforce."""
+    monkeypatch.setattr("framework.v2.common.paths.aegis_mode_path",
+                        lambda slug: (_ for _ in ()).throw(RuntimeError("path subsystem down")))
+    s = _settings("enforce")
+    assert s.intended_mode() == "observe"                # subsystem glitch, no last-known-good -> observe, not enforce
+    s._last_good_mode = "enforce"                        # once a value has been observed, the glitch holds it
+    assert s.intended_mode() == "enforce"
+
+
+def test_enotdir_is_treated_as_absent_like_the_killswitch(tmp_path, monkeypatch):
+    """errno parity with KillSwitch._ABSENT_ERRNOS: a path whose PARENT is a regular file yields ENOTDIR on
+    read — a proof the override cannot exist there — so it is 'absent' (⇒ startup mode + cache cleared), NOT a
+    glitch that would hold a stale cached value. Startup 'observe' + a stale cached 'enforce' makes the two
+    classifications give different answers."""
+    parent_file = tmp_path / "not-a-dir"
+    parent_file.write_text("x", encoding="utf-8")
+    p = parent_file / "aegis-gateway.mode"               # reading beneath a regular file -> ENOTDIR
+    monkeypatch.setattr("framework.v2.common.paths.aegis_mode_path", lambda slug: p)
+    s = _settings("observe")
+    s._last_good_mode = "enforce"                        # a stale cached enforce...
+    assert s.intended_mode() == "observe"                # ...ENOTDIR is ABSENT -> startup observe, not a glitch-hold
+    assert getattr(s, "_last_good_mode", None) is None   # ...and absent classification cleared the cache
+
+
+def test_a_mode_file_permission_error_is_a_glitch_not_absent(tmp_path, monkeypatch):
+    """The docstring's primary 'permission glitch': a PermissionError (EACCES, not in the absent set) is a
+    glitch ⇒ never escalate. With no last-known-good and startup=enforce, it drops to observe."""
+    p = tmp_path / "aegis-gateway.mode"
+    p.write_text("enforce", encoding="utf-8")
+    monkeypatch.setattr("framework.v2.common.paths.aegis_mode_path", lambda slug: p)
+    s = _settings("enforce")
+
+    def _denied(self, *a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied")
+    monkeypatch.setattr("pathlib.Path.read_text", _denied)
+    assert s.intended_mode() == "observe"                # EACCES glitch, no last-good -> observe (never startup enforce)
+
+
+# ---------------------------------------------------------------------------- kill-switch: subsystem construction
+
+def test_an_unreadable_killswitch_via_construction_failure_reads_as_tripped(monkeypatch, mode_path):
+    """Not only is_tripped() raising: if constructing the KillSwitch itself fails (path construction / import),
+    that subsystem-unreadable case must ALSO read as TRIPPED ⇒ pass-through — the gateway never keeps blocking
+    on a kill-switch it cannot even instantiate."""
+    def _boom_init(self, slug, **kw):
+        raise RuntimeError("authority path construction failed")
+    monkeypatch.setattr("framework.v2.authority.killswitch.KillSwitch.__init__", _boom_init)
+
+    s = _settings("enforce")
+    assert s._killswitch_tripped() is True
