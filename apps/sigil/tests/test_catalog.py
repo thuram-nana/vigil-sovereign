@@ -48,6 +48,40 @@ def test_catalog_validates_and_projects():
     assert set(exp) == set(ents) and all(a >= 0 and len(c) == 3 for a, c in exp.values())
 
 
+def test_the_offered_top_ups_are_exactly_the_owners_launch_packs():
+    # Owner pricing (PRICING-RED-PEN-DESIGN.md §1, §1.1d): $1 = 100 credits, packs of $5/$10/$16/$25/$50/$100, no
+    # volume bonus. The top-ups on sale are exactly these, in ascending order, in USD.
+    offered = [p for p in cat.plans() if p["kind"] == EVENT_TOPUP]
+    assert [(p["amount_minor"], p["credits"], p["currency"]) for p in offered] == [
+        (500, 500, "USD"), (1000, 1_000, "USD"), (1600, 1_600, "USD"),
+        (2500, 2_500, "USD"), (5000, 5_000, "USD"), (10000, 10_000, "USD")]
+    # one conversion rate for every pack: exactly 1 credit per US cent, so no pack carries a bonus
+    assert all(p["credits"] == p["amount_minor"] for p in offered)
+
+
+def test_the_offered_credit_plans_are_the_owners_launch_plans_and_each_beats_the_packs():
+    # Owner launch plans (PRICING-RED-PEN-DESIGN.md §1.1d): Starter $29 / 3,200, Pro $99 / 12,000, Team $299 /
+    # 39,000 credits a month, in USD, 30-day periods.
+    offered = cat.credit_plan_entries(offered_only=True)
+    assert [(e.price_id, e.plan_id, e.amount_minor, e.allotment, e.currency) for e in offered] == [
+        ("vigil_starter_monthly", "starter", 2900, 3_200, "USD"),
+        ("vigil_pro_monthly", "pro", 9900, 12_000, "USD"),
+        ("vigil_team_monthly", "team", 29900, 39_000, "USD")]
+    assert all(e.period_s == 30 * 24 * 3600.0 for e in offered)
+    # every plan gives MORE credits per dollar than the packs (1 credit per US cent), and a bigger plan never gives
+    # fewer credits per dollar than a smaller one — so committing monthly is always worth it
+    per_cent = [e.allotment / e.amount_minor for e in offered]
+    assert all(r > 1.0 for r in per_cent) and per_cent == sorted(per_cent)
+
+
+def test_the_retired_bonus_pack_is_never_sold_but_still_credits_a_late_payment():
+    assert "vigil_topup_6k" not in cat.expected_amounts()                 # not on sale: checkout refuses it
+    assert "vigil_topup_6k" not in {p["price_id"] for p in cat.plans()}   # not listed
+    # a late webhook for a pack bought before it was retired is still credited exactly as it was sold
+    assert cat.mintable_entitlements()["vigil_topup_6k"].credits == 6_000
+    assert cat.mintable_expected()["vigil_topup_6k"] == (5000, "USD")
+
+
 def test_public_projection_hides_no_secret_and_matches_kind():
     for p in cat.plans():
         assert "cred_hash" not in p and "salt" not in p
@@ -121,7 +155,7 @@ def test_catalog_drives_a_subscription_mint():
     body = json.dumps({"event": "charge.completed", "data": {"id": 7}}).encode()
     assert signer.ingest(body, "flw-hash", now=100.0) is not None
     assert subs.subscription("acme").plan_id == "pro"
-    assert meter.available("acme", now=200.0) == 6000        # the Pro monthly allotment from the catalog
+    assert meter.available("acme", now=200.0) == 12_000      # the Pro monthly allotment from the catalog
 
 
 # ==================================================================================================
@@ -209,7 +243,7 @@ def test_catalog_import_byte_identical_off_with_a_misconfigured_band():
     env.pop("VIGIL_TIERED_PRODUCTS", None)
     r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, env=env)
     assert r.returncode == 0, f"catalog import crashed when EC-7 off + bad band:\n{r.stderr}"
-    assert "PLANS 5" in r.stdout, r.stdout
+    assert "PLANS 9" in r.stdout, r.stdout                      # 6 packs + 3 credit plans (AEGIS off)
 
 
 def test_tiered_products_flag_cross_plane_agreement():
