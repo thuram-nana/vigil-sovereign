@@ -458,6 +458,59 @@ def apex_autonomous_enabled() -> bool:
     reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
     closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
     return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+def customer_sso_enabled() -> bool:
+    """True iff the consumer SSO / SCIM surfaces are ON (`VIGIL_CUSTOMER_SSO` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off EVERY SSO/SCIM route / action is absent (404 exactly as an unknown
+    route), the edge serves no SAML ACS / enterprise-OIDC callback / SCIM endpoint, the provisioner's `sso_*` /
+    `scim_*` dispatch returns None, no SSO config is read and no membership is ever provisioned from an IdP — so
+    the server is byte-identical to a build without SSO. The master flag over the whole PR-H pipeline
+    (`governor.sso_config`, `governor.scim`, `ui.saml`, `ui.scim`). Read at call time.
+
+    Even when ON, every leg still fails closed unless the OWNER has signed a per-org SSO config
+    (`governor.sso_config`): SSO proves identity, the owner-signed config supplies the (ceiling-capped) role, and
+    SCIM/SAML/OIDC can provision ONLY `viewer`/`analyst`/`org_admin` — never `operator`/`founder`/`owner` or any
+    money/offense authority, which stay owner-signed. SAML signature verification additionally requires a vetted
+    XML-DSig backend (`ui.saml.signxml_sig_verifier`); absent it, SAML login fails closed (enterprise-OIDC does
+    not need it). Set the SAME value in customer.env and cockpit.env: the edge serves the routes, the cockpit
+    dispatches the actions (a value on one side only fails closed)."""
+    return (os.environ.get("VIGIL_CUSTOMER_SSO") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-H — the provisioner-side SSO/SCIM ledgers (written only while VIGIL_CUSTOMER_SSO is on): the durable
+# single-use SAML assertion-ID ledger (replay guard), the per-(org, client IP) failed-SCIM-authentication limiter
+# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per org per minute: a write is admitted
+# while the org is within budget and then charged one unit per record it appended — bounds how fast even a valid
+# token can grow the spine; see ui.sso_provision for the per-request bounds). The default, 1800 records a minute, keeps a
+# first user sync at about 600 users a minute (a user create writes 3 records: user, audit, grant). The per-org SCIM
+# READ budget (VIGIL_SCIM_READS_PER_MIN reads per org per minute, guard-and-count) bounds how much spine folding one
+# org's token can ask for; its default matches a first sync's "does this user exist?" lookup before each create.
+CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
+SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
+SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
+SCIM_READ_RATELIMIT_DIR = _customer / "scim_read_ratelimit"
+SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 1800)
+SCIM_READS_PER_MIN = _int_env("VIGIL_SCIM_READS_PER_MIN", 1800)
+# The per-org DEPROVISIONING cap (VIGIL_SCIM_DEPROVISIONS_PER_MIN units per org per minute; a deprovisioning request
+# costs the records it appended, at least one): a request that can only take privilege away skips the write budget,
+# and this is its own, much higher, count bound. Never refuses while the org is under it, and even an org over it
+# gets one deprovisioning admitted per minute, so an offboarding always makes progress.
+SCIM_DEPROV_RATELIMIT_DIR = _customer / "scim_deprov_ratelimit"
+SCIM_DEPROVISIONS_PER_MIN = _int_env("VIGIL_SCIM_DEPROVISIONS_PER_MIN", 6000)
+# The per-org enterprise sign-in budget (VIGIL_SSO_SIGNINS_PER_MIN VERIFIED sign-ins per org per minute, beside the
+# per-client-IP limiter): an org's own IdP can mint valid assertions without limit and from any address, and each
+# resolved sign-in folds the spine.
+SSO_SIGNIN_RATELIMIT_DIR = _customer / "sso_signin_ratelimit"
+SSO_SIGNINS_PER_MIN = _int_env("VIGIL_SSO_SIGNINS_PER_MIN", 600)
+# Every UNAUTHENTICATED SSO leg (sign-in start, SAML ACS, OIDC callback) is guard-and-counted per client IP,
+# successes included (VIGIL_SSO_REQUESTS_PER_IP_PER_MIN, default 300 a minute: a sign-in is two legs, and a company
+# behind one NAT address signs many people in), and at most VIGIL_SSO_CONCURRENCY of them do CPU work at once in the
+# provisioner (default 4; over it, a short wait, then 503 + Retry-After). The per-IP count is kept in the provisioner
+# process's memory (`ui.sso_provision._LegCounter`).
+SSO_REQUESTS_PER_IP_PER_MIN = _int_env("VIGIL_SSO_REQUESTS_PER_IP_PER_MIN", 300)
+SSO_CONCURRENCY = _int_env("VIGIL_SSO_CONCURRENCY", 4)
+# ... of which ONE org may hold at most VIGIL_SSO_ORG_CONCURRENCY at once (default 1: its further legs wait in its own
+# queue, never in another org's share).
+SSO_ORG_CONCURRENCY = _int_env("VIGIL_SSO_ORG_CONCURRENCY", 1)
 
 
 def apex_impact_enabled() -> bool:

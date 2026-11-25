@@ -152,7 +152,8 @@ class UIServer(GracefulMixin, ThreadingHTTPServer):
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
                  extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None,
-                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None):
+                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,
+                 sso_oidc_http_post=None, sso_oidc_jwks_fetcher=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -203,6 +204,10 @@ class UIServer(GracefulMixin, ThreadingHTTPServer):
         # egress; a test injects both (a fake IdP) so the edge OIDC round-trip never touches the network.
         self.customer_oidc_http_post = customer_oidc_http_post
         self.customer_oidc_jwks_fetcher = customer_oidc_jwks_fetcher
+        # Consumer PR-H — the SAME hooks for the per-org ENTERPRISE-OIDC sign-in (VIGIL_CUSTOMER_SSO). Both None
+        # (production) ⇒ the egress is pinned to each org's owner-signed oidc_egress_hosts; a test injects both.
+        self.sso_oidc_http_post = sso_oidc_http_post
+        self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -1528,7 +1533,7 @@ class Handler(BaseHTTPRequestHandler):
         this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
         proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
         from .. import config as _config
-        from .provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited,
+        from .provision import (ProvisionBusy, ProvisionDenied, ProvisionError, ProvisionRateLimited,
                                 ProvisionStepUpRequired, build_provisioner)
         action = path[len("/api/provision/"):]
         principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
@@ -1536,7 +1541,7 @@ class Handler(BaseHTTPRequestHandler):
         sig = self.headers.get("X-VIGIL-Provision-Sig", "") or ""
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length > self._MAX_BODY:
+            if length > self._provision_body_cap(action):
                 return self._deny(413, "body too large")
             raw = self.rfile.read(length) if length else b""
         except (ValueError, OSError) as e:
@@ -1561,9 +1566,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(400, f"bad request: {str(e)[:200]}")
         p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens(),
                               customer_oidc_http_post=self.server.customer_oidc_http_post,
-                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher)
+                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher,
+                              sso_oidc_http_post=self.server.sso_oidc_http_post,
+                              sso_oidc_jwks_fetcher=self.server.sso_oidc_jwks_fetcher)
         try:
             result = self._provision_dispatch(p, action, principal, body)
+        except ProvisionBusy as e:
+            return self._deny(503, f"busy; retry after {e.retry_after:.0f}s")
         except ProvisionRateLimited as e:
             return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
         except ProvisionStepUpRequired as e:
@@ -1780,6 +1789,15 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.redpen_enabled():
                 return None
             return self._redpen_dispatch(p, action, requester, body, ip)
+        # Consumer PR-H — enterprise SSO sign-in + SCIM provisioning. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_SSO is on, the same master flag that gates the edge routes. These are session-less
+        # bootstrap actions (no requester): the org selects WHICH owner-signed config the proof must verify under —
+        # the IdP assertion/id_token bound to the login the edge's server-side state names, or the org's bearer.
+        if action.startswith(("sso_", "scim_")):
+            from .. import config as _config
+            if not _config.customer_sso_enabled():
+                return None
+            return self._sso_dispatch(p, action, body, ip)
         # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
         # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
         if action == "billing_checkout":
@@ -1947,6 +1965,38 @@ class Handler(BaseHTTPRequestHandler):
             return p.redpen_fix_this(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
         if action == "redpen_retest":
             return p.redpen_retest(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
+        return None
+
+    # The largest hop body each SSO/SCIM action may carry while VIGIL_CUSTOMER_SSO is on (a signed SAML Response is
+    # tens of KiB; a SCIM group PUT can name a thousand members). Every other action keeps the 64 KiB cap.
+    _SSO_BODY_CAPS = {"sso_saml_acs": 768 * 1024, "scim_request": 1536 * 1024}
+
+    def _provision_body_cap(self, action: str) -> int:
+        """The body cap for a provision action: the larger SSO/SCIM caps apply ONLY while the flag is on (off ⇒ the
+        64 KiB cap for every action, exactly as before)."""
+        if action in self._SSO_BODY_CAPS:
+            from .. import config as _config
+            if _config.customer_sso_enabled():
+                return self._SSO_BODY_CAPS[action]
+        return self._MAX_BODY
+
+    @staticmethod
+    def _sso_dispatch(p, action: str, body: dict, ip: str):
+        """Consumer PR-H — the SSO / SCIM provisioner actions over a CLOSED exact-match set (unknown → None → 404).
+        Called only while VIGIL_CUSTOMER_SSO is on. String fields are read as ``str(x or "")`` (absent/null ⇒ empty
+        ⇒ fail-closed in the provisioner); the SCIM request body is relayed as the JSON value the IdP sent."""
+        def s(k: str) -> str:
+            return str(body.get(k) or "")
+        if action == "sso_login_start":
+            return p.sso_login_start(s("org_id"), ip=ip)
+        if action == "sso_saml_acs":
+            return p.sso_saml_acs(s("org_id"), s("saml_response"), request_id=s("request_id"), ip=ip)
+        if action == "sso_oidc_finish":
+            return p.sso_oidc_finish(s("org_id"), code=s("code"), code_verifier=s("code_verifier"),
+                                     nonce=s("nonce"), ip=ip)
+        if action == "scim_request":
+            return p.scim_request(s("org_id"), method=s("method"), path=s("path"), query=s("query"),
+                                  body=body.get("body"), authorization=s("authorization"), ip=ip)
         return None
 
     def _durability_post(self, path):
@@ -2155,7 +2205,8 @@ class Handler(BaseHTTPRequestHandler):
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
                  allowed_hosts=(), allowed_origins=(), oidc_http_post=None,
                  oidc_jwks_fetcher=None, customer_oidc_http_post=None,
-                 customer_oidc_jwks_fetcher=None) -> UIServer:
+                 customer_oidc_jwks_fetcher=None, sso_oidc_http_post=None,
+                 sso_oidc_jwks_fetcher=None) -> UIServer:
     """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
     ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
     ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist.
@@ -2173,7 +2224,8 @@ def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,
                     oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher,
                     customer_oidc_http_post=customer_oidc_http_post,
-                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher)
+                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher,
+                    sso_oidc_http_post=sso_oidc_http_post, sso_oidc_jwks_fetcher=sso_oidc_jwks_fetcher)
 
 
 def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,

@@ -87,7 +87,7 @@ def _snapshot(store, live_window: bool):
 
 
 def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any], "tuple[Any, int]"],
-                reader: Callable[[Any], Any], live_window: bool = False) -> Any:
+                reader: Callable[[Any], Any], live_window: bool = False, force: bool = False) -> Any:
     """`reader(view)` over `cache`'s verified fold of `store`, or `UNCACHED`.
 
     `seed(snap) -> (view, since_seq)` builds the registry's fresh starting view from the loaded snapshot (its
@@ -97,8 +97,11 @@ def cached_read(cache: FoldCache, store, *, trusted_pubkey, seed: Callable[[Any]
 
     `live_window=True` is for a fold whose full path scans the live window from genesis WITHOUT loading the
     snapshot: the snapshot still keys the entry (a prune moves the live window, so the entry rebuilds), but a load
-    failure answers `UNCACHED` instead of raising."""
-    if not fold_cache_enabled():
+    failure answers `UNCACHED` instead of raising.
+
+    `force=True` reads through the cache even while `VIGIL_FOLD_CACHE_ENABLED` is off — for a caller that must not
+    re-fold the spine per call (the SSO / SCIM provisioner paths an unauthenticated client can reach)."""
+    if not (force or fold_cache_enabled()):
         return UNCACHED
     snap = _snapshot(store, live_window)
     if snap is None:

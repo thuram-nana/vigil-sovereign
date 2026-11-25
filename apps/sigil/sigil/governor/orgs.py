@@ -378,6 +378,9 @@ class OrgRegistry:
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        # True ⇒ every read goes through the verified incremental fold cache even while VIGIL_FOLD_CACHE_ENABLED is off
+        # (`fold_read.cached_read(force=True)`): the SSO / SCIM provisioner paths set it
+        self.force_cache = False
 
     # -- owner mutations: orgs ----------------------------------------------------------------------
     def create_org(self, org_id: str, name: str, *, owner: str, issued_at: float) -> int:
@@ -527,7 +530,7 @@ class OrgRegistry:
             return _OrgsView(org_seed, mem_seed), since
 
         return cached_read(_ORGS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
-                           reader=reader)
+                           reader=reader, force=bool(getattr(self, "force_cache", False)))
 
     def _fold_orgs(self) -> dict[str, Org]:
         """Fold the spine into {org_id: Org} for orgs whose latest state is active. Each `active` grant is
