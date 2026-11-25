@@ -446,3 +446,15 @@ def test_a_credit_plan_and_a_top_up_keep_the_immediate_supply_wording(monkeypatc
     _checkout(_provider(api), nonce="n2")
     for params, _k in api.calls:
         assert "credits I am buying" in params["custom_text"]["terms_of_service_acceptance"]["message"]
+
+
+def test_the_go_live_runbook_sets_the_stripe_terms_url_before_the_consent_flag():
+    # Stripe refuses a required Terms box while the account has no Terms of Service URL, so every checkout would fail
+    # closed: GO-LIVE §9b step 1 (the Stripe dashboard step) must name the Public details URL and the flag together.
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[3] / "docs" / "runbooks" / "GO-LIVE-quickstart.md").read_text("utf-8")
+    s9b = doc[doc.index("## 9b."): doc.index("## 10.")]
+    step1 = " ".join(s9b[s9b.index("1. **Stripe dashboard.**"): s9b.index("2. **Proxy route.**")].split())
+    assert "**Public details**" in step1 and "`https://vigilguard.net/terms`" in step1
+    assert "`VIGIL_STRIPE_TERMS_CONSENT=1`" in step1 and "**before**" in step1
+    assert step1.index("**Public details**") < step1.index("`VIGIL_STRIPE_TERMS_CONSENT=1`")
