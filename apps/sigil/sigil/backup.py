@@ -133,7 +133,20 @@ _CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "
 _STATE_DIRS = ("qdrant", "graph",
                # PRICING M1c: the model gateway's per-launch meters — MONEY data (an unsettled run's charge is
                # computed from its meter), hash-chained, packaged verbatim so a restored install settles it.
-               "model_meter")
+               "model_meter",
+               # legal/governance S1: the customer-entered General profile (ui/preferences_store.py — legal entity,
+               # registered address, contractual + emergency contacts). The customer typed it and NOTHING regenerates
+               # it, so a restore must bring it back; it is contact data, so it is restored owner-only
+               # (see _PRIVATE_STATE_DIRS).
+               "customer_preferences")
+# State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
+_PRIVATE_STATE_DIRS = ("customer_preferences",)
+# State subtrees a live process writes by temp-file-then-rename (spine.atomicio.atomic_write_text) while a backup may
+# be running — the customer profile is saved from the cockpit, the very process that also serves the in-browser backup.
+# An atomic write's temp file (spine.consistent_copy.transient) is never state: it exists only while that save is in
+# flight, so it is never captured; and a file of such a unit that is gone by the time it is read (renamed over or
+# removed since the listing) is simply not in this backup — never a crash that fails the whole backup.
+_ATOMIC_STATE_DIRS = ("customer_preferences",)
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -152,6 +165,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "qdrant",                   # vector memory store
     "graph",                    # graph memory mirror
     "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
+    "customer_preferences",     # legal/governance S1: the customer-entered General profile (0600/0700 on restore)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
@@ -186,7 +200,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
                 "AUTHORITATIVE customer accounts/orgs/memberships/wallet/reservations are owner-signed on the spine "
                 "(captured); these regenerate (re-login / re-request / limits reset / the tour shows once more), "
                 "never recovery state (a lost launch copy leaves its reservation on the spine: a later launch of the "
-                "same host supersedes it and `ops-sweep reservations` releases it)",
+                "same host supersedes it and `ops-sweep reservations` releases it). The settings shell's General "
+                "profile is NOT here: the customer typed it and nothing regenerates it, so it is its own top-level "
+                "`customer_preferences`, captured",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
@@ -266,12 +282,21 @@ def _is_sensitive_rel(rel: str) -> bool:
     land at the process umask (potentially world-readable). Covers the WARDEN kernel key
     (``warden/warden.key`` — a plaintext-0600 Rust-kernel file that rides inside the passphrase-sealed body)
     and ANY packaged ``*.key`` file, PLUS ``sigil.env`` (the persisted config / legacy secret tier, which can
-    hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY). The whole backup body is AEAD-sealed at rest
-    regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
-    if rel.endswith(".key") or rel == "sigil.env":
+    hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY), PLUS every file of a :data:`_PRIVATE_STATE_DIRS`
+    subtree (personal data — a customer's contact details), whose directories are restored 0700 as well. The whole
+    backup body is AEAD-sealed at rest regardless; this closes the post-restore on-disk perms of the sensitive
+    material itself."""
+    if rel.endswith(".key") or rel == "sigil.env" or _is_private_state_rel(rel):
         return True
     # #70: the unit EnvironmentFiles (may hold secrets) are owner-only on restore too.
     return "/" not in rel and rel.endswith(".env")
+
+
+def _is_private_state_rel(rel: str) -> bool:
+    """True iff ``rel`` is a file inside a :data:`_PRIVATE_STATE_DIRS` subtree (restored 0600, its directories 0700).
+    A ``\\`` counts as the separator it is to :func:`_safe_target`."""
+    top, sep, _rest = rel.replace("\\", "/").partition("/")
+    return bool(sep) and top in _PRIVATE_STATE_DIRS
 
 
 def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Path, str]]:
@@ -295,8 +320,8 @@ def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Pat
     out: list[tuple[Path, str]] = []
     spine = home / "spine"
     skip_dirs = []
+    from .spine.consistent_copy import transient
     if archive is not None:
-        from .spine.consistent_copy import transient
         skip_dirs = [(spine / "archive").resolve(), archive.resolve()]
     if spine.is_dir():
         for p in sorted(spine.rglob("*")):
@@ -332,8 +357,22 @@ def _spine_files(home: Path, *, archive: "Path | None" = None) -> list[tuple[Pat
             for p in sorted(d.rglob("*")):
                 if p.is_symlink() or not p.is_file() or p.name.endswith(".lock"):
                     continue
+                if state in _ATOMIC_STATE_DIRS and transient(p.name):    # a save in flight: never state
+                    continue
                 out.append((p, p.relative_to(home).as_posix()))
     return out
+
+
+def _read_listed(f: Path, rel: str) -> "bytes | None":
+    """The bytes of a file :func:`_spine_files` listed — or ``None`` for a file of an :data:`_ATOMIC_STATE_DIRS` unit
+    that is gone by the time it is read (a live save renamed over it or removed it since the listing): it is not in
+    this backup. Any other file that cannot be read fails the backup, as before."""
+    try:
+        return f.read_bytes()
+    except FileNotFoundError:
+        if rel.partition("/")[0] in _ATOMIC_STATE_DIRS:
+            return None
+        raise
 
 
 def _pruned_unit_digest(home: Path, archive: Path) -> str:
@@ -400,7 +439,12 @@ def _capture_pruned_unit(home: Path, work_parent: Path) -> "tuple[list[tuple[Pat
     else:
         raise BackupError("the spine kept changing during the backup (a concurrent sign or prune) — retry when it is "
                           "idle")
-    raw.update({rel: f.read_bytes() for f, rel in files if rel not in raw})
+    for f, rel in files:
+        if rel not in raw:
+            data = _read_listed(f, rel)
+            if data is not None:
+                raw[rel] = data
+    files = [(f, rel) for f, rel in files if rel in raw]      # a listed file gone before its read is not captured
     rep = _verify_captured_unit(raw, work_parent)
     if not rep.get("ok") or not rep.get("pruned"):
         why = failure_reason(rep)
@@ -467,7 +511,9 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     file_hashes: dict[str, str] = {}
     warden_rels: list[str] = []
     for f, rel in files:
-        raw = f.read_bytes() if raw_by_rel is None else raw_by_rel[rel]
+        raw = _read_listed(f, rel) if raw_by_rel is None else raw_by_rel[rel]
+        if raw is None:                                 # gone since the listing (see _read_listed): not captured
+            continue
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
         if rel.startswith("warden/"):
@@ -1624,6 +1670,14 @@ def restore_backup(src: str | Path, new_home: "str | Path | None", passphrase: s
             # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
             if _is_sensitive_rel(rel):
                 os.chmod(target, 0o600)
+            if _is_private_state_rel(rel):
+                # personal data: every directory from the file's own up to its top-level unit is owner-only too
+                # (0700, as the store keeps it), never the umask's world-listable default
+                top = staged_dir / rel.replace("\\", "/").partition("/")[0]
+                d = target.parent
+                while d != top.parent:
+                    os.chmod(d, 0o700)
+                    d = d.parent
         from .spine.home_unit import HomeUnit, unit_shape
         pruned = pruned or unit_shape(HomeUnit.for_home(staged_dir), require_archive=False).pruned
         if pruned and not config.pruned_restore_enabled():
