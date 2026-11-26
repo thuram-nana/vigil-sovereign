@@ -30,12 +30,31 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-__all__ = ["REPORT_SCHEMA", "REPORT_DOMAIN", "build_report", "seal_report", "SpoolReporter"]
+__all__ = ["REPORT_SCHEMA", "REPORT_DOMAIN", "domain_slug", "build_report", "seal_report", "SpoolReporter"]
 
 REPORT_SCHEMA = "vigil.aegis.monitoring.v1"
 REPORT_DOMAIN = b"vigil.aegis.monitoring-report.v1\x00"
+# AS-3a strict-domain routing: the domain-separation prefix for the (org, host) spool slug (below).
+DOMAIN_SLUG_PREFIX = b"vigil.aegis.monitoring-domain.v1\x00"
 _MAX_ENVELOPE_BYTES = 16 * 1024
 _REPORTED_DECISIONS = frozenset({"confirmed", "lead"})
+
+
+def domain_slug(org_id: str, host: str) -> str:
+    """A path-safe, collision-resistant slug for the (org_id, host) MONITORING DOMAIN (AS-3a).
+
+    STRICT-DOMAIN drain isolation: a strict sovereign drain processes each DECLARED domain's own
+    ``incoming/<slug>/`` subtree independently and quarantines everything else by LOCATION, so one
+    tenant's volume or poison can never enter another tenant's drain path (TT-A's p95 depends only
+    on TT-A's own subtree). The key is LENGTH-PREFIXED and domain-separated, so distinct (org, host)
+    pairs can never alias into one slug (``("ab","c")`` and ``("a","bc")`` differ). 32 hex chars is
+    filesystem-safe and collision-resistant. PURE / deterministic (no clock, no RNG).
+
+    FATAL-2: this is a shared CONTRACT, not shared code — it is MIRRORED byte-for-byte in the
+    sovereign drain (``sigil.inbound.monitoring_spool.domain_slug``) and pinned equal by a
+    cross-plane test, exactly as ``REPORT_SCHEMA`` / ``REPORT_DOMAIN`` are."""
+    key = f"{len(org_id)}:{org_id}\x1f{len(host)}:{host}".encode("utf-8")
+    return hashlib.sha256(DOMAIN_SLUG_PREFIX + key).hexdigest()[:32]
 
 
 def _canonical(obj: Any) -> str:
@@ -84,12 +103,18 @@ class SpoolReporter:
     """An ``on_verdict`` sink for a tenant gateway: seal + atomically spool each confirmed/lead verdict."""
 
     def __init__(self, spool_dir: "str | Path", *, org_id: str, host: str, secret: bytes,
-                 max_per_minute: int = 600, now_fn: Callable[[], float] = time.time) -> None:
+                 max_per_minute: int = 600, now_fn: Callable[[], float] = time.time,
+                 strict_domain: bool = False) -> None:
         if not org_id or not host:
             raise ValueError("a monitoring reporter is bound to one tenant and one host")
         if not isinstance(secret, (bytes, bytearray)) or len(secret) < 16:
             raise ValueError("a monitoring report secret of at least 16 bytes is required")
-        self._incoming = Path(spool_dir) / "incoming"
+        # AS-3a (opt-in, DEFAULT-OFF): with ``strict_domain`` the reporter writes into this tenant's own
+        # ``incoming/<domain_slug>/`` subtree so a strict drain can process it in isolation. Default OFF
+        # keeps the flat ``incoming/`` layout byte-for-byte, so an unchanged deployment behaves identically.
+        self.strict_domain = bool(strict_domain)
+        base = Path(spool_dir) / "incoming"
+        self._incoming = (base / domain_slug(str(org_id), str(host))) if self.strict_domain else base
         self._org, self._host, self._secret = str(org_id), str(host), bytes(secret)
         self._cap = max(1, int(max_per_minute))
         self._now = now_fn
