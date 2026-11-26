@@ -460,6 +460,7 @@ def test_the_guide_covers_every_screen_of_the_app():
         "#/google-code": (("start", "signin"), "6-digit code"),
         "#/billing/return": (("credits", "buy"), "Payment received"),
         "#/security": (("start", "security"), "Open Account security from your name in the top bar"),
+        "#/settings/authorizations": (("start", "authorizations"), "Authorizations"),
     }
     assert routes == top_bar | set(by_name), "a new screen in app.js must be added to the guide (and to this census)"
     assert top_bar - {"#/guide"} <= step_routes                                  # every tab has its steps
