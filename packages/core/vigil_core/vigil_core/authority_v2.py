@@ -48,7 +48,8 @@ import enum
 import hashlib
 import ipaddress
 import re
-from datetime import datetime
+import socket
+from datetime import datetime, timezone
 from typing import Any, Final, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -76,6 +77,12 @@ _COMPONENT_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0
 _SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Read a tz-NAIVE datetime as UTC so a window comparison never raises on a naive/aware mix (a data-plane
+    caller using ``datetime.utcnow()`` must not crash the fail-closed decision). A tz-aware datetime is unchanged."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def check_dns_host(value: object, *, label: str) -> str:
     """Validate ``value`` as a single bare DNS hostname, fail-closed ``ValueError``. IP literals are REFUSED
     (§4.4: an origin is declared as a DNS HTTPS tuple, never a bare IP — a bare IP has no zone to bind and is
@@ -88,11 +95,24 @@ def check_dns_host(value: object, *, label: str) -> str:
         raise ValueError(f"{label} must be a bare hostname (e.g. api.example.com), not a URL, path, or host:port")
     if not _HOSTNAME_RE.match(h):
         raise ValueError(f"{label} {h!r} is not a valid hostname")
+    # Refuse EVERY IP-literal encoding, not just the canonical dotted-quad / RFC-5952 form. A signed host that
+    # resolves to loopback / link-local / cloud-metadata is an internal-egress (SSRF) hazard, and the resolver
+    # accepts decimal, hex (0x..), octal (0..) and short-dotted IPv4 forms (0x7f.1, 2130706433, 0177.0.0.1,
+    # 127.1, 0xa9fea9fe -> 169.254.169.254) that ``ipaddress.ip_address`` rejects but ``inet_aton`` accepts.
+    ip_literal = False
     try:
-        ipaddress.ip_address(h)
+        ipaddress.ip_address(h)                          # canonical IPv4 / IPv6
+        ip_literal = True
     except ValueError:
         pass
-    else:
+    try:
+        socket.inet_aton(h)                              # any IPv4 numeric encoding (decimal / hex / octal / short)
+        ip_literal = True
+    except OSError:
+        pass
+    if h.rsplit(".", 1)[-1].isdigit():                   # a real hostname's final label (TLD) is never all-numeric
+        ip_literal = True
+    if ip_literal:
         raise ValueError(f"{label} {h!r} is an IP literal — an origin is declared over a DNS hostname, not a bare IP")
     return h
 
@@ -220,7 +240,7 @@ class MonitoringLease(BaseModel):
 
     def covers(self, now: datetime) -> bool:
         """True iff the lease is live at ``now`` (half-open ``[not_before, not_after)``)."""
-        return self.not_before <= now < self.not_after
+        return _as_utc(self.not_before) <= _as_utc(now) < _as_utc(self.not_after)
 
 
 # --- the V2 grant ------------------------------------------------------------------------------------------
@@ -284,7 +304,7 @@ class MonitoringAuthorityV2(BaseModel):
 
     def covers(self, now: datetime) -> bool:
         """True iff ``now`` is inside the grant's OUTER window (not the lease — see :meth:`lease_active`)."""
-        return self.not_before <= now < self.not_after
+        return _as_utc(self.not_before) <= _as_utc(now) < _as_utc(self.not_after)
 
     def lease_active(self, now: datetime) -> bool:
         """True iff the grant's LEASE covers ``now`` (the tight end-to-end liveness bound). A False here is the
@@ -367,7 +387,7 @@ class EnforceRelease(BaseModel):
         return self
 
     def covers(self, now: datetime) -> bool:
-        return self.not_before <= now < self.not_after
+        return _as_utc(self.not_before) <= _as_utc(now) < _as_utc(self.not_after)
 
     def releases(self, capability: MonitoringCapability) -> bool:
         return capability in self.released_capabilities

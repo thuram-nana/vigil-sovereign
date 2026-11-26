@@ -386,16 +386,29 @@ def test_no_grant_is_pass_through():
 # ============================================================================================================
 # 9. IP-literal origin (and subject host) refused
 # ============================================================================================================
-@pytest.mark.parametrize("bad_host", ["127.0.0.1", "10.0.0.5", "::1", "2001:db8::1", "0.0.0.0"])
+@pytest.mark.parametrize("bad_host", [
+    "127.0.0.1", "10.0.0.5", "::1", "2001:db8::1", "0.0.0.0",
+    # alternate IPv4 encodings the resolver accepts but ipaddress.ip_address rejects (SSRF-filter bypass):
+    "0x7f.1", "2130706433", "0x7f000001", "0177.0.0.1", "127.1", "0xa9fea9fe", "2852039166", "0251.0376.0251.0376"])
 def test_ip_literal_origin_is_refused(bad_host):
     with pytest.raises(ValueError):
         OriginTuple(host=bad_host)
 
 
-@pytest.mark.parametrize("bad_host", ["192.168.1.1", "::1"])
+@pytest.mark.parametrize("bad_host", ["192.168.1.1", "::1", "2130706433", "0x7f.1", "127.1", "0xa9fea9fe"])
 def test_ip_literal_subject_host_is_refused(bad_host):
     with pytest.raises(ValueError):
         AuthoritySubject(org_id="org_acme", host=bad_host)
+
+
+def test_evaluate_authority_reads_a_naive_now_as_utc_and_never_crashes():
+    """A grant round-tripped from wire JSON carries tz-AWARE windows, but a data-plane caller computing `now`
+    via datetime.utcnow() supplies a NAIVE datetime. The fail-closed decision must still return cleanly — the
+    naive `now` is read as UTC — never raising the TypeError a naive-vs-aware comparison would."""
+    grant = _grant()                                       # aware windows (_T0 ..)
+    assert evaluate_authority(grant=grant, now=_NOW.replace(tzinfo=None)).outcome is AuthorityOutcome.OBSERVE
+    past_naive = (_T_END + timedelta(days=1)).replace(tzinfo=None)   # past the outer window, tz-naive
+    assert evaluate_authority(grant=grant, now=past_naive).outcome is AuthorityOutcome.PASS_THROUGH
 
 
 def test_origin_requires_its_binding_no_binding_no_signature():
