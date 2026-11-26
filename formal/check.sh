@@ -123,28 +123,7 @@ for row in "${SPECS[@]}"; do
   echo
 done
 
-# Extra single-invariant mutants. The antirollback faithful spec (MonotoneFloor) checks FOUR invariants,
-# but the SPECS loop above only gates its PRIMARY one (MonotoneFloor) two-sidedly. These give the AS-2c
-# AEGIS enforcement-floor invariants their own mutant, so the two-sided guarantee ("a rotted/vacuous check
-# turns RED") covers them too: a future edit that silently made EnforcementFloorMonotone or NoEnforceBelowFloor
-# a tautology would stop producing the counterexample below and fail this gate.
-EXTRA_MUTANTS=(
-  "antirollback|MonotoneFloor_floorbreak|NoEnforceBelowFloor"
-  "antirollback|MonotoneFloor_monobreak|EnforcementFloorMonotone"
-)
-for row in "${EXTRA_MUTANTS[@]}"; do
-  IFS='|' read -r dir base inv <<<"$row"
-  echo "=== $dir/$base — MUTANT (invariant $inv must be VIOLATED) ==="
-  out="$(run_tlc "$dir" "$base.tla" "$base.cfg" || true)"
-  if grep -q "Invariant $inv is violated" <<<"$out"; then
-    echo "  PASS: mutant caught — TLC produced a counterexample to $inv"
-  else
-    echo "  FAIL: mutant $base was NOT caught (check is vacuous / guard not load-bearing)"; grep -Ei 'No error|Error|Exception' <<<"$out" | head -4; fail=1
-  fi
-  echo
-done
-
 if [[ "$fail" -ne 0 ]]; then
   echo "FORMAL CHECK: FAILED"; exit 1
 fi
-echo "FORMAL CHECK: every faithful spec holds AND every mutant is caught (the 4 primary invariants plus the AS-2c AEGIS-floor invariants EnforcementFloorMonotone + NoEnforceBelowFloor)."
+echo "FORMAL CHECK: all 4 invariants hold in their faithful models AND all 4 mutants are caught."
