@@ -594,15 +594,24 @@ class CloudLiveSensor:
                 "Install it (`pip install boto3`) to enable live cloud posture."))
         injected = self._credentials
         if injected is not None:
-            # SCOPED customer identity: build the session from the minted read-only credentials. The ambient
-            # chain is NEVER consulted — VIGIL reaches the customer's cloud as the customer's own scoped role,
-            # not as VIGIL's host identity.
+            # SCOPED customer identity: build the session ONLY from COMPLETE AWS read-only credentials. boto3's
+            # Session skips set_credentials when every aws_* arg is falsy and then LAZILY resolves the ambient
+            # default chain — so an empty/partial credential, or a non-AWS session (a GCP/Azure MintedSession
+            # whose aws_* fields are empty), would silently run as VIGIL's OWN ambient identity. Reject it here
+            # and fail closed: a customer run never reaches AWS as VIGIL (the no-substitution invariant — and the
+            # ``is not None`` ``require_injected`` branch below cannot catch a non-None-but-empty object).
+            provider = str(getattr(injected, "provider", "aws") or "aws")
+            akid = str(getattr(injected, "access_key_id", "") or "")
+            secret = str(getattr(injected, "secret_access_key", "") or "")
+            token = str(getattr(injected, "session_token", "") or "")
+            if provider != "aws" or not (akid and secret and token):
+                return inconclusive_result("cloud_live", missing="a complete AWS scoped read-only session", detail=(
+                    "the injected session is not a complete AWS read-only session (a missing STS credential part "
+                    "or a non-AWS provider) — refusing to fall back to VIGIL's ambient identity (fail-closed, no "
+                    "identity substitution)."))
             try:
-                session = boto3.Session(
-                    aws_access_key_id=str(getattr(injected, "access_key_id", "") or ""),
-                    aws_secret_access_key=str(getattr(injected, "secret_access_key", "") or ""),
-                    aws_session_token=(str(getattr(injected, "session_token", "") or "") or None),
-                    region_name=self._region)
+                session = boto3.Session(aws_access_key_id=akid, aws_secret_access_key=secret,
+                                        aws_session_token=token, region_name=self._region)
             except Exception as e:
                 return inconclusive_result("cloud_live", missing="a usable injected read-only session", detail=(
                     f"could not initialise the scoped AWS session from the minted credentials (fail-closed): {e}"))
@@ -632,13 +641,16 @@ class CloudLiveSensor:
                 f"STS get-caller-identity failed — the credentials are invalid/expired "
                 f"or the endpoint is unreachable (fail-closed): {e}"))
         # Collection-time account-drift guard (defence in depth over the sovereign mint's own drift check): a
-        # scoped run MUST land in the account the grant claimed. The collector independently refuses a mismatch,
-        # so even a mis-minted or re-pointed session can never read a DIFFERENT customer's cloud.
-        claimed = str(getattr(injected, "account_id", "") or "") if injected is not None else ""
-        if claimed and account and claimed != account:
-            return inconclusive_result("cloud_live", missing="the minted session's claimed account", detail=(
-                "the scoped session landed in a different AWS account than the grant claimed — refusing to "
-                "collect (fail-closed, no cross-account read)."))
+        # scoped run MUST POSITIVELY confirm it landed in EXACTLY the account the grant claimed. An empty claimed
+        # id, an unresolved landed account (STS Account ""), or a mismatch is a fail-CLOSED refusal — never a
+        # skipped check — so even a mis-minted or re-pointed session can never read another customer's cloud, and
+        # an unverifiable one is never read at all.
+        if injected is not None:
+            claimed = str(getattr(injected, "account_id", "") or "")
+            if not claimed or not account or claimed != account:
+                return inconclusive_result("cloud_live", missing="a confirmed scoped account match", detail=(
+                    "could not confirm the scoped session landed in the AWS account the grant claimed — refusing "
+                    "to collect (fail-closed, no cross-account or unverified read)."))
         try:
             buckets = self._collect_s3(session.client("s3", **kw))
         except Exception:

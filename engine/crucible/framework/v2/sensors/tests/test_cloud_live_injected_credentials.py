@@ -21,12 +21,16 @@ OTHER = "999999999999"
 
 
 class _Creds:
-    """Duck-typed scoped read-only credentials — the exact shape a vigil_core MintedSession exposes."""
+    """Duck-typed scoped read-only credentials — the exact shape a vigil_core MintedSession exposes. Fields are
+    overridable so a test can forge an EMPTY/PARTIAL AWS session or a non-AWS (gcp/azure) session."""
 
-    def __init__(self, *, account_id: str = ACCT, region: str = "us-east-1") -> None:
-        self.access_key_id = "ASIATEMPKEY"
-        self.secret_access_key = "temp-secret-value"
-        self.session_token = "temp-session-token"
+    def __init__(self, *, account_id: str = ACCT, region: str = "us-east-1", provider: str = "aws",
+                 access_key_id: str = "ASIATEMPKEY", secret_access_key: str = "temp-secret-value",
+                 session_token: str = "temp-session-token") -> None:
+        self.provider = provider
+        self.access_key_id = access_key_id
+        self.secret_access_key = secret_access_key
+        self.session_token = session_token
         self.region = region
         self.account_id = account_id
 
@@ -81,7 +85,50 @@ def test_scoped_run_refuses_account_drift_at_collection_time(monkeypatch):
     fake, _ = _fake_boto3(sts_account=OTHER)
     monkeypatch.setitem(sys.modules, "boto3", fake)
     r = CloudLiveSensor(credentials=_Creds(account_id=ACCT)).run({}, SimpleNamespace())
-    assert r.ok is False and "different aws account" in r.note.lower()
+    assert r.ok is False and "could not confirm" in r.note.lower()
+
+
+def test_empty_or_partial_injected_credentials_fail_closed_never_ambient(monkeypatch):
+    # red-pen HIGH: boto3.Session with empty aws_* args silently falls back to VIGIL's ambient chain. The seam
+    # must REJECT an empty/partial credential BEFORE building the session — the require_injected branch cannot
+    # catch a non-None-but-empty object. Assert refusal AND that no boto3.Session was ever constructed.
+    for bad in (_Creds(secret_access_key=""), _Creds(session_token=""), _Creds(access_key_id="")):
+        fake, rec = _fake_boto3()
+        monkeypatch.setitem(sys.modules, "boto3", fake)
+        r = CloudLiveSensor(credentials=bad, require_injected_credentials=True).run({}, SimpleNamespace())
+        assert r.ok is False and "no identity substitution" in r.note.lower()
+        assert rec["kwargs"] is None     # refused before any boto3.Session (no ambient fall-through possible)
+
+
+def test_non_aws_injected_session_fails_closed(monkeypatch):
+    # a GCP/Azure MintedSession (bearer only; aws_* empty) handed to the AWS collector must be refused, never
+    # treated as AWS creds (which would fall back to the ambient chain).
+    fake, rec = _fake_boto3()
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    gcp = _Creds(provider="gcp", access_key_id="", secret_access_key="", session_token="")
+    r = CloudLiveSensor(credentials=gcp).run({}, SimpleNamespace())
+    assert r.ok is False and "non-aws" in r.note.lower()
+    assert rec["kwargs"] is None
+
+
+def test_injected_run_refuses_an_unresolved_landed_account(monkeypatch):
+    # the empty-account drift edge: STS returns Account "" on an injected run -> tenancy UNCONFIRMED -> fail
+    # closed (the old `if claimed and account` guard silently SKIPPED this).
+    fake, _ = _fake_boto3(sts_account="")
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    r = CloudLiveSensor(credentials=_Creds(account_id=ACCT)).run({}, SimpleNamespace())
+    assert r.ok is False and "could not confirm" in r.note.lower()
+
+
+def test_injected_credentials_never_leak_into_the_result(monkeypatch):
+    fake, _ = _fake_boto3(sts_account=ACCT)
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    creds = _Creds()
+    r = CloudLiveSensor(credentials=creds).run({}, SimpleNamespace())
+    blob = f"{r.summary}\n{getattr(r, 'note', '')}\n{r.output}"
+    assert creds.secret_access_key not in blob
+    assert creds.session_token not in blob
+    assert creds.access_key_id not in blob
 
 
 def test_scoped_run_succeeds_when_the_account_matches(monkeypatch):
