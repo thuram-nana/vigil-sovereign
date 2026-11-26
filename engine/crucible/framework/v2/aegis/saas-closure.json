@@ -1,5 +1,5 @@
 {
-  "_comment": "AS-28 (closure + image, D34). AEGIS SaaS defense-image closure deny list + manifest. Generated from framework.v2.aegis.closure; test_saas_closure.py::test_closure_manifest_matches_module asserts no drift. The in-CI image build/scan/SBOM/sign is DEFERRED to the owner-gated A14 leg.",
+  "_comment": "AS-28 (closure + image, D34). AEGIS SaaS defense-image closure deny list + manifest. Generated from framework.v2.aegis.closure; test_saas_closure.py::test_closure_manifest_matches_module asserts no drift. The analyzer is SOUND against PEP 562 lazy re-exports (it follows verify/__init__'s __getattr__ + _LAZY_SYMBOLS/_SUBMODULES map, fail-closed on an opaque shim) and against a lazy/function-local offense import smuggled into an AEGIS serving module (a conservative overlay scans every reachable framework.v2.aegis module's full source). A runtime probe (import the entrypoints with the agent SDKs blocked, assert no is_denied module in sys.modules) is the robust backstop. Honest scope: this proves NO DENIED module is import-reachable; the agent-executor residual below IS loaded and is disclosed, not claimed absent. The in-CI image build/scan/SBOM/sign is DEFERRED to the owner-gated A14 leg.",
   "slice": "AS-28",
   "entrypoints": [
     "framework.v2.aegis.cli",
@@ -58,7 +58,13 @@
     "framework.v2.agents.tools.builtin",
     "framework.v2.agents.tools.invoker"
   ],
-  "known_residual_note": "Offense agent-executor modules still reachable via the EAGER intel/__init__ -> planner/__init__ -> agents/__init__ chain. Closing this is the same lazy-package move as the AS-28 verify fix, applied to offense-core packages OUTSIDE the AS-28 VERIFY-token lane and requiring a make-gate byte-identity re-baseline. Deferred to the companion GW/engine-core decoupling; ratcheted (must shrink, never grow).",
+  "known_residual_note": "Offense agent-executor host modules (framework.v2.agents.*) still IMPORT-reachable (and so loaded in the serving process) via the EAGER intel/__init__ -> planner/__init__ -> agents/__init__ chain (agents.blackboard/coordinator from planner.planner; agents.tools from aegis.sensors). This is DISCLOSED, never claimed absent. Closing it is the same lazy-package move as the AS-28 verify fix, applied to offense-core packages OUTSIDE the AS-28 VERIFY-token lane and requiring a make-gate byte-identity re-baseline. Deferred to the companion GW/engine-core decoupling; ratcheted (must shrink, never grow).",
+  "soundness": {
+    "pep562_lazy_reexport": "The walk reads a package __init__'s module-level __getattr__ + _LAZY_SYMBOLS/_SUBMODULES string-literal maps and follows each lazily re-exported from-name to its real submodule (so `from framework.v2.verify import OOBReceiver` is seen to reach the denied framework.v2.verify.oob). Fail-closed on an opaque/unparseable shim.",
+    "serving_lazy_offense_overlay": "Besides the module-level import closure, every reachable framework.v2.aegis serving module's FULL source (module scope AND function/method bodies, excluding if TYPE_CHECKING:) is scanned for any denied target; a lazy/function-local offense import there fails the gate. Scoped to the AEGIS-owned serving layer: the shared verify/agents engine code legitimately reaches offense at INVOKE time, governed by the runtime probe.",
+    "runtime_probe": "test_saas_closure.py imports the entrypoints in a subprocess with the LLM/agent SDKs made unimportable, then asserts no closure.is_denied module (first-party offense OR third-party SDK) is in sys.modules. Non-vacuous (negative control loads a denied module and confirms detection).",
+    "oob_relocation": "The gateway's former lazy `from ..verify.oob import OOBReceiver` (a DENIED module) was removed: the neutral loopback-only receiver primitive now lives in framework.v2.common.oob_receiver (offense-free shared infra), verify.oob is a thin re-export (still denied; offense-only), and the AEGIS passive OOB canary correlator imports the common primitive. The defense serve path no longer references the denied verify.* offense namespace, lazily or eagerly."
+  },
   "dockerfile": {
     "path": "framework/v2/aegis/Dockerfile.saas",
     "base_image_digest": "sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90",

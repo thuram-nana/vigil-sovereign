@@ -171,7 +171,9 @@ def test_editing_a_class_reached_constant_changes_the_version(monkeypatch):
 # changed procedure." That promise was FALSE for a helper reached ONLY by a local
 # in-repo import — the pattern used to keep the module graph acyclic. Three oracles'
 # actual decision procedures live behind such imports:
-#   * OOB_CALLBACK           -> `from .oob import verify_oob_receipt`
+#   * OOB_CALLBACK           -> `from .oob import verify_oob_receipt` (AS-28: verify.oob re-exports it from
+#                               the offense-free framework.v2.common.oob_receiver, where its body now lives;
+#                               the version blob tracks the real source there — so DEFINING module = common)
 #   * VERSION_RANGE          -> `from .version import version_in_affected`
 #   * SAML_STRUCTURAL_FORGERY-> `from ..scanner.sso import safe_parse_xml, saml_nameid, XxeBlocked, ...`
 # MEASURED at d445c8b3: none of those helpers' source was in the closure, so
@@ -186,7 +188,7 @@ def test_editing_a_class_reached_constant_changes_the_version(monkeypatch):
 # helper reached only via that path, a mutated form of the marker of a different length, a needle proving
 # the helper's own source is in the closure).
 _LOCAL_IMPORT_PATHS = [
-    (OracleKind.OOB_CALLBACK, "framework.v2.verify.oob",
+    (OracleKind.OOB_CALLBACK, "framework.v2.common.oob_receiver",
      "reject non-canonical", "reject NON-CANONICAL-MUT", "def verify_oob_receipt"),
     (OracleKind.VERSION_RANGE, "framework.v2.verify.version",
      "PROVABLY falls", "PROVABLY_MUTATED falls", "def version_in_affected"),

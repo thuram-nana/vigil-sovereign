@@ -2,8 +2,22 @@
 #
 # This is the AS-28 variant of framework/v2/aegis/Dockerfile, hardened for the hosted SaaS lane
 # (plan §5 / §19): a public-facing DATA PLANE that sits inline in front of a customer's app. The
-# defining property it must carry — and the HIGH finding it closes (plan §1 defect #9, "offense code in
-# the defense runtime") — is that the SERVING PROCESS loads NO offense engine code.
+# property it carries — addressing the HIGH finding (plan §1 defect #9, "offense code in the defense
+# runtime") — is that the SERVING PROCESS loads NO DENIED offense module: no OOB servers, credential-
+# capture, token-forgery, active-recon, scanner/exploit engines, or LLM/agent SDKs are import-reachable
+# from the gateway's serving entrypoints. This is enforced FAIL-CLOSED, two independent ways: a BUILD-TIME
+# static closure gate (below, PEP 562 / lazy-import aware) AND a runtime probe in
+# aegis/tests/test_saas_closure.py that imports the entrypoints with the agent SDKs blocked and asserts no
+# deny-listed module (first-party offense OR third-party SDK) is in sys.modules.
+#
+# ONE residual is TRACKED and DISCLOSED here — NOT hidden, and NOT claimed absent: the offense agent-
+# EXECUTOR layer's host package (framework.v2.agents.*: blackboard/coordinator/models/tools, …) is still
+# import-reachable via the EAGER intel -> planner -> agents package __init__ chain, so it IS loaded in the
+# serving process. It is frozen by a shrink-only ratchet and scheduled for the companion GW/engine-core
+# decoupling (the same lazy-package move as this slice's verify fix, applied outside the AS-28 VERIFY-token
+# lane). See aegis/saas-closure.json ("known_residual"). The agent-executor coupling having moved to this
+# tracked residual — and the gateway's former lazy ``verify.oob`` import having been relocated to the
+# offense-free ``common.oob_receiver`` — is why this banner no longer claims "loads NO offense engine code".
 #
 # HASH-LOCK (A14 supply chain). The base is content-addressed by digest: it either matches or the pull
 # fails. "whatever :3.13-slim resolves to today" is not an acceptable provenance story for an inline
@@ -43,10 +57,13 @@ COPY pyproject.toml README.md LICENSE LICENSING.md ./
 COPY framework ./framework
 RUN pip install --no-cache-dir . && rm -rf /src
 
-# --- AS-28 BUILD-TIME CLOSURE GATE (fail-closed): no offense import reachable from the serving path ---
-# Pure static analysis of the INSTALLED package; exits non-zero (failing the build) if the gateway's
-# import closure reaches any denied offense module or LLM/agent SDK, or any first-party module is
-# unresolvable. This is what makes "a defense-only build" a checked fact rather than a claim.
+# --- AS-28 BUILD-TIME CLOSURE GATE (fail-closed): no DENIED offense import reachable from the serving path ---
+# Pure static analysis of the INSTALLED package (no imports executed, PEP 562 / lazy-re-export aware); exits
+# non-zero (failing the build) if the gateway's import closure reaches any denied offense module or LLM/agent
+# SDK, if any first-party module is unresolvable, or if any AEGIS serving module carries a lazy/function-local
+# offense import. The tracked, disclosed agent-executor residual (saas-closure.json "known_residual") is
+# REPORTED but does not fail the gate; a shrink-only ratchet in the test freezes it. This is what makes
+# "no DENIED offense in the serving path" a checked fact rather than a claim.
 RUN python3 -m framework.v2.aegis.closure
 
 # --- a writable CRUCIBLE_ROOT so enforce-mode kill-switch / audit state has a home ---

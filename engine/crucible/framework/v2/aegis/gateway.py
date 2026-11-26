@@ -158,13 +158,15 @@ class GatewaySettings:
         self.actor_last_class: dict[str, str] = {}
         # OPT-IN passive OOB belief elevation (default OFF). Started ONLY when the operator configured a
         # canary URL AND the AEGIS_RESPOND entitlement is available (like the rest of the response
-        # layer). The receiver binds LOOPBACK ONLY (verify.oob refuses any non-loopback bind). Any
-        # error → the feature stays dormant (fail-open); the gateway proxies exactly as before.
+        # layer). The receiver is the OFFENSE-FREE loopback-only primitive in ``common.oob_receiver``
+        # (AS-28: NOT the deny-listed ``verify.oob``), so the defense serve path pulls no offense code to
+        # run this; it binds LOOPBACK ONLY. Any error → the feature stays dormant (fail-open); the gateway
+        # proxies exactly as before.
         self.oob_correlator = None   # type: ignore[var-annotated]
         self.oob_receiver = None     # type: ignore[var-annotated]
         if config.oob_canary and self._authorize_oob():
             try:
-                from ..verify.oob import OOBReceiver
+                from ..common.oob_receiver import OOBReceiver
                 from .oob_correlator import OOBCorrelator
                 self.oob_correlator = OOBCorrelator(config.oob_canary)
                 self.oob_receiver = OOBReceiver().start()   # loopback-only, ephemeral port
