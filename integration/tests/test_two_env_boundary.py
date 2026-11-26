@@ -282,6 +282,13 @@ assert "strix" not in _m, "ui.report_export must not import strix at module scop
 import sigil.ui.report_pdf  # PR-G: the PDF seam — the owner's renderer runs OUT of this venv, never imported
 assert "framework" not in _m, "ui.report_pdf must not import framework at module scope"
 assert "strix" not in _m, "ui.report_pdf must not import strix at module scope"
+import vigil_integration.multilang_flag        # MULTILANG-P1: the keyless default-OFF FACT-path flag (stdlib only)
+import vigil_integration.langplugins            # MULTILANG-P1: the offense-plane LanguagePlugin registry
+import vigil_integration.langplugins.registry   # the dispatch point — framework-free, tree-sitter-free at import
+import vigil_integration.langplugins.python_plugin  # the Python reference plugin — framework imports are LAZY
+assert "framework" not in _m, "langplugins must not import framework at module scope (FATAL-2: lazy offense plugin)"
+assert "strix" not in _m, "langplugins must not import strix at module scope"
+assert "tree_sitter" not in _m, "langplugins must not import tree_sitter at module scope (phase-1 adds no new dep)"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

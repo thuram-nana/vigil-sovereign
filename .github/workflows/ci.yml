@@ -577,6 +577,7 @@ jobs:
               integration/tests/test_findings_crossing.py \
               integration/tests/test_aegis_saas_acceptance.py \
               integration/tests/IT/test_aegis_tt_rig.py \
+              integration/tests/test_langplugins.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \
