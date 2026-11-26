@@ -66,6 +66,19 @@ from .shard_assignment_record import (
     ShardAssignmentRecord, SignedShardAssignmentRecord, check_tenant_component,
     shard_assignment_signing_bytes, sign_shard_assignment_record, verify_shard_assignment_record,
 )
+from .authority_v2 import (
+    ENFORCING_CAPABILITIES,
+    AuthorityDecision, AuthorityOutcome, AuthoritySubject, AuthorityWithdrawal, EnforceRelease,
+    EnforcementOverride, EpochStatement, MonitoringAuthorityV2, MonitoringCapability,
+    MonitoringLease, MonitoringRevocationV2, OriginTuple, OverrideTarget, SignedEnforceRelease,
+    SignedEpochStatement, SignedMonitoringAuthorityV2, SignedMonitoringRevocationV2, SubjectKind,
+    authority_publish_path, check_dns_host, check_component as check_authority_component,
+    enforce_release_signing_bytes, epoch_statement_signing_bytes, evaluate_authority,
+    monitoring_authority_v2_signing_bytes, monitoring_revocation_v2_signing_bytes,
+    sign_enforce_release, sign_epoch_statement, sign_monitoring_authority_v2,
+    sign_monitoring_revocation_v2, verify_enforce_release, verify_epoch_statement,
+    verify_monitoring_authority_v2, verify_monitoring_revocation_v2,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -129,6 +142,17 @@ __all__ = [
     "connected_repo_signing_bytes", "repo_owner_name", "sign_connected_repo_record", "verify_connected_repo_record",
     "ShardAssignmentRecord", "SignedShardAssignmentRecord", "check_tenant_component",
     "shard_assignment_signing_bytes", "sign_shard_assignment_record", "verify_shard_assignment_record",
+    "ENFORCING_CAPABILITIES",
+    "AuthorityDecision", "AuthorityOutcome", "AuthoritySubject", "AuthorityWithdrawal", "EnforceRelease",
+    "EnforcementOverride", "EpochStatement", "MonitoringAuthorityV2", "MonitoringCapability",
+    "MonitoringLease", "MonitoringRevocationV2", "OriginTuple", "OverrideTarget", "SignedEnforceRelease",
+    "SignedEpochStatement", "SignedMonitoringAuthorityV2", "SignedMonitoringRevocationV2", "SubjectKind",
+    "authority_publish_path", "check_dns_host", "check_authority_component",
+    "enforce_release_signing_bytes", "epoch_statement_signing_bytes", "evaluate_authority",
+    "monitoring_authority_v2_signing_bytes", "monitoring_revocation_v2_signing_bytes",
+    "sign_enforce_release", "sign_epoch_statement", "sign_monitoring_authority_v2",
+    "sign_monitoring_revocation_v2", "verify_enforce_release", "verify_epoch_statement",
+    "verify_monitoring_authority_v2", "verify_monitoring_revocation_v2",
     "REDPEN_ACTION_SEAM_SUBDIR", "REDPEN_FIX_ACTION", "REDPEN_RETEST_ACTION", "redpen_action_marker",
     "RETEST_REPROOF_SEAM_SUBDIR", "RETEST_OUTCOME_SEAM_SUBDIR",
     "retest_reproof_ticket", "retest_reproof_outcome", "ticket_identity",
