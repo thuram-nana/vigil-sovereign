@@ -1687,6 +1687,16 @@ class Handler(BaseHTTPRequestHandler):
             return p.data_rights_request(requester, str(body.get("org_id", "")),
                                          kind=str(body.get("kind") or ""),
                                          request_id=str(body.get("request_id") or ""), ip=ip)
+        # The Seller identity screen's read (legal/governance S7): the PUBLISHED seller identity of the hosted VIGIL
+        # service — a GLOBAL owner-reviewed CODE block, identical for every account, so the body is ignored entirely
+        # (no org, no tenant data). Account-level like the reads above: requester is the hop principal, never a body
+        # field. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_SELLER_IDENTITY is on, the same flag that gates
+        # the edge route. A pure read: off the signed spine, never audited.
+        if action == "seller_identity_get":
+            from .. import config as _config
+            if not _config.customer_seller_identity_enabled():
+                return None
+            return p.seller_identity_get(requester)
         # The Account security screen's read: the requesting account's own second factors (never a secret).
         # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.

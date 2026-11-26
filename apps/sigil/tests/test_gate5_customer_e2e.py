@@ -112,6 +112,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/privacy": ("Privacy", ("api/customer/privacy",)),                           # legal/governance S2
     "#/data-rights": ("Data rights", ("api/customer/data-rights",)),             # legal/governance S3
     "#/ai-governance": ("How VIGIL uses AI", ("api/customer/ai-governance",)),      # legal/governance S5
+    "#/seller-identity": ("Seller identity", ("api/customer/seller-identity",)),      # legal/governance S7
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -182,8 +183,8 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
-               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance
+               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
 # api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
@@ -195,7 +196,7 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VI
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
               "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
               "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS",   # + S2, S3 (legal/governance)
-              "VIGIL_CUSTOMER_AI_GOVERNANCE")   # + S5 (legal/governance)
+              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY")   # + S5, S7 (legal/governance)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -460,6 +461,13 @@ _FAKE_SERVER = {
                           {"name": "GitHub", "detail": "GitHub — only if you connect a repository for code review."},
                           {"name": "Anthropic", "detail": "Anthropic (Claude API) — the AI features."}],
         "links": {"cookies": "/cookies", "privacy": "/privacy", "trust": "/trust"}},
+    # the Seller identity screen (legal/governance S7): the GLOBAL published seller-identity block (ui/seller_identity.py)
+    "api/customer/seller-identity": {"ok": True, "seller": {
+        "legal_name": "SIGIL SARL", "legal_name_expansion": "Sovereign Integrity Governance Infrastructure Labs",
+        "legal_form": "Société à responsabilité limitée (SARL)", "registered_city": "Buea",
+        "registered_country": "Cameroon", "registration_number": "RCCM RC.BUA.2026.B.0190",
+        "contact_email": "info@sigilsovereign.com", "website": "sigilsovereign.com",
+        "governing_law": "the laws of the Republic of Cameroon, including the applicable OHADA Uniform Acts"}},
     # PR-B Fix first: one verified host tested — two open findings worst first (the critical one with its signed
     # plain-language parts and fix), one a retest proved fixed, the first six weeks not measured yet. The scores are the
     # server's own arithmetic over these severities (100 x 100 // (100 + 45 + 22 [+ 9 while the medium was open])).
@@ -933,7 +941,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3
-                  "ai-governance"):                                                      # + S5
+                  "ai-governance", "seller-identity"):                                   # + S5, S7
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

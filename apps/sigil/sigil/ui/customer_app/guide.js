@@ -139,6 +139,15 @@
                    "Read what AI does (it assists and advises), what it never does (it decides no finding, no charge and no scope on its own), and where your data goes.",
                    "Every statement cites the Terms, the README or the Safety and Authorization briefing it is drawn from. Nothing on this screen can be changed: it is a disclosure only."],
           why: "VIGIL uses AI to assist and advise, never as an authority: no finding, charge or action takes effect on an AI's say-so." },
+        // The Seller identity screen (legal/governance S7): served under data-seller-identity
+        // (VIGIL_CUSTOMER_SELLER_IDENTITY, default OFF). A read-only display; `when` names the page switch app.js reads
+        // with pageFlag, `route` lights up its tab.
+        { id: "seller", title: "See who provides the service", where: "Seller identity", route: "#/seller-identity",
+          when: "sellerIdentity",
+          clicks: ["Select Seller identity in the top bar.",
+                   "Under Who provides this service, read the company's published details: its legal name and form, where it is registered, its registration number, contact email, website and the law that governs the service.",
+                   "There is nothing to fill in here: the screen only shows who you are contracting with."],
+          why: "Who provides the hosted service is a legal right to know. These are the company's published details, shown for your records; the screen changes nothing and asks for nothing." },
       ],
     },
     {

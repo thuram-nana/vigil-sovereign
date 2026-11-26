@@ -103,7 +103,7 @@ _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogle
 # ATTACK_PATH_ON / BLIND_VULN_ON are PR-L's (Area 11) flags: the extracted shell + route table read ATTACK_PATH_ON.
 _OTHER_FLAGS_OFF = ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
                     "LAUNCH_ON = false, CODE_ON = false, ATTACK_PATH_ON = false, BLIND_VULN_ON = false, "
-                    "SETTINGS_ON = false, PRIVACY_CENTER_ON = false;")
+                    "SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;")
 
 
 def _wiring(flag: str, script: str) -> dict:

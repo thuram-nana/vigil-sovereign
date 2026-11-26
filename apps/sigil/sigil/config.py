@@ -913,6 +913,21 @@ def customer_ai_governance_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_AI_GOVERNANCE") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_seller_identity_enabled() -> bool:
+    """True iff the customer app shows its Seller identity screen (`VIGIL_CUSTOMER_SELLER_IDENTITY` affirmative;
+    legal/governance S7): the #/seller-identity screen, a READ-ONLY display of the legally-required seller identity of
+    the hosted VIGIL service — SIGIL SARL's published legal name, legal form, registered city/country, registration
+    number, contact email, website and governing law. The block is a GLOBAL owner-reviewed CODE constant
+    (``ui/seller_identity.py``), the SAME trust root as the catalog, served through ``GET api/customer/seller-identity``
+    (``seller_identity_get``) — never a per-tenant wire field and never an invented value. It adds no new authority or
+    money control: a pure display read, nothing minted, nothing mutated, off the signed spine.
+    OFF by default: the app is exactly as before (no Seller identity tab, #/seller-identity is the home screen exactly
+    as any unknown route, and no seller-identity call is made). The edge reads it at startup (it is written into the
+    page) and on each request; the cockpit reads it on each request — set the SAME value in customer.env and
+    cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_SELLER_IDENTITY") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_overview_enabled() -> bool:
     """True iff the customer app's home screen is the fuller Overview (`VIGIL_CUSTOMER_OVERVIEW` affirmative; C7):
     compact summary cards that pull from the SAME session-org-scoped reads the full screens use — credits available

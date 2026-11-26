@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -4281,6 +4281,7 @@
         .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
         .concat(PRIVACY_CENTER_ON ? [navLink("Privacy", "#/privacy")] : [])      // legal/governance S2
+        .concat(SELLER_IDENTITY_ON ? [navLink("Seller identity", "#/seller-identity")] : [])   // legal/governance S7
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -4503,6 +4504,61 @@
       + "policy — exactly as published.", API + "/privacy", "You do not have access to this screen.", privacyBody);
   }
 
+  // ---- Seller identity (VIGIL_CUSTOMER_SELLER_IDENTITY): a READ-ONLY display of who provides the hosted service ------
+  // Shown only while the edge writes data-seller-identity="1". Off, #/seller-identity is the home screen exactly as any
+  // unknown route, and no seller-identity call is made. A PURE DISPLAY: it reads the published seller-identity block
+  // (GET api/customer/seller-identity) and renders it — SIGIL SARL's legal name, form, registered office, registration
+  // number, contact email, website and governing law. It has NO control of its own (no button in the happy path, no
+  // form, no POST): it mints nothing, mutates nothing, and changes no authority or money. The values are the SAME
+  // published facts the public Terms and Privacy pages carry; the screen renders them, it never restates them.
+  var SELLER_IDENTITY_ON = pageFlag("sellerIdentity");
+  // The fields the screen shows, in order: [key, label]. The server sends exactly these keys (ui/seller_identity.py);
+  // the browser renders what it is sent, it never invents a value.
+  var SELLER_FIELDS = [
+    ["legal_name", "Legal name"],
+    ["legal_name_expansion", "In full"],
+    ["legal_form", "Legal form"],
+    ["registered_city", "Registered in"],
+    ["registered_country", "Country"],
+    ["registration_number", "Registration number"],
+    ["contact_email", "Contact email"],
+    ["website", "Website"],
+    ["governing_law", "Governing law"],
+  ];
+  function sellerCard(s) {
+    var rows = [h("h3", { text: "Who provides this service" }),
+      h("p.cust-muted", { text: "The hosted VIGIL service is provided by this company. These are its published details." })];
+    SELLER_FIELDS.forEach(function (f) { rows.push(kv(f[1], s ? s[f[0]] : "")); });
+    return h("div.card", {}, rows);
+  }
+  // A read that failed for any reason but sign-in leaves the details unknown here: the screen says so and offers Try
+  // again — never a half-empty card. (The block is a global constant, so this is only ever a transient read failure.)
+  function sellerUnavailable(holder) {
+    return h("div.card", {}, [h("h3", { text: "Who provides this service" }),
+      h("p.cust-settings-error", { role: "alert", text: "The seller details could not be loaded right now." }),
+      h("div.row", {}, [h("button.btn", { type: "button", text: "Try again",
+        onClick: function () { return loadSeller(holder); } })])]);
+  }
+  async function loadSeller(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/seller-identity"); }
+    catch (e) {
+      if (here() !== "#/seller-identity") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, sellerUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/seller-identity") { return; }
+    var s = r && r.seller;
+    VUI.mount(holder, (s && typeof s === "object" && !Array.isArray(s)) ? sellerCard(s) : sellerUnavailable(holder));
+  }
+  function viewSellerIdentity() {
+    var holder = h("div#cust-seller-identity");
+    loadSeller(holder);                        // the loader at once, then the published details (or why they could not load)
+    return shell(h("div", {}, [h("h2", { text: "Seller identity" }), holder]), "#/seller-identity");
+  }
+
   // ---- misc ---------------------------------------------------------------------------------------
   function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
@@ -4563,6 +4619,8 @@
     "#/data-rights": function () { return authed() ? (DATA_RIGHTS_ON ? viewDataRightsScreen() : viewDashboard()) : viewLogin(); },
     // S5 off: #/ai-governance is the home screen, exactly as any unknown route is
     "#/ai-governance": function () { return authed() ? (AI_GOVERNANCE_ON ? viewAiGovernance() : viewDashboard()) : viewLogin(); },
+    // the Seller identity screen off: #/seller-identity is the home screen, exactly as any unknown route is
+    "#/seller-identity": function () { return authed() ? (SELLER_IDENTITY_ON ? viewSellerIdentity() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

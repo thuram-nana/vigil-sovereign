@@ -1714,6 +1714,19 @@ class Provisioner:
                          "signed history is the owner-gated hard-prune (VAULT-PRUNE) process, not an instant erase; "
                          "this request is what we act on.")}
 
+    def seller_identity_get(self, requester: str) -> dict:
+        """The PUBLISHED seller identity of the hosted VIGIL service (legal/governance S7): SIGIL SARL's legal name,
+        form, registered city/country, registration number, contact email, website and governing law, exactly as
+        published on the public Terms and Privacy pages. GLOBAL, owner-reviewed CODE (``ui/seller_identity.py``) — the
+        SAME trust root as the catalog — never a per-tenant field and never an invented value: the block is IDENTICAL
+        for every account, so no org or tenant data travels. A pure READ, off the signed spine (no audit row). The
+        requester is the hop-bound session principal (never a body field) and must be an ACTIVE customer, exactly as the
+        other account-level reads; the block it returns does not depend on who they are."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .seller_identity import published_seller_identity
+        return {"ok": True, "seller": published_seller_identity()}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an

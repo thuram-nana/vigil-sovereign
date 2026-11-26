@@ -144,7 +144,7 @@ let renders = 0; function render() { renders++; }
 let whoRefreshes = 0; async function refreshWho() { whoRefreshes++; }
 function shell(inner, current) { return h("div.shell", { dataset: { current: current } }, inner); }
 var GUIDE_ON = false;
-var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false;   // every other page flag: off
+var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;   // every other page flag: off
 var ATTACK_PATH_ON = false, BLIND_VULN_ON = false;   // PR-L (Area 11) flags: off here (shell reads ATTACK_PATH_ON)
 const VUI = window.VUI;
 const calls = [], toasts = [], errs = [];
@@ -629,5 +629,7 @@ process.stdout.write(JSON.stringify(out));
                      r'( && [^;]*)?; \}', src)   # (PR-G appends Plans/Reports after PR-B's Fix first)
     assert re.search(r'function routeShown\(route\) \{[^\n]* && \(route !== "#/settings" \|\| SETTINGS_ON\)'
                      r'[^\n]* && \(route !== "#/privacy" \|\| pageFlag\("privacyCenter"\)\)'
-                     r'[^\n]* && \(route !== "#/data-rights" \|\| pageFlag\("dataRights"\)\)[^\n]*; \}',
-                     src)   # (lgS1 Settings, lgS2 Privacy centre, lgS3 Data rights — other legal screens may append)
+                     r'[^\n]* && \(route !== "#/data-rights" \|\| pageFlag\("dataRights"\)\)'
+                     r'[^\n]* && \(route !== "#/ai-governance" \|\| AI_GOVERNANCE_ON\)'
+                     r'[^\n]* && \(route !== "#/seller-identity" \|\| SELLER_IDENTITY_ON\)[^\n]*; \}',
+                     src)   # (lgS1 Settings, lgS2 Privacy, lgS3 Data rights, lgS5 AI governance, lgS7 Seller identity)

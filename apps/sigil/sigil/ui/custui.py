@@ -250,6 +250,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # the same flag that serves its route). A non-secret on/off value written into the page, counting in the build id;
     # off, its #/ai-governance link is absent and the route is the home screen exactly as any unknown route.
     ai_governance = _config.customer_ai_governance_enabled()
+    # Legal/governance S7 — the Seller identity screen (#/seller-identity): a READ-ONLY display of the hosted service's
+    # published seller identity (SIGIL SARL). Like every switch here, a non-secret on/off value written into the page,
+    # counting in the build id; its route is served only when it is on.
+    seller_identity = _config.customer_seller_identity_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -305,6 +309,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
                                      "__VIGIL_DATA_RIGHTS__": "1" if data_rights else "0",
                                      "__VIGIL_AI_GOVERNANCE__": "1" if ai_governance else "0",
+                                     "__VIGIL_SELLER_IDENTITY__": "1" if seller_identity else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -745,6 +750,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("data_rights_overview")
         if path == "/api/customer/data-rights/export" and _data_rights_on():   # S3 own-data export (flag OFF -> 404)
             return self._customer_read_relay("data_rights_export")
+        if path == "/api/customer/seller-identity" and _seller_identity_on():   # S7 seller identity (flag OFF -> 404)
+            return self._seller_identity()
         if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
@@ -1576,6 +1583,20 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         c, r = self._provision("data_rights_request", requester, payload)
         return self._json(r, c)
 
+    def _seller_identity(self):
+        """The Seller identity screen's read (legal/governance S7): the PUBLISHED seller identity of the hosted VIGIL
+        service — SIGIL SARL's legal name, form, registered city/country, registration number, contact email, website
+        and governing law, from owner-reviewed CODE (the cockpit's ``ui/seller_identity.py``). GLOBAL, not per-tenant:
+        the SAME block for every account, so NO org travels and none is read from a query or body — the edge relays
+        only the session principal. Served to an authenticated session only (401 otherwise), exactly as the other
+        read-only customer screens. A pure READ: it mints nothing, mutates nothing, and never touches the signed
+        spine."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        c, r = self._provision("seller_identity_get", str(rec.get("username") or ""), {"ip": self._ip()})
+        return self._json(r, c)
+
     def _security_status(self):
         """The Account security screen's read: which second factors the SESSION's account has (an authenticator app,
         its passkeys) — never a secret. Account-level like MFA: the REQUESTER is the server-side session username, never
@@ -1730,6 +1751,11 @@ def _data_rights_on() -> bool:
 def _ai_governance_on() -> bool:
     from .. import config as _config
     return _config.customer_ai_governance_enabled()
+
+
+def _seller_identity_on() -> bool:
+    from .. import config as _config
+    return _config.customer_seller_identity_enabled()
 
 
 def _plain_body_refusal(e: Exception) -> str:
