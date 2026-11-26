@@ -35,6 +35,7 @@ safe to import on either plane.
 from __future__ import annotations
 
 import enum
+import unicodedata
 from typing import Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -57,17 +58,24 @@ def clean_token(value: object, *, label: str, max_len: int = _MAX_TOKEN, allow_e
     NOT a path component (that is :func:`check_component`) and NOT a hostname (that is
     :func:`check_dns_host`) — this is the permissive-but-safe validator for free-text-ish tokens
     (an attack-class label, a provenance tier, a rule ref, an adapter kind, a reason string). It
-    refuses control characters (incl. newlines / NUL / DEL) so a token can never smuggle a line
-    break into a rendered card or a log line, and bounds the length so a field cannot be used as a
-    DoS amplifier. Deterministic: whitespace is NOT stripped (a token's bytes are its identity), so
-    the canonical form never drifts on an invisible edit."""
+    refuses EVERY Unicode control / format character (category ``Cc``/``Cf`` — the C0 range, DEL, the
+    C1 range incl. U+0085 NEL, and format chars such as the zero-width space U+200B and the bidi
+    overrides U+202A-E / U+2066-9) AND the line / paragraph separators U+2028 / U+2029 (categories
+    ``Zl`` / ``Zp``), so a token can never smuggle a line break into a rendered card or a log line, nor
+    bidi-reorder a display (Trojan-Source) — ``canonical.py`` serialises with ``ensure_ascii=False``, so
+    any such char would otherwise land as raw bytes in the canonical form. An ordinary space (U+0020,
+    category ``Zs``) is allowed. The length is bounded so a field cannot be used as a DoS amplifier.
+    Deterministic: whitespace is NOT stripped (a token's bytes are its identity), so the canonical form
+    never drifts on an invisible edit, and the char test depends only on Unicode category, not locale."""
     s = str(value if value is not None else "")
     if not s and not allow_empty:
         raise ValueError(f"{label} is required")
     if len(s) > max_len:
         raise ValueError(f"{label} exceeds {max_len} characters")
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
-        raise ValueError(f"{label} contains a control character")
+    for c in s:
+        category = unicodedata.category(c)
+        if category[0] == "C" or category in {"Zl", "Zp"}:
+            raise ValueError(f"{label} contains a control, format, or line/paragraph-separator character")
     return s
 
 

@@ -209,6 +209,30 @@ def test_control_char_and_traversal_rejected() -> None:
         clean_token("a\x00b", label="x")
 
 
+def test_clean_token_rejects_unicode_linebreaks_and_bidi() -> None:
+    # The C0/DEL check alone ACCEPTS these — a line-oriented renderer/log would show one token as two
+    # lines (U+2028/9, U+0085 NEL), or bidi-reorder it (U+202E, Trojan-Source). canonical.py serialises
+    # with ensure_ascii=False, so each would land as raw bytes in canonical_bytes. All must be refused,
+    # both directly and through a representative token-bearing schema field (event.attack_class,
+    # health.engine), each of which runs clean_token.
+    # Code points (built via chr so this source file holds no raw control bytes): U+2028 LINE
+    # SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEL (a C1 control), U+202E RTL OVERRIDE.
+    for ch in (chr(0x2028), chr(0x2029), chr(0x0085), chr(0x202E)):
+        with pytest.raises(ValueError):
+            clean_token(f"a{ch}b", label="x")
+        with pytest.raises(ValueError):
+            _event(attack_class=f"sq{ch}li")
+        with pytest.raises(ValueError):
+            EngineHealth(engine=f"un{ch}it", instance_id="u1", seq=1)
+
+
+def test_clean_token_still_allows_ordinary_space() -> None:
+    # The broadened Unicode-category check must NOT regress a legitimate multi-word label: an ordinary
+    # space (U+0020, category Zs) is neither a control/format char (Cc/Cf) nor a Zl/Zp separator.
+    assert clean_token("multi word label", label="x") == "multi word label"
+    assert _event(attack_class="sql injection").attack_class == "sql injection"
+
+
 def test_bad_outcome_class_rejected() -> None:
     with pytest.raises(Exception):
         ResponseManifest(reachable=["not_a_class"])  # type: ignore[list-item]
