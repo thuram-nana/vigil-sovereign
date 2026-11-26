@@ -238,6 +238,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # switch here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
     authorizations = _config.customer_authorizations_enabled()
+    # Legal/governance S2 — the Privacy centre (the #/privacy screen): the published cookie inventory, subprocessor
+    # list and the links to the full pages. Like every switch here, a non-secret on/off value written into the page,
+    # counting in the build id; its route is served only when it is on.
+    privacy_center = _config.customer_privacy_center_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -290,6 +294,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
+                                     "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -724,6 +729,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._preferences(None)
         if path == "/api/customer/authorizations" and _authorizations_on():   # S12 read-only disclosure (OFF -> 404)
             return self._customer_read_relay("customer_authorizations_list")
+        if path == "/api/customer/privacy" and _privacy_center_on():     # S2 Privacy centre (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("privacy_center")
         if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
@@ -1673,6 +1680,12 @@ def _settings_on() -> bool:
 def _authorizations_on() -> bool:
     from .. import config as _config
     return _config.customer_authorizations_enabled()
+
+
+def _privacy_center_on() -> bool:
+    # S2 — the same flag the cockpit privacy_center read re-checks, so the screen and its route are never out of step.
+    from .. import config as _config
+    return _config.customer_privacy_center_enabled()
 
 
 def _plain_body_refusal(e: Exception) -> str:

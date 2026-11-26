@@ -852,6 +852,21 @@ def customer_authorizations_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_AUTHORIZATIONS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_privacy_center_enabled() -> bool:
+    """True iff the customer app shows its Privacy centre (`VIGIL_CUSTOMER_PRIVACY_CENTER` affirmative; legal/governance
+    S2): a #/privacy screen that SURFACES, for the signed-in customer, the privacy information this deployment has already
+    PUBLISHED — the strictly-necessary cookie inventory (``public_site/cookies``), the subprocessor list
+    (``public_site/privacy``) and a link to the full privacy policy. It renders the EXISTING canonical text (read from
+    the packaged public pages at request time — one source of truth, never a reworded copy) and links out to those
+    pages; it adds NO new authority or money control and makes NO mutation (a pure read of published, org-independent
+    facts — the same for every workspace). The edge route ``GET api/customer/privacy`` and the cockpit's
+    ``privacy_center`` read exist only while this is on. OFF by default: the app is exactly as before (no Privacy tab,
+    #/privacy is the home screen exactly as any unknown route, and no privacy read is made). The edge reads it at
+    startup (it is written into the page) and on each request; the cockpit reads it on each request — set the SAME value
+    in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_PRIVACY_CENTER") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_overview_enabled() -> bool:
     """True iff the customer app's home screen is the fuller Overview (`VIGIL_CUSTOMER_OVERVIEW` affirmative; C7):
     compact summary cards that pull from the SAME session-org-scoped reads the full screens use — credits available

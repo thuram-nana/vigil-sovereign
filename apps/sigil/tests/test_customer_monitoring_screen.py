@@ -144,7 +144,7 @@ let renders = 0; function render() { renders++; }
 let whoRefreshes = 0; async function refreshWho() { whoRefreshes++; }
 function shell(inner, current) { return h("div.shell", { dataset: { current: current } }, inner); }
 var GUIDE_ON = false;
-var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false;   // every other page flag: off
+var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false;   // every other page flag: off
 var ATTACK_PATH_ON = false, BLIND_VULN_ON = false;   // PR-L (Area 11) flags: off here (shell reads ATTACK_PATH_ON)
 const VUI = window.VUI;
 const calls = [], toasts = [], errs = [];
@@ -627,5 +627,6 @@ process.stdout.write(JSON.stringify(out));
                      r'&& \(route !== "#/code" \|\| CODE_ON\) && \(route !== "#/connect" \|\| CONNECT_ON\) '
                      r'&& \(route !== "#/fix-first" \|\| POSTURE_ON\)'
                      r'( && [^;]*)?; \}', src)   # (PR-G appends Plans/Reports after PR-B's Fix first)
-    assert re.search(r'function routeShown\(route\) \{[^\n]* && \(route !== "#/settings" \|\| SETTINGS_ON\); \}',
-                     src)   # (lgS1 appends Settings last)
+    assert re.search(r'function routeShown\(route\) \{[^\n]* && \(route !== "#/settings" \|\| SETTINGS_ON\)'
+                     r' && \(route !== "#/privacy" \|\| pageFlag\("privacyCenter"\)\); \}',
+                     src)   # (lgS1 appends Settings, then lgS2 appends the Privacy centre last)

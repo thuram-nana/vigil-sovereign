@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -4241,6 +4241,7 @@
         .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
         .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
+        .concat(PRIVACY_CENTER_ON ? [navLink("Privacy", "#/privacy")] : [])      // legal/governance S2
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -4404,6 +4405,65 @@
     return shell(h("div", {}, [h("h2", { text: "Authorizations" }), holder]), "#/settings/authorizations");
   }
 
+  // ---- Privacy centre (VIGIL_CUSTOMER_PRIVACY_CENTER) ----------------------------------------------
+  // A read-only screen (legal/governance S2) that SURFACES the privacy information this deployment has already
+  // published: the strictly-necessary cookie inventory, the subprocessor list, and links to the full pages. It renders
+  // the EXISTING canonical text the server reads from the public pages (never a reworded copy) and links out to them;
+  // it adds NO authority or money control and makes NO write — the one read, api/customer/privacy, is all it does. Off,
+  // #/privacy is the home screen exactly as any unknown route is (byte-identical), and no privacy read is made.
+  var PRIVACY_CENTER_ON = pageFlag("privacyCenter");
+  // The published pages' links as the server returns them (their canonical public-site paths): an anchor, or nothing.
+  function privacyLink(label, href) {
+    if (!href) { return null; }
+    return h("p.cust-privacy-link", {}, [h("a", { href: String(href), text: label + " →" })]);
+  }
+  // "3 strictly-necessary session cookies, 0 optional — nothing to consent to", from the server's own counts.
+  function cookieCountLine(summary) {
+    var s = Number(summary.strictly_necessary) || 0, o = Number(summary.optional) || 0;
+    return s + " strictly-necessary session cookie" + (s === 1 ? "" : "s") + ", " + o + " optional"
+      + (o === 0 ? " — nothing to consent to." : ".");
+  }
+  // One subprocessor, rendered as the published page words it: the bolded provider name, then the rest of its line.
+  function privacySub(sub) {
+    var name = String(sub.name || ""), detail = String(sub.detail || "");
+    var rest = (detail.indexOf(name) === 0) ? detail.slice(name.length)
+      : (detail && detail !== name ? " — " + detail : "");
+    return h("li.cust-privacy-sub", {}, [h("strong", { text: name }), rest ? h("span", { text: rest }) : null]);
+  }
+  function privacyBody(d) {
+    d = d || {};
+    var cookies = Array.isArray(d.cookies) ? d.cookies : [];
+    var subs = Array.isArray(d.subprocessors) ? d.subprocessors : [];
+    var summary = d.cookie_summary || {}, links = d.links || {};
+    var cookieTable = cookies.length ? h("table.cust-table.cust-privacy-cookies", {}, [
+      h("thead", {}, [h("tr", {}, [h("th", { scope: "col", text: "Cookie" }),
+        h("th", { scope: "col", text: "Purpose" }), h("th", { scope: "col", text: "Category" })])]),
+      h("tbody", {}, cookies.map(function (c) {
+        return h("tr", {}, [h("th", { scope: "row", text: String(c.name || "") }),
+          h("td", { text: String(c.purpose || "") }), h("td", { text: String(c.category || "") })]);
+      }))]) : null;
+    var cookieCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Cookies & local data" }),
+      summary.note ? h("p.cust-muted", { text: String(summary.note) }) : null,
+      h("p.cust-privacy-count", { text: cookieCountLine(summary) }),
+      cookieTable,
+      privacyLink("Full cookie notice", links.cookies),
+    ]);
+    var subCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Subprocessors" }),
+      h("p.cust-muted", { text: "The providers that process data for the hosted service." }),
+      subs.length ? h("ul.cust-privacy-subs", {}, subs.map(privacySub)) : null,
+      privacyLink("Full privacy policy", links.privacy),
+    ]);
+    return h("div", {}, [cookieCard, subCard]);
+  }
+  // The read, the loading holder, the honest "could not load" and the shell/heading are the shared area6View — the
+  // same read-only pattern the Reports screen uses, not a second copy.
+  function viewPrivacy() {
+    return area6View("#/privacy", "Privacy", "The cookies and subprocessors this service uses, and the full privacy "
+      + "policy — exactly as published.", API + "/privacy", "You do not have access to this screen.", privacyBody);
+  }
+
   // ---- misc ---------------------------------------------------------------------------------------
   function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
@@ -4446,6 +4506,8 @@
     "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
     // S12 Authorizations off: #/settings/authorizations is the home screen, exactly as any unknown route is
     "#/settings/authorizations": function () { return authed() ? (AUTHZ_ON ? viewAuthorizations() : viewDashboard()) : viewLogin(); },
+    // the Privacy centre off: #/privacy is the home screen, exactly as any unknown route is (legal/governance S2)
+    "#/privacy": function () { return authed() ? (PRIVACY_CENTER_ON ? viewPrivacy() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

@@ -1607,6 +1607,20 @@ class Provisioner:
         # an OSError (ProfileUnreadable included) is a store fault, not the input: it reaches the cockpit's clean 500
         return {"ok": True, "preferences": merged}
 
+    def privacy_center(self, requester: str, org_id: str = "", *, ip: str = "") -> dict:
+        """The customer Privacy centre's read (legal/governance S2): the PUBLISHED privacy facts this deployment already
+        shows on its public pages — the strictly-necessary cookie inventory, the subprocessor list, and the links to the
+        full pages — read from the ONE canonical source (``privacy_center_store`` reads the packaged ``public_site``
+        pages), never a reworded copy. These facts are org-INDEPENDENT (the same for every workspace), so ``org_id`` is
+        taken (the edge passes the SESSION org) but the answer does not depend on it. The only gate is an ACTIVE
+        customer — any signed-in customer sees the same published facts; the requester is the hop-bound session
+        principal, never a body field. A pure read: it mints nothing, decides no money, and never touches the signed
+        append-only spine (no audit row)."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .privacy_center_store import read_privacy_center
+        return {"ok": True, **read_privacy_center()}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an

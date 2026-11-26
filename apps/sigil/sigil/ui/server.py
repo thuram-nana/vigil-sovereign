@@ -1661,6 +1661,15 @@ class Handler(BaseHTTPRequestHandler):
                 return p.preferences_get(requester)
             prefs = body.get("preferences")
             return p.preferences_set(requester, prefs if isinstance(prefs, dict) else {})
+        # The Privacy centre's read (legal/governance S2): the deployment's PUBLISHED privacy facts (cookie inventory,
+        # subprocessors, the published pages' links), read from the canonical public pages — org-independent, read-only.
+        # requester is the hop principal, never a body field. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_PRIVACY_CENTER is on, the same flag that gates the edge route.
+        if action == "privacy_center":
+            from .. import config as _config
+            if not _config.customer_privacy_center_enabled():
+                return None
+            return p.privacy_center(requester, str(body.get("org_id", "")), ip=ip)
         # The Account security screen's read: the requesting account's own second factors (never a secret).
         # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.

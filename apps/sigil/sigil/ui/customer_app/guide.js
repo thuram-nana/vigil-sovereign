@@ -117,6 +117,14 @@
                           "Select Save. VIGIL keeps these details with your account, and you can change them at any time.",
                           "Under Your organization, select Account security & sign-in, Authorized administrators or Billing to open that screen and change its settings there."] },
           why: "Settings records these details and links to the screens that already exist. It never changes who can do what and never charges anything: roles are changed on Team, and credits are bought on Billing." },
+        // The Privacy centre (legal/governance S2): served under data-privacy-center (VIGIL_CUSTOMER_PRIVACY_CENTER, default OFF).
+        { id: "privacy", title: "See our cookies and subprocessors", where: "Privacy", route: "#/privacy",
+          when: "privacyCenter",
+          clicks: ["Select Privacy in the top bar.",
+                   "Under Cookies and local data, see the strictly-necessary session cookies this service uses. There are no optional cookies, so there is nothing to consent to.",
+                   "Under Subprocessors, see the providers that process data for the hosted service.",
+                   "Select Full cookie notice or Full privacy policy to open the published page with the complete details."],
+          why: "The Privacy centre shows the privacy information VIGIL has already published, as published. It only reads and links out: it changes nothing, and it collects nothing new." },
       ],
     },
     {

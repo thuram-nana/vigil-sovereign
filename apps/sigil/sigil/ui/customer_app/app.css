@@ -290,6 +290,20 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-authz-request, .cust-authz-retry { min-width: 10rem; justify-content: center; }
 .cust-authz-row .row, .cust-authz-unavailable .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
 
+/* legal/governance S2 — the Privacy centre (only while the edge has VIGIL_CUSTOMER_PRIVACY_CENTER on): the published
+   cookie inventory and subprocessor list the server reads from the public pages, plus the links out to those pages */
+.cust-privacy-section { display: grid; gap: 8px; max-width: 760px; margin-bottom: 16px; }
+.cust-privacy-section h3 { margin: 0; }
+.cust-privacy-section p { margin: 0; }
+.cust-privacy-count { font-weight: 600; }
+.cust-privacy-cookies { margin-top: 4px; }
+.cust-privacy-subs { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; }
+.cust-privacy-sub strong { font-weight: 600; }
+.cust-privacy-sub span { opacity: 0.8; }
+.cust-privacy-link { margin-top: 2px; }
+.cust-privacy-link a { color: var(--accent, #6ea8fe); text-decoration: none; font-weight: 600; }
+.cust-privacy-link a:hover { text-decoration: underline; }
+
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {
   position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60;
