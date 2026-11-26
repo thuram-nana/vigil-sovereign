@@ -717,6 +717,68 @@
    "source_doc": "docs/DEFERRED-INFRA.md",
    "disposition": "file-into-w16",
    "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-jobs-runtime-isolation",
+   "title": "AEGIS per-tenant job-runner OS isolation rests on the deployed systemd unit (AS-30)",
+   "summary": "AS-30 ships the per-tenant job-substrate runner (framework.v2.aegis.job_runner.PerTenantRunner) and the pure vigil_core primitive (vigil_core.job_substrate) that renders a tenant's health to the sovereign plane. The fault isolation proven offline is the substrate-logic partition: a killed or failed job degrades only its own tenant's projection and leaves every other tenant's rendered bytes byte-identical (isolation_witness), so a noisy neighbour degrades alone. The residual is that the runtime OS-level isolation — one systemd instance per tenant (aegis-jobs@<tenant>.service), its own uid and MemoryMax/cgroup, routed by the AS-6a fleet — is deploy-gated infra not exercised by these offline tests; the process-per-tenant guarantee holds on the deployed unit, not in-process.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/job_runner.py",
+    "symbol": "PerTenantRunner"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "AS2D-live-broker-transport",
+   "title": "The AEGIS broker's live origin-hop TLS splice is deploy-gated on AS-26 infrastructure",
+   "summary": "AS-2d ships the deterministic broker plane in framework/v2/aegis/broker.py: tenant-isolated origin resolution from the signed grant, the never-liftable L3/L4 egress floor (resolve_and_validate_all with allowed_ips=frozenset() and loopback_allowed_if_scoped=False, so loopback/IMDS/RFC1918 origins and DNS rebinding are refused), the origin LOCK (mTLS / HMAC X-Vigil-Origin-Auth over (request id, ts, client-IP) / secret header) with its origin-side verifier and the Z4 payload-free probe, the startup refusal (a release requires crypto_verified), and the forward composition (broker_forward) over an INJECTED BrokerTransport. The residual is the physical origin-hop TLS splice itself: the live transport over the defense NAT EIPs and the central keyless origin-hop cert issuer is provisioned by the hosted plane (AS-6a placement over AS-26 infrastructure) and verified end to end in the TT-STG staging account under AS-1b, not by this repo's offline tests.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/broker.py",
+    "symbol": "BrokerTransport"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-staging-stack-not-applied",
+   "title": "AEGIS AS-26 staging CloudFormation stack is merged but not applied in CI",
+   "summary": "The AEGIS staging stack (infra/aws/aegis-staging/*.cfn.yaml — zone network + disjoint EIPs, per-zone KMS keys, the test owner and test release roots, permission-bounded roles, the IMDSv2 launch template, the SSM bringup document, the Route 53 test zone, the 2-tenant CloudFront + Shield, the VPC origin + internal ALB, the per-(org,host) edge secrets, the keyless origin-hop cert issuer, SNS paging, CloudFormation drift detection) is a deployment DECLARATION. It is analyzer-clean (cfn-lint) and posture-checked offline (integration/vigil_integration/aegis_infra_lint.py: IMDSv2 enforced, disjoint EIP sets, MFA-gated test roots, keyless relay, no public ingress, paging + drift present). The residual is that there is no live staging AWS account in the merge pipeline, so the stack is NOT applied in CI: the live-reality acceptance — MFA console sign-in, the delivered edge page over CloudFront -> VPC origin -> ALB, Shield, live cert issuance, and live CloudFormation drift detection — is a staging operator action (see infra/aws/aegis-staging/README.md), proven by AS-1b's TT-STG runs, not by this slice.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "infra/aws/aegis-staging/00-network-zones.cfn.yaml"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "infra/aws/aegis-staging/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-staging-cd-inert",
+   "title": "AEGIS AS-26 staging-only CD role ships inert until the operator wires OIDC",
+   "summary": "The staging-only continuous-delivery role (StagingDeployRole in infra/aws/aegis-staging/30-ops-relay-paging-drift.cfn.yaml) is GitHub-OIDC-scoped to ssm:SendCommand against the staging bringup document only (no SSH, no long-lived keys), mirroring the production-side deploy-ec2 role. It is gated on the CdEnabled condition and ships inert: with the ExistingOIDCProviderArn parameter empty the role is not created and no staging deploy can run. There is no live staging deploy executed in this slice — the actual TT-STG staging deploy runs are AS-1b's (aegis-test-tenant-e2e), and they fire only once the operator sets the OIDC provider ARN and the staging deploy variables in a live staging account.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "infra/aws/aegis-staging/30-ops-relay-paging-drift.cfn.yaml"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "infra/aws/aegis-staging/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
   }
  ],
  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -988,6 +1050,13 @@
    "kind": "debt",
    "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
    "note": "AS-6a SsmSecretDelivery: the real AWS SSM client is owner-provided and deploy-gated; offline the channel is an injected transport, so the SSM-only delivery path is exercised without an AWS call."
+  },
+  {
+   "file": "engine/crucible/framework/v2/aegis/job_runner.py",
+   "snippet": "deploy-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-aegis-jobs-runtime-isolation",
+   "note": "AS-30 VIGIL-LIMIT marker: the per-tenant OS process/cgroup isolation is deploy-gated runtime infra (the systemd aegis-jobs@<tenant>.service instance); offline tests prove the substrate-logic fault partition, not the deployed-unit guarantee."
   }
  ]
 }

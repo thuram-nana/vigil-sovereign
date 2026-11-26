@@ -1,0 +1,29 @@
+# env-defense-exec — the AEGIS per-tenant JOB-SUBSTRATE executor (AS-30, D17 "Executor env; primitives
+# move"). This is the environment the fleet's `jobs` worker-kind runs in: AS-6a routes one systemd
+# instance per tenant (`aegis-jobs@<tenant>.service`, health on `/run/aegis-jobs/<tenant>/jobs.sock`),
+# and the per-tenant runner (framework.v2.aegis.job_runner.PerTenantRunner) drives that one tenant's job
+# substrate inside it.
+#
+# TRUST DOMAIN: like env-offense it is KEYLESS — it holds NO owner signing key, so it can run the
+# operator's own managed DEFENSIVE jobs (rule compiles, heartbeat probes, relocations) but cannot forge a
+# sovereign governance event. It deliberately OMITS:
+#   * apps/sigil      — the sovereign plane (FATAL-2: the executor must never import sigil); and
+#   * vendor/strix    — the offensive agent body is not needed to run defensive jobs.
+# so a killed job in this executor degrades ONE tenant and can reach neither the owner key nor another
+# tenant (the AS-30 acceptance: "killed job degrades TT-A only").
+#
+# The job-substrate PRIMITIVE lives in the plane-neutral vigil_core (vigil_core.job_substrate, pure
+# stdlib) so the SAME record the executor produces is renderable by the sovereign plane through VIGIL
+# with no engine import — that is why the primitives "move" into vigil_core (D17).
+#
+# DEFAULT-OFF: the runner is inert unless VIGIL_AEGIS_JOBS is set to an affirmative token (1/true/yes/on);
+# unset, this env builds and imports but routes nothing (flag-off byte-identical).
+#
+# Build:  python -m venv .venv-defense-exec && . .venv-defense-exec/bin/activate \
+#            && pip install -r envs/defense-exec.txt
+# (reproducible builds use the offense framework hash-lock, exactly like env-offense's framework closure;
+#  this is a strict SUBSET of env-offense's members, so no new third-party dependency is introduced.)
+
+-e ./packages/core/vigil_core
+-e ./engine/crucible
+-e ./integration

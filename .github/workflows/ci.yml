@@ -762,6 +762,7 @@ jobs:
               engine/crucible/framework/v2/agents/tests/test_egress_guard_floor.py \
               engine/crucible/framework/v2/agents/tests/test_engage_signed_authority.py \
               engine/crucible/framework/v2/common/tests/test_egress_backstop.py \
+              engine/crucible/framework/v2/aegis/tests/test_egress_backstop_mirror.py \
               engine/crucible/framework/v2/console/tests/test_approvals_screen.py \
               engine/crucible/framework/v2/console/tests/test_chat_clone.py \
               engine/crucible/framework/v2/console/tests/test_chat_codebase_edit.py \

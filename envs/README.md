@@ -7,6 +7,7 @@ interpreter:
 |-----|---------|------|
 | **env-sovereign** (`.venv-sovereign`) | `vigil_core` + `apps/sigil` + `integration` | MUST NOT contain `framework.*` (CRUCIBLE) or `strix.*`. That absence makes `assert_no_offense()` hold by construction. |
 | **env-offense** (`.venv-offense`) | `vigil_core` + `engine/crucible` + `vendor/strix` + `gateway` + `integration` | Runs the offense engine as a **keyless** process (no owner key). |
+| **env-defense-exec** (`.venv-defense-exec`) | `vigil_core` + `engine/crucible` + `integration` | AS-30 (D17) — the AEGIS per-tenant **job-substrate executor**. Keyless, like env-offense, but OMITS `apps/sigil` (FATAL-2) and `vendor/strix` (no offensive body). A strict subset of env-offense's members; member set in `envs/defense-exec.txt`. |
 
 Build both (prefers `uv`, falls back to venv+pip):
 
@@ -29,6 +30,15 @@ The member sets are `envs/sovereign.txt` and `envs/offense.txt` (editable instal
 workspace root (`/pyproject.toml`) lists all members for discovery; the two **isolated** locks are
 these two sets, because a single uv workspace resolves to one shared environment — which is exactly
 what the boundary forbids.
+
+`envs/defense-exec.txt` is a third, standalone member set: the AS-30 (D17) executor the fleet's `jobs`
+worker-kind runs in (`aegis-jobs@<tenant>.service`). It is a strict **subset** of the offense members
+(`vigil_core` + `engine/crucible` + `integration`), so it reuses the offense framework hash-lock and
+introduces no new third-party dependency. `build_envs.sh` builds only the two FATAL-2 planes; this
+executor env is built on demand (`pip install -r envs/defense-exec.txt`). The job-substrate primitives
+live in the plane-neutral `vigil_core` (`vigil_core.job_substrate`, pure stdlib), so the record the
+executor produces is renderable by the sovereign plane with no engine import — that is why D17 moves the
+primitives into `vigil_core`.
 
 **The boundary is proven, not promised:** `integration/tests/test_two_env_boundary.py` demonstrates
 that in a sovereign-only interpreter the offense namespaces are unimportable and the guard passes,
