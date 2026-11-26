@@ -53,7 +53,7 @@ from collections import OrderedDict
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
 
-from ..verify.oob import OOBHit, OOBReceiver
+from ..common.oob_receiver import OOBHit, OOBReceiver
 
 
 class Elevation(NamedTuple):
