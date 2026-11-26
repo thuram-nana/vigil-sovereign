@@ -1897,6 +1897,19 @@ class Handler(BaseHTTPRequestHandler):
                                            engagement_slug=str(body.get("engagement_slug") or ""),
                                            cert_digest=str(body.get("cert_digest") or ""), ip=ip)
 
+        # Legal/governance S12 — the read-only Authorizations surface. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_AUTHORIZATIONS is on (the same flag that gates the edge routes); org from the edge SESSION, never
+        # a body field. The list READS owner-signed authorities (discloses the gate, mints nothing); the request DROPS an
+        # unsigned owner-review note (no authority, no spine write).
+        if action in ("customer_authorizations_list", "customer_authorization_request"):
+            from .. import config as _config
+            if not _config.customer_authorizations_enabled():
+                return None
+            if action == "customer_authorizations_list":
+                return p.customer_authorizations_list(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_authorization_request(requester, str(body.get("org_id", "")),
+                                                    str(body.get("host") or ""), note=str(body.get("note") or ""), ip=ip)
+
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":

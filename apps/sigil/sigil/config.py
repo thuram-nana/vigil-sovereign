@@ -222,6 +222,14 @@ CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
 # operational markers a backup excludes): it is its own top-level directory, which the backup captures
 # (backup._STATE_DIRS) and a restore brings back.
 CUSTOMER_PREFERENCES_DIR = SIGIL_HOME / "customer_preferences"
+# Legal/governance S12 — the owner-review requests a customer drops from the read-only Authorizations surface
+# (ui/authorization_requests_store.py): "please authorize an assessment of host X". It is NOT an authority and NOT
+# money — it mints nothing and is never owner-signed; the owner still signs the real EngagementAuthority in the cockpit
+# (ui/target_authorization.py). An UNSIGNED, off-spine per-org queue (one hashed-name JSON file per org), written only
+# while VIGIL_CUSTOMER_AUTHORIZATIONS is on. It is an operational owner-review queue: a restore drops any pending
+# request (the customer re-requests; the authoritative authorities live owner-signed on the authority seam), so the
+# backup EXCLUDES it with a documented reason (backup._EXCLUSION_REASONS).
+CUSTOMER_AUTHORIZATION_REQUESTS_DIR = SIGIL_HOME / "customer_authorization_requests"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -825,6 +833,23 @@ def customer_settings_enabled() -> bool:
     route, and no preferences call is made). The edge reads it at startup (it is written into the page) and on each
     request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
     return (os.environ.get("VIGIL_CUSTOMER_SETTINGS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_authorizations_enabled() -> bool:
+    """True iff the customer app shows its read-only Authorizations surface (`VIGIL_CUSTOMER_AUTHORIZATIONS`
+    affirmative; legal/governance S12): the #/settings/authorizations screen that DISCLOSES to a workspace, read-only,
+    the owner-signed EngagementAuthorities on record for its OWN proven-owned hosts — scope, validity window,
+    environment and the GET-only / non-destructive flags — plus a "request authorization" action that drops an UNSIGNED
+    owner-review request only (it mints NO authority; the owner still signs in the cockpit via ui/target_authorization.py).
+    It is a DISCLOSURE of the enforced gate (scope/exclusions R1, expiry R2, out-of-scope/new-host refusal R3), never a
+    second enforcement path and never a widening one: the launch gate (`ui/launch_gate._has_verified_authority`) and the
+    conjunctive gate chain stay the sole authority and are byte-identical when this is off. The edge's
+    ``api/customer/authorizations`` read + ``authorizations/request`` action and the cockpit's
+    ``customer_authorizations_list`` / ``customer_authorization_request`` actions exist only while this is on.
+    OFF by default: the app is exactly as before (no Authorizations screen, its routes 404, and nothing is read or
+    dropped). The edge reads it at startup (it is written into the page) and on each request; the cockpit reads it on
+    each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_AUTHORIZATIONS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_overview_enabled() -> bool:

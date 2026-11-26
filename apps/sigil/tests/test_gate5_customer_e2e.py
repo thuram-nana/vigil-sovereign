@@ -108,6 +108,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/settings": ("Settings", ("api/customer/preferences",)),
+    "#/settings/authorizations": ("Authorizations", ("api/customer/authorizations",)),   # legal/governance S12
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -139,9 +140,14 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/attack-path": {"View findings": 1},                          # F1's one chain card (its steps unlisted)
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
+                   "Authorizations": 1,                             # S12: the hub's link to the Authorizations screen
                    "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
+    # S12 Authorizations: the representative data has one active authority (no button), one expired authority and one
+    # not-authorized host — each non-active host offers a "Request authorization" (the expired one + the pending one).
+    "#/settings/authorizations": {"Request authorization": 2},
     "#/guide": {"Replay the welcome tour": 1,
-                "Mark as done": 6},                                 # the open chapter, Get started: its six steps
+                "Mark as done": 7},   # the open chapter, Get started: six steps + the onlyIfShown Authorizations
+                                      # step (listed here because the gate enables VIGIL_CUSTOMER_AUTHORIZATIONS)
     "#/plans": {"Upgrade": 1, "Downgrade": 1, "Cancel plan": 1, "Buy credits on Billing": 1},
     "#/reports": {"Download report": 1, "Download PDF": 1},
     # signed out, the top bar's own Sign in is on every one of these, so the sign-in screen shows that label twice
@@ -169,7 +175,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "settings": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "settings": "1", "authorizations": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
@@ -180,7 +186,7 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VI
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
-              "VIGIL_CUSTOMER_SETTINGS")
+              "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS")   # + S12 (legal/governance)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -417,6 +423,18 @@ _FAKE_SERVER = {
         "legal_entity_name": "Acme SAS", "registered_address": "1 Example Street, Example City",
         "contractual_contact_email": "legal@acme.com", "emergency_contact_name": "Dana Ops",
         "emergency_contact_phone": "+1 555 0100", "emergency_contact_email": "soc@acme.com"}},
+    # S12 the read-only Authorizations surface: one ACTIVE owner-signed authority (no button), one EXPIRED and one
+    # NOT-authorized host — so two hosts offer "Request authorization"; one of them already has an open review request.
+    "api/customer/authorizations": {"org_id": "org_acme", "can_request": True, "requested": ["p.example"], "authorities": [
+        {"host": "a.example", "slug": "cust_a1", "authorized": True, "bound": True, "verified": True, "trusted": True,
+         "active": True, "scope": ["a.example"], "environment": "live", "not_before": "2024-01-01T00:00:00+00:00",
+         "not_after": "2099-01-01T00:00:00+00:00", "allow_destructive": False, "live_destructive_acknowledged": False,
+         "issued_by": "customer:org_acme", "note": ""},
+        {"host": "c.example", "slug": "cust_c1", "authorized": True, "bound": True, "verified": True, "trusted": True,
+         "active": False, "scope": ["c.example"], "environment": "live", "not_before": "2024-01-01T00:00:00+00:00",
+         "not_after": "2024-02-01T00:00:00+00:00", "allow_destructive": False, "live_destructive_acknowledged": False,
+         "issued_by": "customer:org_acme", "note": ""},
+        {"host": "p.example", "slug": "cust_p1", "authorized": False, "active": False}]},
     # PR-B Fix first: one verified host tested — two open findings worst first (the critical one with its signed
     # plain-language parts and fix), one a retest proved fixed, the first six weeks not measured yet. The scores are the
     # server's own arithmetic over these severities (100 x 100 // (100 + 45 + 22 [+ 9 while the medium was open])).
@@ -877,7 +895,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     try:
         for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
-                  "preferences"):
+                  "preferences", "authorizations"):   # + S12
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()
