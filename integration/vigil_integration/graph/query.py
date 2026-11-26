@@ -32,6 +32,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from .model import EVIDENCE_JOIN_UNRESOLVED, EdgeType, GraphView, NodeLabel, _join_unresolved
+from .projector import NO_RETEST
 
 _HIGH_SEVERITIES = frozenset({"high", "critical"})
 
@@ -156,6 +157,83 @@ def query_prior_chains(view: GraphView, *, target: Optional[str] = None,
                                          spine_hash=n.provenance.spine_hash))
     return PriorChainContext(authoritative=False, retrieval_only=True, engagement_id=view.group_id,
                              confirmed_findings=confirmed, leads=leads, failure_lessons=lessons[:lim])
+
+
+# ==========================================================================================================
+# F4 slice S4 — remediation/retest lifecycle retrieval (non-authoritative, INERT). The ONE traversal
+# finding→remediation→retest, surfaced as retrieval context only — it grants nothing and promotes nothing.
+# ==========================================================================================================
+class RetestSummary(BaseModel):
+    seq: int = 0
+    status: str = ""          # verified_fixed / still_vulnerable / inconclusive / refused / unverified / rolled_back
+    state: str = ""           # the RE-VERIFIED 4-state verdict (empty when the tick did not re-verify)
+    label: str = ""           # the drift label (proven-fixed / still-proven / regressed / present / …)
+    verified: bool = False
+
+
+class RemediationSummary(BaseModel):
+    remediation_id: str = ""
+    finding_ref: str = ""                 # the finding it is confirmed-linked to (REMEDIATED_BY); "" ⇒ fail-closed
+    verdict: str = ""
+    bug_class: str = ""
+    original_finding_cert_digest: str = ""
+    retests: list[RetestSummary] = Field(default_factory=list)
+    current_status: str = NO_RETEST       # latest retest status, or NO_RETEST — distinguishes a remediation
+                                          # WITHOUT a retest from one with a passing (verified_fixed) retest.
+
+
+class LifecycleContext(BaseModel):
+    """The projected finding→remediation→retest lifecycle as NON-AUTHORITATIVE retrieval context. FROZEN +
+    ``authoritative=False`` — like ``PriorChainContext`` it grants nothing; the remediation/retest nodes it
+    reflects are INERT (never FACT findings). A remediation with no retest is distinguishable from one with a
+    passing retest via ``current_status`` (``no_retest`` vs ``verified_fixed``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    authoritative: bool = False
+    retrieval_only: bool = True
+    engagement_id: str = ""
+    remediations: list[RemediationSummary] = Field(default_factory=list)
+
+
+def lifecycle_chains(view: GraphView) -> LifecycleContext:
+    """Traverse the projected lifecycle in ONE pass: every active REMEDIATION node, the finding it is
+    confirmed-linked to (``Finding -[REMEDIATED_BY]-> Remediation``), and its re-verified retests
+    (``Remediation -[RETESTED_BY]-> Retest``). Deterministic (remediations + retests sorted). Returns only
+    non-authoritative context — a lead/opinion can never appear as a fact here, and nothing is promoted."""
+    if not isinstance(view, GraphView):
+        return LifecycleContext()
+    # map each remediation node id → the finding it is linked to (active REMEDIATED_BY edge).
+    linked_finding: dict[str, str] = {}
+    for e in view.edges:
+        if e.is_active and e.type == EdgeType.REMEDIATED_BY and e.src.startswith("finding:"):
+            linked_finding[e.dst] = e.src[len("finding:"):]
+    rems: list[RemediationSummary] = []
+    for node in view.active_nodes(NodeLabel.REMEDIATION):
+        retests: list[RetestSummary] = []
+        for e in view.edges:
+            if not (e.is_active and e.type == EdgeType.RETESTED_BY and e.src == node.id):
+                continue
+            rt = view.get(e.dst)
+            if rt is None or not rt.is_active:
+                continue
+            p = rt.props
+            retests.append(RetestSummary(
+                seq=int(p.get("seq") or 0), status=str(p.get("status") or ""),
+                state=str(p.get("state") or ""), label=str(p.get("label") or ""),
+                verified=bool(p.get("verified"))))
+        retests.sort(key=lambda r: r.seq)
+        rems.append(RemediationSummary(
+            remediation_id=str(node.props.get("remediation_id") or node.id),
+            finding_ref=linked_finding.get(node.id, ""),
+            verdict=str(node.props.get("verdict") or ""),
+            bug_class=str(node.props.get("bug_class") or ""),
+            original_finding_cert_digest=str(node.props.get("original_finding_cert_digest") or ""),
+            retests=retests,
+            current_status=(retests[-1].status if retests else NO_RETEST)))
+    rems.sort(key=lambda r: r.remediation_id)
+    return LifecycleContext(authoritative=False, retrieval_only=True, engagement_id=view.group_id,
+                            remediations=rems)
 
 
 def successful_tools(view: GraphView) -> list[str]:

@@ -51,6 +51,13 @@ class NodeLabel(str, Enum):
     # FACT: ``is_confirmed`` gates on CHAIN_FINDING, so an OBJECTIVE can never be CONFIRMED and can never
     # be returned by ``confirmed_findings`` — it carries no evidence_ref and authorizes nothing.
     OBJECTIVE = "Objective"
+    # --- F4 slice S4: remediation/retest lifecycle (projected read-model over the signed certs + ledger) ---
+    # Both are INERT: a REMEDIATION/RETEST node is NEVER a FACT finding (``is_confirmed`` is a CHAIN_FINDING
+    # property), so ``confirmed_findings()`` can never return one — a lifecycle node cannot launder a 'fixed'
+    # into a confirmed vuln (or vice-versa). They project ONLY from the existing SIGNED remediation certs /
+    # attestation ticks, re-verified; nothing here issues traffic or runs a live retest.
+    REMEDIATION = "Remediation"   # a projected, re-verified RemediationCertificate (negative proof)
+    RETEST = "Retest"             # a projected, re-verified attestation-log re-proof tick (4-state verdict)
 
 
 class EdgeType(str, Enum):
@@ -76,6 +83,9 @@ class EdgeType(str, Enum):
     # PURSUES: an Action/ChainStep to the Goal its declared objective id names (no objective id ⇒ no edge).
     REACHES = "REACHES"             # Asset -> Goal
     PURSUES = "PURSUES"             # Action/ChainStep -> Goal
+    # --- F4 slice S4: remediation/retest lifecycle. The one traversal finding->remediation->retest. ---
+    REMEDIATED_BY = "REMEDIATED_BY"   # Finding -> Remediation (only when the referenced finding cert re-verifies)
+    RETESTED_BY = "RETESTED_BY"       # Remediation -> Retest
 
 
 class ConfirmationStatus(str, Enum):

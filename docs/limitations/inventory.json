@@ -701,6 +701,22 @@
    "source_doc": "docs/research/fusion/README.md",
    "disposition": "file-into-w16",
    "w16_issue": null
+  },
+  {
+   "id": "LIMIT-invgraph-s4-lifecycle-local-verify-path",
+   "title": "Investigation-graph S4 lifecycle inherits the attestation log's local-verify-path anti-rollback limit",
+   "summary": "The flag-gated (VIGIL_GRAPH_LIFECYCLE, default off) finding->remediation->retest projection DELEGATES anti-rollback to the attestation-log authority: make_default_lifecycle's verify_retest_series calls attestation_log.verify_log, which re-derives the floor from the SIGNED durable high-water (entry_count + check_highwater), binds the signed head to the rebuilt tick hash-chain, and re-runs verify_prove_certificate on every tick. The floor is NEVER taken from a producer-supplied in-band value. The remaining honest limit is the one verify_log itself documents and the read-model inherits: the LOCAL verify path re-reads the durable floor from the same local disk, so a same-host attacker holding the owner's UID who rewrites the tick log, the head AND the floor together defeats it (closed only by the out-of-band witness VF-1c, not by this read-model). S4's own deterministic tests cover the projector logic (injected fakes) and the REAL verify_log fail-closed paths directly (rolled-back durable floor, missing anchor, log_ref path-confinement); the real authenticated-full-series -> verified_fixed happy path over a genuinely signed, non-truncated tick log is exercised by the existing prove_driver/attestation_log suites rather than rebuilt here. The S1 finding-cert resolver leg (out-of-band-pinned authenticity) is covered against on-disk artifacts in test_graph_lifecycle_s1.py.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "integration/vigil_integration/graph/projector.py",
+    "symbol": "make_default_lifecycle"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
   }
  ],
  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
