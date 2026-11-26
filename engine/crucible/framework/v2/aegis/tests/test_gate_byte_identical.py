@@ -244,3 +244,62 @@ def test_aegis_classes_map_to_their_single_oracle():
     assert BUG_CLASS_ORACLES["system_prompt_disclosure"] == (OracleKind.SYSTEM_PROMPT_DISCLOSURE,)
     assert BUG_CLASS_ORACLES["automated_access"] == (OracleKind.AUTOMATED_ACCESS,)
     assert BUG_CLASS_ORACLES["credential_stuffing"] == (OracleKind.CREDENTIAL_STUFFING,)
+
+
+def test_multilang_p1_gate_is_byte_identical_when_the_flag_is_off():
+    """MULTILANG-P1 (I4): with ``VIGIL_MULTILANG_CODESCAN`` unset, the FACT oracle is byte-identical to the
+    pre-MULTILANG Python-only path. (a) the unknown-class fallback stays EXACTLY 15 — the multi-language route
+    reuses the SAME ``OracleKind.STATIC_RULE`` (additive, kept OUT of ``_ALL_ORACLES``, keyed on a ``static_rule``
+    ctx field no benchmark/scan finding carries), so NO new OracleKind is added. (b) a non-Python ``static_rule``
+    ctx takes the IDENTICAL refuse → LEAD shape. (The ``_static_rule_for`` returns-"" and the sys.modules
+    'no plugin / no tree-sitter imported when OFF' proofs are in integration/tests/test_langplugins.py; the
+    subprocess variant is also asserted below.)"""
+    import os
+
+    from framework.v2.verify import oracles
+
+    # (a) STATIC_RULE is additive — excluded from the frozen fallback, which stays EXACTLY 15.
+    assert len(V._ALL_ORACLES) == 15
+    assert OracleKind.STATIC_RULE in _W51_KINDS
+    assert OracleKind.STATIC_RULE not in V._ALL_ORACLES
+
+    # (b) a non-Python static_rule ctx REFUSES → LEAD with the flag OFF — identical to today's non-Python refuse.
+    prev = os.environ.pop("VIGIL_MULTILANG_CODESCAN", None)
+    try:
+        sig = oracles.static_rule_oracle(
+            {"rule_id": "broken-crypto-invocation", "source": "const h = md5(x);",
+             "language": "javascript", "path": "a.js", "line": 1})
+    finally:
+        if prev is not None:
+            os.environ["VIGIL_MULTILANG_CODESCAN"] = prev
+    assert sig.kind is OracleKind.STATIC_RULE and sig.fired is False and sig.confidence == 0.0
+    assert (sig.observed or {}).get("reason") == "unsupported_language"
+
+
+def test_multilang_p1_off_imports_no_langplugins_or_tree_sitter_via_sys_modules():
+    """MULTILANG-P1 (I4/I3): in a CLEAN subprocess with the flag unset, running the FACT oracle over a Python
+    region still FIRES but imports NO ``langplugins`` / ``tree_sitter`` module (asserted via ``sys.modules``).
+    The plugin machinery is byte-identically absent when the flag is off."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    probe = (
+        "import json, sys\n"
+        "from framework.v2.verify import oracles\n"
+        "obs = {'rule_id': 'broken-crypto-invocation',"
+        " 'source': 'import hashlib\\ndef s(x):\\n    return hashlib.md5(x).hexdigest()\\n',"
+        " 'language': 'python', 'path': 'a.py', 'line': 1}\n"
+        "sig = oracles.static_rule_oracle(obs)\n"
+        "leaked = sorted(m for m in sys.modules if 'langplugins' in m or 'tree_sitter' in m)\n"
+        "print(json.dumps({'fired': bool(sig.fired), 'leaked': leaked}))\n"
+    )
+    env = {k: v for k, v in os.environ.items()}
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    env.pop("VIGIL_MULTILANG_CODESCAN", None)
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=120)
+    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["fired"] is True
+    assert out["leaked"] == [], f"OFF path imported a plugin / tree-sitter module: {out['leaked']}"
