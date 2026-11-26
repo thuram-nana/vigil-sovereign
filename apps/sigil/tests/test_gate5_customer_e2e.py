@@ -146,7 +146,8 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # not-authorized host — each non-active host offers a "Request authorization" (the expired one + the pending one).
     "#/settings/authorizations": {"Request authorization": 2},
     "#/guide": {"Replay the welcome tour": 1,
-                "Mark as done": 6},                                 # the open chapter, Get started: its six steps
+                "Mark as done": 7},   # the open chapter, Get started: six steps + the onlyIfShown Authorizations
+                                      # step (listed here because the gate enables VIGIL_CUSTOMER_AUTHORIZATIONS)
     "#/plans": {"Upgrade": 1, "Downgrade": 1, "Cancel plan": 1, "Buy credits on Billing": 1},
     "#/reports": {"Download report": 1, "Download PDF": 1},
     # signed out, the top bar's own Sign in is on every one of these, so the sign-in screen shows that label twice
