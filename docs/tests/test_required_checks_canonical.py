@@ -137,6 +137,15 @@ KNOWN_ADVISORY: dict[str, str] = {
         "ALSO run as integration/tests/test_vscp_isolation.py in the REQUIRED 'integration two-env boundary "
         "(P5)' job."
     ),
+    "AEGIS TT distinct-uid isolation (root container)": (
+        "ci.yml (AS-1a red-pen) — a root `container:` leg that RUNS the distinct-OS-uid tenant-isolation "
+        "tests (integration/tests/IT/test_aegis_tt_rig.py's test_observe_acceptance_distinct_uids and "
+        "test_cli_require_uids_runs_distinct) that SKIP as the non-root `runner` user in every other leg; "
+        "a JUnit guard (.github/scripts/assert_tt_uid_isolation_ran.py) fails it if either is skipped "
+        "rather than run. Advisory because it is a NEW check whose promotion to a merge blocker needs the "
+        "operator's tools/governance/require-checks.sh --apply (a GitHub-admin action); it reports red on "
+        "the PR when cross-tenant isolation regresses."
+    ),
 }
 
 # Jobs that never run on a pull_request at all (push/tag or schedule/dispatch only) and so CANNOT be a PR

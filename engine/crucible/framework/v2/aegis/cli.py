@@ -388,6 +388,36 @@ def _cmd_demo(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _env_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cmd_tt_acceptance(args: argparse.Namespace) -> int:
+    """Run the AEGIS Test-Tenant (TT) CI Observe acceptance (slice AS-1a): two isolated tenants over
+    real loopback — TT-A under a small attack corpus, TT-B the cross-tenant control. Proves the
+    attack event is visible to TT-A, a same-shape benign baseline is recorded, and TT-B sees nothing.
+
+    This is the ``vigil tt-acceptance``-style entry; it lives with the gateway it drives (engine
+    plane) so it never co-loads the sovereign plane (FATAL-2). ``--require-uids`` (or the
+    ``VIGIL_REQUIRE_TT_UIDS`` env) runs each tenant in its OWN process under a DISTINCT uid; if those
+    uids cannot be provisioned it FAILS (exit 2), never silently skips."""
+    import tempfile
+    from .tt_rig import TTUidsUnavailable, run_tt_acceptance  # lazy: off the gate path
+
+    require = bool(args.require_uids) or _env_truthy(os.environ.get("VIGIL_REQUIRE_TT_UIDS"))
+    root = args.root or tempfile.mkdtemp(prefix="aegis-tt-")
+    try:
+        result = run_tt_acceptance(root, require_distinct_uids=require)
+    except TTUidsUnavailable as exc:
+        sys.stderr.write(
+            f"aegis tt-acceptance: distinct uids REQUIRED but unavailable (FAIL, not skip): {exc}\n")
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    ok = bool(result.get("ok"))
+    sys.stderr.write("aegis tt-acceptance: " + ("PASS\n" if ok else "FAIL\n"))
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # argv is None only when invoked as a console-script entry point (`aegis ...`);
     # argparse then reads sys.argv[1:] itself. Existing callers (`__main__._aegis`)
@@ -464,6 +494,18 @@ def main(argv: list[str] | None = None) -> int:
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")
     demo.set_defaults(func=_cmd_demo)
+
+    tt = sub.add_parser("tt-acceptance",
+                        help="run the Test-Tenant CI Observe acceptance (AS-1a): TT-A sees the "
+                             "attack event, a benign baseline is recorded, TT-B sees nothing")
+    tt.add_argument("--root", default=None, metavar="DIR",
+                    help="the test root the per-tenant upstreams/gateways/feeds live under "
+                         "(default: a fresh temp dir)")
+    tt.add_argument("--require-uids", action="store_true",
+                    help="run each tenant in its own process under a DISTINCT uid; if uids cannot be "
+                         "provisioned, FAIL (exit 2) rather than skip. Also enabled by "
+                         "VIGIL_REQUIRE_TT_UIDS in the environment.")
+    tt.set_defaults(func=_cmd_tt_acceptance)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

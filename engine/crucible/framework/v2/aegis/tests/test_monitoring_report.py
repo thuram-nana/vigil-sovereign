@@ -87,6 +87,38 @@ def test_reporter_spools_confirmed_and_lead_but_not_clear(tmp_path):
     assert stat.S_IMODE((tmp_path / "incoming").stat().st_mode) == 0o700
 
 
+# ---- AS-3a strict-domain routing (opt-in, default-OFF) --------------------------------------------------
+def test_domain_slug_is_pinned_and_non_aliasing():
+    # the pinned vector (asserted equal sovereign-side) binds the two planes; the length-prefix means distinct
+    # (org, host) pairs can NEVER collapse into one slug.
+    assert R.domain_slug("org_a", "apme.cm") == "3b47c421ee2b04ed814c44a99213f64c"
+    assert R.domain_slug("ab", "c") != R.domain_slug("a", "bc")
+    assert len(R.domain_slug("x", "y")) == 32 and set(R.domain_slug("x", "y")) <= set("0123456789abcdef")
+
+
+def test_reporter_strict_domain_routes_into_its_own_slug_subtree(tmp_path):
+    rp = R.SpoolReporter(tmp_path, org_id="org_a", host="apme.cm", secret=SECRET, now_fn=lambda: 100.0,
+                         strict_domain=True)
+    rp(_v("confirmed"))
+    slug = R.domain_slug("org_a", "apme.cm")
+    # the sealed report lands under incoming/<slug>/, NOT flat in incoming/ — so a strict drain reads it from
+    # that tenant's own subtree in isolation.
+    assert list((tmp_path / "incoming").iterdir()) == [tmp_path / "incoming" / slug]
+    files = list((tmp_path / "incoming" / slug).glob("*.json"))
+    assert len(files) == 1 and rp.written == 1
+    env = json.loads(files[0].read_bytes())
+    assert _mac_ok(env) and json.loads(env["body"])["org_id"] == "org_a"
+
+
+def test_reporter_default_is_flat_incoming_byte_identical(tmp_path):
+    rp = R.SpoolReporter(tmp_path, org_id="org_a", host="apme.cm", secret=SECRET, now_fn=lambda: 100.0)
+    assert rp.strict_domain is False
+    rp(_v("confirmed"))
+    # default (strict_domain OFF): flat incoming/*.json, no domain subtree — unchanged from pre-AS-3a.
+    assert sorted(p.name for p in (tmp_path / "incoming").iterdir()) and \
+        all(p.is_file() for p in (tmp_path / "incoming").iterdir())
+
+
 def test_reporter_rate_cap_drops_and_counts(tmp_path):
     rp = R.SpoolReporter(tmp_path, org_id="o", host="h", secret=SECRET, max_per_minute=3, now_fn=lambda: 60.0)
     for _ in range(10):
