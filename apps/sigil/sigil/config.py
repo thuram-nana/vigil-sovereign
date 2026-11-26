@@ -898,6 +898,21 @@ def customer_data_rights_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_DATA_RIGHTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_ai_governance_enabled() -> bool:
+    """True iff the customer app shows its AI / human-in-the-loop GOVERNANCE disclosure (`VIGIL_CUSTOMER_AI_GOVERNANCE`
+    affirmative; legal/governance S5): a settings sub-screen (#/ai-governance, linked from the #/settings hub) that
+    STATES how VIGIL uses AI and the human oversight around it. It is a pure READ — the statements are SYNTHESISED from
+    the published Terms (§11 AI-assisted features, §12 data), the README's governing invariant (the AI only proposes;
+    four separate authorities run the system and none is the AI) and the Safety & Authorization briefing (the AI-free
+    danger-tier classifier; "AI proposes, the oracle disposes"), each cited on the screen. It adds NO new authority or
+    money control, mints nothing and mutates nothing.
+    OFF by default: the app is exactly as before (no #/ai-governance link, the route is the home screen exactly as any
+    unknown route, and no disclosure call is made). The edge's ``api/customer/ai-governance`` route and the cockpit's
+    ``ai_governance_disclosure`` action exist only while this is on. The edge reads it at startup (it is written into the
+    page) and on each request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_AI_GOVERNANCE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def customer_overview_enabled() -> bool:
     """True iff the customer app's home screen is the fuller Overview (`VIGIL_CUSTOMER_OVERVIEW` affirmative; C7):
     compact summary cards that pull from the SAME session-org-scoped reads the full screens use — credits available

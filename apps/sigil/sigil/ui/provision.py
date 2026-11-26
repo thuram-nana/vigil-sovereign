@@ -4751,6 +4751,21 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _cv.compliance_view(s, o, now=t, retests=retests))
 
+    def customer_ai_governance(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """Legal/governance S5 — the session org's AI / human-in-the-loop governance disclosure
+        (``ui/ai_governance``): a READ-ONLY statement of how VIGIL uses AI and the human oversight around it,
+        SYNTHESISED from the published Terms, the README invariant and the Safety & Authorization briefing (each cited
+        in the payload). ``admit_customer(view_assessments)`` for the SESSION org — the requester / org are the
+        hop-bound session principal, NEVER a body field, so no one reads another tenant's view (a revoked membership
+        dies on the next request). A pure read: it carries no finding, no proof, no authority and no money, mints
+        nothing and touches no owner key."""
+        from .. import config
+        if not config.customer_ai_governance_enabled():
+            raise ProvisionDenied("the AI governance disclosure is not enabled")
+        from . import ai_governance as _aig
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _aig.disclosure(o))
+
     def customer_report_export(self, requester: str, requester_org_id: str, *, fmt: str = "html", ip: str = "",
                                now: "Optional[float]" = None) -> dict:
         """PR-G — the session org's shareable report (``ui/report_export``): the deterministic HTML document, or (``fmt

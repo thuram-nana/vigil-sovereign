@@ -111,6 +111,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/settings/authorizations": ("Authorizations", ("api/customer/authorizations",)),   # legal/governance S12
     "#/privacy": ("Privacy", ("api/customer/privacy",)),                           # legal/governance S2
     "#/data-rights": ("Data rights", ("api/customer/data-rights",)),             # legal/governance S3
+    "#/ai-governance": ("How VIGIL uses AI", ("api/customer/ai-governance",)),      # legal/governance S5
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -144,6 +145,7 @@ _CONTROLS: dict[str, dict[str, int]] = {
                    "Authorized administrators": 1,
                    "Authorizations": 1,                             # S12: the hub's link to the Authorizations screen
                    "Data rights": 1,                                # S3: the hub's Data-rights link
+                   "How VIGIL uses AI": 1,                          # S5: the hub's link to the AI-governance sub-screen
                    "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
     # S12 Authorizations: the representative data has one active authority (no button), one expired authority and one
     # not-authorized host — each non-active host offers a "Request authorization" (the expired one + the pending one).
@@ -180,8 +182,8 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
-               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
+               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
 # api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
@@ -192,7 +194,8 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VI
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
               "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
-              "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS")   # + S2, S3 (legal/governance)
+              "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS",   # + S2, S3 (legal/governance)
+              "VIGIL_CUSTOMER_AI_GOVERNANCE")   # + S5 (legal/governance)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -521,6 +524,17 @@ _FAKE_SERVER = {
                         "controls": [{"id": "A03:2021", "name": "Injection", "status": "weakness_proven",
                                       "findings": [{"finding_ref": "f1", "title": "SQL injection",
                                                     "host": "a.example", "retest": None}]}]}]},
+    # S5: the AI / human-in-the-loop governance disclosure (ui/ai_governance) — the fixed statement and the cited
+    # sections. A pure display: no control, so the screen adds no button to the census.
+    "api/customer/ai-governance": {
+        "ok": True, "org_id": "org_acme",
+        "statement": "VIGIL uses AI to assist and advise — never as an authority.",
+        "sections": [{"title": "What AI does",
+                      "points": [{"text": "Parts of the Service use AI models to plan and prioritise testing.",
+                                  "source": "Terms of Service, §11"}]},
+                     {"title": "What AI never does",
+                      "points": [{"text": "AI never decides what you are charged or which hosts you may test.",
+                                  "source": "Terms of Service, §11"}]}]},
 }
 
 
@@ -918,7 +932,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
         for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
-                  "data-rights", "data-rights/export"):                                  # + S3
+                  "data-rights", "data-rights/export",   # + S3
+                  "ai-governance"):                                                      # + S5
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

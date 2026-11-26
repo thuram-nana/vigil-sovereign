@@ -261,6 +261,12 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 /* legal/governance S1 — the Settings hub (only while the edge has VIGIL_CUSTOMER_SETTINGS on): the General tab (its
    labelled fields, its Save, the notice when the details could not be loaded) and the card linking the other screens */
 #cust-settings-general { margin-bottom: 16px; }
+/* S5 — the AI / human-in-the-loop governance disclosure (#/ai-governance): a read-only screen of cited statements */
+.cust-ai-governance { display: grid; gap: 14px; max-width: 760px; }
+.cust-aig-statement { margin: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg-1); font-weight: 600; }
+.cust-aig-point { margin: 0 0 4px; }
+.cust-aig-cite { margin: 0 0 10px; font-size: 0.8rem; font-style: italic; }
 .cust-settings-general-form, .cust-settings-links { display: grid; gap: 6px; max-width: 640px; }
 .cust-settings-general-form h3, .cust-settings-general-form p,
 .cust-settings-links h3, .cust-settings-links p { margin: 0 0 6px; }

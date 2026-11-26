@@ -246,6 +246,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # deletion request). The same VIGIL_CUSTOMER_DATA_RIGHTS that serves its routes, so the screen and its API are never
     # out of step; a non-secret on/off value written into the page, counting in the build id.
     data_rights = _config.customer_data_rights_enabled()
+    # Legal/governance S5 — the AI / human-in-the-loop governance disclosure sub-screen (VIGIL_CUSTOMER_AI_GOVERNANCE,
+    # the same flag that serves its route). A non-secret on/off value written into the page, counting in the build id;
+    # off, its #/ai-governance link is absent and the route is the home screen exactly as any unknown route.
+    ai_governance = _config.customer_ai_governance_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -300,6 +304,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
                                      "__VIGIL_DATA_RIGHTS__": "1" if data_rights else "0",
+                                     "__VIGIL_AI_GOVERNANCE__": "1" if ai_governance else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -768,6 +773,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("report_export_pdf" if path.endswith("/pdf") else "report_export")
         if path == "/api/customer/compliance" and _compliance_on():     # PR-G compliance view (flag OFF -> 404)
             return self._customer_read_relay("compliance_view")
+        if path == "/api/customer/ai-governance" and _ai_governance_on():   # legal/governance S5 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("ai_governance_disclosure")
         if path == "/api/customer/assessments/proof" and _proof_badge_on():    # PR-I (flag OFF -> unknown-route 404)
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
@@ -1718,6 +1725,11 @@ def _privacy_center_on() -> bool:
 def _data_rights_on() -> bool:
     from .. import config as _config
     return _config.customer_data_rights_enabled()
+
+
+def _ai_governance_on() -> bool:
+    from .. import config as _config
+    return _config.customer_ai_governance_enabled()
 
 
 def _plain_body_refusal(e: Exception) -> str:

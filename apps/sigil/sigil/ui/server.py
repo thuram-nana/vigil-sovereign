@@ -1940,6 +1940,14 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        # Legal/governance S5 — the AI / human-in-the-loop governance disclosure (read-only). Org from the edge
+        # SESSION; absent (unknown action -> 404) unless VIGIL_CUSTOMER_AI_GOVERNANCE is on, the same flag that serves
+        # its edge route.
+        if action == "ai_governance_disclosure":
+            from .. import config as _config
+            if not _config.customer_ai_governance_enabled():
+                return None
+            return p.customer_ai_governance(requester, str(body.get("org_id", "")), ip=ip)
         # PR-G (Area 6) — Plans + plan change, the report export, the compliance view. Each absent (unknown action ->
         # 404) unless its own flag is on (the same flag that serves its edge route); org from the edge SESSION.
         if action in self._AREA6_ACTIONS:

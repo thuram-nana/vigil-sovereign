@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -3904,6 +3904,35 @@
   }
   // ---- end of Plans, Reports and the standards mapping (PR-G) ------------------------------------------------------
 
+  // ---- AI governance (VIGIL_CUSTOMER_AI_GOVERNANCE): the AI / human-in-the-loop disclosure sub-screen (S5) ----------
+  // Shown only while the edge writes data-ai-governance="1" (AI_GOVERNANCE_ON, read in the Settings section). One read
+  // (api/customer/ai-governance) over the existing one-read helper (area6View): the server returns the fixed negating
+  // statement and the cited sections, and the screen shows exactly those words and their sources — no control, no
+  // estimate, no engine name, nothing it rewords. Linked from the Settings hub.
+  function viewAiGovernance() {
+    return area6View("#/ai-governance", "How VIGIL uses AI",
+      "How VIGIL uses AI across the Service, and the human oversight around it — drawn word for word from your "
+      + "Terms of Service, the README and the Safety & Authorization briefing, each cited so you can check it.",
+      API + "/ai-governance",
+      "Only members who can see this workspace's assessments can open this page.", aiGovernanceBody);
+  }
+  // The disclosure as the server sent it: the one negating statement, then each cited section. Every sentence is the
+  // server's own (ui/ai_governance), shown verbatim with its source; the screen invents nothing and offers no control.
+  function aiGovernanceBody(d) {
+    var head = [];
+    if (d && d.statement) { head.push(h("p.cust-aig-statement", { role: "note", text: String(d.statement) })); }
+    var sections = (d && Array.isArray(d.sections)) ? d.sections : [];
+    var cards = sections.map(function (s) {
+      var rows = [];
+      ((s && Array.isArray(s.points)) ? s.points : []).forEach(function (pt) {
+        rows.push(h("p.cust-aig-point", { text: String((pt && pt.text) || "") }));
+        if (pt && pt.source) { rows.push(h("p.cust-muted.cust-aig-cite", { text: "Source: " + String(pt.source) })); }
+      });
+      return VUI.card(String((s && s.title) || ""), null, rows);
+    });
+    return h("div.cust-ai-governance", {}, head.concat(cards));
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -4109,6 +4138,11 @@
   // request; it mints no authority and changes no scope (the gate stays the sole authority). The screen itself lives in
   // its own block below (outside this hub's own code), so the hub still reaches the network through /preferences alone.
   var AUTHZ_ON = pageFlag("authorizations");
+  // Legal/governance S5: the AI / human-in-the-loop governance disclosure sub-screen (data-ai-governance="1",
+  // VIGIL_CUSTOMER_AI_GOVERNANCE). Off, #/ai-governance is the home screen exactly as any unknown route, the settings
+  // hub shows no link to it, and nothing is fetched. A pure read: it shows statements drawn word for word from the
+  // Terms, the README and the Safety & Authorization briefing (cited), and offers no control.
+  var AI_GOVERNANCE_ON = pageFlag("aiGovernance");
   // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
   // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
   var PREF_FIELDS = [
@@ -4138,6 +4172,7 @@
       settingsLink("Authorizations", "#/settings/authorizations"),
       settingsLink("Billing", "#/billing"),
       settingsLink("Data rights", "#/data-rights"),
+      AI_GOVERNANCE_ON ? settingsLink("How VIGIL uses AI", "#/ai-governance") : null,   // S5: only while its flag is on
     ]);
   }
   // The General tab: the profile fields, pre-filled from what the server stored, with one Save. `shown` keeps each
@@ -4526,6 +4561,8 @@
     "#/privacy": function () { return authed() ? (PRIVACY_CENTER_ON ? viewPrivacy() : viewDashboard()) : viewLogin(); },
     // the data-rights screen off: #/data-rights is the home screen, exactly as any unknown route is
     "#/data-rights": function () { return authed() ? (DATA_RIGHTS_ON ? viewDataRightsScreen() : viewDashboard()) : viewLogin(); },
+    // S5 off: #/ai-governance is the home screen, exactly as any unknown route is
+    "#/ai-governance": function () { return authed() ? (AI_GOVERNANCE_ON ? viewAiGovernance() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

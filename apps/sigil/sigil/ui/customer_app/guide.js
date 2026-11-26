@@ -131,6 +131,14 @@
                    "It states your rights — access, correction, deletion and export — in VIGIL's published words, and VIGIL responds to a data-rights request within 30 days at info@sigilsovereign.com.",
                    "Select Export my data to download your workspace's own records (invoices, usage and findings), or Request account deletion to record a close-account request for VIGIL to act on."],
           why: "Data rights states your rights and lets you export your own records or record a deletion request. Recording a request does not erase VIGIL's immutable, signed history by itself — that is the owner-gated hard-prune process; your request is what VIGIL acts on." },
+        // The AI governance disclosure (legal/governance S5): served under data-ai-governance (VIGIL_CUSTOMER_AI_GOVERNANCE,
+        // default OFF). Route-gated like Account security, so the guide hides this step where the screen is off.
+        { id: "ai_governance", title: "See how VIGIL uses AI", where: "How VIGIL uses AI", route: "#/ai-governance",
+          when: "aiGovernance",
+          clicks: ["Under Settings, open How VIGIL uses AI.",
+                   "Read what AI does (it assists and advises), what it never does (it decides no finding, no charge and no scope on its own), and where your data goes.",
+                   "Every statement cites the Terms, the README or the Safety and Authorization briefing it is drawn from. Nothing on this screen can be changed: it is a disclosure only."],
+          why: "VIGIL uses AI to assist and advise, never as an authority: no finding, charge or action takes effect on an AI's say-so." },
       ],
     },
     {
