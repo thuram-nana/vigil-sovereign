@@ -62,6 +62,67 @@ def test_s2_flag_off_projection_and_confirmed_findings_are_byte_identical(monkey
     assert project(recs).model_dump() == baseline
 
 
+# --- CROSS-SLICE flag-OFF byte-identity (S2 + S3 + S4 combined) -------------------------------
+
+def _all_slices_spine_fixture():
+    """A fixed spine exercising EVERY cross-slice record kind in ONE projection: the base kinds
+    (chain/step/finding), S3's ``goal`` / ``reach`` + a ``step`` carrying an objective id, S2's
+    join-eligible confirmed finding, and S4's ``remediation`` / ``retest``. With all three flags OFF the
+    new kinds are inert and the step's objective id adds no edge, so the view must be byte-identical to the
+    base-only projection (the same spine with the flag-gated kinds removed)."""
+    return [
+        SpineRecord(seq=1, hash="c1", kind="chain", chain_id="C", props={"objective": "o"}),
+        SpineRecord(seq=2, hash="s1", kind="step", step_id="S1", chain_id="C",
+                    objective_id="G1", props={"tool": "nmap"}),
+        _finding_rec(3, "f1", ref="F-fact", status="fact", evidence_ref="cert:abc", signature_ref="sig:1",
+                     parent_step_id="S1", targets=[{"type": "host", "value": "in-scope.tld"}]),
+        SpineRecord(seq=4, hash="g1", kind="goal", objective_id="G1", props={"title": "crown jewel"}),
+        SpineRecord(seq=5, hash="rc1", kind="reach", objective_id="G1", status="fact",
+                    evidence_ref="cert:reach", signature_ref="sig:reach",
+                    targets=[{"type": "host", "value": "in-scope.tld"}]),
+        SpineRecord(seq=6, hash="rem1", kind="remediation",
+                    props={"remediation_id": "REM1",
+                           "remediation_cert": {"verdict": "fixed", "finding_ref": "F-fact",
+                                                "original_finding_cert_digest": "dig"}}),
+        SpineRecord(seq=7, hash="ret1", kind="retest",
+                    props={"remediation_id": "REM1", "retest_log_ref": "log/REM1"}),
+    ]
+
+
+def test_all_three_flags_off_combined_projection_is_byte_identical_to_preslice(monkeypatch):
+    # CROSS-SLICE flag-OFF byte-identity: with S3 (VIGIL_GRAPH_OBJECTIVES), S2 (VIGIL_GRAPH_EVIDENCE_JOIN)
+    # and S4 (VIGIL_GRAPH_LIFECYCLE) ALL OFF, a spine carrying goal/reach/remediation/retest AND a
+    # join-eligible confirmed finding projects a view byte-identical to the pre-slice read-model (the same
+    # spine with the flag-gated kinds removed): the new kinds are inert, the step's objective id adds no
+    # edge, and no S2 join tag is written. Runs framework-free (no flag armed ⇒ no framework import).
+    monkeypatch.delenv("VIGIL_GRAPH_OBJECTIVES", raising=False)
+    monkeypatch.delenv("VIGIL_GRAPH_EVIDENCE_JOIN", raising=False)
+    monkeypatch.delenv("VIGIL_GRAPH_LIFECYCLE", raising=False)
+    full = _all_slices_spine_fixture()
+    preslice = [r for r in full if r.kind in {"chain", "step", "finding"}]
+    combined = project(full)
+    assert combined.model_dump() == project(preslice).model_dump(), \
+        "all-three-flags-OFF must be byte-identical to the pre-slice read-model"
+    # none of the flag-gated nodes leaked in (S3 OBJECTIVE, S4 REMEDIATION/RETEST).
+    assert not any(n.label in (NodeLabel.OBJECTIVE, NodeLabel.REMEDIATION, NodeLabel.RETEST)
+                   for n in combined.nodes.values())
+    # none of the flag-gated edges leaked in (S3 REACHES/PURSUES, S4 REMEDIATED_BY/RETESTED_BY).
+    assert not any(e.type in (EdgeType.REACHES, EdgeType.PURSUES, EdgeType.REMEDIATED_BY,
+                              EdgeType.RETESTED_BY) for e in combined.edges)
+    # no S2 join demote marker was written (the join never ran).
+    assert all("evidence_join" not in n.props for n in combined.nodes.values())
+    # the confirmed set is exactly the intrinsic FACT — the join never demoted it, the lifecycle never
+    # laundered one in, and the Goal is never a fact.
+    assert {n.props["ref"] for n in combined.confirmed_findings()} == {"F-fact"}
+    # passing EVERY slice's params with the flags OFF changes NOTHING (inert).
+    with_params = project(full, objectives=None, evidence_root="/nonexistent",
+                          contexts={"F-fact": {"host": "in-scope.tld"}},
+                          trust_root_fingerprint="sha256:" + ("ab" * 32), lifecycle=None).model_dump()
+    assert with_params == combined.model_dump(), "every slice's params must be inert when all flags are OFF"
+    # determinism: a second projection is byte-identical.
+    assert project(full).model_dump() == combined.model_dump()
+
+
 # --- the anti-trust-laundering core ----------------------------------------------------------
 
 def test_claimed_fact_without_signed_evidence_is_a_lead():
