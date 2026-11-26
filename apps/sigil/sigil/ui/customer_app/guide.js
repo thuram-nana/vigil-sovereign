@@ -175,7 +175,7 @@
     },
     {
       id: "hosts", title: "Prove you control a host",
-      lead: "VIGIL tests and protects a host only after you prove you control it.",
+      lead: "VIGIL tests and monitors a host only after you prove you control it.",
       steps: [
         { id: "register", title: "Register the host", where: "Assets", route: "#/assets",
           clicks: ["Select Assets in the top bar.",
