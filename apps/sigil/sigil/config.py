@@ -816,6 +816,48 @@ def cloud_connect_fetcher():
     return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
 
 
+# --- AZURE OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) -------------------------
+# The ONLY hosts the Azure cloud-connect fetcher (`ui.cloud_fetch.AzureConsentConnectFetcher`) may reach, enforced
+# BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): Microsoft Entra ID (the client-credentials token
+# endpoint) and Microsoft Graph (the admin-set external-id binding read). No endpoint override — the credential-
+# holding egress can only ever reach these two. A customer supplies only a tenant id + the enterprise-app Object ID
+# (PATH segments of host-pinned requests, never a host), so the customer can never steer this egress anywhere.
+AZURE_CLOUD_CONNECT_EGRESS_ALLOWLIST = frozenset({"login.microsoftonline.com", "graph.microsoft.com"})
+
+# VIGIL's multi-tenant Azure AD app-registration client id (a GUID) — the tenant-agnostic application a customer's
+# Global Admin admin-consents into their tenant (the Azure analog of the AWS connector principal). Validated so a
+# malformed value can never be printed into a customer's admin-consent URL.
+_AZURE_CLIENT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def cloud_connect_azure_client_id() -> str:
+    """VIGIL's Azure connector app (client) id (`VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID`), format-checked, or "" when
+    unset/malformed (the Azure cloud leg then offers nothing — fail closed, never an admin-consent URL naming a bad
+    client id)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID") or "").strip()
+    return raw if _AZURE_CLIENT_ID_RE.fullmatch(raw) else ""
+
+
+def azure_connect_fetcher():
+    """The live Azure cloud-connect fetcher (``ui.cloud_fetch.AzureConsentConnectFetcher``: a client-credentials
+    token against the customer's tenant proves admin consent, a Microsoft Graph read confirms the admin-set
+    external-id binding, and the same-shape negative control proves the result is tenant-specific) when the cloud leg
+    is ON and the owner has provisioned VIGIL's Azure app (client id + a client secret OR a client assertion/cert),
+    else None (fail closed: the provisioner then offers and verifies no Azure flow). Credentials:
+    `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET` OR `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION` — an app whose only
+    consented permission is a read-only Graph read. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_azure_client_id():
+        return None
+    secret = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET") or "").strip()
+    assertion = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION") or "").strip()
+    if not secret and not assertion:
+        return None
+    from .ui.cloud_fetch import AzureConsentConnectFetcher
+    return AzureConsentConnectFetcher(client_id=cloud_connect_azure_client_id(), client_secret=secret,
+                                      client_assertion=assertion)
+
+
 def customer_posture_enabled() -> bool:
     """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
     Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of

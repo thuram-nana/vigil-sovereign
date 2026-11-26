@@ -577,8 +577,8 @@
   },
   {
    "id": "LIMIT-cloud-connect-gcp-azure-verdict",
-   "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
-   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
+   "title": "Customer cloud connect verifies AWS and Azure accounts; GCP is refused at the first step",
+   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account (VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity - the account the role lands in - and requires a same-shape negative control: the same role must DENY a fresh random external id) and of an Azure tenant (a multi-tenant app-registration consent token proving admin consent, the token tid decode, a Microsoft Graph read-back of the admin-set external-id binding, and a same-shape negative control against a derived random control tenant). GCP (service-account impersonation) still needs a different observation and verdict, which is not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws, azure}, so issue_challenge and verify_and_connect refuse gcp before any record is written, and the connect screen offers only AWS and Azure - no customer is walked into a flow that cannot finish.",
    "classification": "real-unfinished-code",
    "severity": "info",
    "anchor": {
@@ -588,6 +588,22 @@
    "marker": true,
    "check": "symbol-exists",
    "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-cloud-connect-azure-live-fire",
+   "title": "Azure customer cloud-connect is proven offline in full; the live Entra/Graph round-trip is an owner-provisioned residual",
+   "summary": "The Azure cloud-connect proof (ui/cloud_fetch.py::AzureConsentConnectFetcher: a client-credentials token against the customer tenant proving admin consent, the token tid decode, the Microsoft Graph service-principal binding read, and the same-shape negative control against a derived control tenant) and its deterministic verdict (governor/cloud_connect.py::cloud_grant_refusal azure branch) are covered OFFLINE in full by apps/sigil/tests/test_cloud_fetch_azure.py / test_cloud_connect_azure.py / test_connect_provision_azure.py, with a fake Entra+Graph transport that routes by tenant and answers the binding read through the same egress guard. What stays a residual: the real round-trip to live Microsoft Entra ID and Graph is a deploy-gated live-fire, exercised only once the owner provisions VIGIL's multi-tenant Azure app (client id + secret/cert) and a customer's Global Admin admin-consents it and sets the external-id tag - there is no live AAD in CI, and (unlike the AWS SigV4 signer) no in-repo reference implementation to pin the live protocol against. Default-OFF behind VIGIL_CUSTOMER_CLOUD_CONNECT: byte-identical when off, a grant authorizes no offense.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/cloud_fetch.py",
+    "symbol": "AzureConsentConnectFetcher"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/ui/cloud_fetch.py",
    "disposition": "file-into-w16",
    "w16_issue": null
   },

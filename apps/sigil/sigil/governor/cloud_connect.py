@@ -14,6 +14,18 @@ customer's account through VIGIL (the confused-deputy hole the external id exist
 assumes the SAME role with a FRESH RANDOM external id, and the verdict holds only if that control was explicitly
 DENIED. A role that admits an arbitrary external id is refused, for every tenant, with a message naming the fix.
 
+AZURE (a multi-tenant app-registration consent) proves control of a TENANT differently but to the same bar. VIGIL
+ships one multi-tenant Azure AD app. A customer's Global Admin admin-consents it INTO their tenant (a tenant-admin-
+only act) and, to bind THIS challenge, sets the issued ``external_id`` as a tag on VIGIL's enterprise application in
+their directory (editable only by a tenant admin / the app's owner). Trusted sovereign code then takes a client-
+credentials token against the customer's tenant (success proves the consent), decodes the token's ``tid`` claim
+(which must equal the tenant id), reads VIGIL's OWN service principal back over Microsoft Graph and confirms the tag
+equals ``external_id`` (constant-time). The SAME-SHAPE NEGATIVE CONTROL asks for a token in a FRESH RANDOM control
+tenant (derived from the control id), which must be explicitly DENIED — so a positive result is specific to the
+customer's tenant and VIGIL's app is never treated as consented everywhere. Only a tenant admin can BOTH consent
+the app AND tag its enterprise application, so the read-back proves control for THIS challenge (confused-deputy-safe:
+another tenant's admin can set neither in the customer's directory, and could not know the unguessable external id).
+
 WHY IT MATTERS (the doctrine, stated once, enforced): own-a-repo != own-a-host != CONNECT-A-CLOUD-ACCOUNT !=
 offense-test. Connecting a cloud account RECORDS an owner-verified asset; it is a DISTINCT, read-only capability.
 It NEVER, by itself, authorizes a live offense run — not against the cloud account, not against anything. The
@@ -84,24 +96,34 @@ CHALLENGE_SIGNAL = "governor.cloud_connect_challenge"
 GRANT_SIGNAL = "governor.cloud_connect_grant"
 
 # The cloud provider vocabulary. The proof is CONCRETE for AWS (external-id assume-role + caller-identity account
-# match + the same-shape negative control). GCP (service-account impersonation) and Azure (a multi-tenant app
-# registration) need a different observation; their verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict),
-# so BOTH a challenge and a verify refuse them — a customer is never walked into a flow that cannot finish.
+# match + the same-shape negative control) and for AZURE (a multi-tenant app-registration consent token + an
+# admin-set external-id binding read back over Microsoft Graph + the same-shape negative control). GCP
+# (service-account impersonation) still needs a different observation and verdict.
+# GCP's verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict), so a GCP challenge and verify
+# refuse — a customer is never walked into a flow that cannot finish.
 PROVIDER_AWS = "aws"
 PROVIDER_GCP = "gcp"
 PROVIDER_AZURE = "azure"
 _PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE})
-# The providers whose deterministic proof-of-control verdict exists. Anything else fails closed at the first step.
-_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS})
+# The providers whose deterministic proof-of-control verdict exists (AWS and Azure). Anything else fails closed at
+# the first step.
+_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_AZURE})
 
 # A cloud ACCOUNT id: a provider-agnostic single safe token (alnum start, then [A-Za-z0-9._-], max 128) — one safe
 # spine key component that can never widen scope. AWS additionally requires the exact 12-digit account id.
 _ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _AWS_ACCOUNT_RE = re.compile(r"[0-9]{12}")
+# An Azure account id is the customer's TENANT id — a lowercase GUID (AAD renders tenant ids lowercase, and the
+# token's ``tid`` claim is compared against it constant-time, so the canonical lowercase form is required here).
+_AZURE_TENANT_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # A role / grant REFERENCE the customer created — a public identifier, never a secret. Bounded + control-char-free;
-# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected.
+# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected; for Azure it is the
+# Object ID (a GUID) of VIGIL's enterprise application in the customer's tenant (what the admin copies from the
+# portal) — a public reference recorded with the grant. The Azure proof reads VIGIL's OWN service principal by
+# VIGIL's constant client id, so the role_ref never steers the read.
 _ROLE_REF_MAX = 512
 _AWS_ROLE_ARN_RE = re.compile(r"arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]{1,512}")
+_AZURE_OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 # The AWS managed policy the connect screen asks the customer to attach: read-only access to security configuration
 # metadata (list/describe/get), the standard for cloud-posture tooling. Shown, never enforced by this module.
@@ -141,7 +163,8 @@ def _check_verifiable(provider: str) -> str:
     """A provider whose proof-of-control VIGIL can actually check — anything else refuses at the first step."""
     p = _check_provider(provider)
     if p not in _VERIFIABLE_PROVIDERS:
-        raise ValueError(f"connecting a {p!r} account is not available — only AWS accounts can be connected today")
+        raise ValueError(f"connecting a {p!r} account is not available — "
+                         f"only AWS and Azure accounts can be connected today")
     return p
 
 
@@ -149,9 +172,11 @@ def _check_account(account_id: str, provider: str = "") -> str:
     a = str(account_id or "").strip()
     if not _ACCOUNT_RE.fullmatch(a):
         raise ValueError("account_id must be an alphanumeric start then [A-Za-z0-9._-], max 128 chars, "
-                         "no separators / traversal / spaces (an AWS account id / GCP project / Azure subscription)")
+                         "no separators / traversal / spaces (an AWS account id / GCP project / Azure tenant id)")
     if provider == PROVIDER_AWS and not _AWS_ACCOUNT_RE.fullmatch(a):
         raise ValueError("an AWS account id is exactly 12 digits")
+    if provider == PROVIDER_AZURE and not _AZURE_TENANT_RE.fullmatch(a):
+        raise ValueError("an Azure tenant id is a lowercase GUID, e.g. 00000000-0000-0000-0000-000000000000")
     return a
 
 
@@ -167,6 +192,9 @@ def _check_role_ref(role_ref: str, provider: str = "", account_id: str = "") -> 
             raise ValueError("give the role's full ARN, e.g. arn:aws:iam::123456789012:role/VigilSecurityAudit")
         if account_id and m.group(1) != account_id:
             raise ValueError("the role ARN names a different AWS account than the one you are connecting")
+    if provider == PROVIDER_AZURE and not _AZURE_OBJECT_ID_RE.fullmatch(r):
+        raise ValueError("give the Object ID (a GUID) of VIGIL's enterprise application in your tenant, "
+                         "e.g. 00000000-0000-0000-0000-000000000000")
     return r
 
 
@@ -201,13 +229,26 @@ def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observ
       * ``account`` equals the claimed ``account_id`` — the role LANDS IN the claimed account. THE control proof;
       * ``control_external_id`` equals the control id the provisioner generated for this check and differs from the
         real id, and ``control_denied`` is exactly ``True`` — the same role REFUSED an arbitrary external id, so its
-        trust policy enforces ours (the confused-deputy guard; see the module docstring)."""
+        trust policy enforces ours (the confused-deputy guard; see the module docstring).
+
+    For AZURE the observation is instead
+
+        {"tenant": <the token's tid claim>, "external_id_matched": <True iff the admin-set tag equals external_id>,
+         "external_id": <the id the binding was checked against>, "control_tenant": <the derived control tenant>,
+         "control_denied": <True iff the control tenant's token was explicitly AADSTS-denied>}
+
+    and the verdict holds iff ``tenant`` equals the claimed ``account_id`` (the tenant VIGIL got a token for),
+    ``external_id_matched`` is ``True`` AND ``external_id`` equals this challenge's id (constant-time; a replayed
+    observation from a prior challenge is refused), ``control_tenant`` equals the tenant derived from this check's
+    control id (the observation belongs to THIS check), and ``control_denied`` is exactly ``True``."""
     try:
         ext, ctl = str(external_id or ""), str(control_external_id or "")
         if provider not in _VERIFIABLE_PROVIDERS:
             return "connecting this kind of cloud account is not available"
         if not ext or not ctl or _ct_eq(ext, ctl) or not isinstance(observed, dict):
             return _NOT_MADE
+        if provider == PROVIDER_AZURE:
+            return _azure_grant_refusal(ext, ctl, str(account_id or ""), observed)
         got_ext, got_acct = observed.get("assumed_with_external_id"), observed.get("account")
         got_ctl, denied = observed.get("control_external_id"), observed.get("control_denied")
         if not isinstance(got_ext, str) or not _ct_eq(ext, got_ext):
@@ -233,6 +274,42 @@ def cloud_grant_proves(provider: str, external_id: str, account_id: str, observe
                                control_external_id=control_external_id) is None
 
 
+def azure_control_tenant(control_external_id: str) -> str:
+    """A deterministic, random-LOOKING Azure tenant GUID derived from the provisioner's unguessable control id — the
+    tenant the Azure negative control asks for a token against. It is NOT a real tenant (it is a domain-separated
+    hash of a secret), so a well-behaved AAD answers with an explicit no-consent / tenant-not-found error; a control
+    that answers anything but that explicit denial is inconclusive and fails closed. The SAME function runs in the
+    fetcher (which tests this tenant) and in the verdict (which re-binds ``observed['control_tenant']`` to it), so a
+    replayed or mismatched control observation is refused — the Azure analog of AWS's control-external-id re-bind."""
+    from ..reuse import sha256_hex
+    h = sha256_hex(("vigil-azure-connect-control:" + str(control_external_id or "")).encode("utf-8"))
+    return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _azure_grant_refusal(ext: str, ctl: str, account_id: str, observed: dict) -> Optional[str]:
+    """The AZURE leg of :func:`cloud_grant_refusal` (``ext``/``ctl`` already validated non-empty and distinct, and
+    ``observed`` already known to be a dict). TOTAL and FAIL-CLOSED. Holds iff the token's ``tid`` is the claimed
+    tenant, the admin-set external-id binding matched (constant-time) and is THIS challenge's id, the control tenant
+    is the one derived from this check's control id, and the negative control was explicitly denied."""
+    got_tid = observed.get("tenant")
+    got_match = observed.get("external_id_matched")
+    got_ext = observed.get("external_id")
+    got_ctl = observed.get("control_tenant")
+    denied = observed.get("control_denied")
+    if not isinstance(got_tid, str) or not _ct_eq(account_id, got_tid):
+        return (f"control of {account_id} was not proven — the token VIGIL obtained is for a different Azure tenant "
+                f"(admin-consent VIGIL's app into tenant {account_id} and try again)")
+    if got_match is not True or not isinstance(got_ext, str) or not _ct_eq(ext, got_ext):
+        return ("the connect binding was not found in your tenant — set the external id shown on the connect screen "
+                "as the tag on VIGIL's enterprise application, then verify again")
+    if not isinstance(got_ctl, str) or not _ct_eq(azure_control_tenant(ctl), got_ctl):
+        return _NOT_MADE
+    if denied is not True:
+        return ("the admin-consent proof is not specific to your tenant (the negative control was not denied), so "
+                "the account was not connected")
+    return None
+
+
 # ---------------------------------------------------------------------------------------------------
 # Placement — a deterministic function of (VIGIL's connector principal, external_id). The edge hands this to the
 # customer verbatim ("create a read-only role whose trust policy is exactly this").
@@ -246,6 +323,37 @@ def aws_trust_policy(principal_arn: str, external_id: str) -> str:
            "Statement": [{"Effect": "Allow", "Principal": {"AWS": str(principal_arn)}, "Action": "sts:AssumeRole",
                           "Condition": {"StringEquals": {"sts:ExternalId": str(external_id)}}}]}
     return json.dumps(doc, indent=2)
+
+
+def azure_placement(client_id: str, tenant_id: str, external_id: str) -> dict:
+    """The exact admin-consent placement VIGIL hands the customer's Global Admin to prove control of Azure tenant
+    ``tenant_id`` — the Azure analog of :func:`aws_trust_policy`, deterministic (stable) so the screen and a test
+    agree byte-for-byte:
+      * ``admin_consent_url`` — admin-consent VIGIL's multi-tenant app (``client_id``) INTO this tenant (a
+        tenant-admin-only act; success is what the client-credentials token later proves);
+      * ``binding_tag`` — after consent, set THIS value (the challenge ``external_id``) as a tag on VIGIL's
+        enterprise application in the tenant (editable only by a tenant admin / the app's owner), which binds this
+        specific challenge and closes the confused-deputy hole (another tenant's admin cannot set it, and could not
+        guess the unguessable id);
+      * ``graph_read`` — the exact Microsoft Graph read VIGIL performs with its OWN app token (keyed on VIGIL's
+        constant ``client_id``, so it is never customer-steerable) to confirm the tag.
+    Recording the resulting grant authorizes NO offense (see the module docstring)."""
+    cid, tid = str(client_id), str(tenant_id)
+    return {
+        "client_id": cid,
+        "admin_consent_url": f"https://login.microsoftonline.com/{tid}/adminconsent?client_id={cid}",
+        "binding_tag": str(external_id),
+        "graph_read": (f"GET https://graph.microsoft.com/v1.0/servicePrincipals(appId='{cid}')"
+                       f"?$select=appId,id,tags"),
+        "steps": [
+            (f"As a Global Administrator of tenant {tid}, open the admin-consent URL and grant VIGIL's app admin "
+             f"consent (read-only application permissions)."),
+            ("In Microsoft Entra ID -> Enterprise applications -> VIGIL -> Properties, add the binding tag shown "
+             "(the external id) as a tag, then Save."),
+            ("Return here and verify: VIGIL reads its own service principal back over Microsoft Graph and confirms "
+             "the tag equals the external id."),
+        ],
+    }
 
 
 @dataclass(frozen=True)

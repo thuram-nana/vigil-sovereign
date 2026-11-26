@@ -107,7 +107,8 @@ def test_verdict_refuses_a_control_that_is_not_the_one_issued_or_is_the_real_id(
 
 def test_verdict_refuses_unverifiable_providers_and_bad_input():
     good = _observed("EXT", ACCT)
-    assert cc.cloud_grant_proves("gcp", "EXT", ACCT, good, control_external_id=CTL) is False
+    assert cc.cloud_grant_proves("gcp", "EXT", ACCT, good, control_external_id=CTL) is False   # gcp: no verdict
+    # azure IS verifiable now, but an AWS-shaped observation (no tenant / external_id_matched) never satisfies it
     assert cc.cloud_grant_proves("azure", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "", ACCT, _observed("", ACCT), control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "EXT", ACCT, "not-a-dict", control_external_id=CTL) is False
@@ -183,10 +184,11 @@ def test_verify_refuses_a_superseded_external_id():
 
 
 def test_an_unverifiable_provider_is_refused_at_the_first_step_and_writes_nothing():
+    # gcp has no deterministic verdict (azure now does — see test_cloud_connect_azure.py), so it is refused up front
     s = _store()
     r = _reg(s)
     before = s.next_seq
-    for prov, acct in (("gcp", "proj-123"), ("azure", "sub-1")):
+    for prov, acct in (("gcp", "proj-123"),):
         with pytest.raises(ValueError, match="only AWS"):
             r.issue_challenge("acme", prov, acct, issued_at=_t(), external_id="EXT1")
         with pytest.raises(ValueError, match="only AWS"):
