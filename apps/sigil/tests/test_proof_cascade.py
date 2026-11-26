@@ -199,6 +199,53 @@ def test_partial_cascade_is_failsafe_and_idempotently_completed(monkeypatch):
     assert own.proof("acme", "beta.cm") is None
 
 
+# --- NEGATIVE CONTROL: a PRECEDING cascade raising must NOT skip the proof cascade (isolation) -------
+
+def test_proof_cascade_runs_even_when_monitoring_cascade_raises(monkeypatch):
+    """CASCADE ISOLATION (AS-2l red-pen MEDIUM): `revoke_org` runs the membership, monitoring-authority and
+    proof cascades. The monitoring-authority cascade is NOT itself fail-safe (its `revoke` unpublishes to the
+    edge, which can raise). Without isolation it ran sequentially BEFORE the proof cascade with no try/except,
+    so a raising monitoring cascade SKIPPED the proof cascade entirely — leaving the org's ownership proofs
+    ACTIVE, which a re-created org_id would inherit (defeating the slice's whole anti-replay guarantee on
+    exactly the partial-failure path the cascade exists to handle).
+
+    This injects a crash into the monitoring-authority cascade (which runs BEFORE the proof cascade) and
+    asserts the PROOF cascade STILL ran (the proof is revoked) AND the overall call still SURFACES the failure
+    (an aggregated raise), rather than silently swallowing it. Mutation-sensitive: with the pre-fix sequential
+    code the proof cascade is skipped and `own.proof("acme", "apme.cm")` stays non-None, failing below."""
+    s = _store()
+    orgs, own = _orgs(s), _own(s)
+    orgs.create_org("acme", "Acme", owner="owner", issued_at=_issue())
+    _prove(own, "acme", "apme.cm")
+    assert own.has_current_proof("acme", "apme.cm", now=150.0) is True
+
+    # make the monitoring-authority cascade (which lands BEFORE the proof cascade) blow up.
+    from sigil.governor.monitoring_authority import MonitoringAuthorityRegistry
+
+    real_revoke_org = MonitoringAuthorityRegistry.revoke_org
+
+    def _boom(self, org_id):
+        raise RuntimeError("simulated monitoring-authority cascade crash")
+
+    monkeypatch.setattr(MonitoringAuthorityRegistry, "revoke_org", _boom)
+
+    # the call still SURFACES the failure (aggregated raise) rather than swallowing it...
+    with pytest.raises(RuntimeError):
+        orgs.revoke_org("acme")
+
+    # ...BUT the proof cascade ran anyway (it is no longer gated on the preceding cascade succeeding):
+    assert own.proof("acme", "apme.cm") is None
+    assert own.has_current_proof("acme", "apme.cm", now=150.0) is False
+    # the org revoke landed FIRST (fail-safe ordering), so the tenant admits no one regardless.
+    assert orgs.org("acme") is None
+
+    # Recovery: with the fault gone, re-running the (now complete) decommission is an idempotent no-op in
+    # effect — the monitoring cascade finishes and the proof stays revoked.
+    monkeypatch.setattr(MonitoringAuthorityRegistry, "revoke_org", real_revoke_org)
+    orgs.revoke_org("acme")
+    assert own.proof("acme", "apme.cm") is None
+
+
 # --- ROBUSTNESS: a corrupt folded proof cannot abort the cascade (revoked by raw folded host) -------
 
 def test_cascade_not_aborted_by_a_corrupt_folded_proof():
