@@ -39,8 +39,9 @@ PER-ORG for orgs and PER-(org_id, username) for memberships, so the LWW state of
 `_fold_memberships` seed them from the committed `spine.snapshot.SnapshotState` (which now carries org +
 membership rows) exactly as `accounts._fold` does, and `spine.prune` refuses any prune that would strand an
 active org/membership the seed does not carry — so a prune below a revoked grant can NOT reset the high-water
-and re-open the replay. (Reactivation is handled too: `revoke_org` cascade-revokes the org's memberships, so
-re-creating a decommissioned org_id does not restore prior members without a fresh owner-signed grant.)
+and re-open the replay. (Reactivation is handled too: `revoke_org` cascade-revokes the org's memberships —
+and, per Slice AS-2l, its asset-ownership proofs and monitoring authorities — so re-creating a decommissioned
+org_id does not restore prior members, proven hosts, or monitoring grants without a fresh owner-signed grant.)
 
 OWNER-KEY SUCCESSION: the fold authenticates each `active` grant under the owner pubkey valid AT ITS SEQ
 (`key_history.key_resolver(...).at(seq)`), identical to `accounts._fold`. With no rotation this is a single
@@ -408,6 +409,17 @@ class OrgRegistry:
         member is admitted again ONLY after a FRESH owner-signed grant with a strictly-greater issued_at. The
         org revoke is appended FIRST (see below) and its seq is returned (the primary record).
 
+        PROOF + AUTHORITY CASCADE (Slice AS-2l — the SAME reactivation guard for the asset layer): the org
+        decommission ALSO revokes every monitoring authority AND every asset-ownership PROOF of the org. Both
+        `monitoring_authority.active_at` / `owned_at` and `asset_ownership.has_current_proof` gate only on
+        THEIR fold, never on the org's active state, so without the proof cascade a `revoke_org`→`create_org`
+        on the same org_id would resurrect the decommissioned org's proven hosts (and the monitoring grants
+        minted on them) in the new incarnation. Each is a safe-direction revoke that leaves the record in the
+        `revoked` LWW state (durable across a hard prune via each module's snapshot seed), so a re-created org
+        starts with NO proofs and NO authorities — a host is proven/monitored again only after a FRESH
+        owner-signed grant with a strictly-greater issued_at. These cascades land AFTER the org revoke (same
+        fail-safe ordering) and their seqs are not returned (the org revoke is the primary record).
+
         ORDERING — the org revoke lands BEFORE the membership cascade so the fail-SAFE direction can never be
         gated on the cascade succeeding: a corrupt/hand-signed folded membership (one the fold accepts but the
         binding-time `_check_member_username` would reject — only reachable via a direct owner-signed append,
@@ -435,6 +447,15 @@ class OrgRegistry:
         from .monitoring_authority import MonitoringAuthorityRegistry
         MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
                                     trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
+        # AS-2l PROOF CASCADE: revoke every asset-ownership proof of the org so a re-created org_id starts
+        # with NO proofs (no resurrection — `asset_ownership.has_current_proof` gates only on the proof fold,
+        # not on org state). Appended AFTER the monitoring revoke above, so a proven host's monitoring grant
+        # is already retired; revoking the proof additionally makes any surviving grant inert at read time.
+        # Safe direction, fixed issued_at 0.0 (no clock on this path), durable across a hard prune. Mirrors
+        # the membership cascade's robustness (revoked by raw folded host, so one corrupt proof cannot abort).
+        from .asset_ownership import AssetOwnershipRegistry
+        AssetOwnershipRegistry(self.store, owner_key=self.owner_key,
+                               trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
         return seq
 
     # -- owner mutations: memberships ---------------------------------------------------------------
