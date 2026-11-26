@@ -276,3 +276,22 @@ def objectives(view: GraphView) -> ObjectiveContext:
     ]
     return ObjectiveContext(authoritative=False, retrieval_only=True,
                             engagement_id=view.group_id, objectives=rows)
+
+
+# ==========================================================================================================
+# F4 slice S5 — the coverage read is exposed from this module ONLY when ``VIGIL_COVERAGE_VIEW`` is armed. With
+# the flag OFF ``graph.query.coverage`` raises AttributeError (the symbol is NOT in this module's namespace, so
+# the public API is BYTE-IDENTICAL to the pre-slice query layer and NO coverage function is exposed). The
+# implementation lives in ``graph.coverage``; the import is lazy inside ``__getattr__`` so this module's scope
+# is unchanged whether the flag is on or off. (PEP 562 module ``__getattr__`` fires only for a name NOT found
+# normally, so every pre-slice symbol resolves exactly as before.)
+# ==========================================================================================================
+def __getattr__(name: str):   # noqa: N807 — PEP 562 module-level attribute hook
+    if name == "coverage":
+        from .coverage import coverage as _coverage, coverage_view_enabled   # noqa: PLC0415 (lazy; flag-gated)
+        if coverage_view_enabled():
+            return _coverage
+        raise AttributeError(
+            "graph.query.coverage is gated behind VIGIL_COVERAGE_VIEW (default off): no coverage read is "
+            "exposed while the flag is unarmed")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
