@@ -24,9 +24,14 @@ Two soundness holes the red-pen found, now closed (both in the analyzer, backed 
     not run at import time (so the module-level walk, correctly modelling Python, leaves it out of the
     closure) — but it is still offense wired into the serve path. A conservative overlay now scans EVERY
     import (module scope AND function/method bodies, excluding ``if TYPE_CHECKING:``) of every reachable
-    ``framework.v2.aegis`` serving module and FAILS on any denied target. (It is deliberately scoped to
-    the AEGIS-owned serving layer: the shared engine's ``verify``/``agents`` code legitimately reaches
-    offense submodules at INVOKE time, which the runtime probe — not this static overlay — governs.)
+    ``framework.v2.aegis`` serving module and FAILS on any denied target. It is as strong as the
+    module-level walk — it resolves a LITERAL ``from ..verify.oob import X``, a PEP 562 lazy re-export
+    (``from framework.v2.verify import OOBReceiver`` -> the denied ``verify.oob``; fail-closed on an opaque
+    shim) AND a dynamic-string ``importlib.import_module("framework.v2.verify.oob")`` / ``__import__(...)`` —
+    so none of those forms can smuggle a denied module into a serving function body past the gate. (It is
+    deliberately scoped to the AEGIS-owned serving layer: the shared engine's ``verify``/``agents`` code
+    legitimately reaches offense submodules at INVOKE time, which the runtime probe — not this static
+    overlay — governs.)
 
 Design invariants (constitution: determinism, fail-closed, no over-claim):
   * PURE + DETERMINISTIC. No imports are executed, no network, no wall-clock, no RNG. The result is a
@@ -415,12 +420,16 @@ def _module_imports(module: str, path: pathlib.Path, is_pkg: bool) -> set[str]:
 
 class _AllImports(ast.NodeVisitor):
     """Collect EVERY import target — module scope AND inside function/method bodies — as (base, from_names,
-    lineno), SKIPPING provably-dead ``if TYPE_CHECKING:`` branches (those imports never run). Used only by
-    the conservative serving-module lazy-offense scan; it does NOT feed the import closure."""
+    lineno), SKIPPING provably-dead ``if TYPE_CHECKING:`` branches (those imports never run). Also captures
+    ``importlib.import_module("literal")`` / ``__import__("literal")`` string-literal dynamic imports as
+    (literal, lineno) in ``dynamic`` — mirroring ``_ModuleLevelImports`` — so a statically-named denied
+    package cannot hide behind the dynamic form in a serving function body. Used only by the conservative
+    serving-module lazy-offense scan; it does NOT feed the import closure."""
 
     def __init__(self, current_pkg: str) -> None:
         self.current_pkg = current_pkg
         self.targets: list[tuple[str, tuple[str, ...], int]] = []
+        self.dynamic: list[tuple[str, int]] = []  # (literal_module_name, lineno)
 
     def visit_If(self, node: ast.If) -> None:  # noqa: N802
         test = node.test
@@ -440,12 +449,28 @@ class _AllImports(ast.NodeVisitor):
         if base:
             self.targets.append((base, tuple(a.name for a in node.names), node.lineno))
 
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        fn = node.func
+        is_dynamic_import = (
+            (isinstance(fn, ast.Attribute) and fn.attr == "import_module")
+            or (isinstance(fn, ast.Name) and fn.id == "__import__")
+        )
+        if is_dynamic_import and node.args:
+            arg0 = node.args[0]
+            if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str) and arg0.value:
+                self.dynamic.append((arg0.value, node.lineno))
+        self.generic_visit(node)
+
 
 def _serving_lazy_denied(reachable: frozenset[str]) -> tuple[tuple[str, str, int], ...]:
     """Every denied import target that appears ANYWHERE — module scope OR a function/method body, excluding
     ``if TYPE_CHECKING:`` — in a reachable AEGIS SERVING module (``_SERVING_MODULE_PREFIX``). The module-level
     closure already catches eager offense; this conservative overlay additionally forbids a LAZY/function-
-    local offense import smuggled into the serve path. Returns sorted ``(module, denied_target, lineno)``."""
+    local offense import smuggled into the serve path. It is as strong as the module-level walk: besides a
+    literal ``from a.b import c`` it also resolves PEP 562 lazy re-exports (``from framework.v2.verify import
+    OOBReceiver`` -> the denied ``verify.oob``, fail-closed on an opaque shim) and captures
+    ``importlib.import_module("literal")`` / ``__import__("literal")`` dynamic-string imports. Returns sorted
+    ``(module, denied_target, lineno)``."""
     out: list[tuple[str, str, int]] = []
     for module in reachable:
         if not (module == _SERVING_MODULE_PREFIX or module.startswith(_SERVING_MODULE_PREFIX + ".")):
@@ -464,12 +489,38 @@ def _serving_lazy_denied(reachable: frozenset[str]) -> tuple[tuple[str, str, int
             if is_denied(base) is not None:
                 out.append((module, base, lineno))
                 continue
+            # PEP 562 shim of ``base`` (if it is a first-party package) — mirrors ``_module_imports`` so a
+            # lazily re-exported from-name that pulls a denied submodule cannot hide behind a clean ``base``.
+            base_path, base_is_pkg = _resolve_first_party_file(base)
+            shim = _shim_for_package(base_path) if (base_is_pkg and base_path is not None) else None
             for name in names:
                 if name == "*":
                     continue
                 cand = f"{base}.{name}"
+                cpath, _ = _resolve_first_party_file(cand)
+                if cpath is not None:  # ``name`` is a real submodule -> importing it runs that module
+                    if is_denied(cand) is not None:
+                        out.append((module, cand, lineno))
+                    continue
+                if shim is not None:
+                    sub = shim.lazy_symbols.get(name)
+                    if sub is None and name in shim.submodules:
+                        sub = name
+                    if sub is not None:  # lazy re-export edge -> the real submodule it pulls
+                        resolved = f"{base}.{sub}"
+                        if is_denied(resolved) is not None:
+                            out.append((module, resolved, lineno))
+                        continue
+                    if shim.opaque:  # cannot read the map -> cannot prove ``name`` is not denied -> fail closed
+                        out.append((module, cand, lineno))
+                        continue
+                # else: a literal denied NAME with no real submodule/shim (e.g. a bare ``from a import b``
+                # whose ``a.b`` is on the deny prefix) is still caught by name.
                 if is_denied(cand) is not None:
                     out.append((module, cand, lineno))
+        for literal, lineno in visitor.dynamic:
+            if is_denied(literal) is not None:  # importlib.import_module("framework.v2.verify.oob") et al.
+                out.append((module, literal, lineno))
     return tuple(sorted(out))
 
 

@@ -220,9 +220,52 @@ def test_static_catches_lazy_offense_in_a_serving_module():
     )
 
 
+def test_static_catches_dynamic_string_offense_in_a_serving_module():
+    # OBFUSCATION 1: a function-local ``importlib.import_module("framework.v2.verify.oob")`` (and the
+    # ``__import__("...")`` twin) loads the denied offense submodule from a STRING LITERAL at serve time.
+    # It is neither an import-time edge (lazy) nor a literal ``from ... import``, so the overlay must
+    # capture the dynamic-import string argument — as strong as the module-level walk — or it evades the
+    # gate while the build reports CLEAN. (Pre-fix, this fixture was reported CLEAN; it must now REFUSE.)
+    report = C.check_saas_closure([f"{_FIX}.lazy_oob_serving_dynamic"])
+    assert report.ok is False
+    flagged = [(l, t) for _, t, l in report.serving_lazy_denied if t == "framework.v2.verify.oob"]
+    assert flagged, (
+        f"overlay missed the dynamic-string offense import: {report.serving_lazy_denied}"
+    )
+    # both the ``importlib.import_module`` and the ``__import__`` call sites are flagged.
+    assert len(flagged) == 2, f"expected both import_module and __import__ call sites flagged: {flagged}"
+
+
+def test_static_catches_pep562_symbol_offense_in_a_serving_module():
+    # OBFUSCATION 2: a function-local ``from framework.v2.verify import OOBReceiver`` loads the denied
+    # ``verify.oob`` at serve time via PEP 562 ``__getattr__`` — ``framework.v2.verify`` itself is NOT
+    # denied, so a literal ``is_denied(base)`` is clean. The overlay must apply the SAME shim resolution
+    # the module-level walk uses (``OOBReceiver`` -> the ``oob`` submodule) before the deny check, or this
+    # symbol form evades the gate. (Pre-fix, this fixture was reported CLEAN; it must now REFUSE.)
+    report = C.check_saas_closure([f"{_FIX}.lazy_oob_serving_pep562"])
+    assert report.ok is False
+    assert any(t == "framework.v2.verify.oob" for _, t, _ in report.serving_lazy_denied), (
+        f"overlay did not follow the PEP 562 lazy re-export in a serving function body: {report.serving_lazy_denied}"
+    )
+
+
+def test_overlay_fails_closed_on_opaque_shim_symbol_in_serving_module():
+    # FAIL-CLOSED: a function-local ``from framework.v2.tools import <symbol>`` where ``framework.v2.tools``
+    # is an OPAQUE PEP 562 shim (``__getattr__`` present, map not statically readable). The overlay cannot
+    # prove the symbol does not pull a denied submodule, so it must REFUSE — mirroring the module-level
+    # walk's enqueue-then-fail-closed on an opaque shim — rather than wave the unprovable import through.
+    report = C.check_saas_closure([f"{_FIX}.opaque_shim_serving"])
+    assert report.ok is False
+    assert any(t.startswith("framework.v2.tools.") for _, t, _ in report.serving_lazy_denied), (
+        f"overlay did not fail closed on an opaque-shim symbol import: {report.serving_lazy_denied}"
+    )
+
+
 def test_real_gateway_has_no_lazy_offense_import():
     # The fix: the gateway no longer imports verify.oob even lazily — it uses the offense-free
     # common.oob_receiver — so the serving-module lazy-offense overlay is clean on the real entrypoints.
+    # (The overlay is now as strong as the module-level walk — literal, PEP 562 lazy re-export AND
+    # dynamic-string forms — yet still raises NO false positive on the legitimate relocated gateway.)
     report = C.check_saas_closure()
     assert report.serving_lazy_denied == (), (
         f"an AEGIS serving module carries a lazy offense import: {report.serving_lazy_denied}"

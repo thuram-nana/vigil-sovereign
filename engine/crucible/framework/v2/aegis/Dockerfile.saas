@@ -61,7 +61,8 @@ RUN pip install --no-cache-dir . && rm -rf /src
 # Pure static analysis of the INSTALLED package (no imports executed, PEP 562 / lazy-re-export aware); exits
 # non-zero (failing the build) if the gateway's import closure reaches any denied offense module or LLM/agent
 # SDK, if any first-party module is unresolvable, or if any AEGIS serving module carries a lazy/function-local
-# offense import. The tracked, disclosed agent-executor residual (saas-closure.json "known_residual") is
+# offense import in ANY form — literal, PEP 562 lazy re-export, or dynamic-string importlib/__import__ (the
+# overlay is as strong as the module-level walk). The tracked, disclosed agent-executor residual (saas-closure.json "known_residual") is
 # REPORTED but does not fail the gate; a shrink-only ratchet in the test freezes it. This is what makes
 # "no DENIED offense in the serving path" a checked fact rather than a claim.
 RUN python3 -m framework.v2.aegis.closure
