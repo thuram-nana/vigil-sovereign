@@ -559,7 +559,10 @@ class AzureConsentConnectFetcher:
         if status != 200 or data is None:
             raise CloudFetchError("the cloud check could not be completed; try again shortly",
                                   detail=f"Graph servicePrincipals HTTP {status}")
-        if str(data.get("appId") or "") != self._client_id:
+        # appId is an Azure AD application GUID — a case-INSENSITIVE identifier. The client-id config permits an
+        # uppercase GUID, and Graph echoes it in Microsoft's own casing, so a case-only difference is the SAME app:
+        # compare case-insensitively (a genuinely different appId still fails closed) rather than bricking the connect.
+        if str(data.get("appId") or "").strip().lower() != self._client_id.strip().lower():
             raise CloudFetchError("the cloud check could not be made", detail="Graph returned a different appId")
         tags = data.get("tags")
         if not isinstance(tags, list):

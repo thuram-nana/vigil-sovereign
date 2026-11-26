@@ -182,6 +182,25 @@ def test_a_graph_fault_or_wrong_appid_is_inconclusive():
         _assume(_fetcher(FakeEntra(graph_answer=(200, other))))
 
 
+def test_a_graph_appid_differing_only_in_case_still_binds():
+    # red-pen wgeauhgdu (LOW): appId is a case-INSENSITIVE Azure AD GUID. The client-id config regex permits an
+    # uppercase GUID, and Graph echoes Microsoft's own casing, so a case-only difference is the SAME app and must
+    # still bind — else the connect bricks fail-closed (dead) for that deployment. A DIFFERENT appId still fails closed.
+    cid = "ab111111-cd22-ef33-ab44-cd55ef66ab77"                 # a client id with hex LETTERS (CLIENT_ID is digits)
+
+    def _graph(appid):
+        def t(method, url, headers, body, timeout):
+            return 200, json.dumps({"appId": appid, "id": OBJ, "tags": [EXT]}).encode()
+        return t
+
+    same = AzureConsentConnectFetcher(client_id=cid, client_secret=SECRET, transport=_graph(cid.upper()))
+    assert same._binding_matched("bearer-token", EXT) is True   # same GUID, upper vs lower -> still bound
+    diff = AzureConsentConnectFetcher(client_id=cid, client_secret=SECRET,
+                                      transport=_graph("deadbeef-dead-beef-dead-beefdeadbeef"))
+    with pytest.raises(CloudFetchError):
+        diff._binding_matched("bearer-token", EXT)              # a genuinely different appId still fails closed
+
+
 @pytest.mark.parametrize("kw, why", [
     ({"obj": "not-a-guid"}, "Object ID"),
     ({"tenant": "not-a-guid"}, "tenant id"),
