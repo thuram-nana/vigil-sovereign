@@ -125,8 +125,17 @@ services:
   # VIGIL_AEGIS_SAAS_ENFORCE=1 AND --mode enforce AND the AEGIS_RESPOND entitlement (all OFF by default).
   # See docs/runbooks/aegis-saas-onboarding.md.
   aegis-saas-gateway:
-    image: vigil/aegis-gateway:local
+    # AS-28: the MANAGED tenant gateway runs the HARDENED, closure-gated SaaS image (Dockerfile.saas),
+    # not the plain sidecar image. Dockerfile.saas is hash-locked and FAILS THE BUILD (fail-closed) if any
+    # offense module or LLM/agent SDK is import-reachable from the gateway's serving entrypoints — so the
+    # defense data plane ships NO offense engine (plan §1 defect #9). Build: `make aegis-saas-image`.
+    image: vigil/aegis-saas-gateway:local
     profiles: ["aegis-saas"]
+    build:
+      context: ./engine/crucible
+      dockerfile: framework/v2/aegis/Dockerfile.saas
+      additional_contexts:
+        vigil_core: ./packages/core/vigil_core
     command:
       - "--upstream"
       - "${AEGIS_SAAS_UPSTREAM:?set AEGIS_SAAS_UPSTREAM}"

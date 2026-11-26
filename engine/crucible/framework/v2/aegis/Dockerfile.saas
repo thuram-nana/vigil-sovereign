@@ -1,0 +1,76 @@
+# AEGIS SaaS Gateway — the DEFENSIVE "provable firewall" as the SIGIL-operated SaaS data plane.
+#
+# This is the AS-28 variant of framework/v2/aegis/Dockerfile, hardened for the hosted SaaS lane
+# (plan §5 / §19): a public-facing DATA PLANE that sits inline in front of a customer's app. The
+# defining property it must carry — and the HIGH finding it closes (plan §1 defect #9, "offense code in
+# the defense runtime") — is that the SERVING PROCESS loads NO offense engine code.
+#
+# HASH-LOCK (A14 supply chain). The base is content-addressed by digest: it either matches or the pull
+# fails. "whatever :3.13-slim resolves to today" is not an acceptable provenance story for an inline
+# public data plane. Digest == the one gateway/Dockerfile and framework/v2/aegis/Dockerfile pin
+# (python:3.13-slim, resolved 2026-08-12, aligned to the 3.13 minor the committed locks target).
+# Re-pin with: bash infra/supply-chain/resolve-image-digests.sh  (see docs/SUPPLY-CHAIN.md).
+#
+# BUILD (from the monorepo ROOT; the shared integrity substrate is a NAMED build context):
+#     docker build -f engine/crucible/framework/v2/aegis/Dockerfile.saas \
+#         --build-context vigil_core=packages/core/vigil_core -t aegis-saas-gateway engine/crucible
+#
+# CLOSURE GATE. The build RUNS the static closure analyzer (framework.v2.aegis.closure) against the
+# shipped tree. If ANY denied offense module or LLM/agent SDK is import-reachable from the gateway
+# entrypoints, or any first-party module is unresolvable, the analyzer exits non-zero and the BUILD
+# FAILS (fail-closed) — the image cannot be produced with offense reachable in the serving path. The
+# analyzer is PURE STATIC source parsing; it never imports the offense code it proves absent.
+#
+# DEFERRED to the A14 CI leg (owner-gated; needs a Docker build host, a vuln scanner, an SBOM tool and a
+# signing key, none of which exist in the offline build sandbox): the actual image BUILD, the image/OS
+# vuln SCAN, the SBOM generation and the cryptographic SIGN + attestation. The deployed digest is then
+# verified by AS-6a (placement/reconciler). This Dockerfile + the closure gate are the buildable-now
+# half; the in-CI build/scan/SBOM/sign are the owner-gated half. See aegis/saas-closure.json.
+
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+
+# --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
+WORKDIR /src
+# The shared integrity substrate (packages/core/vigil_core) lives OUTSIDE this (engine/crucible) build
+# context, so it is supplied as a NAMED build context. framework.v2 imports it at module load
+# (common.errors -> vigil_core.IntegrityError); the gateway cannot start without it. Pure-Python; its
+# deps (cryptography, pydantic) are also crucible deps, so installing it pulls nothing extra.
+COPY --from=vigil_core . ./vigil_core
+RUN pip install --no-cache-dir ./vigil_core
+# COPY only what the wheel build needs; the offensive playbooks, engagement data under targets/ and the
+# knowledge graph are deliberately NOT shipped in this defensive image.
+COPY pyproject.toml README.md LICENSE LICENSING.md ./
+COPY framework ./framework
+RUN pip install --no-cache-dir . && rm -rf /src
+
+# --- AS-28 BUILD-TIME CLOSURE GATE (fail-closed): no offense import reachable from the serving path ---
+# Pure static analysis of the INSTALLED package; exits non-zero (failing the build) if the gateway's
+# import closure reaches any denied offense module or LLM/agent SDK, or any first-party module is
+# unresolvable. This is what makes "a defense-only build" a checked fact rather than a claim.
+RUN python3 -m framework.v2.aegis.closure
+
+# --- a writable CRUCIBLE_ROOT so enforce-mode kill-switch / audit state has a home ---
+ENV CRUCIBLE_ROOT=/var/lib/aegis
+RUN mkdir -p /var/lib/aegis \
+ && printf '%s\n' \
+      '# AEGIS gateway state root (CRUCIBLE_ROOT sentinel).' \
+      'Marks this directory as the framework root for the gateway kill-switch + audit state.' \
+      > /var/lib/aegis/CLAUDE.md
+
+# --- drop privileges: a public-facing data plane must not run as root ---
+RUN useradd --system --create-home --uid 10001 aegis \
+ && chown -R aegis:aegis /var/lib/aegis
+USER aegis
+
+EXPOSE 8080
+
+# HEALTHCHECK exercises the /readyz probe on the EXPOSEd port (stdlib-only python; the base ships no
+# curl). A down upstream -> 503 -> non-zero exit -> the container is marked UNHEALTHY.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python3", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=4).status==200 else 1)"]
+
+# `aegis gateway` REQUIRES --upstream at run time, and needs --host 0.0.0.0 to be reachable from outside
+# the container. Default CMD keeps it READ-ONLY (observe); override to enforce only after confirming
+# zero false positives against real traffic in observe.
+ENTRYPOINT ["python3", "-m", "framework.v2", "aegis", "gateway"]
+CMD ["--mode", "observe"]
