@@ -45,6 +45,25 @@ from .certify import (
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .audit_package import build_audit_package, write_package
+from .aegis_tt import (
+    AegisTtDemonstration,
+    BuildRef,
+    DemonstrationVerification,
+    RequiredCases,
+    SignedDemonstration,
+    SubjectRef,
+    TopologyRef,
+    TrustRootDoc,
+    UiLeg,
+    CAPABILITY_STATES,
+    build_demonstration,
+    load_trust_root_doc,
+    load_trust_root_doc_file,
+    manifest_digest,
+    project_state,
+    sign_demonstration,
+    verify_demonstration,
+)
 
 __all__ = [
     "build_audit_package", "write_package",
@@ -58,4 +77,10 @@ __all__ = [
     "build_certificate", "build_path_certificate", "sign_certificate",
     "verify_certificate", "verify_bundle",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
+    # AEGIS TT-STG DONE record (AS-25 / D33)
+    "AegisTtDemonstration", "SignedDemonstration", "DemonstrationVerification",
+    "UiLeg", "RequiredCases", "BuildRef", "TopologyRef", "SubjectRef", "TrustRootDoc",
+    "build_demonstration", "sign_demonstration", "verify_demonstration",
+    "manifest_digest", "load_trust_root_doc", "load_trust_root_doc_file",
+    "project_state", "CAPABILITY_STATES",
 ]
