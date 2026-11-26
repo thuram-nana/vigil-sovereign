@@ -1271,6 +1271,9 @@ jobs:
     # become a silently-unguarded PR job. Until promoted it reports red on the PR when isolation breaks.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash  # the container's default shell is `sh` (dash); bash is required for `set -o pipefail`
     # Pinned by digest (python:3.13-bookworm) — the full image ships git (for actions/checkout) and
     # useradd/userdel (the shadow `passwd` package the distinct-uid provisioner needs), so no apt step
     # and no network beyond the pinned base + the hash-locked pip installs below.
