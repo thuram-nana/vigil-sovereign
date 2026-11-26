@@ -701,6 +701,22 @@
    "source_doc": "docs/DEFERRED-INFRA.md",
    "disposition": "file-into-w16",
    "w16_issue": null
+  },
+  {
+   "id": "AS2D-live-broker-transport",
+   "title": "The AEGIS broker's live origin-hop TLS splice is deploy-gated on AS-26 infrastructure",
+   "summary": "AS-2d ships the deterministic broker plane in framework/v2/aegis/broker.py: tenant-isolated origin resolution from the signed grant, the never-liftable L3/L4 egress floor (resolve_and_validate_all with allowed_ips=frozenset() and loopback_allowed_if_scoped=False, so loopback/IMDS/RFC1918 origins and DNS rebinding are refused), the origin LOCK (mTLS / HMAC X-Vigil-Origin-Auth over (request id, ts, client-IP) / secret header) with its origin-side verifier and the Z4 payload-free probe, the startup refusal (a release requires crypto_verified), and the forward composition (broker_forward) over an INJECTED BrokerTransport. The residual is the physical origin-hop TLS splice itself: the live transport over the defense NAT EIPs and the central keyless origin-hop cert issuer is provisioned by the hosted plane (AS-6a placement over AS-26 infrastructure) and verified end to end in the TT-STG staging account under AS-1b, not by this repo's offline tests.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/broker.py",
+    "symbol": "BrokerTransport"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
   }
  ],
  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
