@@ -432,6 +432,11 @@ def broker_forward(
     ``ts`` come from the request context. ``transport`` performs the TLS splice (injected)."""
     trusted_ip = client_ip if (edge_verified and is_valid_edge_identity(client_ip)) else ""
     reserved = {HDR_ORIGIN_AUTH.lower(), HDR_REQUEST_ID.lower(), HDR_TIMESTAMP.lower(), HDR_CLIENT_IP.lower()}
+    # The lock's OWN credential header is reserved too: the broker is the sole setter of the secret-header
+    # lock, so a caller-supplied copy of it (any case) is stripped before sign() applies the authentic value,
+    # rather than riding alongside it as an ambiguous case-variant duplicate on the wire.
+    if armed.lock.secret_header_name:
+        reserved.add(armed.lock.secret_header_name.lower())
     headers: dict[str, str] = {
         k: v for k, v in (extra_headers or {}).items() if k.lower() not in reserved}
     headers.update(armed.lock.sign(request_id=request_id, ts=ts, client_ip=trusted_ip))

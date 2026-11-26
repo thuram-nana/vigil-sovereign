@@ -184,13 +184,24 @@ class PerTenantRunner:
             )
 
         # ``payload`` is JSON-canonical (opaque to the runner); content_id hashes it deterministically.
-        payload_digest = content_id(spec.kind, spec.payload)
+        # A non-canonical payload (content_id raises) is a malformed ADMISSION, not a crash: fault-contain
+        # it exactly like a failing body — degrade ONLY this tenant and record FAILED — rather than let the
+        # exception escape run_job (which the contract above forbids). The fallback digest is deterministic
+        # and cannot collide with a real serialisable payload's digest, so job ids stay stable and distinct.
+        try:
+            payload_digest = content_id(spec.kind, spec.payload)
+            admission_error: Exception | None = None
+        except Exception as e:  # noqa: BLE001 — a non-canonical payload fails ONE job, never crashes the runner
+            payload_digest = content_id(spec.kind, "\x00<unadmissible-payload>")
+            admission_error = e
         job_id = self._next_job_id(payload_digest)
         job = Job(job_id=job_id, tenant=self.tenant, kind=spec.kind, payload_digest=payload_digest)
         self._state = submit(self._state, job)
         self._state = transition(self._state, job_id, JobState.RUNNING)
 
         try:
+            if admission_error is not None:
+                raise admission_error
             execute(self._state.require(job_id))
         except KilledJob as k:
             reason = str(k) or "killed"

@@ -155,3 +155,20 @@ def test_runner_imports_no_sigil_or_strix():
     assert "sigil" not in roots, "job_runner must never import the sovereign plane (FATAL-2)"
     assert "strix" not in roots, "job_runner must never import strix"
     assert "vigil_core" in roots, "job_runner must drive the vigil_core job-substrate primitive"
+
+
+def test_non_canonical_payload_is_fault_contained_not_raised():
+    """A payload content_id cannot canonicalise (e.g. a set) is a malformed ADMISSION, not a crash:
+    run_job must contain it as FAILED and degrade ONLY this tenant, never let the exception escape
+    (the run_job contract: 'The exception NEVER escapes')."""
+    runner = PerTenantRunner("TT-A", enabled=True)
+    out = runner.run_job(_spec("TT-A", v={1, 2, 3}), lambda job: None)   # a set -> not JSON-canonical
+    assert out.state is JobState.FAILED
+    assert out.health is TenantHealth.DEGRADED
+    assert "TypeError" in out.detail
+    # a second unadmissible job is independent and gets a distinct id (seq-scoped) -> deterministic ids
+    out2 = runner.run_job(_spec("TT-A", v={4, 5}), lambda job: None)
+    assert out2.state is JobState.FAILED and out2.job_id != out.job_id
+    # a sibling tenant is untouched by TT-A's malformed admission
+    ok = PerTenantRunner("TT-B", enabled=True).run_job(_spec("TT-B"), lambda job: None)
+    assert ok.state is JobState.SUCCEEDED

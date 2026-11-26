@@ -309,3 +309,23 @@ def test_module_is_fatal2_clean():
     assert "vigil_integration" not in src and "apps.sigil" not in src
     # no wallclock / RNG on the signed paths or ids.
     assert "time.time" not in src and "random" not in src and "datetime.now" not in src
+
+
+def test_broker_forward_strips_caller_supplied_secret_header_copy():
+    """The broker is the SOLE setter of the secret-header lock. A caller-supplied copy of the credential
+    header (ANY case) must be stripped before sign() applies the authentic value, so no ambiguous
+    case-variant duplicate of the credential rides to the origin and the origin still verifies the real one."""
+    lock = OriginLock(method=LockMethod.SECRET_HEADER,
+                      secret_header_name="X-Vigil-Edge-Secret", secret_header_value="s3cr3t")
+    armed = arm_broker(_grant(), uid=ORG_A, lock=lock, resolver=_resolver(ADDR_A))
+    transport, _seen = _origin_transport(lock, origin_only=ORIGIN_A)
+    res = broker_forward(armed, request_id="r", ts=NOW, client_ip="203.0.113.5",
+                         edge_verified=True, transport=transport,
+                         extra_headers={"X-VIGIL-EDGE-SECRET": "junk", "X-Other": "ok"})
+    assert res.status == 200                                     # origin verified the AUTHENTIC credential
+    sent = res.sent_headers
+    secret_keys = [k for k in sent if k.lower() == "x-vigil-edge-secret"]
+    assert secret_keys == ["X-Vigil-Edge-Secret"], sent         # exactly one copy, the broker's own casing
+    assert sent["X-Vigil-Edge-Secret"] == "s3cr3t"
+    assert "junk" not in set(sent.values())                     # the caller's forged copy is gone
+    assert sent.get("X-Other") == "ok"                          # unrelated caller headers still pass
