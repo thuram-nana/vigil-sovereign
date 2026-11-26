@@ -3775,6 +3775,7 @@
       "objective": "Every product claim resolves to an enforcing symbol and a proving test in a required CI job; limitations are code-grounded and never worded as completeness (claim discipline).",
       "residual_limitations": [
         "LIMIT-a11y-capture-unwired",
+        "LIMIT-aegis-sealing-delivery-deferred",
         "LIMIT-agent-body-scaffold",
         "LIMIT-cloud-connect-gcp-azure-verdict",
         "LIMIT-consumer-shard-on-signup-ops",
