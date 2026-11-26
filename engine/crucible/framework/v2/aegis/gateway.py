@@ -29,9 +29,20 @@ import itertools
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .authority_v2_check import (
+        AuthorityEvent,
+        AuthorityV2Decision,
+        AuthorityV2Paths,
+        MonotoneEpochFloor,
+    )
 
 from ..common.logging import get_logger
 from .actor_graph import ActorGraph
@@ -100,12 +111,72 @@ _CLIENT_TIMEOUT_S = 60.0                 # per-connection socket read deadline (
 
 SAAS_ENFORCE_ENV = "VIGIL_AEGIS_SAAS_ENFORCE"
 
+# AS-2c (gateway v2): the default-OFF switch that selects the V2 authority data plane (dual-accept, the monotone
+# epoch floor, signed V2 revocations, the lease⇒pass-through rule R16, the ≤1 s verify cache, release_valid, and
+# 421 on a foreign Host). OFF ⇒ the gateway behaves BYTE-IDENTICALLY to the legacy / v1 SaaS path (the new code is
+# inert). Strict, fail-closed: only an explicit affirmative token turns it on. ENFORCEMENT under V2 still
+# additionally requires the production flag above AND a release — the V2 flag only selects the authority model.
+GATEWAY_V2_ENV = "VIGIL_AEGIS_GATEWAY_V2"
+
+# Override for the per-instance V2 publish root (the dir tree the sovereign reconciler publishes signed V2 grants /
+# releases / epoch statements / revocations / fail-safe signals into); unset ⇒ a sibling of the v1 publish dir.
+V2_PUBLISH_DIR_ENV = "VIGIL_AEGIS_V2_PUBLISH_DIR"
+
 
 def _saas_enforce_flag() -> bool:
     """AEGIS-SaaS AE-3 production enforcement flag — strict, fail-closed, DEFAULT OFF. Only an explicit
     affirmative token turns it on; anything else (unset, typo) keeps SaaS enforcement off."""
     import os
     return (os.environ.get(SAAS_ENFORCE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _gateway_v2_flag() -> bool:
+    """AS-2c V2 data-plane switch — strict, fail-closed, DEFAULT OFF (read per request so a deployment can be
+    flipped without a restart, exactly like the enforce flag). OFF ⇒ the V2 path is never taken."""
+    import os
+    return (os.environ.get(GATEWAY_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_owner_roots() -> "list":
+    """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
+    authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
+    revocation / epoch statement that verifies under EITHER root is accepted across the rotation seam, and no
+    in-flight request is refused. Fail-CLOSED: an unreadable/absent root yields an EMPTY set ⇒ no authority."""
+    try:
+        from ..authority import store as _store
+        root = _store.load_authority_root()
+    except Exception:
+        return []
+    return [root] if root is not None else []
+
+
+def load_release_roots() -> "list":
+    """The release-root overlap set for ``release_valid`` (AS-29). The release root is the SEPARATE wall an
+    owner-root signature can never satisfy. No release-root store exists yet (AS-29 pending), so absent a
+    ``load_release_root`` this returns an EMPTY set ⇒ ``release_valid`` is always False ⇒ enforcement never
+    renders and the gate degrades to OBSERVE (the safe default). Fail-closed throughout."""
+    try:
+        from ..authority import store as _store
+        loader = getattr(_store, "load_release_root", None)
+        if loader is None:
+            return []
+        root = loader()
+    except Exception:
+        return []
+    return [root] if root is not None else []
+
+
+def _v2_publish_root() -> "Path":
+    """The V2 publish root (a :class:`pathlib.Path`). ``VIGIL_AEGIS_V2_PUBLISH_DIR`` wins; else a sibling
+    ``authority_v2`` dir next to the v1 monitoring-authority publish dir, so the whole V2 tree stays inside the
+    AEGIS seam the backup layer excludes wholesale."""
+    import os
+    from pathlib import Path
+    override = (os.environ.get(V2_PUBLISH_DIR_ENV) or "").strip()
+    if override:
+        return Path(override)
+    from .monitoring_authority_check import published_dir
+    return published_dir().parent / "authority_v2"
 
 
 class GatewaySettings:
@@ -123,7 +194,11 @@ class GatewaySettings:
 
     def __init__(self, upstream: str, config: AegisConfig, *, slug: str = "aegis-gateway",
                  on_verdict: Callable[[Verdict], None] | None = None,
-                 saas_tenant: str | None = None, saas_host: str | None = None) -> None:
+                 saas_tenant: str | None = None, saas_host: str | None = None,
+                 instance_id: str = "gw", replica_index: int = 0, saas_v2_dir: "str | None" = None,
+                 now_fn: "Callable[[], datetime] | None" = None,
+                 monotonic_fn: "Callable[[], float] | None" = None,
+                 on_authority_event: "Callable[[Any], None] | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"upstream must be an http(s) URL with a host, got {upstream!r}")
@@ -148,6 +223,43 @@ class GatewaySettings:
                 raise ValueError("a SaaS (tenant-bound) gateway requires a valid saas_host: the protected host its "
                                  "monitoring authority names")
             self.saas_host = h
+        # AS-2c (gateway v2) — the V2 data-plane state. Built once for a tenant-bound gateway (cheap + inert); it
+        # is only USED when the per-request GATEWAY_V2 flag is on (``gateway_v2``), so a flag-OFF gateway behaves
+        # byte-identically. The clocks are INJECTED for determinism (a fake clock in tests; the real monotonic /
+        # UTC-now in production) — the verify cache must never key on a wallclock, and no signature path reads one.
+        self.instance_id = instance_id
+        self.replica_index = int(replica_index)
+        self._v2_now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._v2_monotonic = monotonic_fn or time.monotonic
+        self.on_authority_event = on_authority_event
+        self._v2_subject = None
+        self._v2_paths = None
+        self._v2_cache = None
+        self._v2_floor = None
+        if self.saas_tenant is not None:
+            try:
+                from pathlib import Path
+
+                from vigil_core.authority_v2 import AuthoritySubject, SubjectKind
+
+                from .authority_v2_check import AuthorityV2Cache, AuthorityV2Paths, MonotoneEpochFloor
+                base = Path(saas_v2_dir) if saas_v2_dir is not None else _v2_publish_root()
+                self._v2_subject = AuthoritySubject(kind=SubjectKind.HOST, org_id=self.saas_tenant,
+                                                    host=self.saas_host or "")
+                # Per-subject isolation: each tenant-host subject gets its own subdir, so the fixed per-subject
+                # document names (release / epoch / revocation) cannot collide across subjects sharing one root.
+                from .authority_v2_check import _subject_dir_name
+                self._v2_paths = AuthorityV2Paths(base=base / _subject_dir_name(self._v2_subject),
+                                                  subject=self._v2_subject, instance_id=self.instance_id,
+                                                  replica_index=self.replica_index)
+                self._v2_floor = MonotoneEpochFloor()
+                self._v2_cache = AuthorityV2Cache(self._v2_resolve_uncached, monotonic=self._v2_monotonic)
+            except Exception:
+                # The (tenant, host) is not a valid V2 subject (stricter V2 validators), or the V2 module is
+                # unavailable: V2 is simply unavailable for this gateway. ``gateway_v2`` stays False ⇒ the flag,
+                # even if set, degrades to the v1 path (never a crash, never a silent enforce).
+                self._v2_subject = None
+                self._v2_cache = None
         self._enforce_authorized = self._authorize_enforce()
         # G5 — the inline per-actor Beta belief graph + a monotonic sequence for its observations, and
         # a lock (the server is threaded, so belief updates must be serialised). ``actor_last_class``
@@ -311,6 +423,56 @@ class GatewaySettings:
         if decision is None:
             return self.enforce
         return bool(decision.ok and decision.mode == "block" and _saas_enforce_flag() and self.enforce)
+
+    # -- AS-2c (gateway v2) data plane -------------------------------------------------------------------
+
+    @property
+    def gateway_v2(self) -> bool:
+        """Is the V2 authority data plane active for THIS request? Only when the gateway is tenant-bound, the V2
+        subject was built successfully, AND the default-OFF per-request GATEWAY_V2 flag is on. Otherwise the v1
+        path runs, byte-identically to before."""
+        return self._v2_cache is not None and _gateway_v2_flag()
+
+    def _v2_resolve_uncached(self, org_id: str, host: str) -> "AuthorityV2Decision":
+        """One full V2 resolve (cache MISS body): reads the owner/release overlap sets + the injected wall-now
+        fresh each time, so a rotation or a just-published release is picked up at the next cache refresh. Total:
+        the resolver is itself fail-closed and never raises."""
+        from .authority_v2_check import resolve_authority_v2
+        assert self._v2_paths is not None and self._v2_floor is not None  # only reachable once V2 state is built
+        return resolve_authority_v2(org_id, host, paths=self._v2_paths,
+                                    owner_roots=load_owner_roots(), release_roots=load_release_roots(),
+                                    floor=self._v2_floor, now=self._v2_now(),
+                                    on_event=self._emit_authority_event)
+
+    def v2_decision(self) -> "AuthorityV2Decision":
+        """The cached (≤1 s) V2 decision for this gateway's fixed (tenant, host) subject. Deliberately takes no
+        request input — authorization is keyed on the FIXED saas_host, never the client Host header, so no client
+        can switch inspection off or borrow another subject's grant (the Host header only drives the 421
+        misdirected-request check, which is a routing signal, not authorization)."""
+        assert self._v2_cache is not None  # only reachable when gateway_v2 is True (⇒ the cache exists)
+        return self._v2_cache.get(self.saas_tenant or "", self.saas_host or "")
+
+    def effective_enforce_v2(self, v2: "AuthorityV2Decision") -> bool:
+        """The per-request V2 enforce term. Blocking renders ONLY when the composed V2 decision is ENFORCE (the
+        grant carries the enforcing capability AND a release-root release covers it and is live and at/above the
+        floor — ``release_valid``) AND the default-OFF production flag is on AND the gateway's own enforce gate
+        (enforce mode + entitlement + untripped kill-switch) holds. Every term fails toward NOT blocking."""
+        return bool(v2.enforce and v2.release_valid and _saas_enforce_flag() and self.enforce)
+
+    def _emit_authority_event(self, event: "AuthorityEvent") -> None:
+        """Forward a de-duplicated authority-lifecycle event to the operator's optional sink, and audit it. Total
+        (never breaks the request path)."""
+        try:
+            _log.info("aegis.gateway.authority_event", slug=self.slug, kind=getattr(event, "kind", ""),
+                      host=getattr(event, "host", ""), epoch=getattr(event, "epoch", 0),
+                      outcome=getattr(event, "outcome", ""))
+        except Exception:
+            pass
+        if self.on_authority_event is not None:
+            try:
+                self.on_authority_event(event)
+            except Exception:
+                pass
 
     def enforcement_status(self) -> dict[str, object]:
         """A machine-readable, HONEST snapshot of the enforce gate — the structural guarantee that a
@@ -647,6 +809,35 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _foreign_host(self) -> bool:
+        """AS-2c: True iff the client sent a Host header that, normalized, does NOT match this gateway's FIXED
+        protected host. A per-instance V2 gateway is fronted by an ALB that routes by Host to the target group
+        for its ``instance_id``; a request whose Host names a different backend has been MISDIRECTED here, so the
+        honest answer is 421 (retry on a fresh connection), never a silent forward of another host's traffic.
+
+        A MISSING/empty Host is NOT treated as foreign — LB health probes and HTTP/1.0 clients omit it, and
+        authorization is keyed on the fixed saas_host regardless, so a missing Host can switch nothing off. A
+        present-but-unparseable Host IS foreign (it is certainly not this host)."""
+        raw = (self.headers.get("Host") or "").strip()
+        if not raw:
+            return False
+        from .monitoring_authority_check import normalize_host
+        return normalize_host(raw) != self.settings.saas_host
+
+    def _send_misdirected(self) -> None:
+        """421 Misdirected Request (RFC 9110 §15.5.20): this gateway cannot serve the requested Host. Close the
+        connection so the client re-resolves to the correct origin; the response carries no upstream address."""
+        self.close_connection = True
+        body = b'{"error":"misdirected_request","by":"aegis-gateway","reason":"this gateway serves a different host"}'
+        self.send_response(421)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     def _send_too_large(self) -> None:
         """413 for a body over the hard cap, and CLOSE the connection — we did not read the body, so
         the residual bytes must not be mis-parsed as the next request (keep-alive desync)."""
@@ -745,6 +936,13 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         #     prior inbound hit is reflected in this/next request's belief. Belief-only; total; a no-op
         #     when the feature is off. Reads nothing from THIS request — never mutates it.
         self._drain_oob_elevations()
+        # AS-2c (gateway v2): 421 on a FOREIGN Host, as EARLY as possible (before buffering a body). A per-instance
+        # V2 gateway is fronted by an ALB that routes by Host; a request whose Host names a different backend has
+        # been MISDIRECTED here, so the honest answer is 421 (retry on a fresh connection), never inspection or a
+        # silent forward of another host's traffic. Inert unless the V2 flag is on (byte-identical v1 otherwise).
+        if settings.gateway_v2 and self._foreign_host():
+            self._send_misdirected()
+            return
         if self._framing_unsupported():
             self._send_length_required()   # chunked/bad-CL: refuse+close, never drop-body+desync
             return
@@ -752,17 +950,34 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if too_large:
             self._send_too_large()   # honest 413 + close; never a truncated/desynced forward
             return
-        # AEGIS-SaaS AE-3: re-authorize THIS request against the tenant's monitoring authority. No valid
-        # authority => AEGIS neither inspects nor acts: a plain pass-through (no verdict, no belief, no block).
-        decision = settings.saas_decision()
-        if decision is not None and not decision.ok:
-            passthrough = self._forward(method, body)
-            if passthrough is None:
-                self._send_bad_gateway()
+
+        if settings.gateway_v2:
+            # AS-2c (gateway v2) data plane. Re-authorize THIS request against the tenant's V2 authority
+            # (dual-accept + monotone floor + signed revocation + lease R16 + release_valid), via the ≤1 s verify
+            # cache. PASS_THROUGH (no grant, lapsed lease, stale/superseded, withdrawn/overridden) ⇒ uninspected
+            # pass-through: no verdict, no belief, no block — shown visibly (R16), exactly mirroring the
+            # kill-switch / v1 pass-through semantics.
+            v2 = settings.v2_decision()
+            if v2.pass_through:
+                passthrough = self._forward(method, body)
+                if passthrough is None:
+                    self._send_bad_gateway()
+                    return
+                self._relay(*passthrough)
                 return
-            self._relay(*passthrough)
-            return
-        enforce = settings.effective_enforce(decision)
+            enforce = settings.effective_enforce_v2(v2)
+        else:
+            # AEGIS-SaaS AE-3 (v1): re-authorize THIS request against the tenant's monitoring authority. No valid
+            # authority => AEGIS neither inspects nor acts: a plain pass-through (no verdict, no belief, no block).
+            decision = settings.saas_decision()
+            if decision is not None and not decision.ok:
+                passthrough = self._forward(method, body)
+                if passthrough is None:
+                    self._send_bad_gateway()
+                    return
+                self._relay(*passthrough)
+                return
+            enforce = settings.effective_enforce(decision)
 
         # Inspect only a bounded prefix (the whole body is still forwarded intact).
         inspect_body = body[:_MAX_INSPECT_BYTES].decode("utf-8", "replace") if body else None
@@ -844,7 +1059,11 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   on_verdict: Callable[[Verdict], None] | None = None,
                   saas_tenant: str | None = None, saas_host: str | None = None,
                   monitoring_spool: str | None = None,
-                  monitoring_secret: bytes | None = None) -> ThreadingHTTPServer:
+                  monitoring_secret: bytes | None = None,
+                  instance_id: str = "gw", replica_index: int = 0, saas_v2_dir: "str | None" = None,
+                  now_fn: "Callable[[], datetime] | None" = None,
+                  monotonic_fn: "Callable[[], float] | None" = None,
+                  on_authority_event: "Callable[[Any], None] | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -860,7 +1079,10 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
     if monitoring_spool is not None and not saas_tenant:
         raise ValueError("monitoring reports require a tenant-bound gateway (saas_tenant + saas_host)")
     httpd.settings = GatewaySettings(upstream, config, slug=slug, on_verdict=on_verdict,  # type: ignore[attr-defined]
-                                     saas_tenant=saas_tenant, saas_host=saas_host)
+                                     saas_tenant=saas_tenant, saas_host=saas_host,
+                                     instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
+                                     now_fn=now_fn, monotonic_fn=monotonic_fn,
+                                     on_authority_event=on_authority_event)
     if monitoring_spool is not None:
         from .monitoring_report import SpoolReporter, compose_sinks
         st = httpd.settings  # type: ignore[attr-defined]
