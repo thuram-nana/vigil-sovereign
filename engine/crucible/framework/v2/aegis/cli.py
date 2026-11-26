@@ -265,7 +265,20 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         return 2
     mode = os.environ.get("AEGIS_GW_MODE") or args.mode
     slug = os.environ.get("AEGIS_GW_SLUG") or args.slug
-    secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or _DEMO_SECRET
+    # AS-2j (N-A fix): prefer a 0600 FILE / systemd credential for the deployment secret so it is never in the
+    # process environment (/proc/<pid>/environ). Default-OFF: with no file source the legacy env/arg path below
+    # is byte-identical to before. The report-secret loader's fail-closed rule (regular file, O_NOFOLLOW,
+    # owner-only, bounded, >=16 bytes) is reused verbatim — the two secrets have the same handling requirement.
+    deployment_secret_file = (os.environ.get("AEGIS_GW_SECRET_FILE")
+                              or getattr(args, "deployment_secret_file", None))
+    if deployment_secret_file:
+        try:
+            secret = load_monitoring_secret(str(deployment_secret_file)).decode("utf-8")
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            sys.stderr.write(f"aegis gateway: cannot load --deployment-secret-file: {e}\n")
+            return 2
+    else:
+        secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or _DEMO_SECRET
     honeypots = list(args.honeypot or ())
     _hp_env = os.environ.get("AEGIS_GW_HONEYPOTS")
     if _hp_env:
@@ -490,6 +503,11 @@ def main(argv: list[str] | None = None) -> int:
                         "--monitoring-secret-file and --saas-tenant)")
     g.add_argument("--monitoring-secret-file", default=None, metavar="PATH",
                    help="AEGIS-SaaS: 0600 file holding the per-(tenant, host) report secret (never on argv)")
+    g.add_argument("--deployment-secret-file", default=None, metavar="PATH",
+                   help="AEGIS-SaaS (AS-2j N-A fix): read the deployment (pseudonymization) secret from a "
+                        "0600 FILE / systemd credential instead of AEGIS_GW_SECRET in the environment, so it "
+                        "never lands in /proc/<pid>/environ. Default-OFF: absent => the AEGIS_GW_SECRET env "
+                        "path is used unchanged. Also settable via AEGIS_GW_SECRET_FILE.")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")

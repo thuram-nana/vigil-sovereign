@@ -119,6 +119,51 @@ def test_bad_secret_file_exits_2_without_serving(tmp_path, captured, capsys, mon
     assert SECRET not in capsys.readouterr().err
 
 
+# ---- AS-2j (N-A fix): the deployment/pseudonymization secret from a 0600 file / credential, never the env ----
+
+def test_deployment_secret_file_loads_into_config_not_from_env(tmp_path, captured):
+    """--deployment-secret-file reads the pseudonymization secret from a 0600 file (so it never sits in the
+    process environment / /proc/<pid>/environ). The loaded secret reaches AegisConfig.deployment_secret."""
+    sf = _secret_file(tmp_path, name="gw.secret")
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert captured["config"].deployment_secret == SECRET
+
+
+def test_deployment_secret_file_wins_over_env_secret(tmp_path, captured, monkeypatch):
+    """The hardened unit passes the secret ONLY through LoadCredential; a stray AEGIS_GW_SECRET in the env must
+    not override the file source (the file is the isolated path)."""
+    sf = _secret_file(tmp_path, content="f" * 48, name="gw.secret")
+    monkeypatch.setenv("AEGIS_GW_SECRET", "e" * 48)   # set AFTER the fixture cleared AEGIS_GW_*
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert captured["config"].deployment_secret == "f" * 48
+
+
+def test_deployment_secret_file_via_env_var(tmp_path, captured, monkeypatch):
+    sf = _secret_file(tmp_path, content="g" * 40, name="gw.secret")
+    monkeypatch.setenv("AEGIS_GW_SECRET_FILE", str(sf))
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9"])
+    assert captured["config"].deployment_secret == "g" * 40
+
+
+def test_default_off_without_the_flag_is_unchanged(tmp_path, captured, monkeypatch):
+    """Byte-identical when off: with no file source, the legacy AEGIS_GW_SECRET env path is used verbatim."""
+    monkeypatch.setenv("AEGIS_GW_SECRET", "h" * 40)
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9"])
+    assert captured["config"].deployment_secret == "h" * 40
+
+
+def test_bad_deployment_secret_file_exits_2_without_serving_or_leaking(tmp_path, captured, capsys, monkeypatch):
+    sf = _secret_file(tmp_path, name="gw.secret")
+    _report_loose_mode(monkeypatch, sf, 0o044)        # group/world readable -> fail-closed
+    rc = C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert rc == 2 and captured == {}
+    assert SECRET not in capsys.readouterr().err
+
+
 def test_real_gateway_refusals_exit_2(tmp_path, monkeypatch):
     for k in list(os.environ):
         if k.startswith("AEGIS_GW_"):
