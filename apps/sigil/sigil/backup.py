@@ -62,7 +62,6 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator, NoReturn
 
 from vigil_core.aegis_seam import (
-    AEGIS_BACKUP_EXCLUDE_ENV,
     AEGIS_SEAM_SUBDIR,
     MONITORING_AUTHORITY_SUBDIR,
     REPORT_SECRETS_SUBDIR,
@@ -250,14 +249,14 @@ _EXCLUSION_REASONS: dict[str, str] = {
         # record (captured) and the report secrets are re-provisionable, so a restore must leave AEGIS Off and
         # resurrect nothing (acceptance: nothing inspected). The sovereign re-derives + re-publishes under fresh
         # consent after a restore (full restore drill = legal-gov S1). The OFFENSE leg captures the seam, so its
-        # backup drops the SAME ``aegis/`` subtree under VIGIL_AEGIS_BACKUP_EXCLUDE.
+        # backup drops the SAME ``aegis/`` subtree UNCONDITIONALLY (a safety exclusion, not opt-in).
         f"AS-2i: the AEGIS tenant-monitoring seam subtree (<seam>/{AEGIS_SEAM_SUBDIR}/"
         f"{MONITORING_AUTHORITY_SUBDIR} published authorities + {REPORT_SECRETS_SUBDIR}). By default it lives "
         f"UNDER the cross-plane seam (credit-lease, excluded above); this entry covers an override that places "
         f"it directly under SIGIL_HOME. Never sovereign recovery state: the authorities mirror the "
         f"governor.monitoring_authority spine (captured) and the report secrets are re-provisionable, so a "
         f"restore leaves AEGIS Off and resurrects nothing. The offense leg captures the seam and drops the same "
-        f"subtree under {AEGIS_BACKUP_EXCLUDE_ENV}"),
+        f"monitoring subtree unconditionally"),
     "billing-spool": "the money-IN billing-webhook spool at the GO-LIVE runbook path ($SIGIL_HOME/billing-spool, "
                      "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
                      "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "

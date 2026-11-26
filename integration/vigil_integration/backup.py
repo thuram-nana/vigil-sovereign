@@ -92,7 +92,7 @@ import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from vigil_core import canonical_json, sha256_hex, sign, verify_one
-from vigil_core.aegis_seam import aegis_backup_exclude_enabled, is_aegis_monitoring_seam_rel
+from vigil_core.aegis_seam import aegis_monitoring_exclusion, is_aegis_monitoring_seam_rel
 from vigil_core.install_manifest import MANIFEST_FILENAME as _INSTALL_MANIFEST_FILENAME
 from vigil_core.sealing import SealError, seal, unseal
 from vigil_core.vault import Vault
@@ -899,13 +899,14 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
     Skips: transient ``*.lock``; the TPM-sealed KEK ``vault/`` dir (machine-bound, re-provisioned on restore);
     the socket/pid runtime dirs (``ui/pids/``, ``live-ui/``); symlinks (never followed/packaged); the
     three identity keys (re-wrapped separately as sealed-body secrets); the eval-seam PUBLICATIONS that mirror
-    the sovereign spine; AS-2i — when ``VIGIL_AEGIS_BACKUP_EXCLUDE`` is set — the AEGIS tenant-MONITORING seam
-    subtree (``aegis/``); AND — the W16-8 co-location rule, mirroring :func:`_iter_crucible_files` — anything
-    under the crypto-shred EVIDENCE KEYSTORE when ``evidence_keys_dir`` (a ``CRUCIBLE_EVIDENCE_KEYS_DIR``
-    override) relocates it UNDER ``base_dir``, so a DEK never travels to the same place as the ciphertext it
-    seals even from the base tree."""
+    the sovereign spine; AS-2i — UNCONDITIONALLY — the AEGIS tenant-MONITORING seam subtree (the default
+    ``aegis/`` plus whatever ``VIGIL_MONITORING_PUBLISH_DIR`` / ``VIGIL_MONITORING_SECRETS_DIR`` configure UNDER
+    ``base_dir``); AND — the W16-8 co-location rule, mirroring :func:`_iter_crucible_files` — anything under the
+    crypto-shred EVIDENCE KEYSTORE when ``evidence_keys_dir`` (a ``CRUCIBLE_EVIDENCE_KEYS_DIR`` override)
+    relocates it UNDER ``base_dir``, so a DEK never travels to the same place as the ciphertext it seals even
+    from the base tree."""
     skip_names = {name for name, _ctx in _REWRAP_KEYS}
-    exclude_aegis = aegis_backup_exclude_enabled()   # read once: deterministic within one backup
+    aegis_exclusion = aegis_monitoring_exclusion(base)   # resolved once: deterministic within one backup
     for p in sorted(base.rglob("*")):
         if p.is_symlink() or not p.is_file():
             continue
@@ -929,14 +930,15 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
         if parts[0] in _EVAL_SEAM_PUBLICATION_DIRS:
             continue
         # AS-2i: the AEGIS tenant-MONITORING seam subtree (``aegis/monitoring_authority`` published owner-signed
-        # authorities + ``aegis/report_secrets`` per-(org,host) HMAC secrets) is a MIRROR of the sovereign
+        # authorities + ``aegis/report_secrets`` per-(org,host) HMAC secrets, PLUS any non-default location the
+        # config's VIGIL_MONITORING_PUBLISH_DIR / _SECRETS_DIR puts UNDER base_dir) is a MIRROR of the sovereign
         # spine-of-record (``governor.monitoring_authority``), not offense recovery state. Carrying it off-host
         # would let a restore RESURRECT monitoring a restore must leave Off — the published artifact verifies on
         # signature + window alone, so it would be honored until ``not_after`` (acceptance: nothing inspected).
-        # DEFAULT-OFF (``VIGIL_AEGIS_BACKUP_EXCLUDE``) → byte-identical when unset; fail-closed when set (the
-        # WHOLE ``aegis/`` subtree, unknown entries included). The sovereign re-derives + re-publishes under
-        # fresh consent after a restore (full restore drill = legal-gov S1).
-        if exclude_aegis and is_aegis_monitoring_seam_rel(rel):
+        # UNCONDITIONAL (a SAFETY exclusion, not opt-in) and fail-closed (the WHOLE monitoring subtree, unknown
+        # entries included). The sovereign re-derives + re-publishes under fresh consent after a restore (full
+        # restore drill = legal-gov S1).
+        if is_aegis_monitoring_seam_rel(rel, aegis_exclusion):
             continue
         # W5-4 (#448) × W7-4 (#462): the top-level install manifest is a per-INSTALL/host marker the startup
         # gate WRITES into whatever data dir this binary runs against — it describes the operating install,
@@ -1271,15 +1273,16 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         # (the SAME path-escape guard); the SAME target is written.
         staged_base_resolved = staged_base.resolve()
         staged_croot_resolved = staged_croot.resolve() if staged_croot is not None else None
-        exclude_aegis = aegis_backup_exclude_enabled()   # AS-2i — gate the aegis-seam restore skip
+        aegis_exclusion = aegis_monitoring_exclusion(new_base)   # AS-2i — unconditional aegis-seam restore skip
         for rel, b64 in files.items():
             if (rel.split("/", 1)[0] in _EVAL_SEAM_PUBLICATION_DIRS
-                    or (exclude_aegis and is_aegis_monitoring_seam_rel(rel))):
+                    or is_aegis_monitoring_seam_rel(rel, aegis_exclusion)):
                 # A publication that MIRRORS the sovereign spine: the eval-capability-grant / eval-offense-
-                # attestation publications, OR — when ``VIGIL_AEGIS_BACKUP_EXCLUDE`` is set — the AS-2i AEGIS
-                # tenant-monitoring seam subtree. An archive made before the exclusion still carries them;
-                # restoring one would resurrect a grant/authority the spine has since revoked. Verified here
-                # (tamper check against the signed manifest), never WRITTEN — so a restore leaves them out.
+                # attestation publications, OR — ALWAYS (AS-2i) — the AEGIS tenant-monitoring seam subtree (the
+                # default ``aegis/`` plus whatever VIGIL_MONITORING_PUBLISH_DIR / _SECRETS_DIR configure under
+                # the restore base). An archive made before the exclusion still carries them; restoring one would
+                # resurrect a grant/authority the spine has since revoked. Verified here (tamper check against
+                # the signed manifest), never WRITTEN — so a restore leaves them out.
                 if sha256_hex(base64.b64decode(b64)) != hashes.get(rel):
                     raise OffenseBackupError(f"file {rel!r} does not match its signed hash (tamper)")
                 continue
