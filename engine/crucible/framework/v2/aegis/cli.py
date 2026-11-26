@@ -269,12 +269,17 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     # process environment (/proc/<pid>/environ). Default-OFF: with no file source the legacy env/arg path below
     # is byte-identical to before. The report-secret loader's fail-closed rule (regular file, O_NOFOLLOW,
     # owner-only, bounded, >=16 bytes) is reused verbatim — the two secrets have the same handling requirement.
+    # The loaded secret is kept as RAW BYTES (never UTF-8-decoded), exactly like the report secret: the runbook
+    # provisions it with `head -c 32 /dev/urandom`, and random bytes are not valid UTF-8 — decoding would crash
+    # the documented provisioning path. hmac_id keys off the raw bytes (a str env secret is UTF-8-encoded there,
+    # so a text secret and its byte-identical file produce the same pseudonym).
     deployment_secret_file = (os.environ.get("AEGIS_GW_SECRET_FILE")
                               or getattr(args, "deployment_secret_file", None))
+    secret: str | bytes
     if deployment_secret_file:
         try:
-            secret = load_monitoring_secret(str(deployment_secret_file)).decode("utf-8")
-        except (OSError, ValueError, UnicodeDecodeError) as e:
+            secret = load_monitoring_secret(str(deployment_secret_file))
+        except (OSError, ValueError) as e:
             sys.stderr.write(f"aegis gateway: cannot load --deployment-secret-file: {e}\n")
             return 2
     else:
