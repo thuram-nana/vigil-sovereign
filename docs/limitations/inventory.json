@@ -672,8 +672,8 @@
   },
   {
    "id": "LIMIT-aegis-sealing-delivery-deferred",
-   "title": "AEGIS secret-sealing fleet delivery (AS-6a) is a default-OFF stub",
-   "summary": "aegis_sealing seals and rotates secret bundles with KMS+AAD, but the seam that pushes a sealed SecretBundle to the fleet units is the AS-6a reconciler, which is not yet built. Delivery is a default-OFF stub that stages the bundle and reports status 'deferred' (DeferredDelivery); no secret reaches the units until AS-6a is wired.",
+   "title": "AEGIS secret-sealing fleet delivery needs an owner-provided AWS SSM transport",
+   "summary": "aegis_sealing seals and rotates secret bundles with KMS+AAD; the AS-6a fleet reconciler is built and supplies the real SSM-only delivery seam (SsmSecretDelivery), exercised offline against an injected in-memory SSM channel. The residual is that the real AWS SSM client is owner-provided and deploy-gated: with no channel injected (or the delivery flag off) delivery falls back to DeferredDelivery, which stages the bundle and reports status 'deferred', so no secret reaches the units until the owner wires the SSM transport.",
    "classification": "real-unfinished-code",
    "severity": "info",
    "anchor": {
@@ -951,18 +951,11 @@
    "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
   },
   {
-   "file": "packages/core/vigil_core/vigil_core/aegis_sealing.py",
-   "snippet": "AS-6a",
+   "file": "engine/crucible/framework/v2/aegis/aegis_fleet.py",
+   "snippet": "deploy-gated",
    "kind": "debt",
    "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
-   "note": "AS-2h discloses the AS-6a fleet-delivery seam as a default-OFF stub (not yet built)."
-  },
-  {
-   "file": "packages/core/vigil_core/vigil_core/aegis_sealing.py",
-   "snippet": "Not yet implemented",
-   "kind": "debt",
-   "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
-   "note": "AS-2h DeferredDelivery docstring — AS-6a reconciler not yet implemented."
+   "note": "AS-6a SsmSecretDelivery: the real AWS SSM client is owner-provided and deploy-gated; offline the channel is an injected transport, so the SSM-only delivery path is exercised without an AWS call."
   }
  ]
 }

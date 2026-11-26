@@ -70,6 +70,21 @@ degeneracy (both an empty and a 1-record chain read `last_seq = 0`), which is ex
 - **Mutant:** removes the `entry_count ≥ floor` guard → a rolled-back/truncated head is accepted and
   the high-water drops → `MonotoneFloor` violated.
 
+#### 4a. AEGIS enforcement epoch floor (AS-2c extension, invariants `EnforcementFloorMonotone` / `NoEnforceBelowFloor`)
+The gateway-v2 slice (AS-2c) extends `MonotoneFloor.tla` with a second monotone floor of the same
+anti-rollback shape, over the authority **epoch** rather than the spine entry_count: a verified
+`EpochStatement` raises the floor to `max(local, statement)` (upward-only), and a grant whose epoch is
+below the floor is never accepted for enforcement (it degrades to uninspected pass-through). Two
+invariants are added to the faithful model and checked in the same run: `EnforcementFloorMonotone` (the
+epoch floor never regresses) and `NoEnforceBelowFloor` (no grant is ever accepted for enforcement below
+the floor — the stale-epoch guard is load-bearing).
+- **Code:** `packages/core/vigil_core/vigil_core/authority_v2.py` `evaluate_authority` (the `grant.epoch <
+  epoch_floor ⇒ PASS_THROUGH` stale-epoch guard); `engine/crucible/framework/v2/aegis/authority_v2_check.py`
+  `MonotoneEpochFloor.raise_to` (upward-only, seeded from the signed `EpochStatement`).
+- **Gate:** these two invariants are FAITHFUL-checked (the existing `MonotoneFloor` mutant remains the
+  load-bearing mutation gate for the anti-rollback family; the AEGIS-floor guard's own mutation sensitivity
+  is expressed in-model by `NoEnforceBelowFloor`, which goes TRUE if the stale-epoch guard is dropped).
+
 ## Reproduce
 
 ```bash
