@@ -235,6 +235,10 @@ assert "strix" not in _m, "jobs.redpen_fix must not import strix at module scope
 import vigil_core.standards_mirror             # APEX PR-A: the inert engine-table mirror the consumer renders from
 assert "framework" not in _m, "standards_mirror must not import framework at module scope"
 assert "strix" not in _m, "standards_mirror must not import strix at module scope"
+import vigil_core.job_substrate                # AS-30 (D17, #1202): the per-tenant job-substrate PRIMITIVE — PURE STDLIB
+assert "framework" not in _m, "job_substrate must not import framework at module scope (sovereign-renders tenant health)"
+assert "strix" not in _m, "job_substrate must not import strix at module scope"
+# (its stdlib-closure — not even pydantic — is pinned structurally by test_job_substrate::test_the_leaf_is_stdlib_only)
 import sigil.ui.finding_presentation          # APEX PR-A: the sovereign posture/presentation head (renders via the mirror)
 assert "framework" not in _m, "finding_presentation must not import framework at module scope"
 assert "strix" not in _m, "finding_presentation must not import strix at module scope"

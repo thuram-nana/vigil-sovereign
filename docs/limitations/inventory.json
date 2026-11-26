@@ -685,6 +685,22 @@
    "source_doc": "docs/DEFERRED-INFRA.md",
    "disposition": "file-into-w16",
    "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-jobs-runtime-isolation",
+   "title": "AEGIS per-tenant job-runner OS isolation rests on the deployed systemd unit (AS-30)",
+   "summary": "AS-30 ships the per-tenant job-substrate runner (framework.v2.aegis.job_runner.PerTenantRunner) and the pure vigil_core primitive (vigil_core.job_substrate) that renders a tenant's health to the sovereign plane. The fault isolation proven offline is the substrate-logic partition: a killed or failed job degrades only its own tenant's projection and leaves every other tenant's rendered bytes byte-identical (isolation_witness), so a noisy neighbour degrades alone. The residual is that the runtime OS-level isolation — one systemd instance per tenant (aegis-jobs@<tenant>.service), its own uid and MemoryMax/cgroup, routed by the AS-6a fleet — is deploy-gated infra not exercised by these offline tests; the process-per-tenant guarantee holds on the deployed unit, not in-process.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/job_runner.py",
+    "symbol": "PerTenantRunner"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
   }
  ],
  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -956,6 +972,13 @@
    "kind": "debt",
    "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
    "note": "AS-6a SsmSecretDelivery: the real AWS SSM client is owner-provided and deploy-gated; offline the channel is an injected transport, so the SSM-only delivery path is exercised without an AWS call."
+  },
+  {
+   "file": "engine/crucible/framework/v2/aegis/job_runner.py",
+   "snippet": "deploy-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-aegis-jobs-runtime-isolation",
+   "note": "AS-30 VIGIL-LIMIT marker: the per-tenant OS process/cgroup isolation is deploy-gated runtime infra (the systemd aegis-jobs@<tenant>.service instance); offline tests prove the substrate-logic fault partition, not the deployed-unit guarantee."
   }
  ]
 }
