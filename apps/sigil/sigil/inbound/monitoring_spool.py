@@ -23,6 +23,7 @@ one bad file. SOVEREIGN-only (``assert_no_offense``).
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -53,6 +54,12 @@ _PER_DOMAIN_DRAIN_CAP = 1024       # AS-3a red-pen #3: the BOUNDED SAFE DEFAULT 
 #                                    declared tenant drains at most this many reports per pass, so a flooded
 #                                    tenant whose slug sorts first can NEVER consume the whole pass and starve
 #                                    the next declared tenant — fairness is the DEFAULT, not opt-in.
+_LOCK_NAME = ".drain.lock"         # AS-3c: the single-drainer lock — a REGULAR file in working/ (never a *.json),
+#                                    flock'd exclusive so a pass-start reclaim can never race a live drainer's
+#                                    in-flight claim. The kernel drops it when the holder exits/dies, so a crash
+#                                    never wedges the spool. A non-regular file planted at that name => refuse.
+_STRICT_BUSY = {"recorded": 0, "rejected": 0, "deduped": 0, "seqs": [], "off_domain": 0,
+                "in_domain_foreign": 0, "alert_seq": -1, "busy": True}  # AS-3c: another drainer holds the lock
 
 
 def domain_slug(org_id: str, host: str) -> str:
@@ -191,13 +198,26 @@ class MonitoringSpoolWatcher:
         except OSError:
             pass
 
-    def _process_one(self, src: Path) -> "tuple[str, int]":
+    def _process_one(self, src: Path, slug: "Optional[str]" = None) -> "tuple[str, int]":
         """Claim ONE incoming file out of ``incoming/`` and drain it: returns ``(status, seq)`` where status is
         ``recorded`` | ``deduped`` | ``rejected`` | ``gone`` and ``seq`` is the spined event seq (``-1`` unless
         recorded). Shared by the global and strict drains so the per-file contract (atomic claim, bounded
         regular-UTF-8 read, content-addressed dedup, fail-closed verify, nothing-appended-on-refusal) lives in
-        exactly one place. Never raises."""
-        claimed = self.working / src.name
+        exactly one place. Never raises.
+
+        AS-3c: when ``slug`` is given (strict mode), the file is claimed into ``working/<slug>/`` rather than flat
+        ``working/`` — so a crash-recovery reclaim can restore it to the SAME ``incoming/<slug>/`` subtree it was
+        draining (a flat reclaim would drop it into ``incoming/`` root and the next strict pass would sweep it
+        off-domain). The dedup marker stays content-addressed (``processed/<sha256>``), so re-drain is idempotent."""
+        if slug is not None:
+            wdir = self.working / slug
+            try:
+                wdir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return ("gone", -1)
+            claimed = wdir / src.name
+        else:
+            claimed = self.working / src.name
         try:
             os.replace(src, claimed)   # atomic CLAIM: the file leaves incoming/ before we act on it
         except OSError:
@@ -223,15 +243,75 @@ class MonitoringSpoolWatcher:
             self._quarantine(claimed, f"{type(exc).__name__}: {exc}")
             return ("rejected", -1)
 
-    def drain(self) -> dict:
+    # -- AS-3c crash durability: reclaim + single-drainer lock (ported from billing_spool) ----------------
+    def _reclaim_working(self) -> None:
+        """Crash recovery — "killed drain loses nothing". ``_process_one`` CLAIMS a file into ``working/`` (atomic
+        rename out of ``incoming/``) BEFORE it verifies/records; if the drainer dies between that claim and the
+        archive to ``processed/``, the file is STRANDED in ``working/`` — out of ``incoming/`` so no later drain
+        sees it, and not in ``processed/`` so it was never spined. The authenticated gateway report is then
+        silently lost. At the START of each strict pass, move every stranded file back to its ``incoming/`` origin
+        so the next pass re-drains it. Re-drain is idempotent via the ``processed/<sha256>`` dedup marker, so a
+        file reclaimed AFTER it already spined is deduped, never double-recorded. Strict claims live in
+        ``working/<slug>/`` (restored to ``incoming/<slug>/``); any flat ``working/*.json`` (a global-mode claim)
+        restores to ``incoming/``. NEVER unlink on a failed move: a report that cannot be reclaimed stays in
+        ``working/`` for the next sweep rather than being destroyed (losing an authenticated detection is not
+        recoverable; re-draining one is). Skips the ``.drain.lock`` (not a ``*.json``) and producer ``.tmp-``."""
+        def _restore(files: "Iterable[Path]", dest_dir: Path) -> None:
+            for f in files:
+                if f.name.startswith(".tmp-"):
+                    continue
+                try:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    os.replace(f, dest_dir / f.name)
+                except OSError:
+                    pass   # leave it in working/ for a later sweep — never destroy an authenticated report
+        try:
+            _restore(self.working.glob("*.json"), self.incoming)   # flat (global-mode) claims
+            subdirs = [d for d in self.working.iterdir() if d.is_dir()]
+        except OSError:
+            return
+        for sub in subdirs:                                        # per-slug (strict-mode) claims
+            try:
+                _restore(sub.glob("*.json"), self.incoming / sub.name)
+            except OSError:
+                pass
+
+    def drain(self, *, wait_s: float = 0.0) -> dict:
         """Drain the spool once. DEFAULT (``domains=None``): the unchanged GLOBAL drain — process every file in
-        ``incoming/`` in one pass. STRICT (AS-3a, ``domains`` declared): process ONLY each declared domain's own
-        ``incoming/<slug>/`` subtree, quarantine everything else OFF-DOMAIN by location (never scanning it), and
-        fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped, seqs}`` and, in strict mode,
-        also ``{off_domain, in_domain_foreign, alert_seq}``. Never raises on one bad file."""
+        ``incoming/`` in one pass (byte-identical; no lock, no reclaim, no DRR). STRICT (AS-3a, ``domains``
+        declared): under the single-drainer lock, reclaim any crash-stranded ``working/`` files (AS-3c), then
+        process ONLY each declared domain's own ``incoming/<slug>/`` subtree, quarantine everything else
+        OFF-DOMAIN by location, and fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped,
+        seqs}`` and, in strict mode, also ``{off_domain, in_domain_foreign, alert_seq}`` (and ``busy`` when
+        another drainer holds the lock). ``wait_s`` bounds the wait for the lock (default 0: try once). Never
+        raises on one bad file."""
         if self._domains is None:
             return self._drain_global()
-        return self._drain_strict()
+        # STRICT (AS-3c): the whole pass — reclaim + every claim — runs under an exclusive flock on
+        # working/.drain.lock, so a pass-start reclaim can never take a file a concurrent drainer is mid-verify
+        # on (which could double-spine, or strand a half-processed report). Fail-closed: a lock that is not a
+        # regular file (a planted symlink/FIFO) refuses the drain; the kernel releases it on crash.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(str(self.working / _LOCK_NAME), flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise MonitoringSpoolError(f"{self.working / _LOCK_NAME} is not a regular file — refusing to drain")
+            deadline = time.monotonic() + max(0.0, float(wait_s))
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return dict(_STRICT_BUSY, seqs=[])
+                    time.sleep(0.05)
+            self._reclaim_working()      # crash recovery under the lock: re-admit working/ files a dead drainer left
+            return self._drain_strict()
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def _drain_global(self) -> dict:
         """The default drain: one pass over every ``incoming/*.json`` (byte-for-byte the pre-AS-3a behavior)."""
@@ -277,7 +357,7 @@ class MonitoringSpoolWatcher:
                 continue
             picked, foreign = self._scan_declared_subtree(ddir, self.per_domain_limit, self.off_domain_limit)
             for name in sorted(picked):                # determinism over the BOUNDED slice (signed-path order)
-                status, seq = self._process_one(ddir / name)
+                status, seq = self._process_one(ddir / name, slug)   # AS-3c: claim into working/<slug>/ (reclaimable)
                 if status == "recorded":
                     recorded += 1
                     seqs.append(seq)
