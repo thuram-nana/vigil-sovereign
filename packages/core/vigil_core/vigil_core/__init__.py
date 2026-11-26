@@ -79,6 +79,21 @@ from .authority_v2 import (
     sign_monitoring_revocation_v2, verify_enforce_release, verify_epoch_statement,
     verify_monitoring_authority_v2, verify_monitoring_revocation_v2,
 )
+from .aegis_schemas import (
+    ALL_OUTCOME_CLASSES, BASELINE_REACHABLE_OUTCOMES, EVENT_V2_SCHEMA, HEALTH_V1_SCHEMA,
+    RESPONSE_MANIFEST_SCHEMA, AdapterCapability, AegisEventV2, AssetRef, CanonicalModel, Criticality,
+    EffectVerification, EngineHealth, EngineHealthState, OutcomeClass, PlacementState,
+    ResponseDeadlines, ResponseManifest, baseline_response_manifest, clean_token as clean_aegis_token,
+)
+from .protection_contract import (
+    BASELINE_SIGIL_PROVIDER, PROTECTION_CONTRACT_SCHEMA, PROVIDER_REGISTRY_SCHEMA, AuthorizedActions,
+    BindingState, Budgets, CertState, CustomerPrerequisites, Dimensions, DuplicateProviderError,
+    EdgeBlock, EnforceReleaseProjection, EnforcementTerms, FailureBasis, FailurePolicy, Headline,
+    LeaseProjection, LicensingMode, LockState, OriginBinding, OriginBlock, OriginLock, PostureDimension,
+    ProtectionContract, ProviderDescriptor, ProviderRegistry, ReleaseState, RequiredSensor,
+    RevocationProjection, RevocationState, SignerRole, TrustAssumptions, ViewerTls,
+    baseline_provider_registry,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -184,4 +199,20 @@ __all__ = [
     "prove_wielder", "verify_wielder_proof",
     "EscrowBundle", "EscrowError", "EscrowRequest", "Share", "escrow_passphrase", "maybe_escrow",
     "parse_public_metadata", "recover_passphrase", "recover_secret", "split_secret",
+    # AS-2b — base data contracts (aegis_schemas.py):
+    "EVENT_V2_SCHEMA", "HEALTH_V1_SCHEMA", "RESPONSE_MANIFEST_SCHEMA",
+    "ALL_OUTCOME_CLASSES", "BASELINE_REACHABLE_OUTCOMES", "clean_aegis_token", "CanonicalModel",
+    "OutcomeClass", "EffectVerification", "EngineHealthState", "PlacementState", "Criticality",
+    "AssetRef", "AdapterCapability", "EngineHealth", "ResponseDeadlines", "ResponseManifest",
+    "baseline_response_manifest", "AegisEventV2",
+    # AS-2b — protection contract + provider registry (protection_contract.py):
+    "PROTECTION_CONTRACT_SCHEMA", "PROVIDER_REGISTRY_SCHEMA",
+    "Headline", "PostureDimension", "LicensingMode", "BindingState", "LockState", "CertState",
+    "RevocationState", "ReleaseState", "SignerRole", "FailureBasis",
+    "ViewerTls", "EdgeBlock", "OriginBinding", "OriginLock", "OriginBlock", "RequiredSensor",
+    "LeaseProjection", "RevocationProjection", "AuthorizedActions", "EnforceReleaseProjection",
+    "EnforcementTerms", "FailurePolicy", "CustomerPrerequisites", "TrustAssumptions",
+    "Dimensions", "Budgets", "ProtectionContract",
+    "ProviderDescriptor", "ProviderRegistry", "DuplicateProviderError",
+    "BASELINE_SIGIL_PROVIDER", "baseline_provider_registry",
 ]
