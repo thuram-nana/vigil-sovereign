@@ -4706,7 +4706,7 @@ class Provisioner:
         else:
             grant_role_ref = role_ref
             grant_token_sha256 = ""
-        role_ref = None                                             # shed the token reference past the fetch (Cloudflare)
+        role_ref = ""                                               # shed the token reference past the fetch (Cloudflare)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):

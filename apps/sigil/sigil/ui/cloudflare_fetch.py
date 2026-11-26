@@ -275,7 +275,8 @@ class CloudflareTokenConnectFetcher:
         never a pass)."""
         status, doc = self._call(_CF_VERIFY_URL, token)
         if status == 200 and isinstance(doc, dict) and doc.get("success") is True:
-            result = doc.get("result") if isinstance(doc.get("result"), dict) else {}
+            raw_result = doc.get("result")
+            result = raw_result if isinstance(raw_result, dict) else {}
             tid, st = str(result.get("id") or ""), str(result.get("status") or "")
             if not _CF_TOKEN_ID_RE.fullmatch(tid):
                 raise CloudFetchError("the cloud check could not be made", detail="verify answer carried no token id")
@@ -297,7 +298,9 @@ class CloudflareTokenConnectFetcher:
                                   "scoped to one account — include the read-only 'User API Tokens Read' permission "
                                   "shown on the connect screen, then try again",
                                   detail=f"token-detail HTTP {status} cf={_cf_error_codes(doc)}")
-        result = doc.get("result") if isinstance(doc.get("result"), dict) else {}
+        assert isinstance(doc, dict)                    # narrowed by the guard above (no-op at runtime; for mypy)
+        raw_result = doc.get("result")
+        result = raw_result if isinstance(raw_result, dict) else {}
         name = str(result.get("name") or "")
         policies = result.get("policies")
         if not isinstance(policies, list):
