@@ -274,6 +274,8 @@ class AdapterCapability(CanonicalModel):
     enum. ``effect_verification`` defaults to ``none`` (fail-closed: an adapter proves nothing until
     it declares a basis)."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     kind: str = Field(description="The adapter kind (e.g. 'inline_block', 'edge_virtual_patch', 'guardduty').")
     outcome_class: OutcomeClass = Field(description="Which of the five outcome classes this capability reaches.")
     effect_verification: EffectVerification = Field(default=EffectVerification.NONE)

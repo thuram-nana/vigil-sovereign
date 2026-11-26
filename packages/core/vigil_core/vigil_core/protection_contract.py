@@ -477,11 +477,24 @@ class ProtectionContract(CanonicalModel):
 class ProviderDescriptor(CanonicalModel):
     """One enforcement/detection provider in the registry. Declares its ``capabilities`` (each an
     :class:`AdapterCapability` naming the ONE outcome class it reaches + how its effect is verified).
-    ``provider_id`` is a safe path component; ``capabilities`` carries at least one entry."""
+    ``provider_id`` is a safe path component; ``capabilities`` carries at least one entry. FROZEN with a
+    TUPLE of frozen capabilities so a held descriptor cannot be rewritten in place — a mutable descriptor
+    let an in-place edit over-claim an outcome class, bypass ``clean_token`` on ``title`` via assignment,
+    and poison the shared baseline singleton process-wide (red-pen wufm8d7z1)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider_id: str = Field(description="The stable provider id (a safe path component).")
     title: str = Field(default="", description="A human label for the provider.")
-    capabilities: list[AdapterCapability] = Field(min_length=1)
+    capabilities: tuple[AdapterCapability, ...] = Field(min_length=1)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _coerce_caps(cls, v: Any) -> Any:
+        """Coerce a list to a TUPLE so the capabilities sequence is immutable: ``frozen=True`` blocks REASSIGNMENT
+        of the field, but a ``list`` value would still accept ``.append()`` / ``[i]=`` on a held descriptor,
+        re-opening the over-claim + shared-singleton-poisoning hole."""
+        return tuple(v) if isinstance(v, list) else v
 
     @field_validator("provider_id")
     @classmethod
