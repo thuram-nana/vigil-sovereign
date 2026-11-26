@@ -34,6 +34,8 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import quote as _urlquote, unquote as _urlunquote, urlsplit
 
 from .models import OracleKind, OracleSignal
+from ._multilang_static import multilang_dispatch as _multilang_dispatch
+from ._multilang_static import multilang_enabled as _multilang_enabled
 
 # HTML void elements never get an end tag — popped from the path stack on start.
 _VOID_ELEMENTS = frozenset({
@@ -6393,28 +6395,24 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
     #     ``_static_tier_hit`` below (byte-identical), every non-Python language takes the EXISTING refuse→LEAD.
     #   * Flag ON: a registered language routes through its plugin (Python IS the first plugin — proving the
     #     refactor), and an UNREGISTERED language takes the IDENTICAL refuse shape (fail-closed — an unregistered
-    #     language == today's non-Python refuse). The imports are FUNCTION-LOCAL (FATAL-2): no ``langplugins`` /
-    #     ``tree_sitter`` module is imported when the flag is OFF.
+    #     language == today's non-Python refuse). The flag read + registry dispatch are ISOLATED in
+    #     ``verify._multilang_static`` (imported at module level) so this oracle's Python re-execution
+    #     closure stays STDLIB-ONLY (``test_general_reexecutable``): the flag is a pure ``os.environ`` read
+    #     and the ONLY non-stdlib import — the offense-plane ``langplugins`` registry — is lazy there and
+    #     reached ONLY when the flag is ON, never on the Python offline-re-verification path.
     _lang_plugin = None
-    _multilang = False
-    try:
-        from vigil_integration.multilang_flag import multilang_codescan_enabled  # noqa: PLC0415 (FATAL-2: framework-free offense flag)
-        _multilang = multilang_codescan_enabled()
-    except Exception:  # noqa: BLE001 — flag module unavailable ⇒ OFF (byte-identical legacy path)
-        _multilang = False
+    _multilang = _multilang_enabled()
     if _multilang:
-        try:
-            from vigil_integration.langplugins import registry as _lp_registry  # noqa: PLC0415 (FATAL-2: framework-free offense plugin)
-            _lang_plugin = _lp_registry.for_language(language)
-        except Exception:  # noqa: BLE001 — plugin machinery unavailable ⇒ degrade to the Python-only path (never raise)
+        _avail, _lang_plugin = _multilang_dispatch(language)
+        if not _avail:
+            # plugin machinery unavailable ⇒ degrade to the byte-identical Python-only legacy path.
             _lang_plugin, _multilang = None, False
-        else:
-            if _lang_plugin is None:
-                # fail-closed: an unregistered language is EXACTLY today's non-Python refuse → a LEAD.
-                return OracleSignal(
-                    kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
-                    evidence=f"language {language!r} is not re-parseable by this oracle (Python-only) — REFUSE (lead)",
-                    observed={"rule_id": rule_id, "language": language, "reason": "unsupported_language"})
+        elif _lang_plugin is None:
+            # fail-closed: an unregistered language is EXACTLY today's non-Python refuse → a LEAD.
+            return OracleSignal(
+                kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                evidence=f"language {language!r} is not re-parseable by this oracle (Python-only) — REFUSE (lead)",
+                observed={"rule_id": rule_id, "language": language, "reason": "unsupported_language"})
     if not _multilang and language not in ("python", "py"):
         # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.
         return OracleSignal(
