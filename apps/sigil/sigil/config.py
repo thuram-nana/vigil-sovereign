@@ -1119,20 +1119,22 @@ def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
     (`VIGIL_BASE_DIR`, else `.vigil-live`). Only signed public artifacts land here — never private material."""
+    from vigil_core.aegis_seam import AEGIS_SEAM_SUBDIR, MONITORING_AUTHORITY_SUBDIR
     override = (os.environ.get("VIGIL_MONITORING_PUBLISH_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(_seam_base()) / "aegis" / "monitoring_authority"
+    return Path(_seam_base()) / AEGIS_SEAM_SUBDIR / MONITORING_AUTHORITY_SUBDIR
 
 
 def monitoring_secrets_dir() -> Path:
     """Where the sovereign keeps the per-(org, host) AEGIS-SaaS monitoring REPORT secrets (AE-6). These are
     shared HMAC secrets (one copy goes to that tenant's managed gateway as a 0600 file); never published.
     `VIGIL_MONITORING_SECRETS_DIR` overrides; default under the live data dir."""
+    from vigil_core.aegis_seam import AEGIS_SEAM_SUBDIR, REPORT_SECRETS_SUBDIR
     override = (os.environ.get("VIGIL_MONITORING_SECRETS_DIR") or "").strip()
     if override:
         return Path(override)
-    return Path(_seam_base()) / "aegis" / "report_secrets"
+    return Path(_seam_base()) / AEGIS_SEAM_SUBDIR / REPORT_SECRETS_SUBDIR
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
