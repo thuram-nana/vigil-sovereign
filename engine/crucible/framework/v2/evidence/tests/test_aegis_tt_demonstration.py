@@ -19,6 +19,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
 
@@ -347,6 +350,46 @@ def test_build_artifacts_not_valid_is_refused() -> None:
     signed = sign_demonstration(demo, signers)
     v = verify_demonstration(signed, manifest=manifest, trust_root=tr, environment="staging")
     assert not v.artifacts_valid and not v.ok
+
+
+# --------------------------------------------------------------------------------------
+# IaC-topology invariant — a demonstration exists only to attest an IaC-provisioned run.
+# --------------------------------------------------------------------------------------
+def test_non_iac_topology_is_refused() -> None:
+    """A run that executed against a NON-IaC topology (e.g. a dev's local docker-compose,
+    ``kind="local-docker-compose"``) must never back a demonstration — binding it would attest to an
+    environment that does not describe staging, defeating the IaC invariant. Exercised non-vacuously:
+    the clean (kind="iac") fixture verifies ok with topology_is_iac set, and ONLY flipping the
+    topology class to a non-iac value turns ok False, on that reason alone (signature and manifest
+    binding stay sound)."""
+    manifest = _manifest()
+    tr, signers = _trust_root()
+
+    # Control: the unmodified fixture (kind="iac") verifies ok=True.
+    clean = sign_demonstration(_demo(manifest), signers)
+    good = verify_demonstration(clean, manifest=manifest, trust_root=tr, environment="staging")
+    assert good.ok and good.topology_is_iac
+
+    # Treatment: bind a run against a non-IaC topology. Built past the Literal["iac"] construction
+    # guard with object.__setattr__ so the record even exists; the signature is minted over the
+    # tampered bytes and is itself valid — only the verify-time IaC check denies it.
+    demo = _demo(manifest)
+    object.__setattr__(demo.topology, "kind", "local-docker-compose")
+    signed = sign_demonstration(demo, signers)
+    v = verify_demonstration(signed, manifest=manifest, trust_root=tr, environment="staging")
+    assert v.authentic and v.manifest_bound   # the ONLY thing wrong is the topology class
+    assert not v.topology_is_iac and not v.ok
+    assert any('not "iac"' in r for r in v.reasons)
+
+
+def test_non_iac_topology_is_refused_at_construction() -> None:
+    """The IaC-only invariant is also STRUCTURAL: a non-"iac" topology cannot be constructed at all,
+    so build_demonstration can never mint a non-iac record in the first place — defence in depth with
+    the verify-time guard. The existing kind="iac" fixture is unaffected (it builds and verifies)."""
+    with pytest.raises(ValidationError):
+        TopologyRef.model_validate({"class": "local-docker-compose", "digest": "e" * 64})
+    # And the valid value still constructs.
+    assert TopologyRef.model_validate({"class": "iac", "digest": "e" * 64}).kind == "iac"
 
 
 def test_a_swapped_but_internally_valid_manifest_is_refused() -> None:

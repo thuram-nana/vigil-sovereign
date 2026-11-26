@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -132,7 +132,12 @@ class TopologyRef(BaseModel):
     # Serialized as "class" (plan §13.3 ``topology{class: iac, digest}``); ``kind`` is the Python name
     # because ``class`` is a reserved word. Signing always goes through ``_signing_payload`` with
     # by_alias=True so the bytes carry "class", and verify uses the same path — they cannot diverge.
-    kind: str = Field(alias="class", min_length=1)
+    # ``Literal["iac"]`` makes the IaC-only invariant STRUCTURAL: ``build_demonstration`` (and any
+    # load of a serialized record) refuses a non-"iac" topology at construction, fail-closed, before
+    # any signature is minted. A demonstration exists only to attest an IaC-provisioned run, so there
+    # is no legitimate non-iac record to foreclose. ``verify_demonstration`` re-checks this anyway, so
+    # a record built past validation (``model_construct``) is still denied at verify time.
+    kind: Literal["iac"] = Field(alias="class")
     digest: str = Field(min_length=1)
 
 
@@ -333,6 +338,7 @@ class DemonstrationVerification:
     routes_in_census: bool
     no_skip_ok: bool
     artifacts_valid: bool
+    topology_is_iac: bool
     valid_signers: tuple[str, ...]
     stale: bool
     reasons: tuple[str, ...]
@@ -471,6 +477,17 @@ def verify_demonstration(
     if not artifacts_valid:
         reasons.append(f"build artifacts are {demo.build.artifacts!r}, not VALID")
 
+    # 10. IaC topology — the invariant this whole record exists to attest (ADR 0005 / plan §13.3:
+    #     "proven ... through VIGIL on staging" against infrastructure-as-code). The run must have
+    #     executed against an IaC topology; a non-IaC one (e.g. a dev's local docker-compose,
+    #     ``kind="local-docker-compose"``) can never back a demonstration, or the record would attest
+    #     to a run on an environment that does not describe staging. Fail-closed and independent of the
+    #     ``Literal["iac"]`` construction constraint, so a record built past validation is still denied.
+    topology_is_iac = demo.topology.kind == "iac"
+    if not topology_is_iac:
+        reasons.append(f"topology class is {demo.topology.kind!r}, not \"iac\" — "
+                       "a demonstration must bind a run on an IaC-provisioned topology")
+
     # Staleness (a STATE, computed by subject/topology digest — never a failure, never a clock).
     stale = False
     if current_subject_digest is not None and current_subject_digest != demo.subject.digest:
@@ -483,12 +500,14 @@ def verify_demonstration(
     ok = (
         authentic and non_production and manifest_bound and run_ok and cases_present
         and legs_nonempty and routes_in_census and no_skip_ok and artifacts_valid
+        and topology_is_iac
     )
     return DemonstrationVerification(
         authentic=authentic, non_production=non_production, manifest_bound=manifest_bound,
         run_ok=run_ok, cases_present=cases_present, legs_nonempty=legs_nonempty,
         routes_in_census=routes_in_census, no_skip_ok=no_skip_ok, artifacts_valid=artifacts_valid,
-        valid_signers=thr.valid_signers, stale=stale, reasons=tuple(reasons), ok=ok,
+        topology_is_iac=topology_is_iac, valid_signers=thr.valid_signers, stale=stale,
+        reasons=tuple(reasons), ok=ok,
     )
 
 
