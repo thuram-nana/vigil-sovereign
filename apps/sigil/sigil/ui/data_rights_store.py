@@ -51,10 +51,18 @@ KINDS = ("export", "close_account")
 #: never be re-aimed at another or have its kind rewritten without breaking the signature.
 _CORE = ("signal", "username", "org_id", "request_id", "kind", "created_at")
 
-_MAX_BYTES = 262144                 # the largest ledger file this store reads (a larger file is not one it wrote)
 _MAX_ROWS = 1000                    # the most rows one account's ledger holds (a larger one is refused a new row)
 _MAX_ID_LEN = 128                   # per request_id, in characters
 _MAX_ORG_LEN = 256                  # per org_id, in characters
+_MAX_USER_LEN = 256                 # per username, in characters — bounds the row so _MAX_ROWS (not _MAX_BYTES) is the
+#                                     binding cap; without it a single long username could make a legitimate row
+#                                     unbounded and trip _MAX_BYTES before the graceful _MAX_ROWS limit.
+# A fully-populated signed row (username/org at _MAX_*_LEN, request_id at _MAX_ID_LEN, ed25519 sig+pubkey) measures
+# ~946 bytes; 1024 is the per-row ceiling with headroom. _MAX_BYTES is derived from it so the read guard always admits
+# _MAX_ROWS legitimate rows and the graceful "too many requests on this account" path (not an EFBIG 500) is what a
+# full ledger hits.
+_MAX_ROW_BYTES = 1024
+_MAX_BYTES = _MAX_ROWS * _MAX_ROW_BYTES   # the largest ledger file this store reads (a larger file is not one it wrote)
 # What opening a symlink with O_NOFOLLOW fails with (ELOOP on Linux, EMLINK on the BSDs): a symlink where an account's
 # file goes holds no ledger, so a record replaces nothing through it (the append opens the real path only).
 _SYMLINK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
@@ -179,13 +187,13 @@ def record_request(username: str, org_id: str, kind: str, request_id: str, *, ow
     their bounds.
 
     Refused with ``ValueError``, nothing written: an unknown kind, a non-string / empty / over-long / non-text
-    ``request_id`` or ``org_id``, or an empty or non-text ``username`` — the caller's INPUT. Refused with ``OSError``,
+    ``request_id`` or ``org_id``, or an empty / over-long / non-text ``username`` — the caller's INPUT. Refused with ``OSError``,
     nothing written (a STORE / environment fault, not the input): no owner key to sign with (a locked vault — a row
     that could never verify on read must not be recorded, fail-closed), a ledger file that is there but cannot be read
     (``LedgerUnreadable``, so idempotency cannot be checked), one already at ``_MAX_ROWS``, or a directory that cannot
     be written."""
     u = str(username or "")
-    if not u or not _is_text(u):
+    if not u or not _is_text(u) or len(u) > _MAX_USER_LEN:
         raise ValueError("a data-rights request needs the account")
     if kind not in KINDS:
         raise ValueError(f"unknown data-rights request kind: {kind!r}")
@@ -213,6 +221,13 @@ def record_request(username: str, org_id: str, kind: str, request_id: str, *, ow
                 "kind": kind, "created_at": float(now)}
         row = signed_payload(core, owner_key)
         line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+        # Resync guard: if a PRIOR append was torn (an incomplete write left its last line without a trailing newline,
+        # e.g. the disk filled mid-write), prepend a newline so this record starts on its own line and cannot be
+        # concatenated onto the partial bytes (which would merge two JSON records into one unparseable line that
+        # _rows drops — silently losing BOTH the partial and this valid, owner-signed request). The leading empty line
+        # is skipped by _rows. We already hold `existing` from the idempotency read above, so this costs no extra I/O.
+        if existing and not existing.endswith(b"\n"):
+            line = b"\n" + line
         d = _dir()
         d.mkdir(parents=True, exist_ok=True)
         try:
@@ -221,8 +236,18 @@ def record_request(username: str, org_id: str, kind: str, request_id: str, *, ow
             pass
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(d / _name(u)), flags, 0o600)
+        # Write the whole line or fail: os.write may return a short count (EINTR, or a near-full disk), and a partial
+        # append must never be reported as recorded. Loop until every byte is on disk; if it cannot complete, raise
+        # LedgerUnreadable (an OSError the provisioner surfaces as a clean 500, nothing "recorded") — and the resync
+        # guard above repairs the torn tail on the next successful append.
         try:
-            os.write(fd, line)                      # one write of one line (< PIPE_BUF): an atomic append
+            mv = memoryview(line)
+            written = 0
+            while written < len(mv):
+                n = os.write(fd, mv[written:])
+                if n <= 0:
+                    raise LedgerUnreadable(errno.EIO, "the data-rights request could not be fully recorded")
+                written += n
         finally:
             os.close(fd)
         return {"recorded": True, "request": _view(row)}

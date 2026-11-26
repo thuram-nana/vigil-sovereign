@@ -469,3 +469,78 @@ def test_11_app_wires_flag_route_and_screen_script():
             ' : viewDashboard()) : viewLogin(); },') in src
     assert 'settingsLink("Data rights", "#/data-rights")' in src
     assert DATA_RIGHTS_JS.exists() and "window.VIGIL_DATA_RIGHTS" in DATA_RIGHTS_JS.read_text(encoding="utf-8")
+
+
+# =====================================================================================================================
+# 12-16. Ledger robustness regressions (red-pen Batch-L): the compliance ledger must not silently lose a recorded
+#        request, must not brick the screen before its graceful cap, and bounds every identity field.
+# =====================================================================================================================
+def _sign_row(u, o, rid, created):
+    from sigil.governor.authn import signed_payload
+    core = {"signal": store.DATA_RIGHTS_SIGNAL, "username": u, "org_id": o,
+            "request_id": rid, "kind": "close_account", "created_at": float(created)}
+    return json.dumps(signed_payload(core, OWNER), sort_keys=True)
+
+
+def test_12_max_rows_is_the_binding_cap_not_max_bytes(home):
+    # A full ledger of the LARGEST legitimate rows must still read (no EFBIG 500) and the (_MAX_ROWS+1)th request must
+    # hit the GRACEFUL "too many requests" path — not the byte cap tripping first and hard-500ing record + view.
+    u = "u" * store._MAX_USER_LEN
+    o = "o" * store._MAX_ORG_LEN
+    d = store._dir(); d.mkdir(parents=True, exist_ok=True)
+    path = d / store._name(u)
+    lines = [_sign_row(u, o, str(i).zfill(store._MAX_ID_LEN), i) for i in range(store._MAX_ROWS)]
+    path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    # the derived read cap admits a full ledger of max-size rows
+    assert path.stat().st_size <= store._MAX_BYTES
+    rows = store.list_requests(u, trusted_pubkey=OP, strict=True)      # strict: a byte-cap EFBIG would raise here
+    assert len(rows) == store._MAX_ROWS
+    # one more request: the graceful account-level cap, NOT "larger than this store writes"
+    with pytest.raises(store.LedgerUnreadable) as ei:
+        store.record_request(u, o, "close_account", "one-too-many", owner_key=OWNER, now=9e9)
+    assert "too many data-rights requests on this account" in str(ei.value)
+    assert "larger than this store writes" not in str(ei.value)
+
+
+def test_13_torn_prior_append_does_not_swallow_the_next_record(home):
+    # A prior torn append (partial line, no trailing newline — e.g. the disk filled mid-write) must not merge with the
+    # next record. The resync guard prepends a newline so the valid, owner-signed request still lands and reads back.
+    u = "cust_torn"
+    d = store._dir(); d.mkdir(parents=True, exist_ok=True)
+    path = d / store._name(u)
+    path.write_bytes(b'{"partial": "a torn row with no closing brace and no newline"')   # not valid JSON, no "\n"
+    res = store.record_request(u, "org_a", "export", "rid-after-torn", owner_key=OWNER, now=5.0)
+    assert res["recorded"] is True
+    rows = store.list_requests(u, trusted_pubkey=OP)
+    assert [r["request_id"] for r in rows] == ["rid-after-torn"]       # torn partial dropped, new row survives
+    assert path.read_bytes().endswith(b"\n")                            # tail resynced
+
+
+def test_14_username_over_max_len_is_refused(home):
+    too_long = "u" * (store._MAX_USER_LEN + 1)
+    with pytest.raises(ValueError):
+        store.record_request(too_long, "org_a", "export", "rid-1", owner_key=OWNER, now=1.0)
+    at_bound = "u" * store._MAX_USER_LEN
+    assert store.record_request(at_bound, "org_a", "export", "rid-1", owner_key=OWNER, now=1.0)["recorded"] is True
+
+
+def test_15_short_writes_still_persist_the_whole_row(home, monkeypatch):
+    # os.write may return a short count; the write-all loop must land every byte so the row is complete and readable.
+    import os as _os
+    u = "cust_short"
+    real_write = _os.write
+    # <=7 bytes per write; list_requests only reads, so leaving the patch in place does not affect it (and calling
+    # monkeypatch.undo() here would also revert the `home` fixture's CUSTOMER_DATA_RIGHTS_DIR patch).
+    monkeypatch.setattr(store.os, "write", lambda fd, data: real_write(fd, bytes(data[:7])))
+    res = store.record_request(u, "org_a", "export", "rid-1", owner_key=OWNER, now=1.0)
+    assert res["recorded"] is True
+    assert [r["request_id"] for r in store.list_requests(u, trusted_pubkey=OP)] == ["rid-1"]
+
+
+def test_16_a_write_that_cannot_progress_raises_not_silently_records(home, monkeypatch):
+    # If os.write can make no progress (returns 0), the request must fail loudly (LedgerUnreadable -> clean 500),
+    # never be reported as recorded.
+    u = "cust_stuck"
+    monkeypatch.setattr(store.os, "write", lambda fd, data: 0)
+    with pytest.raises(store.LedgerUnreadable):
+        store.record_request(u, "org_a", "export", "rid-1", owner_key=OWNER, now=1.0)
