@@ -520,6 +520,47 @@ class AssetOwnershipRegistry:
                                     trusted_pubkey=self.trusted_pubkey).retire(oid, h)
         return seq
 
+    def _append_revoked_proof(self, org_id: str, host: str) -> int:
+        """Append a safe-direction revoked proof for an ALREADY-FOLDED (org_id, host), skipping the
+        binding-time ``_check_host`` validation (the pair came straight from the proof fold). Used ONLY by
+        the ``revoke_org`` cascade so a corrupt/hand-signed folded proof whose host the binding check would
+        reject (only reachable via a direct owner-signed append — the API refuses it) cannot abort the org
+        decommission. Mirrors ``orgs._append_revoked_membership`` exactly. Fixed ``issued_at`` 0.0 (a replayed
+        revoke merely re-revokes)."""
+        core = {"signal": PROOF_SIGNAL, "org_id": org_id, "host": host, "method": "", "token_sha256": "",
+                "verified_at": 0.0, "expires_at": 0.0, "state": "revoked", "issued_at": 0.0}
+        payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
+                   "tier": "A0", "decision": "auto",
+                   "reason": f"ownership proof for {host} (org {org_id}) REVOKED (org cascade)"}
+        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
+    def revoke_org(self, org_id: str) -> "list[int]":
+        """Revoke EVERY active ownership proof of one org — the org-decommission PROOF CASCADE (Slice AS-2l).
+
+        THE RESURRECTION GUARD: because ``has_current_proof`` gates ONLY on the proof fold (never on whether
+        the org is active), a ``revoke_org`` that left the proofs active would silently restore every prior
+        proof the moment the SAME org_id is re-created (supported reactivation) — a re-created org inheriting
+        the decommissioned org's proven hosts. Cascading leaves each proof in the ``revoked`` LWW state
+        (durable across a hard prune via the snapshot seed — the SAME guard ``_fold_proofs`` carries), so a
+        prior host is proven again ONLY after a FRESH owner-signed ``verify_and_record`` with a
+        strictly-greater ``issued_at``. Mirrors ``orgs.OrgRegistry.revoke_org``'s membership cascade.
+
+        DETERMINISM + FAIL-SAFE: enumerates the proof fold and appends one safe-direction revoke per host —
+        NO wallclock / global-RNG on this path (each revoke carries a FIXED ``issued_at`` 0.0, not ``now``).
+        Each host is revoked by its RAW folded host via ``_append_revoked_proof`` (never re-validated), so a
+        single corrupt folded proof cannot abort the cascade — a partial cascade can only ever leave FEWER
+        hosts revoked (never resurrect one), and is completed idempotently by re-running (every step is the
+        replay-safe safe direction). Returns the appended revoke seqs, in host order.
+
+        SCOPE: this revokes the PROOF records only. Retiring the monitoring authority minted on each proof is
+        the monitoring registry's responsibility — ``orgs.OrgRegistry.revoke_org`` invokes
+        ``MonitoringAuthorityRegistry.revoke_org`` alongside this cascade (and revoking the proof additionally
+        makes any surviving grant inert at read time, since ``monitoring_authority.active_at`` re-checks the
+        proof). ``revoke_proof`` (single host) remains the path that also retires monitoring inline."""
+        oid = _check_org_id(org_id)
+        hosts = sorted({h for (o, h) in self._fold_proofs() if o == oid})
+        return [self._append_revoked_proof(oid, h) for h in hosts]
+
     # -- reads (owner-key-succession-aware folds) ---------------------------------------------------
     def _fold(self, signal: str, core_fields):
         """Fold the spine into {(org_id, host): record_dict} for the given signal whose latest state is

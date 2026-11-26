@@ -1,0 +1,20 @@
+{
+  "schema": "aegis-engine-pins-v1",
+  "source": "parsed-popping-lemur.md §7 (Engines and licensing) — the R1 record for every deployed engine, dependency and distributed artefact.",
+  "note": "use_mode tags how each artefact reaches the user. An advisory entry is tracked but never blocks the gate (tracked pending licence review / dev-only). This ledger must be complete, consistent and policy-clean before the first third-party deploy.",
+  "records": [
+    {"artefact": "vigil-aegis-gateway", "component_kind": "engine", "license": "PolyForm-Noncommercial-1.0.0", "use_mode": "service", "notes": "first-party AEGIS gateway; commercial terms under D10"},
+    {"artefact": "coraza-v3", "component_kind": "engine", "license": "Apache-2.0", "use_mode": "service", "notes": "front WAF engine (DetectionOnly)"},
+    {"artefact": "caddy", "component_kind": "engine", "license": "Apache-2.0", "use_mode": "service", "notes": "front reverse proxy (pin [U])"},
+    {"artefact": "coreruleset-crs-4x", "component_kind": "rule", "license": "Apache-2.0", "use_mode": "service", "notes": "CRS 4.x rule corpus, gated for tenants"},
+    {"artefact": "vectorscan", "component_kind": "dependency", "license": "BSD-3-Clause", "use_mode": "service", "notes": "Hyperscan-compatible matcher (BSD; Hyperscan >=5.5 proprietary is NOT used)"},
+    {"artefact": "haproxy", "component_kind": "engine", "license": "GPL-2.0", "use_mode": "service", "notes": "service-use only; GPL imposes nothing on service use"},
+    {"artefact": "suricata", "component_kind": "engine", "license": "GPL-2.0", "use_mode": "service", "notes": "runs as a separate process; service-use only"},
+    {"artefact": "sigmahq-rules", "component_kind": "rule", "license": "DRL-1.1", "use_mode": "service", "author": "SigmaHQ contributors", "notes": "DRL-1.1 requires author attribution in match views [W]"},
+    {"artefact": "pysigma", "component_kind": "dependency", "license": "LGPL-3.0", "use_mode": "service", "advisory": true, "notes": "dev-only; not shipped — tracked, non-blocking"},
+    {"artefact": "aegis-cfn-template", "component_kind": "artifact", "license": "PolyForm-Noncommercial-1.0.0", "use_mode": "distribution", "bundle": "aegis-kit", "notes": "distributed CloudFormation template; customer terms under D10"},
+    {"artefact": "aegis-forwarder-sdk", "component_kind": "artifact", "license": "Apache-2.0", "use_mode": "distribution", "bundle": "aegis-kit", "notes": "forwarder/SDK shipped to customers (no framework); NOTICE obligation"},
+    {"artefact": "pushed-crs-rules", "component_kind": "rule", "license": "Apache-2.0", "use_mode": "distribution", "bundle": "pushed-rules", "notes": "CRS-derived rule content pushed to customers carries its notices"},
+    {"artefact": "pushed-sigma-rules", "component_kind": "rule", "license": "DRL-1.1", "use_mode": "distribution", "author": "SigmaHQ contributors", "bundle": "pushed-rules", "notes": "Sigma-derived pushed rules carry DRL attribution"}
+  ]
+}

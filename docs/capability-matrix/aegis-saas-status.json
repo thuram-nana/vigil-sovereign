@@ -1,0 +1,36 @@
+{
+  "schema": "vigil-aegis-saas-status/1",
+  "note": "AEGIS SaaS capability status projection (AS-25 / decision D33, plan §13.7). Per-claim displayed state plus the record that demonstrated it. The FIVE states are a closed vocabulary (see `states`); a claim reads `implemented_and_demonstrated` ONLY with a current, valid AEGIS TT-STG DONE record (vigil-aegis-tt-demonstration-v1, verified by engine/crucible/framework/v2/evidence/aegis_tt.py::verify_demonstration) whose id is named in `demonstrated_by`. No record, a stale record, or an invalid one reads `implemented_not_validated` — nothing can display `demonstrated` without a current IaC record. The drift guard (engine/crucible/framework/v2/evidence/tests/test_aegis_tt_demonstration.py) asserts every `state` is in the closed vocabulary and that no claim with a null `demonstrated_by` claims `implemented_and_demonstrated`. Records are produced by TT-STG runs (AS-1b) and the staging key is provisioned by AS-26; until then every claim here is honestly `implemented_not_validated`.",
+  "states": [
+    {
+      "id": "implemented_and_demonstrated",
+      "rule": "Valid claim AND a current (non-stale) IaC DONE record."
+    },
+    {
+      "id": "implemented_not_validated",
+      "rule": "No record, or the record is stale/invalid."
+    },
+    {
+      "id": "partially_implemented",
+      "rule": "Some claims of the slice are missing."
+    },
+    {
+      "id": "unsupported",
+      "rule": "The manifest says so, with a reason."
+    },
+    {
+      "id": "blocked",
+      "rule": "A LIMIT-aegis-* entry names a §14.3 prerequisite and its check."
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "AS-25.done-record",
+      "slice": "AS-25",
+      "title": "AEGIS TT-STG DONE record: signed binding over a verification manifest, offline-verifiable, fails on a 1-byte flip.",
+      "state": "implemented_not_validated",
+      "demonstrated_by": null,
+      "reason": "The DONE-record machinery (model, signed binding, offline verifier, trust root) is implemented. No TT-STG record has been produced yet: the staging TT evidence key is provisioned by AS-26 and the first record is produced by an AS-1b run. Until then this reads not-validated, by design."
+    }
+  ]
+}
