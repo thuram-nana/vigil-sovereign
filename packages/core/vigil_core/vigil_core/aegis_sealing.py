@@ -28,9 +28,10 @@ What AS-2h ADDS on top of those:
      outgoing epoch in the accept-set — the OVERLAP — so no event is ever rejected across the cut (**no
      gap**). ``close_overlap`` drops the retired epochs; the **old secret is then REFUSED**.
   3. **The AS-6a delivery seam** (:class:`SecretDelivery` / :func:`deliver_bundle`): the contract the fleet
-     reconciler (AS-6a, not yet built) implements to push a sealed :class:`SecretBundle` to the units. It is
-     STUBBED here and DEFAULT-OFF: with the flag unset it performs no delivery and returns a fail-closed
-     ``deferred`` receipt — it never claims a secret was delivered.
+     reconciler (AS-6a) implements to push a sealed :class:`SecretBundle` to the units. AS-6a supplies the
+     real ``framework.v2.aegis.aegis_fleet.SsmSecretDelivery`` (SSM-only); :class:`DeferredDelivery` here is
+     the DEFAULT-OFF fallback — with the flag unset or no SSM channel injected it performs no delivery and
+     returns a fail-closed ``deferred`` receipt, so an un-wired build never claims a secret was delivered.
 
 Determinism: the sign/verify path uses HMAC-SHA256 and reads NO wall-clock and NO RNG; whether a given epoch
 is accepted is a pure function of the ring's state. The at-rest seal uses :mod:`vigil_core.sealing`'s random
@@ -346,7 +347,8 @@ class SecretRing:
 
 
 # ======================================================================================================
-# Delivery seam to the AS-6a fleet reconciler — STUBBED + DEFAULT-OFF (AS-6a not yet built)
+# Delivery seam to the AS-6a fleet reconciler — the real SSM-only push lives in
+# framework.v2.aegis.aegis_fleet.SsmSecretDelivery; DeferredDelivery below is the DEFAULT-OFF fallback.
 # ======================================================================================================
 @dataclass(frozen=True)
 class SecretBundle:
@@ -366,9 +368,9 @@ class SecretBundle:
 @dataclass(frozen=True)
 class DeliveryReceipt:
     """The outcome of a delivery attempt. ``delivered`` is True ONLY when a real seam confirmed the bundle
-    reached the units; otherwise it is False and ``status`` says why (``deferred`` when AS-6a is not wired,
-    ``refused`` when a seam declined). Fail-closed: a caller treats anything but ``delivered is True`` as
-    'not yet on the unit' and does not close the overlap."""
+    reached the units; otherwise it is False and ``status`` says why (``deferred`` when no real SSM channel
+    is injected, ``refused`` when a seam declined). Fail-closed: a caller treats anything but ``delivered is
+    True`` as 'pending on the unit' and does not close the overlap."""
 
     delivered: bool
     status: str
@@ -379,20 +381,22 @@ class DeliveryReceipt:
 class SecretDelivery(Protocol):
     """The contract the AS-6a fleet reconciler implements to push a :class:`SecretBundle` to the units it
     places. Defined here (engine-free) so the sovereign side can hand it bundles without importing the
-    fleet. Not yet implemented — see :class:`DeferredDelivery`."""
+    fleet. The real implementation is ``framework.v2.aegis.aegis_fleet.SsmSecretDelivery`` (SSM-only);
+    :class:`DeferredDelivery` is the DEFAULT-OFF fallback."""
 
     def deliver(self, bundle: SecretBundle) -> DeliveryReceipt: ...
 
 
 class DeferredDelivery:
-    """The default seam while AS-6a is unbuilt: it performs NO delivery and returns a fail-closed ``deferred``
-    receipt. It never claims a secret reached a unit, so a caller can honestly report the delivery leg as
-    pending/owner-gated rather than silently assume success."""
+    """The DEFAULT-OFF fallback seam: it performs NO delivery and returns a fail-closed ``deferred`` receipt.
+    Used when the delivery flag is off OR no real SSM channel is injected into AS-6a's ``SsmSecretDelivery``,
+    so a caller can honestly report the delivery leg as pending/owner-gated rather than silently assume
+    success. It never claims a secret reached a unit."""
 
     def deliver(self, bundle: SecretBundle) -> DeliveryReceipt:
         return DeliveryReceipt(
             delivered=False, status="deferred",
-            detail="AS-6a fleet reconciler not yet built — secret bundle staged, not delivered",
+            detail="no SSM delivery channel configured — secret bundle staged, not delivered (default-OFF)",
         )
 
 
