@@ -226,6 +226,146 @@ def test_signing_bytes_are_deterministic_no_model_in_the_loop():
     assert b1 == b2 and isinstance(b1, bytes)
 
 
+# --- HARD-PRUNE durability (AS-2f: the v2 fold seeds from the v13 snapshot; the prune tripwire keeps it honest) ---
+class PrunedView:
+    """A store view that hides every record below K — the post-hard-prune live window. Mirrors the v1
+    monitoring-authority prune test's PrunedView."""
+
+    def __init__(self, inner, K):
+        self._inner, self._K = inner, K
+
+    def iter_records(self, *, since_seq=-1):
+        for r in self._inner.iter_records(since_seq=since_seq):
+            if r.seq >= self._K:
+                yield r
+
+    def get(self, seq):
+        return self._inner.get(seq)
+
+    def append(self, **kw):
+        return self._inner.append(**kw)
+
+
+def _owner_pub():
+    from sigil.governor.identity import owner_pubkey
+    return owner_pubkey()
+
+
+def test_active_v2_grant_and_epoch_issued_highwater_survive_a_hard_prune(monkeypatch):
+    """The AS-2f (b) fix: a hard prune that archives a subject's only v2 records must preserve the EPOCH high-water
+    and the issued_at anti-replay high-water via the v13 snapshot seed, and keep the active grant readable. The
+    NEUTERED CONTROL (no seed) is the exact failure the finding flags: epoch_highwater resets to 0 (the next grant
+    would mint a DUPLICATE epoch) and the grant vanishes (split-brain with the still-published bytes)."""
+    from vigil_core.authority_v2 import MonitoringCapability
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+    from sigil.spine.snapshot import SnapshotState, build
+    s = _store()
+    op = _owner_pub()
+    _prove(s, "org_a", "apme.cm")
+    _grant(_reg(s), "org_a", "apme.cm", [MonitoringCapability.OBSERVE], now=5000.0, issued=7000.0)
+    k = s.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
+    snap = build([r for r in s.iter_records() if r.seq < k], trusted_pubkey=op, base_seq=k, snapshot_seq=k - 1)
+    assert snap.monitoring_authority_v2_state_map()[("org_a", "apme.cm")] == "active"
+    assert snap.monitoring_authority_v2_epoch_map()[("org_a", "apme.cm")] == 1
+    assert snap.monitoring_authority_v2_issued_map()[("org_a", "apme.cm")] == 7000.0
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, st: snap))
+    r2 = MonitoringAuthorityV2Registry(PrunedView(s, k))
+    assert r2.grant_for("org_a", "apme.cm") is not None, "a pruned active v2 grant must survive via the seed"
+    assert r2.epoch_highwater("org_a", "apme.cm") == 1, "the epoch high-water must cross the prune"
+    assert r2.issued_highwater("org_a", "apme.cm") == 7000.0, "the issued_at anti-replay high-water must cross"
+    # neutered control: no seed ⇒ the high-water resets to 0 (duplicate-epoch door open) and the grant vanishes
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, st: SnapshotState.empty()))
+    r3 = MonitoringAuthorityV2Registry(PrunedView(s, k))
+    assert r3.epoch_highwater("org_a", "apme.cm") == 0
+    assert r3.grant_for("org_a", "apme.cm") is None
+
+
+def _segmented(tmp_path):
+    from vigil_core.authority_v2 import MonitoringCapability
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.spine.store import SpineStore
+    ensure_owner_keypair()
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    _prove(s, "org_a", "apme.cm")                                                 # seq 0,1
+    _grant(_reg(s), "org_a", "apme.cm", [MonitoringCapability.OBSERVE], now=2000.0, issued=2000.0)  # seq 2
+    for _ in range(2):
+        s.append(kind="event", source="t", actor="u", payload={"i": "pad"})      # seq 3,4
+    s.rotate()
+    for _ in range(5):
+        s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})
+    s.rotate()
+    for _ in range(3):
+        s.append(kind="event", source="t", actor="u", payload={"i": "tail"})
+    return s
+
+
+def _archived_below(store, K):
+    from sigil.spine.manifest import read_manifest
+    return [seg for seg in read_manifest(store._layout).sealed_in_order()
+            if seg.last_seq is not None and seg.last_seq < K]
+
+
+def test_prune_allows_a_carried_v2_grant(tmp_path):
+    """Happy path: an active v2 grant below K is CARRIED by the snapshot build, so the tripwire is empty and
+    check_prune_safe returns the archivable segments (no block)."""
+    from sigil.spine import prune
+    s = _segmented(tmp_path)
+    archived = prune.check_prune_safe(s, 5)
+    assert prune.stranded_active_monitoring_authorities_v2(s, archived, 5) == []
+
+
+def test_tripwire_detects_a_seed_that_drops_an_active_v2_grant(tmp_path, monkeypatch):
+    """The fail-closed tripwire: if the snapshot seed ever dropped an active v2 grant's rows (a seed regression),
+    the prune cut would strand it (reset its epoch/issued high-water). Simulated by neutering build's v2 carry —
+    stranded_active_monitoring_authorities_v2 then names the subject and check_prune_safe refuses the prune."""
+    from sigil.spine import prune
+    s = _segmented(tmp_path)
+    real = prune.build
+
+    def drop(records, **kw):
+        seed = real(records, **kw)
+        return seed.model_copy(update={
+            "monitoring_authority_v2_state": [], "monitoring_authority_v2_issued": [],
+            "monitoring_authority_v2_epoch": [], "monitoring_authority_v2_row": []})
+
+    monkeypatch.setattr(prune, "build", drop)
+    assert prune.stranded_active_monitoring_authorities_v2(s, _archived_below(s, 5), 5) == ["apme.cm@org_a"]
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    assert "v2 monitoring authorit" in str(e.value) and "apme.cm@org_a" in str(e.value)
+
+
+def test_check_prune_safe_wires_the_v2_monitoring_tripwire(tmp_path, monkeypatch):
+    """check_prune_safe must CALL the v2 tripwire and fail closed on a non-empty result (mirror of the v1 wiring
+    test) — so a future edit that forgets the guard reddens here."""
+    from sigil.spine import prune
+    s = _segmented(tmp_path)
+    monkeypatch.setattr(prune, "stranded_active_monitoring_authorities_v2", lambda st, a, K: ["ghost@org"])
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    assert "ghost@org" in str(e.value)
+
+
+def test_forged_v2_grant_in_a_pruned_prefix_is_not_seeded():
+    """The snapshot fold's OWN signature check: a forged (attacker-signed) active v2 grant below K never seeds,
+    so the tripwire can never be tricked into blocking a prune by a forged record (no availability regression)."""
+    from vigil_core.authority_v2 import MonitoringCapability
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+    from sigil.spine.snapshot import build
+    from vigil_core.crypto import generate_keypair
+    s = _store()
+    op = _owner_pub()
+    _prove(s, "org_a", "apme.cm")
+    attacker = generate_keypair()
+    forged = MonitoringAuthorityV2Registry(s, owner_key=attacker, trusted_pubkey=op)
+    _grant(forged, "org_a", "apme.cm", [MonitoringCapability.OBSERVE], now=5000.0, issued=5000.0)
+    k = s.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
+    snap = build([r for r in s.iter_records() if r.seq < k], trusted_pubkey=op, base_seq=k, snapshot_seq=k - 1)
+    assert ("org_a", "apme.cm") not in snap.monitoring_authority_v2_state_map()
+    assert snap.monitoring_authority_v2_row == []
+
+
 def test_fatal2_module_imports_no_framework_or_offense():
     # Isolated subprocess: importing the SOVEREIGN v2 module must not pull in `framework` / `strix` (the offense
     # tree) or any model/LLM client — the FATAL-2 two-plane boundary + the "no AI on authority paths" doctrine.

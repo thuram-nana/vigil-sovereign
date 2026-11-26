@@ -224,6 +224,21 @@ def test_revoke_unpublishes_and_renew_requires_an_active_grant():
         p.monitor_renew("alice", "org_a", "apme.cm", now=5002.0)
 
 
+def test_revoke_v2_unpublishes_the_grants_actual_instance_id():
+    """Confirmed LOW: a grant authorized under a NON-default instance_id, then revoked WITHOUT re-supplying it,
+    must unpublish the grant's ACTUAL content-addressed path (looked up from the spine fold) — not the
+    instance_id='default' path. Mutation-sensitive: against the pre-fix default, the wrong path is unlinked
+    (``unpublished`` False) and the real published grant file survives (the data plane keeps honoring it)."""
+    from sigil import config
+    p, s, _ = _rig()
+    g = p.monitor_authorize_v2("alice", "org_a", "apme.cm", instance_id="worker-7", now=5000.0)
+    pubfile = config.monitoring_v2_publish_dir() / g["published"]
+    assert pubfile.exists() and g["instance_id"] == "worker-7"
+    rr = p.monitor_revoke_v2("alice", "org_a", "apme.cm", now=5001.0)             # NO instance_id supplied (defaults)
+    assert rr["revoked"] is True and rr["unpublished"] is True                    # the REAL file was removed
+    assert not pubfile.exists()
+
+
 def test_renew_re_mints_same_capabilities_with_higher_epoch():
     p, s, _ = _rig()
     g = p.monitor_authorize_v2("alice", "org_a", "apme.cm", now=5000.0)
@@ -245,6 +260,75 @@ def test_renew_of_enforcing_grant_requires_stepup():
         p.monitor_renew("alice", "org_a", "apme.cm", now=5005.0, mfa_at=0.0)
     r = p.monitor_renew("alice", "org_a", "apme.cm", now=5005.0, mfa_at=5005.0)
     assert r["epoch"] == 2 and r["capabilities"] == ["observe", "respond"]
+
+
+# --- read-back failure during publish MUST revert (the phantom-grant fix) -----------------------------
+def _fail_read_back(monkeypatch):
+    """Monkeypatch the registry so ``read_back`` raises ValueError — read_back's ONLY failure mode (unreadable
+    file, verify failure, or round-trip mismatch all raise ValueError). This simulates an IO/verify fault that
+    strikes AFTER publish() has already overwritten the content-addressed (epoch-less) grant file."""
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+
+    def boom(self, *a, **k):
+        raise ValueError("read-back failed: simulated disk/verify fault")
+    monkeypatch.setattr(MonitoringAuthorityV2Registry, "read_back", boom)
+
+
+def test_renew_read_back_failure_reverts_the_phantom_grant_and_is_not_a_bare_denied(monkeypatch):
+    """Confirmed MEDIUM: a read-back ValueError DURING renew must reach the revert (``except Exception``), not the
+    ``except ValueError`` -> ProvisionDenied clause that left the revoke+unpublish DEAD. Because
+    ``authority_publish_path`` is epoch-less, renew's publish() already overwrote the prior valid grant file, so a
+    missed revert leaves a PHANTOM active grant on the spine + a destroyed valid file. Mutation-sensitive: against
+    the pre-fix code this raises ProvisionDenied and grant_for stays active + the file stays published."""
+    from sigil import config
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+    from sigil.ui.provision import ProvisionDenied, ProvisionError
+    p, s, _ = _rig()
+    g = p.monitor_authorize_v2("alice", "org_a", "apme.cm", now=5000.0)           # active grant, epoch 1, published
+    pubfile = config.monitoring_v2_publish_dir() / g["published"]
+    assert pubfile.exists()
+    _fail_read_back(monkeypatch)
+    with pytest.raises(ProvisionError) as e:
+        p.monitor_renew("alice", "org_a", "apme.cm", now=5005.0)
+    assert not isinstance(e.value, ProvisionDenied)                               # the revert clause, not ValueError->Denied
+    assert "could not renew" in str(e.value)
+    assert MonitoringAuthorityV2Registry(s).grant_for("org_a", "apme.cm") is None  # the phantom grant was revoked
+    assert not pubfile.exists()                                                   # the republished file was unpublished
+
+
+def test_renew_grant_valueerror_is_still_a_denied_and_publishes_nothing(monkeypatch):
+    """The split keeps grant()'s OWN ValueError (a bad window / anti-replay refusal — nothing published yet) a
+    ProvisionDenied, NOT the critical publish_failed revert path. Mirrors ``monitor_authorize_v2``."""
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+    from sigil.ui.provision import ProvisionDenied
+    p, s, _ = _rig()
+    p.monitor_authorize_v2("alice", "org_a", "apme.cm", now=5000.0)
+
+    def bad_grant(self, *a, **k):
+        raise ValueError("not_after must be strictly after not_before")
+    monkeypatch.setattr(MonitoringAuthorityV2Registry, "grant", bad_grant)
+    with pytest.raises(ProvisionDenied, match="not_after"):
+        p.monitor_renew("alice", "org_a", "apme.cm", now=5005.0)
+
+
+def test_authorize_read_back_failure_reverts_and_is_not_a_bare_denied(monkeypatch):
+    """The equivalent revert test for ``monitor_authorize_v2`` (its revert was previously untested): a read-back
+    ValueError reaches the revert clause (revoke + unpublish), surfaces a ProvisionError (not ProvisionDenied), and
+    leaves NO active grant and NO published grant file behind. Mutation-sensitive against removing the revert."""
+    from sigil import config
+    from sigil.governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+    from sigil.ui.provision import ProvisionDenied, ProvisionError
+    p, s, _ = _rig()
+    _fail_read_back(monkeypatch)
+    with pytest.raises(ProvisionError) as e:
+        p.monitor_authorize_v2("alice", "org_a", "apme.cm", now=5000.0)
+    assert not isinstance(e.value, ProvisionDenied)
+    assert "could not publish/verify" in str(e.value)
+    assert MonitoringAuthorityV2Registry(s).grant_for("org_a", "apme.cm") is None  # the revert revoked it
+    pubdir = config.monitoring_v2_publish_dir()
+    leftover = [f.name for f in pubdir.glob("*.json")
+                if not f.name.endswith(".epoch.json")] if pubdir.exists() else []
+    assert leftover == []                                                         # the grant bytes were unpublished
 
 
 # --- window is server-decided (client may only shorten) -----------------------------------------------

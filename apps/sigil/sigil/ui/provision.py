@@ -3355,8 +3355,17 @@ class Provisioner:
             except ValueError as e:
                 raise ProvisionDenied(str(e)) from None
             reg = MonitoringAuthorityV2Registry(self.store)
-            was_active = reg.grant_for(requester_org_id, h) is not None
-            removed = reg.unpublish(requester_org_id, h, instance_id=instance_id, replica_index=replica_index)
+            current = reg.grant_for(requester_org_id, h)
+            was_active = current is not None
+            # Unpublish the grant's ACTUAL published path. The file name is content-addressed over
+            # (subject, instance_id, replica_index), so defaulting to instance_id="default" would delete the
+            # WRONG path for a grant authorized under a non-default instance_id — the real file would stay
+            # published (the keyless data plane keeps honoring it) while the spine records a revocation. Take the
+            # instance_id/replica_index from the spine fold's active grant; fall back to the caller's args only
+            # when no active grant stands (nothing to unpublish but the idempotent delete is still attempted).
+            inst = current.instance_id if current is not None else instance_id
+            repl = current.replica_index if current is not None else replica_index
+            removed = reg.unpublish(requester_org_id, h, instance_id=inst, replica_index=repl)
             if was_active:
                 reg.revoke(requester_org_id, h, issued_at=self._next_issued(), reason="tenant revoke")
             self._audit("monitor_revoke_v2", requester=requester, org_id=requester_org_id, target=h,
@@ -3403,23 +3412,32 @@ class Provisioner:
             issued = self._next_issued()
             reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
                               now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0), note="INTENT: renew lease")
+            # Mirror ``monitor_authorize_v2``: grant() in its OWN try (a ValueError here means nothing was
+            # published yet -> ProvisionDenied), and publish/epoch/read-back under a SEPARATE try whose revert
+            # runs on ``except Exception``. Keeping these in ONE try (with ``except ValueError`` first) made the
+            # revert DEAD CODE: ``read_back`` raises ValueError on every failure mode, so an IO/verify fault was
+            # caught by the ValueError clause and the revoke+unpublish never ran — leaving a PHANTOM active grant
+            # on the spine and (``authority_publish_path`` is epoch-less, so publish() already overwrote the prior
+            # valid file) a destroyed valid grant: the inconsistent state this method's invariant forbids.
             try:
                 view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
                                          not_after=not_after, lease_not_before=t,
                                          lease_not_after=min(t + lease_window, not_after),
                                          instance_id=instance_id, now=t, issued_at=issued,
                                          replica_index=replica_index)
-                path = reg.publish(signed)
-                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
-                                                 issued_at=self._next_issued())
-                reg.publish_epoch_statement(stmt)
-                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))
             except ValueError as e:
                 self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
                             outcome="refused", reason=str(e))
                 raise ProvisionDenied(str(e)) from None
-            except Exception as e:  # noqa: BLE001 — fail-closed: never leave an unverifiable renewed grant
-                reg.revoke(requester_org_id, host, issued_at=self._next_issued(), reason="renew publish failed")
+            try:
+                path = reg.publish(signed)
+                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
+                                                 issued_at=self._next_issued())
+                reg.publish_epoch_statement(stmt)
+                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))      # fail-closed read-back
+            except Exception as e:  # noqa: BLE001 — never leave an active-but-unpublished/unverifiable renewed grant
+                reg.revoke(requester_org_id, host, issued_at=self._next_issued(),
+                           reason="renew publish/read-back failed")
                 reg.unpublish(requester_org_id, host, instance_id=instance_id, replica_index=replica_index)
                 self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
                             outcome="publish_failed", critical=True)

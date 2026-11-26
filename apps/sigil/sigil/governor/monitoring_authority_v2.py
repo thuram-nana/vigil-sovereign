@@ -166,17 +166,60 @@ class MonitoringAuthorityV2Registry:
         return str(config.monitoring_v2_publish_dir())
 
     # -- fold -----------------------------------------------------------------------------------------
+    def _seed(self, snap) -> "tuple[dict, int]":
+        """The HARD-PRUNE SEED (``SnapshotState`` v13): the folded per-(org,host) ``{state, epoch_hw, issued_hw,
+        row}`` of the pruned prefix, or the empty genesis start when the trusted anchor differs from the
+        snapshot's. The epoch map is a SUPERSET of the state/row keys (a revoked or epoch-statement-only subject
+        still carries its monotone epoch high-water), so a pruned subject's next grant STILL mints strictly above
+        it — without this, the first hard prune would reset ``epoch_hw`` to 0 / ``issued_hw`` to ``-inf`` and the
+        next grant would mint a DUPLICATE epoch (a captured old grant no longer detectably stale) while a
+        still-published grant goes split-brain. Mirrors the v1 ``monitoring_authority._seed`` (the SAME
+        ``seed_applies`` rule)."""
+        from ..spine.snapshot import seed_applies
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            return {}, -1
+        st_map = snap.monitoring_authority_v2_state_map()
+        iss_map = snap.monitoring_authority_v2_issued_map()
+        ep_map = snap.monitoring_authority_v2_epoch_map()
+        rows = {(r[0], r[1]): r for r in snap.monitoring_authority_v2_row}
+        out: dict = {}
+        for key in set(st_map) | set(iss_map) | set(ep_map) | set(rows):
+            state = st_map.get(key)
+            row = rows.get(key)
+            out[key] = {"state": state, "epoch_hw": int(ep_map.get(key, 0)),
+                        "issued_hw": float(iss_map.get(key, NO_HIGHWATER)),
+                        "row": self._seed_row(row) if (state == STATE_ACTIVE and row is not None) else None}
+        return out, snap.base_seq - 1
+
+    @staticmethod
+    def _seed_row(row) -> dict:
+        """Reconstruct the active-grant row dict (the shape ``dict(p)`` carried in the live fold) from a snapshot
+        row ``[org_id, host, capabilities, epoch, not_before, not_after, lease_not_before, lease_not_after,
+        instance_id, replica_index, edge_chain, proof_sha256, issued_at]`` — exactly the keys ``_to_view`` reads."""
+        return {"org_id": row[0], "host": row[1], "capabilities": row[2], "epoch": row[3],
+                "not_before": row[4], "not_after": row[5], "lease_not_before": row[6], "lease_not_after": row[7],
+                "instance_id": row[8], "replica_index": row[9], "edge_chain": row[10], "proof_sha256": row[11],
+                "issued_at": row[12]}
+
     def _fold(self) -> dict:
-        """{(org_id, host): dict} over the spine. Each subject's dict carries ``state`` (active|revoked), the
-        epoch high-water ``epoch_hw`` (max epoch seen across grant/revoke/epoch records — the read-back floor),
-        the ``issued_hw`` anti-replay high-water, and (when active) the latest active ``row``.
+        """{(org_id, host): dict} over the spine, SEEDED from the hard-prune snapshot (v13) then folded forward
+        over the LIVE window only (``fold(seed, live)`` — every sub-state is associative: LWW state, max epoch/
+        issued high-water). Each subject's dict carries ``state`` (active|revoked), the epoch high-water
+        ``epoch_hw`` (max epoch seen across grant/revoke/epoch records — the read-back floor), the ``issued_hw``
+        anti-replay high-water, and (when active) the latest active ``row``.
 
         Order-sensitive exactly like the v1 fold: a REVOKED record latches state=revoked; an ACTIVE record is
         honoured only if owner-signed AND its ``issued_at`` is strictly above the subject's issued high-water
         (the DANGEROUS direction — a replayed/old active can never resurrect a superseded grant). Every record's
-        epoch advances ``epoch_hw`` so the next mint reads back a strictly-higher floor."""
-        out: dict = {}
-        for r in self.store.iter_records():
+        epoch advances ``epoch_hw`` so the next mint reads back a strictly-higher floor. Each live record is
+        verified under the owner key valid AT ITS SEQ (``key_history`` succession) — byte-identical to the single
+        ``trusted_pubkey`` verify for an un-rotated spine, and correct across a rotation on a pruned spine."""
+        from . import key_history as _kh
+        from ..spine.snapshot import SnapshotState
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        out, since = self._seed(snap)
+        for r in self.store.iter_records(since_seq=since):
             p = getattr(r, "payload", None)
             if not isinstance(p, dict):
                 continue
@@ -191,23 +234,24 @@ class MonitoringAuthorityV2Registry:
             # The intent row is an audit marker only — it advances nothing and never sets state.
             if sig == SIGNAL_V2_INTENT:
                 continue
+            vpk = resolver.at(r.seq)
             ep = p.get("epoch")
             ep_i = int(ep) if isinstance(ep, int) and not isinstance(ep, bool) and ep >= 1 else 0
             if sig == SIGNAL_V2_EPOCH:
-                if verify_signed(p, _CORE_EPOCH, self.trusted_pubkey) and ep_i > st["epoch_hw"]:
+                if verify_signed(p, _CORE_EPOCH, vpk) and ep_i > st["epoch_hw"]:
                     st["epoch_hw"] = ep_i
                 continue
             # SIGNAL_V2 grant / revoke
             state = p.get("state")
             if state == STATE_REVOKED:
-                if verify_signed(p, _CORE_REVOKE, self.trusted_pubkey):
+                if verify_signed(p, _CORE_REVOKE, vpk):
                     st["state"] = STATE_REVOKED
                     st["row"] = None
                     if ep_i > st["epoch_hw"]:
                         st["epoch_hw"] = ep_i
                 continue
             if state == STATE_ACTIVE:
-                if _cap_values(p.get("capabilities") or []) == [] or not verify_signed(p, _CORE, self.trusted_pubkey):
+                if _cap_values(p.get("capabilities") or []) == [] or not verify_signed(p, _CORE, vpk):
                     continue
                 at = as_issued_at(p.get("issued_at"))
                 if at <= st["issued_hw"]:
