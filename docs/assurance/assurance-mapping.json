@@ -3613,6 +3613,7 @@
       "label": "Finding soundness (oracle sole authority)",
       "objective": "A FACT is minted only by a deterministic oracle re-executing over retained evidence; an AI judgement, a tool's bytes, or an unproven lead can never be laundered into a FACT.",
       "residual_limitations": [
+        "LIMIT-aegis-staging-stack-not-applied",
         "LIMIT-audit-package-reproduction",
         "LIMIT-cloud-exploit-fixture-proven",
         "LIMIT-customer-cloud-posture-run",
@@ -3698,6 +3699,7 @@
       "label": "Cryptography & key management",
       "objective": "Signing keys are handled fail-closed (hardware backend, m-of-n quorum, escrow at threshold, crypto-shred erasure); keys are passed in, never provisioned by the tool (FATAL-2).",
       "residual_limitations": [
+        "LIMIT-aegis-jobs-runtime-isolation",
         "LIMIT-attest-tee-hardware",
         "LIMIT-capture-attestation-offense-plane",
         "LIMIT-evidence-producer-refs-unique"
@@ -3774,8 +3776,10 @@
       "label": "Assurance governance & documentation honesty",
       "objective": "Every product claim resolves to an enforcing symbol and a proving test in a required CI job; limitations are code-grounded and never worded as completeness (claim discipline).",
       "residual_limitations": [
+        "AS2D-live-broker-transport",
         "LIMIT-a11y-capture-unwired",
         "LIMIT-aegis-sealing-delivery-deferred",
+        "LIMIT-aegis-staging-cd-inert",
         "LIMIT-agent-body-scaffold",
         "LIMIT-cloud-connect-gcp-azure-verdict",
         "LIMIT-consumer-shard-on-signup-ops",
