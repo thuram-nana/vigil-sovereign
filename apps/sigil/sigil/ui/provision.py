@@ -617,6 +617,7 @@ class Provisioner:
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, cloud_fetcher=None,
                  cloud_principal_arn="", cloud_gcp_fetcher=None, cloud_gcp_connector_sa="",
+                 azure_fetcher=None, azure_client_id="",
                  connect_check_limiter=None, connect_org_limiter=None,
                  cloud_connect_limiter=None,
                  signup_email_limiter=None,
@@ -683,14 +684,23 @@ class Provisioner:
         self.cloud_fetcher = cloud_fetcher
         self.cloud_principal_arn = str(cloud_principal_arn or "")
         # The GCP leg of the cloud connect (``ui.cloud_fetch.GcpImpersonationConnectFetcher``): it signs VIGIL's
-        # connector-SA assertion, impersonates the customer's target SA with the issued external id bound into the SA
-        # description, and runs the same-shape negative control (``assume(provider=, account_id=, role_ref=,
-        # external_id=, control_external_id=, now=) -> {impersonated_sa, project, description_matched, external_id,
-        # control_sa, control_denied}`` — the SAME signature as the AWS fetcher). None ⇒ the GCP leg offers nothing
-        # (fail-closed) until the owner provisions VIGIL's connector SA. ``cloud_gcp_connector_sa`` is that connector
-        # SA's email, shown to the customer as the member to grant tokenCreator ("" ⇒ the GCP leg offers nothing).
+        # connector-SA assertion and impersonates the challenge-NAMED target SA (whose id encodes the issued external
+        # id), proving control in one call (``assume(provider=, account_id=, role_ref=, external_id=,
+        # control_external_id=, now=) -> {impersonated, expected_email, project, external_id}`` — the SAME signature as
+        # the AWS fetcher). None ⇒ the GCP leg offers nothing (fail-closed) until the owner provisions VIGIL's connector
+        # SA. ``cloud_gcp_connector_sa`` is that connector SA's email, shown to the customer as the member to grant
+        # tokenCreator ("" ⇒ the GCP leg offers nothing).
         self.cloud_gcp_fetcher = cloud_gcp_fetcher
         self.cloud_gcp_connector_sa = str(cloud_gcp_connector_sa or "")
+        # Consumer PR-C (Azure leg) — the READ-ONLY Azure consent fetcher (``ui.cloud_fetch.AzureConsentConnectFetcher``):
+        # under VIGIL's multi-tenant app it takes a client-credentials token against the customer's tenant (admin
+        # consent), reads VIGIL's own service principal back over Microsoft Graph to confirm the admin-set external_id
+        # binding, and runs the same-shape negative control (``assume(provider=, account_id=, role_ref=, external_id=,
+        # control_external_id=, now=) -> {tenant, external_id_matched, external_id, control_tenant, control_denied}``).
+        # None ⇒ the Azure flow offers nothing (fail-closed) until the owner provisions VIGIL's Azure app.
+        # ``azure_client_id`` is that app's client id, printed into the customer's admin-consent URL ("" ⇒ no flow).
+        self.azure_fetcher = azure_fetcher
+        self.azure_client_id = str(azure_client_id or "")
         # PR-C — the connect surface's durable limiters (LoginRateLimiter, guard-and-count ``admit``). FAIL-CLOSED when
         # unwired (they guard OUTBOUND fetches, like the checkout limiter guards a money call): the automatic ownership
         # re-check needs BOTH the per-(org, host) cadence and the per-org ceiling, cloud verify needs its own per-org
@@ -4422,22 +4432,30 @@ class Provisioner:
         overview's single availability flag); a specific provider ⇒ exactly that provider's readiness. Anything
         missing ⇒ the screen offers no cloud flow for it (fail-closed; no dead-end flow)."""
         from .. import config
-        from ..governor.cloud_connect import PROVIDER_AWS, PROVIDER_GCP
+        from ..governor.cloud_connect import PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE
         if not (config.customer_cloud_connect_enabled() and self.cloud_connect_limiter is not None):
             return False
         aws_ok = bool(self.cloud_principal_arn and self.cloud_fetcher is not None)
         gcp_ok = bool(self.cloud_gcp_connector_sa and self.cloud_gcp_fetcher is not None)
+        azure_ok = bool(self.azure_client_id and self.azure_fetcher is not None)
         if provider == PROVIDER_AWS:
             return aws_ok
         if provider == PROVIDER_GCP:
             return gcp_ok
-        return aws_ok or gcp_ok
+        if provider == PROVIDER_AZURE:
+            return azure_ok
+        return aws_ok or gcp_ok or azure_ok
 
     def _cloud_fetcher_for(self, provider: str):
-        """The live cloud fetcher for ``provider`` (the AWS STS fetcher or the GCP impersonation fetcher) — both share
-        one ``assume(...)`` signature. Only reached once ``_cloud_ready(provider)`` has confirmed it is wired."""
-        from ..governor.cloud_connect import PROVIDER_GCP
-        return self.cloud_gcp_fetcher if provider == PROVIDER_GCP else self.cloud_fetcher
+        """The live cloud fetcher for ``provider`` (AWS STS / GCP impersonation / Azure consent) — all share one
+        ``assume(...)`` signature. Only reached once ``_cloud_ready(provider)`` has confirmed it is wired."""
+        from ..governor.cloud_connect import PROVIDER_GCP, PROVIDER_AZURE
+        p = str(provider or "").strip().lower()
+        if p == PROVIDER_GCP:
+            return self.cloud_gcp_fetcher
+        if p == PROVIDER_AZURE:
+            return self.azure_fetcher
+        return self.cloud_fetcher
 
     def customer_connect_overview(self, requester: str, requester_org_id: str, *, ip: str = "",
                                   now: "Optional[float]" = None) -> dict:
@@ -4555,21 +4573,23 @@ class Provisioner:
         customer configures. For AWS: a read-only role in THAT account whose trust policy (``trust_policy``, ready to
         paste) trusts VIGIL's connector principal ONLY under the external id, with AWS's managed read-only
         ``SecurityAudit`` policy attached. For GCP: ``gcp_placement`` — create a service account whose ID encodes the
-        external id and grant VIGIL's connector SA tokenCreator on it (the exact gcloud commands). When a
-        connection for that account is already outstanding it is RESUMED (``resumed`` True: the same external id, so a
-        role/SA the customer already created keeps working and nothing is written), else an owner-signed challenge is
-        issued (``CloudConnectRegistry.open_challenge``). Behind BOTH flags; an unverifiable provider is refused with
-        the reason BEFORE any write, then the PROVIDER's own connector identity must be provisioned here (``_cloud_ready``
-        — no dead-end flow); ``run_engagement`` (the testing axis, NOT billing), mirroring ``target_challenge``. The
-        requester + org are the SERVER-authenticated session principal (never body fields). A challenge grants NOTHING.
-        CONNECTING AUTHORIZES NO OFFENSE."""
-        from ..governor.cloud_connect import (AWS_READ_ONLY_POLICY_ARN, PROVIDER_GCP, CloudConnectRegistry,
-                                              _check_verifiable, aws_trust_policy, gcp_placement)
+        external id and grant VIGIL's connector SA tokenCreator on it (the exact gcloud commands). For Azure:
+        ``azure_placement`` — admin-consent VIGIL's app into the tenant and set the external id as the binding tag on
+        VIGIL's enterprise application. When a connection for that account is already outstanding it is RESUMED
+        (``resumed`` True: the same external id, so a role/SA/consent the customer already created keeps working and
+        nothing is written), else an owner-signed challenge is issued (``CloudConnectRegistry.open_challenge``). Behind
+        BOTH flags; an unverifiable provider is refused with the reason BEFORE any write, then the PROVIDER's own
+        connector identity must be provisioned here (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the
+        testing axis, NOT billing), mirroring ``target_challenge``. The requester + org are the SERVER-authenticated
+        session principal (never body fields). A challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
+        from ..governor.cloud_connect import (AWS_READ_ONLY_POLICY_ARN, PROVIDER_GCP, PROVIDER_AZURE,
+                                              CloudConnectRegistry, _check_verifiable, aws_trust_policy,
+                                              azure_placement, gcp_placement)
         with self._lock:
             self._connect_enabled_or_deny("cloud_connect_challenge", requester, requester_org_id,
                                           target=f"{provider}:{account_id}", cloud=True)
             try:
-                prov = _check_verifiable(provider)       # azure / unknown -> refuse here (no dead-end, no record)
+                prov = _check_verifiable(provider)       # an unverifiable/unknown provider -> refuse (no dead-end)
             except ValueError as e:
                 raise ProvisionDenied(str(e)) from None
             if not self._cloud_ready(prov):
@@ -4590,6 +4610,10 @@ class Provisioner:
                   "resumed": resumed}
         if ch.provider == PROVIDER_GCP:
             return {**common, **gcp_placement(self.cloud_gcp_connector_sa, ch.account_id, ch.external_id)}
+        if ch.provider == PROVIDER_AZURE:
+            # Azure placement: the admin-consent URL (VIGIL's client id + the tenant), the external_id binding tag the
+            # Global Admin sets on VIGIL's enterprise application, and the exact Graph read VIGIL performs.
+            return {**common, **azure_placement(self.azure_client_id, ch.account_id, ch.external_id)}
         return {**common, "principal_arn": self.cloud_principal_arn,
                 "trust_policy": aws_trust_policy(self.cloud_principal_arn, ch.external_id),
                 "permissions_policy_arn": AWS_READ_ONLY_POLICY_ARN, "role_name_hint": "VigilSecurityAudit"}
@@ -4611,7 +4635,7 @@ class Provisioner:
                                           target=f"{provider}:{account_id}", cloud=True)
             from ..governor.cloud_connect import _check_verifiable
             try:
-                prov = _check_verifiable(provider)       # azure / unknown -> refuse here with the reason
+                prov = _check_verifiable(provider)       # an unverifiable/unknown provider -> refuse here, no dead-end
             except ValueError as e:
                 raise ProvisionDenied(str(e)) from None
             if not self._cloud_ready(prov):
@@ -4632,6 +4656,8 @@ class Provisioner:
                 self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                             target=f"{provider}:{account_id}", outcome="rate_limited")
                 raise ProvisionRateLimited(wait)
+        # the right trusted fetcher for the challenge's provider (provider-agnostic from here: the verdict + record
+        # are the same for AWS, GCP and Azure). The FETCH is OUTSIDE the lock (network I/O).
         control = _secrets.token_urlsafe(32)                        # the same-shape negative control's random id
         from .cloud_fetch import CloudFetchError
         try:
@@ -5281,6 +5307,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         cloud_gcp_fetcher=config.cloud_connect_gcp_fetcher(),
         cloud_gcp_connector_sa=(config.cloud_connect_gcp_connector_sa()
                                 if config.customer_cloud_connect_enabled() else ""),
+        # Consumer PR-C (Azure leg) — VIGIL's multi-tenant Azure app fetcher + its client id (None / "" until the
+        # owner provisions VIGIL's Azure app ⇒ the Azure flow is offered nowhere).
+        azure_fetcher=config.azure_connect_fetcher(),
+        azure_client_id=(config.cloud_connect_azure_client_id()
+                         if config.customer_cloud_connect_enabled() else ""),
         # E2a/E2b — the owner-signed customer-credential registry (always wired; finish_login's federated
         # branch resolves through it) + the Google-OIDC provider (None unless customer_oidc_enabled()).
         customer_credentials=CustomerCredentialRegistry(store),

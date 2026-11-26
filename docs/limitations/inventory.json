@@ -576,22 +576,6 @@
    "w16_issue": null
   },
   {
-   "id": "LIMIT-cloud-connect-gcp-azure-verdict",
-   "title": "Customer cloud connect verifies AWS and GCP accounts; Azure is refused at the first step",
-   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account (VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the account the role lands in, and requires a same-shape negative control) and of a GCP project (the customer creates a service account whose id encodes the unguessable external id, and VIGIL's connector service account impersonates exactly that service account via iamcredentials generateAccessToken under a project-admin-only roles/iam.serviceAccountTokenCreator grant; the unguessable per-challenge name is the confused-deputy closure). Azure (a multi-tenant app registration + role assignment) needs a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws, gcp}, so issue_challenge and verify_and_connect both refuse azure before any record is written, and the connect screen offers only AWS and GCP - no customer is walked into a flow that cannot finish.",
-   "classification": "real-unfinished-code",
-   "severity": "info",
-   "anchor": {
-    "file": "apps/sigil/sigil/governor/cloud_connect.py",
-    "symbol": "_VERIFIABLE_PROVIDERS"
-   },
-   "marker": true,
-   "check": "symbol-exists",
-   "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
-   "disposition": "file-into-w16",
-   "w16_issue": null
-  },
-  {
    "id": "LIMIT-cloud-connect-gcp-livefire",
    "title": "GCP cloud-connect live round-trip is not exercised in CI (no live GCP project / connector SA in the hash-locked CI env)",
    "summary": "The GCP cloud-connect proof-of-control (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) is a complete, functional two-call round-trip: the connector service-account assertion JWT (RS256), the oauth2 token exchange, and iamcredentials generateAccessToken on the challenge-named service account. Every deterministic layer - RS256 signing (pinned against a known RSA key + a precomputed signature vector), request construction, the Google JSON parsing, the egress guard, and the name-binding verdict - is covered offline by apps/sigil/tests/test_cloud_fetch_gcp.py + test_cloud_connect.py against a fake Google transport. The residual is only that the LIVE round-trip against real Google endpoints is not exercised in CI: the hash-locked CI environment has no live GCP project and no owner-provisioned connector service account, so config.cloud_connect_gcp_fetcher builds the live fetcher only when the owner sets VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA + VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY, and when unprovisioned the GCP leg is simply not built and verify fails closed (not available on this deployment). No metadata read or negative control is made, so there is no live-only step that could fail after the offline tests pass.",
@@ -793,6 +777,22 @@
    "marker": false,
    "check": "file-exists",
    "source_doc": "infra/aws/aegis-staging/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-cloud-connect-azure-live-fire",
+   "title": "Azure customer cloud-connect is proven offline in full; the live Entra/Graph round-trip is an owner-provisioned residual",
+   "summary": "The Azure cloud-connect proof (ui/cloud_fetch.py::AzureConsentConnectFetcher: a client-credentials token against the customer tenant proving admin consent, the token tid decode, the Microsoft Graph service-principal binding read, and the same-shape negative control against a derived control tenant) and its deterministic verdict (governor/cloud_connect.py::cloud_grant_refusal azure branch) are covered OFFLINE in full by apps/sigil/tests/test_cloud_fetch_azure.py / test_cloud_connect_azure.py / test_connect_provision_azure.py, with a fake Entra+Graph transport that routes by tenant and answers the binding read through the same egress guard. What stays a residual: the real round-trip to live Microsoft Entra ID and Graph is a deploy-gated live-fire, exercised only once the owner provisions VIGIL's multi-tenant Azure app (client id + secret/cert) and a customer's Global Admin admin-consents it and sets the external-id tag - there is no live AAD in CI, and (unlike the AWS SigV4 signer) no in-repo reference implementation to pin the live protocol against. Default-OFF behind VIGIL_CUSTOMER_CLOUD_CONNECT: byte-identical when off, a grant authorizes no offense.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/cloud_fetch.py",
+    "symbol": "AzureConsentConnectFetcher"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/ui/cloud_fetch.py",
    "disposition": "file-into-w16",
    "w16_issue": null
   }

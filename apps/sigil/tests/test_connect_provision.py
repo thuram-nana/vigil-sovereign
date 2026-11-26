@@ -499,8 +499,8 @@ def test_unverifiable_providers_are_refused_before_any_record():
     p, s, orgs = _prov(cloud_fetcher=_StubCloudFetcher())
     _seat(orgs, "org_a", "u_f", "operator")
     before = s.next_seq
-    with pytest.raises(ProvisionDenied, match="only AWS"):        # gcp is WIRED now; azure is the unverifiable one
-        p.cloud_connect_challenge("u_f", "org_a", "azure", "sub-1")
+    with pytest.raises(ProvisionDenied, match="provider must be one of"):   # every KNOWN provider is verifiable now
+        p.cloud_connect_challenge("u_f", "org_a", "digitalocean", "acct-1")
     assert s.next_seq == before                          # no challenge, no audit row: nothing written at all
 
 

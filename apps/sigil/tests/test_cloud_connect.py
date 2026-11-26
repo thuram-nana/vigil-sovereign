@@ -107,8 +107,10 @@ def test_verdict_refuses_a_control_that_is_not_the_one_issued_or_is_the_real_id(
 
 def test_verdict_refuses_unverifiable_providers_and_bad_input():
     good = _observed("EXT", ACCT)
-    assert cc.cloud_grant_proves("azure", "EXT", ACCT, good, control_external_id=CTL) is False     # known-unverifiable
-    assert cc.cloud_grant_proves("cloudflare", "EXT", ACCT, good, control_external_id=CTL) is False  # unknown provider
+    assert cc.cloud_grant_proves("cloudflare", "EXT", ACCT, good, control_external_id=CTL) is False  # not verifiable here
+    # gcp and azure ARE verifiable now, but an AWS-shaped observation (no SA / tenant) never satisfies their verdicts
+    assert cc.cloud_grant_proves("gcp", "EXT", ACCT, good, control_external_id=CTL) is False
+    assert cc.cloud_grant_proves("azure", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "", ACCT, _observed("", ACCT), control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "EXT", ACCT, "not-a-dict", control_external_id=CTL) is False
     for missing in ("assumed_with_external_id", "account", "control_external_id", "control_denied"):
@@ -182,14 +184,15 @@ def test_verify_refuses_a_superseded_external_id():
     assert _verify(r, "NEW", now=3.0).role_ref == ROLE
 
 
-def test_an_unverifiable_provider_is_refused_at_the_first_step_and_writes_nothing():
+def test_an_unknown_provider_is_refused_at_the_first_step_and_writes_nothing():
+    # every KNOWN provider (aws/gcp/azure/cloudflare) is now verifiable; an UNKNOWN one is refused up front, no dead-end
     s = _store()
     r = _reg(s)
     before = s.next_seq
-    for prov, acct in (("azure", "sub-1"),):                     # gcp is now WIRED; azure is the unverifiable one
-        with pytest.raises(ValueError, match="only AWS"):
+    for prov, acct in (("digitalocean", "acct-1"),):
+        with pytest.raises(ValueError, match="provider must be one of"):
             r.issue_challenge("acme", prov, acct, issued_at=_t(), external_id="EXT1")
-        with pytest.raises(ValueError, match="only AWS"):
+        with pytest.raises(ValueError, match="provider must be one of"):
             r.verify_and_connect("acme", prov, acct, role_ref="vigil@proj.iam", observed=_observed("EXT1", acct),
                                  control_external_id=CTL, now=1.0)
     assert s.next_seq == before                                  # no dead-end challenge, no record of any kind
@@ -290,8 +293,8 @@ def test_open_challenge_resumes_the_outstanding_id_and_writes_nothing():
     r.disconnect("acme", "aws", ACCT)
     fresh, resumed = r.open_challenge("acme", "aws", ACCT, issued_at=_t())
     assert resumed is False and fresh.external_id != ch.external_id          # a reconnect starts clean
-    with pytest.raises(ValueError, match="only AWS"):
-        r.open_challenge("acme", "azure", "sub-1", issued_at=_t())           # gcp is WIRED now; azure is not
+    with pytest.raises(ValueError, match="provider must be one of"):
+        r.open_challenge("acme", "digitalocean", "acct-1", issued_at=_t())   # every KNOWN provider is verifiable now
 
 
 def test_has_current_grant_respects_the_owner_signed_expiry():
