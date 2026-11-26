@@ -30,7 +30,8 @@ now — and under what epoch floor?* It wires the seven AS-2c behaviours:
 Everything fails CLOSED toward PASS_THROUGH / OBSERVE; nothing here ever raises on the request path, holds a key,
 or reads a wallclock on a decision that feeds a signature check.
 
-FATAL-2: engine-side; imports only ``vigil_core`` (the shared contracts) + stdlib. No ``sigil``; no sovereign code.
+FATAL-2: engine-side; imports ``vigil_core`` (the shared contracts), stdlib, and the framework-internal v1 reader
+``monitoring_authority_check`` (itself FATAL-2-clean) — nothing from ``sigil`` or the sovereign plane.
 """
 from __future__ import annotations
 
