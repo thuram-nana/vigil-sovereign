@@ -513,7 +513,7 @@ class ProviderRegistry(CanonicalModel):
     byte-identical; a different order is a different registry)."""
 
     schema_id: str = Field(default=PROVIDER_REGISTRY_SCHEMA, alias="schema")
-    providers: list[ProviderDescriptor] = Field(default_factory=list)
+    providers: tuple[ProviderDescriptor, ...] = Field(default_factory=tuple)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
 
@@ -522,6 +522,18 @@ class ProviderRegistry(CanonicalModel):
     def _check_schema(cls, v: str) -> str:
         if v != PROVIDER_REGISTRY_SCHEMA:
             raise ValueError(f"provider registry schema must be {PROVIDER_REGISTRY_SCHEMA!r}, got {v!r}")
+        return v
+
+    @field_validator("providers", mode="before")
+    @classmethod
+    def _coerce_providers(cls, v: Any) -> Any:
+        """Coerce a list (e.g. the ``[*self.providers, descriptor]`` :meth:`register` builds, or a
+        parsed JSON array) to a TUPLE, so the stored sequence is immutable: ``frozen=True`` blocks
+        REASSIGNMENT of ``providers`` but a ``list`` would still accept ``.append(...)`` /
+        ``providers[i] = ...`` on a held instance, bypassing :meth:`register`'s append-only + dedup
+        guard and the ``_no_dupes`` validator. A tuple refuses both in-place mutations."""
+        if isinstance(v, list):
+            return tuple(v)
         return v
 
     @model_validator(mode="after")
@@ -548,7 +560,7 @@ class ProviderRegistry(CanonicalModel):
         if self.get(descriptor.provider_id) is not None:
             raise DuplicateProviderError(
                 f"provider {descriptor.provider_id!r} is already registered (the registry is append-only)")
-        return ProviderRegistry(providers=[*self.providers, descriptor])
+        return ProviderRegistry(providers=(*self.providers, descriptor))
 
 
 #: The baseline SIGIL-native provider AS-1a ships: the in-request-path gateway. It reaches outcome
@@ -573,7 +585,7 @@ def baseline_provider_registry() -> ProviderRegistry:
     """A registry seeded with exactly the baseline SIGIL provider. Later slices call
     :meth:`ProviderRegistry.register` to append their provider; this function is the shared starting
     point so every plane begins from the same, byte-identical baseline."""
-    return ProviderRegistry(providers=[BASELINE_SIGIL_PROVIDER])
+    return ProviderRegistry(providers=(BASELINE_SIGIL_PROVIDER,))
 
 
 __all__ = [

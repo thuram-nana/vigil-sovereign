@@ -163,6 +163,26 @@ def test_registry_register_is_append_only_and_immutable() -> None:
     assert reg2.get("guardduty") is extra
 
 
+def test_registry_providers_tuple_refuses_in_place_mutation() -> None:
+    # frozen=True blocks REASSIGNMENT of `providers`, but a list would still accept .append(...) /
+    # providers[i] = ... on a HELD instance, bypassing register()'s append-only + dedup guard and the
+    # _no_dupes validator. Storing providers as an immutable tuple refuses both in-place mutations.
+    reg = baseline_provider_registry()
+    extra = ProviderDescriptor(provider_id="guardduty",
+                               capabilities=[AdapterCapability(
+                                   kind="guardduty_finding",
+                                   outcome_class=OutcomeClass.DETECTED_WITHOUT_ENFORCEMENT,
+                                   effect_verification=EffectVerification.REPORTED)])
+    assert isinstance(reg.providers, tuple)
+    with pytest.raises(AttributeError):
+        reg.providers.append(extra)  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        reg.providers[0] = extra  # type: ignore[index]
+    # the held registry is unchanged — the only growth path is register(), which returns a new registry:
+    assert reg.provider_ids == ("sigil_gateway",)
+    assert reg.register(extra).provider_ids == ("sigil_gateway", "guardduty")
+
+
 def test_registry_refuses_duplicate_provider_id() -> None:
     reg = baseline_provider_registry()
     dup = ProviderDescriptor(provider_id="sigil_gateway",
