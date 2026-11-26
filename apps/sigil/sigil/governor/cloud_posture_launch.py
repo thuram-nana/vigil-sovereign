@@ -21,6 +21,13 @@ from typing import Any, Callable, Optional
 from vigil_core.cloud_session import MINTABLE_PROVIDERS, MintedSession
 from vigil_core.posture import customer_prod_execution_enabled
 
+from ..reuse import assert_no_offense
+
+# FATAL-2 tripwire (the same import-time guard every sovereign governor sibling arms): refuse to be loaded in
+# a process that has imported the offense engine (framework.*/strix.*). The grant read + credential mint stay
+# sovereign; only the MintedSession (plain data) ever crosses to the offense plane.
+assert_no_offense()
+
 
 class PostureDenied(Exception):
     """A customer-cloud-posture session was refused (fail-closed). The message is customer-safe (no internals)."""

@@ -17,6 +17,7 @@ customer token per run instead (never stored), and a collector must refuse a sto
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 #: The providers a session can be re-minted for from a stored grant (Cloudflare is excluded by design — see above).
@@ -50,8 +51,15 @@ class MintedSession:
             raise ValueError("MintedSession.account_id is required")
 
     def is_fresh(self, now: float) -> bool:
-        """True iff the session has not expired at ``now``. Default-deny: a non-positive expiry is never fresh."""
-        return self.expires_at > 0.0 and float(now) < self.expires_at
+        """True iff the session has not expired at ``now``. Default-deny: a non-positive expiry — or a
+        non-finite ``expires_at`` / ``now`` (NaN, ±inf) — is NEVER fresh. An unbounded or undefined lifetime
+        cannot satisfy the time-boxed read-only contract, so it fails closed rather than reading as 'fresh
+        forever'."""
+        exp = float(self.expires_at)
+        n = float(now)
+        if not (math.isfinite(exp) and math.isfinite(n)):
+            return False
+        return exp > 0.0 and n < exp
 
     def has_credential(self) -> bool:
         """True iff the session actually carries a usable credential for its provider (fail-closed check a collector

@@ -186,6 +186,82 @@ def test_orchestrator_mints_an_aws_session_end_to_end() -> None:
     assert s.has_credential() and s.is_fresh(_CLOCK)
 
 
+# --- fail-closed ORDER: the customer's cloud is never touched before every rung passes -----------
+# The refusal-rung tests above assert only that PostureDenied is raised, which a "mint first, THEN refuse"
+# reorder would still satisfy (the owner gate still raises "...not enabled" on a minted-then-discarded
+# session). These spy probes pin the stronger, stated invariant — mint_read_only_session (the live
+# sts:AssumeRole into the customer account) is NEVER invoked until the grant AND the owner gate AND the
+# provider rungs have all passed — so moving the owner gate below the mint turns one of these RED.
+class _SpyFetcher:
+    """Records whether mint_read_only_session ran, delegating to a real fetcher when one is given."""
+
+    def __init__(self, inner: AwsStsConnectFetcher | None = None) -> None:
+        self._inner = inner
+        self.mint_calls = 0
+
+    def mint_read_only_session(self, target, *, now=None):
+        self.mint_calls += 1
+        if self._inner is None:
+            raise AssertionError("mint_read_only_session must not run on a refusal rung")
+        return self._inner.mint_read_only_session(target, now=now)
+
+
+def _spy_open(spy, *, target, env, provider="aws", account_id=ACCT):
+    return open_posture_session(registry=_Registry(target), mint_fetcher=lambda p: spy if p == provider else None,
+                                org_id="acme", provider=provider, account_id=account_id, now=_CLOCK, env=env)
+
+
+def test_no_mint_before_the_grant_rung() -> None:
+    spy = _SpyFetcher(_fetcher(_FakeSts()))
+    with pytest.raises(PostureDenied, match="no active read-only connection"):
+        _spy_open(spy, target=None, env=_ON)
+    assert spy.mint_calls == 0
+
+
+def test_no_mint_while_the_owner_gate_is_off() -> None:
+    # THE regression guard for the red-pen MEDIUM: a fully-working fetcher sits behind the owner gate and
+    # VIGIL_CUSTOMER_PROD_EXECUTION is OFF, so no sts:AssumeRole may fire. A reorder that mints before the
+    # gate still raises PostureDenied("not enabled") but would trip this assertion.
+    spy = _SpyFetcher(_fetcher(_FakeSts()))
+    with pytest.raises(PostureDenied, match="not enabled"):
+        _spy_open(spy, target=_target(), env={})
+    assert spy.mint_calls == 0
+
+
+def test_no_mint_for_a_stored_grant_cloudflare_target() -> None:
+    spy = _SpyFetcher(_fetcher(_FakeSts()))
+    cf = _target(provider="cloudflare", account_id="a" * 32, role_ref="b" * 32)
+    with pytest.raises(PostureDenied, match="fresh read-only API token"):
+        _spy_open(spy, target=cf, env=_ON, provider="cloudflare", account_id="a" * 32)
+    assert spy.mint_calls == 0
+
+
+def test_the_mint_runs_exactly_once_when_every_rung_passes() -> None:
+    spy = _SpyFetcher(_fetcher(_FakeSts()))
+    s = _spy_open(spy, target=_target(), env=_ON)
+    assert isinstance(s, MintedSession) and spy.mint_calls == 1
+
+
+# --- FATAL-2: neither new module may import the offense engine (framework.*/strix.*/engine) -------
+def test_new_modules_do_not_import_the_offense_engine() -> None:
+    import ast
+    import importlib
+    import inspect
+
+    def import_roots(module_name: str) -> set[str]:
+        tree = ast.parse(inspect.getsource(importlib.import_module(module_name)))
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+        return roots
+
+    for mod in ("sigil.governor.cloud_posture_launch", "vigil_core.cloud_session"):
+        assert import_roots(mod).isdisjoint({"framework", "strix", "engine"}), mod
+
+
 # --- the MintedSession data contract (the FATAL-2 crossing object) -------------------------------
 def test_minted_session_is_frozen() -> None:
     import dataclasses
@@ -212,6 +288,12 @@ def test_minted_session_freshness_is_fail_closed() -> None:
     assert not MintedSession(provider="gcp", account_id="p", bearer_token="b").is_fresh(0.0)  # expiry 0 → never fresh
     live = MintedSession(provider="gcp", account_id="p", expires_at=100.0, bearer_token="b")
     assert live.is_fresh(99.999) and not live.is_fresh(100.0)
+    # non-finite expiry / now never reads as fresh (an unbounded lifetime must not satisfy the time-box):
+    inf = float("inf"); nan = float("nan")
+    assert not MintedSession(provider="gcp", account_id="p", expires_at=inf, bearer_token="b").is_fresh(1.0)
+    assert not MintedSession(provider="gcp", account_id="p", expires_at=nan, bearer_token="b").is_fresh(1.0)
+    assert not MintedSession(provider="gcp", account_id="p", expires_at=100.0, bearer_token="b").is_fresh(inf)
+    assert not MintedSession(provider="gcp", account_id="p", expires_at=100.0, bearer_token="b").is_fresh(nan)
 
 
 def test_minted_session_has_credential_per_provider() -> None:
