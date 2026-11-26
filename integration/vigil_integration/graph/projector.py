@@ -23,6 +23,15 @@ are enforced HERE, deterministically:**
   6. **The graph is inert.** It returns a view; it authorizes nothing. No consumer may read authority
      from it (enforced by the query layer returning only non-authoritative retrieval context).
 
+  7. **S3 — charter objectives are INERT read-model nodes (DEFAULT-OFF behind ``VIGIL_GRAPH_OBJECTIVES``).**
+     A declared charter ``goal`` record projects to one ``OBJECTIVE`` node keyed on a stable objective id;
+     a ``reach`` record (a worldmodel crown-jewel a PathCertificate reaches) projects ``Asset-[REACHES]->
+     Goal`` with the PATH's confirmation; a ``step`` carrying an objective id projects ``ChainStep-
+     [PURSUES]->Goal``. A Goal is NEVER a FACT: it is always projected LEAD with no ``evidence_ref``, so
+     ``is_confirmed`` (which gates on CHAIN_FINDING) can never return it and ``confirmed_findings`` never
+     surfaces it. With the flag OFF, ``goal`` / ``reach`` are UNKNOWN kinds (already fail-closed-ignored)
+     and a step's objective id adds no edge — the view is byte-identical to the pre-S3 read-model.
+
 Import-clean: pydantic + .model + stdlib only.
 """
 
@@ -42,6 +51,7 @@ from .model import (
     NodeLabel,
     Provenance,
 )
+from .objectives_flag import objectives_enabled
 
 
 class SpineRecord(BaseModel):
@@ -64,6 +74,8 @@ class SpineRecord(BaseModel):
     parent_step_id: str = ""        # the step that PRODUCED this finding/failure/decision
     prev_step_id: str = ""          # the preceding step (NEXT_STEP)
     refutes_id: str = ""            # for kind=refute: the node id to retire
+    objective_id: str = ""          # S3: stable charter-objective id. kind=goal→the OBJECTIVE node key;
+    #                                 kind=step→the Goal the step PURSUES; kind=reach→the Goal an asset REACHES
     targets: list[dict[str, Any]] = Field(default_factory=list)   # [{"type":"cve"/"host"/..,"value":..}]
 
 
@@ -164,7 +176,8 @@ def _host_in_scope(target_type: str, value: str, scope_gate: Optional[ScopeGate]
     return True
 
 
-def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate]) -> None:
+def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate],
+                    objectives: bool) -> None:
     kind = (rec.kind or "").lower()
     if kind == "refute":
         if rec.refutes_id:
@@ -197,6 +210,13 @@ def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[Scop
         if rec.prev_step_id:
             view.add_edge(GraphEdge(src=f"step:{rec.prev_step_id}", dst=node.id, type=EdgeType.NEXT_STEP,
                                     provenance=_provenance(rec, False), valid_from=rec.seq))
+        # S3: a step that DECLARES an objective id PURSUES that Goal. A step with NO objective id creates
+        # NO edge — linkage is never fabricated. LEAD provenance: a step authorizes nothing, and the
+        # PURSUES edge is a plan-intent link, never a proof. Default-OFF: no edge unless the flag is on.
+        if objectives and rec.objective_id:
+            view.add_edge(GraphEdge(src=node.id, dst=f"objective:{rec.objective_id}",
+                                    type=EdgeType.PURSUES, provenance=_provenance(rec, False),
+                                    valid_from=rec.seq))
         return
 
     if kind == "finding":
@@ -232,6 +252,29 @@ def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[Scop
                                     type=EdgeType.DECISION_PRECEDED, provenance=_provenance(rec, False),
                                     valid_from=rec.seq))
         return
+
+    # S3 — charter objectives, gated DEFAULT-OFF. With the flag off these two kinds are NOT recognised and
+    # fall through to the unknown-kind fail-closed-ignore below, byte-identical to the pre-S3 read-model.
+    if objectives and kind == "goal":
+        # A declared charter objective → ONE inert OBJECTIVE node keyed on a stable objective id. Always
+        # LEAD, never any evidence_ref: a Goal is never a FACT, is never returned by confirmed_findings(),
+        # and authorizes nothing. No objective id ⇒ no node (never fabricate an unkeyed Goal). Re-projecting
+        # the same id MERGEs (GraphView.upsert_node), never duplicates.
+        if rec.objective_id:
+            view.upsert_node(GraphNode(id=f"objective:{rec.objective_id}", label=NodeLabel.OBJECTIVE,
+                                       props=dict(rec.props), provenance=_provenance(rec, False),
+                                       valid_from=rec.seq))
+        return
+
+    if objectives and kind == "reach":
+        # A worldmodel crown-jewel a PathCertificate reaches → Asset-[REACHES]->Goal. The asset is a recon
+        # bridge target (host/endpoint/port/cve/tech); a host-bearing asset must clear the SAME scope gate
+        # (``_host_in_scope``) — an out-of-scope host can't re-enter under the Goal path. The REACHES edge
+        # inherits the PATH's confirmation (``_is_confirmed``): a lead route is a lead edge. No objective
+        # id ⇒ nothing projected (never fabricate linkage).
+        if rec.objective_id:
+            _project_reach(view, rec, f"objective:{rec.objective_id}", scope_gate)
+        return
     # unknown kind → silently ignored (fail-closed: an unrecognized record projects nothing)
 
 
@@ -258,6 +301,32 @@ def _project_bridges(view: GraphView, rec: SpineRecord, finding_id: str, confirm
                                 provenance=_provenance(rec, confirmed), valid_from=rec.seq))
 
 
+def _project_reach(view: GraphView, rec: SpineRecord, objective_id: str,
+                   scope_gate: Optional[ScopeGate]) -> None:
+    """S3 — project ``Asset-[REACHES]->Goal`` from a crown-jewel reach record. The asset(s) a
+    PathCertificate reaches are carried as recon bridge targets; EACH host-bearing asset must clear the
+    SAME ``_host_in_scope`` scope gate the finding bridges use (an out-of-scope host can't enter under the
+    Goal path, under any label or client reading). The asset NODE is a plain recon node (LEAD, like any
+    bridge target); the REACHES EDGE inherits the path's confirmation (``_is_confirmed``) — a lead route
+    is a lead edge, a signed/verified route a confirmed edge. The Goal itself stays untouched and inert."""
+    confirmed = _is_confirmed(rec)
+    for t in rec.targets:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type", "")).lower()
+        value = str(t.get("value", "")).strip()
+        label = _BRIDGE_LABELS.get(ttype)
+        if not label or not value:
+            continue
+        if not _host_in_scope(ttype, value, scope_gate):
+            continue
+        tid = f"{label.value.lower()}:{value}"
+        view.upsert_node(GraphNode(id=tid, label=label, props={"value": value},
+                                   provenance=_provenance(rec, False), valid_from=rec.seq))
+        view.add_edge(GraphEdge(src=tid, dst=objective_id, type=EdgeType.REACHES,
+                                provenance=_provenance(rec, confirmed), valid_from=rec.seq))
+
+
 def spine_record_from_finding(finding: Any, *, seq: int, hash: str, signature_ref: str = "",
                               engagement_id: str = "", parent_step_id: str = "",
                               targets: Optional[list[dict[str, Any]]] = None) -> SpineRecord:
@@ -281,12 +350,19 @@ def spine_record_from_finding(finding: Any, *, seq: int, hash: str, signature_re
 
 
 def project(records: list[SpineRecord], *, group_id: str = "",
-            scope_gate: Optional[ScopeGate] = None) -> GraphView:
+            scope_gate: Optional[ScopeGate] = None, objectives: Optional[bool] = None) -> GraphView:
     """Project a list of signed spine records into a typed ``GraphView`` — the ONLY writer. Deterministic
     (records applied in ``(seq, hash)`` order), so the same spine rebuilds a byte-identical view. A
     finding is CONFIRMED only when its record carries signed oracle evidence; everything else is a LEAD.
     Never raises on a malformed record LIST — a non-``SpineRecord`` element (e.g. a torn/None row from
-    a lossy spine loader) is skipped, not crashed on."""
+    a lossy spine loader) is skipped, not crashed on.
+
+    ``objectives`` gates the S3 charter-objective projection (``goal`` / ``reach`` kinds and the step→Goal
+    ``PURSUES`` edge). ``None`` (the default) reads the DEFAULT-OFF ``VIGIL_GRAPH_OBJECTIVES`` env flag, so
+    every existing caller is unchanged and the view is byte-identical to the pre-S3 read-model unless an
+    operator opts in; an explicit ``True`` / ``False`` pins it (for deterministic offline tests). Reading
+    an env flag keeps the function deterministic for a fixed environment — no wallclock, no RNG."""
+    objectives_on = objectives_enabled() if objectives is None else bool(objectives)
     view = GraphView(group_id=group_id)
     clean = [r for r in (records or []) if isinstance(r, SpineRecord)]   # pre-filter → total on garbage
     # total order: (seq, hash, canonical body) so two records sharing (seq, hash) still sort
@@ -301,7 +377,7 @@ def project(records: list[SpineRecord], *, group_id: str = "",
 
     for rec in sorted(clean, key=_sort_key):
         try:
-            _project_record(view, rec, scope_gate)
+            _project_record(view, rec, scope_gate, objectives_on)
         except Exception:   # noqa: BLE001 — a malformed record must not abort the whole projection
             continue
     return view
