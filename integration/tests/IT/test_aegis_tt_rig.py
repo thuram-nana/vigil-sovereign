@@ -60,6 +60,16 @@ def _assert_acceptance(result: dict) -> None:
     assert b["baseline"]["all_forwarded_200"] is True
     # observe forwarded every attack (never blocked) — availability-first.
     assert all(d["status"] == 200 and d["forwarded"] is True for d in a["attack_detail"])
+    # distinct-uid mode asserts the OS filesystem boundary POSITIVELY: a child dropped to TT-B's uid
+    # was DENIED a read of TT-A's 0700 feed (and a listing of its root), and the hardened drop shed
+    # every supplementary group. (In-process mode shares one uid, so there is no OS boundary to prove.)
+    if result["mode"] == "distinct-uids":
+        assert checks["cross_tenant_uid_cannot_read_peer_feed"] is True, json.dumps(result, indent=2,
+                                                                                     sort_keys=True)
+        probe = result["cross_tenant_fs_probe"]
+        assert probe["feed_open"] == "denied"      # EACCES reading TT-A's feed as TT-B's uid
+        assert probe["root_list"] == "denied"      # EACCES listing TT-A's 0700 root as TT-B's uid
+        assert probe["residual_groups"] == []      # setgroups([]) shed the shared `users` gid
 
 
 def test_observe_acceptance_in_process(tmp_path: Path) -> None:

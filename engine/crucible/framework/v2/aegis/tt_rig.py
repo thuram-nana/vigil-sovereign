@@ -396,6 +396,124 @@ def _event_summary(feed: list[dict[str, object]]) -> list[dict[str, object]]:
              "action": r.get("action")} for r in _confirmed(feed)]
 
 
+def _peer_isolation_child(w: int, peer_feed: str, peer_root: str, uid: int, gid: int,
+                          user: str) -> int:
+    """(forked child, root-only) Drop to the CONTROL tenant's identity — the SAME hardened drop
+    :func:`_serve_tenant` performs (``setgid`` → ``setgroups([])`` → ``setuid``) — then ATTEMPT to
+    read the ATTACK tenant's feed and list its ``0700`` root, reporting the outcome as one JSON line
+    on ``w``. It also seeds the identity's real group set with ``initgroups`` BEFORE the hardening
+    ``setgroups([])``, so the report proves that call actually SHEDS the shared ``users`` gid
+    ``useradd -N`` hands every tenant (``residual_groups`` must come back empty). Never returns to the
+    caller's flow — the parent ``os._exit``s on its return value."""
+    report: dict[str, object] = {}
+    try:
+        os.setgid(gid)
+        try:
+            # Adopt the tenant's real login groups (on this provisioning: the shared `users` gid) so
+            # the hardening setgroups([]) below has something real to drop — otherwise, with a root
+            # parent that carries no supplementary groups, the call would be a silent no-op and could
+            # not be shown to matter.
+            os.initgroups(user, gid)
+        except OSError:
+            pass
+        os.setgroups([])            # HARDENING: shed every supplementary group (incl. the shared gid).
+        os.setuid(uid)
+    except OSError as exc:          # fail-closed: a failed drop is reported, never silently "denied".
+        report["drop_error"] = f"{type(exc).__name__}: {exc}"
+        os.write(w, json.dumps(report).encode("utf-8"))
+        return 0
+    report["dropped_uid"] = os.getuid()
+    report["residual_groups"] = sorted(os.getgroups())
+    try:
+        with open(peer_feed, "rb") as fh:
+            fh.read(1)
+        report["feed_open"] = "read"            # the OS let the dropped uid read the peer feed — BAD.
+    except PermissionError:
+        report["feed_open"] = "denied"          # EACCES — the 0700 boundary held.
+    except FileNotFoundError:
+        report["feed_open"] = "missing"         # the peer feed is gone — NOT a proof of denial.
+    except OSError as exc:
+        report["feed_open"] = f"error:{exc.errno}"
+    try:
+        os.listdir(peer_root)
+        report["root_list"] = "listed"          # the dropped uid enumerated the peer root — BAD.
+    except PermissionError:
+        report["root_list"] = "denied"
+    except OSError as exc:
+        report["root_list"] = f"error:{exc.errno}"
+    os.write(w, json.dumps(report).encode("utf-8"))
+    return 0
+
+
+def _probe_peer_feed_isolation(peer_feed: str, peer_root: str, probe_uid: int) -> dict[str, object]:
+    """Root-only OS-boundary probe (the positive assertion the distinct-uid acceptance was missing).
+
+    Fork a child, drop it to the CONTROL tenant's distinct uid/gid, and have it ATTEMPT to read the
+    ATTACK tenant's ``0700`` feed and list its root. The cross-tenant OS boundary HOLDS iff BOTH
+    accesses are DENIED (``EACCES``) **and** the dropped identity retains NO supplementary group (so
+    the shared ``users`` gid ``useradd -N`` gives both tenants is shed by ``setgroups([])``, not
+    carried across). A weakened boundary — ``tenant_root`` ``0700`` → ``0755``, or a dropped
+    ``setgroups([])`` — flips one of those to a non-pass, so the acceptance can no longer ship GREEN.
+
+    Additive and read-only: it has no enforcing power and only reads the peer's own tree. The caller
+    reaches it ONLY on the distinct-uid (root) path, so non-root CI never forks here. Fail-closed:
+    any drop error, a missing peer feed, or a silent child is NOT a pass.
+    """
+    probe_gid = int(pwd.getpwuid(probe_uid).pw_gid)
+    probe_user = pwd.getpwuid(probe_uid).pw_name
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover — the child is a separate process, invisible to the parent's coverage
+        try:
+            os.close(r)
+            rc = _peer_isolation_child(w, peer_feed, peer_root, probe_uid, probe_gid, probe_user)
+        except BaseException:  # noqa: BLE001 — a child must NEVER unwind into the parent's flow
+            rc = 1
+        finally:
+            try:
+                os.close(w)
+            except OSError:
+                pass
+        os._exit(rc)
+    os.close(w)
+    chunks: list[bytes] = []
+    while True:
+        buf = os.read(r, 65536)
+        if not buf:
+            break
+        chunks.append(buf)
+    os.close(r)
+    os.waitpid(pid, 0)
+    try:
+        child = json.loads(b"".join(chunks).decode("utf-8") or "{}")
+    except ValueError:
+        child = {}
+    if not isinstance(child, dict):
+        child = {}
+    feed_open = child.get("feed_open", "error:no-report")
+    root_list = child.get("root_list", "error:no-report")
+    # Sentinel: a non-empty list when the child never reported, so a silent child is NOT a group-clean pass.
+    residual_groups = child.get("residual_groups", [-1])
+    drop_error = child.get("drop_error")
+    denied = feed_open == "denied" and root_list == "denied"
+    no_group_leak = residual_groups == []
+    return {
+        "attempted": True,
+        "peer_feed": peer_feed,
+        "peer_root": peer_root,
+        "probe_uid": probe_uid,
+        "probe_gid": probe_gid,
+        "feed_open": feed_open,
+        "root_list": root_list,
+        "residual_groups": residual_groups,
+        "dropped_uid": child.get("dropped_uid"),
+        "drop_error": drop_error,
+        "denied": denied,
+        "no_supplementary_group_leak": no_group_leak,
+        "ok": bool(denied and no_group_leak and drop_error is None),
+    }
+
+
 @dataclass
 class _BaselineRecord:
     probes: int = 0
@@ -476,6 +594,25 @@ def run_tt_acceptance(root: "str | Path", *, require_distinct_uids: bool,
             "cross_tenant_control_sees_nothing": control_sees_nothing,
             "observe_never_blocked": observe_never_blocked,
         }
+
+        # (3a) THE OS-BOUNDARY ASSERTION (distinct-uid mode only). The checks above are all computed by
+        #      the ROOT parent via _read_feed, which bypasses mode bits — so an empty TT-B feed proves
+        #      only that TT-B got no attack traffic, NOT that the OS would DENY TT-B's uid a read of
+        #      TT-A's 0700 feed. Here we assert that boundary POSITIVELY: fork a child, drop it to
+        #      TT-B's distinct identity, and require that reading TT-A's feed / listing its root is
+        #      DENIED (EACCES) and that the hardened drop shed every supplementary group. Root-gated:
+        #      alloc is not None only on the provisioned (root) distinct-uid path.
+        peer_isolation: Optional[dict[str, object]] = None
+        if alloc is not None:
+            probe_uid = tenants[_TENANT_B].uid
+            assert probe_uid is not None, "distinct-uid control tenant must carry an int uid"
+            peer_isolation = _probe_peer_feed_isolation(
+                peer_feed=tenants[_TENANT_A].feed_path,
+                peer_root=str(root / _TENANT_A),
+                probe_uid=probe_uid,
+            )
+            checks["cross_tenant_uid_cannot_read_peer_feed"] = bool(peer_isolation["ok"])
+
         result: dict[str, object] = {
             "ok": all(checks.values()),
             "mode": mode,
@@ -483,6 +620,7 @@ def run_tt_acceptance(root: "str | Path", *, require_distinct_uids: bool,
             "control_tenant": _TENANT_B,
             "expected_attack_classes": expected_classes,
             "checks": checks,
+            "cross_tenant_fs_probe": peer_isolation,
             "tenants": {
                 _TENANT_A: {
                     "uid": tenants[_TENANT_A].uid,
