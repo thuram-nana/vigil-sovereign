@@ -1431,9 +1431,10 @@ def test_16_the_hub_links_account_security_only_where_it_is_shown():
         off = _node(_settings_app("1", _PROFILE, security=security, security_js=js) + _LINKS)
         assert off["links"] == ["#/team", "#/billing"], (security, js)
         assert "Account security & sign-in" not in off["labels"] and off["securityShown"] is True, (security, js)
-    # every link asks routeShown: a screen routeShown hides gets no link
+    # every link asks routeShown: a screen routeShown hides gets no link (here routeShown shows everything but billing,
+    # so the hub's other links — Account security, Team and the legal/governance-S3 Data rights link — all remain)
     hidden = _node(_settings_app("1", _PROFILE) + 'routeShown = r => r !== "#/billing";\n' + _LINKS)
-    assert hidden["links"] == ["#/security", "#/team"]
+    assert hidden["links"] == ["#/security", "#/team", "#/data-rights"]
 
 
 # =====================================================================================================================

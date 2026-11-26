@@ -143,9 +143,14 @@ _STATE_DIRS = ("qdrant", "graph",
                # registered address, contractual + emergency contacts). The customer typed it and NOTHING regenerates
                # it, so a restore must bring it back; it is contact data, so it is restored owner-only
                # (see _PRIVATE_STATE_DIRS).
-               "customer_preferences")
+               "customer_preferences",
+               # legal/governance S3: the customer data-rights request ledger (ui/data_rights_store.py — one
+               # owner-signed append-only row per close-account / deletion request). The customer recorded it and
+               # nothing regenerates it, and it is the durable item the owner's documented process acts on, so a
+               # restore must bring it back; it names the account, so it is restored owner-only (_PRIVATE_STATE_DIRS).
+               "customer_data_rights")
 # State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
-_PRIVATE_STATE_DIRS = ("customer_preferences",)
+_PRIVATE_STATE_DIRS = ("customer_preferences", "customer_data_rights")
 # State subtrees a live process writes by temp-file-then-rename (spine.atomicio.atomic_write_text) while a backup may
 # be running — the customer profile is saved from the cockpit, the very process that also serves the in-browser backup.
 # An atomic write's temp file (spine.consistent_copy.transient) is never state: it exists only while that save is in
@@ -171,6 +176,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "graph",                    # graph memory mirror
     "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
     "customer_preferences",     # legal/governance S1: the customer-entered General profile (0600/0700 on restore)
+    "customer_data_rights",     # legal/governance S3: the customer data-rights request ledger (0600/0700 on restore)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
