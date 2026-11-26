@@ -608,6 +608,22 @@
    "w16_issue": null
   },
   {
+   "id": "LIMIT-cloud-connect-cloudflare-livefire",
+   "title": "Customer Cloudflare connect: the pure-protocol proof is fully offline-covered; the live-fire leg against a real Cloudflare token is an honestly-registered residual",
+   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of a Cloudflare account under a different trust model from AWS: a Cloudflare API token IS a bearer secret the customer hands over, so VIGIL reads it exactly twice (GET /client/v4/user/tokens/verify, then GET /client/v4/user/tokens/{id}) to bind the challenge via the token's own name (vigil-verify-{external_id}) and to confirm it is READ-ONLY and SINGLE-ACCOUNT, then NEVER stores it - only the token's public id and a sha256 are recorded. The pure-protocol layer (sigil/ui/cloudflare_fetch.py: https-only exact-host egress guard, redirect block, bounded read, JSON parse, policy/resource evaluation, read-only group detection, the fail-closed verdict wiring in governor/cloud_connect.py::_cloudflare_grant_refusal, and the never-store-the-token path through ui/provision.py) is proven FULLY offline through the injectable transport seam (tests/test_cloudflare_fetch.py, tests/test_cloudflare_connect.py, tests/test_cloudflare_provision.py), including the never-leak assertion that the raw token appears in no record, audit line, or return. What is DEFERRED is the live-fire leg: a real Cloudflare API cannot be reached in CI, so the exact minimal read-only permission groups, whether self-introspection of the calling token needs 'User API Tokens Read', and the precise live policies/resources JSON shapes are confirmed against a live customer token in the field, not in CI. Fail-closed by construction meanwhile: any answer that is not an explicit active, read-only, single-account, challenge-bound token refuses, and no grant is recorded.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/cloudflare_fetch.py",
+    "symbol": "CloudflareTokenConnectFetcher"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/ui/cloudflare_fetch.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
    "title": "The customer proof badge covers the positive finding certificate only: a remediation's signed negative clearance certificate is not surfaced to the customer",
    "summary": "The customer proof badge and per-finding PCF export (consumer PR-I, Area 8) surface the governance-signed POSITIVE finding certificate only. A remediation's signed NEGATIVE clearance certificate (vigil-remediation-cert-v2, minted offense-side by the APEX PCR close-the-loop and the prove driver) does not reach the customer (sovereign) plane: nothing carries it across the offense-to-sovereign seam until the Area 10 fix-it wiring (consumer PR-K) dispatches the fix worker and carries its certificate, which then surfaces through this same export (plan Area 10, step 2). Fail-closed meanwhile: the badge and the bundle assert nothing about a fix, and a retest's 'fixed' verdict is shown as the retest's own result, never as a signed clearance.",

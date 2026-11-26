@@ -7,6 +7,13 @@ unguessable ``external_id`` — the classic cross-account, confused-deputy-safe 
 (``ui.cloud_fetch``) then ASSUMES that role with our external_id and reads back the caller identity; the account the
 role lands in IS the proof of control (only that account's IAM controller can create a role there and trust VIGIL).
 
+CLOUDFLARE (a second verifiable provider, a DIFFERENT trust model): a Cloudflare API token IS a bearer secret the
+customer hands over, so there is no delegated role to assume. The customer creates a READ-ONLY, SINGLE-ACCOUNT token
+named ``vigil-verify-{external_id}`` (the name carries the challenge binding); trusted sovereign code
+(``ui.cloudflare_fetch``) reads the token's OWN definition ONCE to bind the challenge and confirm it is read-only +
+single-account, and VIGIL records only the token's PUBLIC id and a sha256 — NEVER the token. A token that can write,
+or is account-global, is REFUSED (VIGIL will not hold a powerful customer secret even briefly).
+
 THE SAME-SHAPE NEGATIVE CONTROL (why the verdict also needs a DENIAL): a successful assume with our external id
 proves nothing about whether the role's trust policy REQUIRES that id. A role that trusts VIGIL's principal with no
 ``sts:ExternalId`` condition would also succeed — and then ANY VIGIL tenant could name that role and connect another
@@ -84,24 +91,42 @@ CHALLENGE_SIGNAL = "governor.cloud_connect_challenge"
 GRANT_SIGNAL = "governor.cloud_connect_grant"
 
 # The cloud provider vocabulary. The proof is CONCRETE for AWS (external-id assume-role + caller-identity account
-# match + the same-shape negative control). GCP (service-account impersonation) and Azure (a multi-tenant app
-# registration) need a different observation; their verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict),
+# match + the same-shape negative control) and for CLOUDFLARE (a customer-supplied READ-ONLY, single-account API
+# token, read ONCE to bind this challenge via the token's own name and to confirm it is read-only + single-account,
+# then never stored — the token IS a bearer secret, unlike AWS/GCP/Azure delegated access, so VIGIL holds it only
+# for the two verify reads and records only its public id + a sha256). GCP (service-account impersonation) and Azure
+# (a multi-tenant app registration) need a different observation; their verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict),
 # so BOTH a challenge and a verify refuse them — a customer is never walked into a flow that cannot finish.
 PROVIDER_AWS = "aws"
 PROVIDER_GCP = "gcp"
 PROVIDER_AZURE = "azure"
-_PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE})
+PROVIDER_CLOUDFLARE = "cloudflare"
+_PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE, PROVIDER_CLOUDFLARE})
 # The providers whose deterministic proof-of-control verdict exists. Anything else fails closed at the first step.
-_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS})
+_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_CLOUDFLARE})
 
 # A cloud ACCOUNT id: a provider-agnostic single safe token (alnum start, then [A-Za-z0-9._-], max 128) — one safe
-# spine key component that can never widen scope. AWS additionally requires the exact 12-digit account id.
+# spine key component that can never widen scope. AWS additionally requires the exact 12-digit account id; Cloudflare
+# the exact 32-lowercase-hex account id.
 _ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _AWS_ACCOUNT_RE = re.compile(r"[0-9]{12}")
+_CLOUDFLARE_ACCOUNT_RE = re.compile(r"[0-9a-f]{32}")
 # A role / grant REFERENCE the customer created — a public identifier, never a secret. Bounded + control-char-free;
-# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected.
+# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected; for Cloudflare it is
+# the token's PUBLIC id (32 lowercase hex) — the token itself is NEVER a role_ref the grant stores (see the Cloudflare
+# notes on verify_and_connect / cloudflare_placement: the secret token travels only to the fetcher).
 _ROLE_REF_MAX = 512
 _AWS_ROLE_ARN_RE = re.compile(r"arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]{1,512}")
+_CLOUDFLARE_TOKEN_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+# The Cloudflare connect token's NAME prefix: the customer names their read-only token ``vigil-verify-{external_id}``
+# so its name carries the challenge binding (the fetcher reads the name back and the verdict ct-compares it).
+_CLOUDFLARE_TOKEN_NAME_PREFIX = "vigil-verify-"
+# The minimal READ-ONLY Cloudflare permission groups the connect screen asks the customer to add. All are Read-only:
+# Account Settings Read + Zone Read give read posture visibility; "User API Tokens Read" lets VIGIL read the token's
+# OWN definition (name + policies + account scope) to bind the challenge and prove read-only + single-account — the
+# exact minimal set is confirmed against the live API (VIGIL-LIMIT:LIMIT-cloud-connect-cloudflare-livefire).
+_CLOUDFLARE_MINIMAL_READ_GROUPS = ("Account Settings Read", "Zone Read", "User API Tokens Read")
 
 # The AWS managed policy the connect screen asks the customer to attach: read-only access to security configuration
 # metadata (list/describe/get), the standard for cloud-posture tooling. Shown, never enforced by this module.
@@ -119,7 +144,11 @@ _DEFAULT_GRANT_TTL_S: float = 90.0 * 24.0 * 3600.0
 # nor have its role, its external id or its window rewritten. The grant carries the external id ITSELF (not a hash)
 # so it stays CONSUMABLE after a later challenge supersedes the one it was proven against (``assume_target``).
 _CHALLENGE_CORE = ("signal", "org_id", "provider", "account_id", "external_id", "state", "issued_at")
-_GRANT_CORE = ("signal", "org_id", "provider", "account_id", "role_ref", "external_id",
+# ``token_sha256`` is inside the signed core (mirrors asset_ownership._PROOF_CORE): for a Cloudflare grant it is the
+# sha256 of the customer's bearer token — the grant RECOGNISES a re-presented token WITHOUT storing it. "" for AWS
+# (delegated access, no bearer secret). Signed so it is tamper-bound, defaulted so AWS grants are signed identically
+# every time; the fold, the overview projection and the prune tripwire all carry it transparently.
+_GRANT_CORE = ("signal", "org_id", "provider", "account_id", "role_ref", "external_id", "token_sha256",
                "verified_at", "expires_at", "state", "issued_at")
 
 _SKIP = object()          # the shared fold step: the record touched no (org_id, provider, account_id)
@@ -141,7 +170,8 @@ def _check_verifiable(provider: str) -> str:
     """A provider whose proof-of-control VIGIL can actually check — anything else refuses at the first step."""
     p = _check_provider(provider)
     if p not in _VERIFIABLE_PROVIDERS:
-        raise ValueError(f"connecting a {p!r} account is not available — only AWS accounts can be connected today")
+        raise ValueError(f"connecting a {p!r} account is not available — "
+                         "only AWS and Cloudflare accounts can be connected today")
     return p
 
 
@@ -152,6 +182,8 @@ def _check_account(account_id: str, provider: str = "") -> str:
                          "no separators / traversal / spaces (an AWS account id / GCP project / Azure subscription)")
     if provider == PROVIDER_AWS and not _AWS_ACCOUNT_RE.fullmatch(a):
         raise ValueError("an AWS account id is exactly 12 digits")
+    if provider == PROVIDER_CLOUDFLARE and not _CLOUDFLARE_ACCOUNT_RE.fullmatch(a):
+        raise ValueError("a Cloudflare account id is exactly 32 lowercase hex characters")
     return a
 
 
@@ -167,6 +199,11 @@ def _check_role_ref(role_ref: str, provider: str = "", account_id: str = "") -> 
             raise ValueError("give the role's full ARN, e.g. arn:aws:iam::123456789012:role/VigilSecurityAudit")
         if account_id and m.group(1) != account_id:
             raise ValueError("the role ARN names a different AWS account than the one you are connecting")
+    if provider == PROVIDER_CLOUDFLARE and not _CLOUDFLARE_TOKEN_ID_RE.fullmatch(r):
+        # For Cloudflare the recorded reference is the token's PUBLIC id (32 hex), produced by the trusted fetcher's
+        # observation — never the token itself (the grant must never carry the bearer secret). A bad id here means a
+        # malformed observation, which the verdict already refuses; validate it so a bad record is never bound.
+        raise ValueError("the Cloudflare API token id was not recognised")
     return r
 
 
@@ -208,6 +245,8 @@ def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observ
             return "connecting this kind of cloud account is not available"
         if not ext or not ctl or _ct_eq(ext, ctl) or not isinstance(observed, dict):
             return _NOT_MADE
+        if provider == PROVIDER_CLOUDFLARE:
+            return _cloudflare_grant_refusal(ext, account_id, observed)
         got_ext, got_acct = observed.get("assumed_with_external_id"), observed.get("account")
         got_ctl, denied = observed.get("control_external_id"), observed.get("control_denied")
         if not isinstance(got_ext, str) or not _ct_eq(ext, got_ext):
@@ -224,6 +263,48 @@ def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observ
         return None
     except Exception:  # noqa: BLE001 — a verdict is total: anything unexpected refuses
         return _NOT_MADE
+
+
+def _cloudflare_grant_refusal(external_id: str, account_id: str, observed: dict) -> Optional[str]:
+    """``None`` iff the TRUSTED Cloudflare fetcher's observation proves control of ``account_id`` under THIS
+    challenge, with a token that is READ-ONLY and SINGLE-ACCOUNT; otherwise the customer-facing reason. TOTAL and
+    FAIL-CLOSED (``cloud_grant_refusal`` wraps it in the try/except — never raises).
+
+    ``observed`` is what the trusted fetcher saw (never customer-supplied):
+
+        {"token_id": <the token's public id>, "account": <the single account the token is scoped to>,
+         "name_matched": <True iff the token's own name ct-equals vigil-verify-{external_id}>,
+         "external_id": <the challenge external_id the fetcher bound against>,
+         "read_only": <True iff every permission group is a read-only group>,
+         "single_account": <True iff the token's resources name exactly the one account, never all-accounts>}
+
+    The verdict holds iff ALL of:
+      * ``name_matched`` is exactly ``True`` AND ``external_id`` ct-equals this challenge's ``external_id`` — the
+        token the customer created carries THIS challenge's binding in its own name, so a replayed observation from
+        another challenge (or an unnamed token) is refused;
+      * ``account`` ct-equals the claimed ``account_id`` — the token is scoped to the account being connected;
+      * ``read_only`` is exactly ``True`` — the token carries no write/edit/admin permission (the adapted negative
+        control: VIGIL will not hold a customer secret that can CHANGE their account, even briefly);
+      * ``single_account`` is exactly ``True`` — the token reaches exactly this one account, never ``*``/all-accounts
+        (a global token is refused for the same reason)."""
+    got_acct = observed.get("account")
+    got_ext = observed.get("external_id")
+    name_matched = observed.get("name_matched")
+    read_only = observed.get("read_only")
+    single_account = observed.get("single_account")
+    if name_matched is not True or not isinstance(got_ext, str) or not _ct_eq(str(external_id or ""), got_ext):
+        return ("the API token's name does not match this request — name the token EXACTLY as the connect screen "
+                "shows (vigil-verify-…) and try again")
+    if not isinstance(got_acct, str) or not _ct_eq(str(account_id or ""), got_acct):
+        return (f"control of {account_id} was not proven — the API token is not scoped to that account "
+                f"(scope it to exactly that account and try again)")
+    if read_only is not True:
+        return ("the API token is not read-only — create it with only Read permissions (no Edit/Write): VIGIL "
+                "accepts a read-only token only and will not hold a token that can change your account")
+    if single_account is not True:
+        return ("the API token is not scoped to a single account — scope it to exactly the account you are "
+                "connecting (not 'All accounts'); a global token is refused")
+    return None
 
 
 def cloud_grant_proves(provider: str, external_id: str, account_id: str, observed, *,
@@ -248,6 +329,47 @@ def aws_trust_policy(principal_arn: str, external_id: str) -> str:
     return json.dumps(doc, indent=2)
 
 
+def cloudflare_token_name(external_id: str) -> str:
+    """The exact name the customer's read-only Cloudflare token must carry: ``vigil-verify-{external_id}``. The name
+    carries the challenge binding — the trusted fetcher reads the token's own name back and the verdict ct-compares
+    it, so a token created for a different (or no) challenge is refused."""
+    return f"{_CLOUDFLARE_TOKEN_NAME_PREFIX}{str(external_id)}"
+
+
+def cloudflare_placement(external_id: str, account_id: str) -> dict:
+    """The exact self-serve steps the customer follows to prove control of Cloudflare account ``account_id``: create
+    a CUSTOM API TOKEN scoped READ-ONLY to EXACTLY that account, NAME it ``vigil-verify-{external_id}`` (the name
+    carries this challenge's binding), and paste it into the connect screen ONCE.
+
+    Unlike AWS/GCP/Azure (delegated access, VIGIL stores no customer secret), a Cloudflare API token IS a bearer
+    secret the customer hands over. VIGIL reads the token's OWN definition exactly twice (status, then name +
+    policies + account scope) to bind this challenge and confirm the token is read-only + single-account, then
+    NEVER stores, logs or returns it — only the token's public id and a sha256 are recorded. Deterministic text, so
+    the screen and a test agree byte-for-byte. The placement NEVER includes the external id's secret beyond the
+    token name the customer must set (which they already see)."""
+    name = cloudflare_token_name(external_id)
+    acct = str(account_id)
+    groups = list(_CLOUDFLARE_MINIMAL_READ_GROUPS)
+    return {
+        "token_name": name,
+        "permission_groups": groups,
+        "account_scope": acct,
+        "read_only": True,
+        "steps": [
+            "In the Cloudflare dashboard open My Profile → API Tokens → Create Token → Create Custom Token.",
+            f"Name the token EXACTLY {name} — the name proves this request is yours; a different name is rejected.",
+            "Under Permissions add ONLY Read permissions (set each to Read, never Edit/Write): "
+            + ", ".join(groups) + ". A token carrying any write/edit permission is refused.",
+            (f"Under Account Resources choose Include → a specific account → {acct} (NOT 'All accounts'); keep any "
+             "Zone Resources scoped within that same account only. A token that can reach more than this one "
+             "account is refused."),
+            "Leave Client IP Address Filtering and TTL at their defaults, create the token, and copy it.",
+            ("Paste the token into the connect screen once. VIGIL verifies it and does NOT store it — only the "
+             "token's public id and a sha256 are kept."),
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class CloudConnectChallenge:
     org_id: str
@@ -262,13 +384,14 @@ class CloudGrant:
     org_id: str
     provider: str
     account_id: str
-    role_ref: str                # the read-only role the customer created (a public id, never a secret)
+    role_ref: str                # the public reference the customer created: an AWS role ARN, or a Cloudflare token id
     external_id: str = field(repr=False)   # the id the role's trust policy requires (never rendered in a repr)
     verified_at: float = 0.0
     expires_at: float = 0.0      # owner-signed expiry — re-connecting required after this
     issued_at: float = 0.0       # owner-set anti-replay high-water for this grant
     state: str = "active"        # "active" | "revoked"
     access: str = "read-only"    # the RECORDED connection intent (see the module CLAIM BOUNDARY note)
+    token_sha256: str = ""       # Cloudflare: sha256 of the bearer token (log-safe; the token itself is NEVER stored)
 
     @property
     def external_id_sha256(self) -> str:
@@ -296,8 +419,8 @@ class CloudAssumeTarget:
 
 def _grant_row(p: dict, at: float) -> dict:
     return {"provider": p.get("provider"), "account_id": p.get("account_id"), "role_ref": p.get("role_ref"),
-            "external_id": p.get("external_id"), "verified_at": p.get("verified_at"),
-            "expires_at": p.get("expires_at"), "issued_at": at}
+            "external_id": p.get("external_id"), "token_sha256": p.get("token_sha256"),
+            "verified_at": p.get("verified_at"), "expires_at": p.get("expires_at"), "issued_at": at}
 
 
 def _payload_row(p: dict, at: float) -> dict:
@@ -387,7 +510,7 @@ class CloudConnectRegistry:
 
     def verify_and_connect(self, org_id: str, provider: str, account_id: str, *, role_ref: str,
                            observed, control_external_id: str, now: float,
-                           ttl_seconds: float = _DEFAULT_GRANT_TTL_S) -> CloudGrant:
+                           ttl_seconds: float = _DEFAULT_GRANT_TTL_S, token_sha256: str = "") -> CloudGrant:
         """Run the deterministic verdict over a TRUSTED observation and, ONLY on success, owner-sign a READ-ONLY
         cloud GRANT for (org_id, provider, account_id). Fail-closed — raises ``ValueError`` (its text is the
         customer-facing reason) on an invalid org/provider/account/role, an unverifiable provider, a missing/stale
@@ -398,6 +521,12 @@ class CloudConnectRegistry:
         the CURRENT active challenge's external_id for the key; a verify with no outstanding challenge, or against a
         superseded external_id, refuses. On success the grant carries an owner-signed ``expires_at`` =
         ``now + ttl_seconds`` and the verified external id (so a later gated run can assume the role).
+
+        ``token_sha256`` is recorded in the signed grant for a Cloudflare connection (the sha256 of the customer's
+        bearer token, supplied by the provisioner — the registry NEVER sees the token). ``role_ref`` for Cloudflare
+        is the token's PUBLIC id; the grant therefore RECOGNISES a re-presented token without ever storing it. ""
+        for AWS (delegated access, no bearer secret). The token itself never reaches this method, the record, or
+        the return — only its public id and its sha256.
 
         RECORDING A GRANT AUTHORIZES NO OFFENSE: it is a read-only CONNECTION record (see the module docstring)."""
         if self.owner_key is None:
@@ -418,16 +547,19 @@ class CloudConnectRegistry:
         if not (verified_at > self._highwater(GRANT_SIGNAL, _GRANT_CORE, (oid, prov, acct))):
             # the fold would ignore a grant stamped at/below the key's high-water: refuse rather than report success
             raise ValueError("the connection could not be recorded just now — try again in a moment")
+        tok_sha = str(token_sha256 or "")
+        if tok_sha and any(ord(c) < 0x20 or ord(c) == 0x7f for c in tok_sha):
+            raise ValueError("token_sha256 must be a control-char-free string")
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": ref,
-                "external_id": ch.external_id, "verified_at": verified_at, "expires_at": verified_at + ttl,
-                "state": "active", "issued_at": verified_at}
+                "external_id": ch.external_id, "token_sha256": tok_sha, "verified_at": verified_at,
+                "expires_at": verified_at + ttl, "state": "active", "issued_at": verified_at}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"read-only cloud grant RECORDED for {prov}:{acct} by org {oid} (owner-signed)"}
         self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
         return CloudGrant(org_id=oid, provider=prov, account_id=acct, role_ref=ref, external_id=ch.external_id,
                           verified_at=verified_at, expires_at=verified_at + ttl, issued_at=verified_at,
-                          state="active")
+                          state="active", token_sha256=tok_sha)
 
     def disconnect(self, org_id: str, provider: str, account_id: str) -> int:
         """Disconnect a cloud account — the SAFE direction (honored even unsigned, fixed ``issued_at`` 0.0). Retires
@@ -438,7 +570,8 @@ class CloudConnectRegistry:
         seq."""
         oid, prov, acct = _check_org_id(org_id), _check_provider(provider), _check_account(account_id)
         core = {"signal": GRANT_SIGNAL, "org_id": oid, "provider": prov, "account_id": acct, "role_ref": "",
-                "external_id": "", "verified_at": 0.0, "expires_at": 0.0, "state": "revoked", "issued_at": 0.0}
+                "external_id": "", "token_sha256": "", "verified_at": 0.0, "expires_at": 0.0,
+                "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"cloud grant for {prov}:{acct} (org {oid}) DISCONNECTED (governed latch)"}
@@ -507,7 +640,8 @@ class CloudConnectRegistry:
             external_id=str(row.get("external_id") or ""),
             verified_at=float(as_issued_at(row.get("verified_at"))),
             expires_at=float(as_issued_at(row.get("expires_at"))),
-            issued_at=as_issued_at(row.get("issued_at")), state="active")
+            issued_at=as_issued_at(row.get("issued_at")), state="active",
+            token_sha256=str(row.get("token_sha256") or ""))
 
     def has_current_grant(self, org_id: str, provider: str, account_id: str, *, now: float) -> bool:
         """True iff the key has an ACTIVE, UNEXPIRED read-only grant at ``now``. DEFAULT-DENY — no grant, a

@@ -616,6 +616,7 @@ class Provisioner:
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, cloud_fetcher=None,
+                 cloudflare_fetcher=None,
                  cloud_principal_arn="", connect_check_limiter=None, connect_org_limiter=None,
                  cloud_connect_limiter=None,
                  signup_email_limiter=None,
@@ -680,6 +681,13 @@ class Provisioner:
         # sovereign egress posture until the owner provisions VIGIL's connector identity. ``cloud_principal_arn`` is
         # that identity's ARN, printed into the customer's trust policy ("" ⇒ the cloud leg offers nothing).
         self.cloud_fetcher = cloud_fetcher
+        # Consumer PR-C (Cloudflare leg) — the READ-ONLY Cloudflare token fetcher (``ui.cloudflare_fetch``): it
+        # verifies the customer's read-only API token and reads the token's OWN definition to bind the challenge and
+        # confirm read-only + single-account (``assume(provider=, account_id=, role_ref=<the token, a bearer secret>,
+        # external_id=, control_external_id=, now=) -> {token_id, account, name_matched, external_id, read_only,
+        # single_account}``). None ⇒ Cloudflare connect offers nothing (fail-closed). Unlike AWS, VIGIL holds no
+        # Cloudflare credential of its own; the customer's token is the only secret and this leg never stores it.
+        self.cloudflare_fetcher = cloudflare_fetcher
         self.cloud_principal_arn = str(cloud_principal_arn or "")
         # PR-C — the connect surface's durable limiters (LoginRateLimiter, guard-and-count ``admit``). FAIL-CLOSED when
         # unwired (they guard OUTBOUND fetches, like the checkout limiter guards a money call): the automatic ownership
@@ -4406,12 +4414,21 @@ class Provisioner:
             self._audit(action, requester=requester, org_id=org_id, target=target, outcome="connect_off")
             raise ProvisionDenied("the unified connect surface is not enabled on this deployment")
 
-    def _cloud_ready(self) -> bool:
-        """The cloud leg can actually connect an account here: the flag, VIGIL's connector principal, the live
-        fetcher and the verify limiter are all in place. Anything missing ⇒ the screen offers no cloud flow."""
+    def _cloud_ready(self, provider: str = "aws") -> bool:
+        """The cloud leg can actually connect an account of ``provider`` here: the flag + the verify limiter, plus the
+        provider's own prerequisites — for AWS, VIGIL's connector principal and the AWS fetcher; for Cloudflare, the
+        Cloudflare fetcher (VIGIL holds no Cloudflare credential of its own). Anything missing ⇒ the screen offers no
+        flow for that provider."""
         from .. import config
-        return bool(config.customer_cloud_connect_enabled() and self.cloud_principal_arn
-                    and self.cloud_fetcher is not None and self.cloud_connect_limiter is not None)
+        if not (config.customer_cloud_connect_enabled() and self.cloud_connect_limiter is not None):
+            return False
+        if str(provider or "").strip().lower() == "cloudflare":
+            return self.cloudflare_fetcher is not None
+        return bool(self.cloud_principal_arn and self.cloud_fetcher is not None)
+
+    def _cloud_fetcher_for(self, provider: str):
+        """The trusted fetcher for ``provider`` (``_cloud_ready`` has already confirmed it is present)."""
+        return self.cloudflare_fetcher if str(provider or "").strip().lower() == "cloudflare" else self.cloud_fetcher
 
     def customer_connect_overview(self, requester: str, requester_org_id: str, *, ip: str = "",
                                   now: "Optional[float]" = None) -> dict:
@@ -4436,7 +4453,7 @@ class Provisioner:
                                       and self.connect_org_limiter is not None),
             "repos": repos_ok,
             "repo_connect": bool(repos_ok and config.github_app_slug()),
-            "cloud_connect": self._cloud_ready(),
+            "cloud_connect": self._cloud_ready() or self._cloud_ready("cloudflare"),
         }
 
         def _proj(s, o):
@@ -4534,11 +4551,12 @@ class Provisioner:
         this deployment can really verify it (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the testing
         axis, NOT billing), mirroring ``target_challenge``. The requester + org are the SERVER-authenticated session
         principal (never body fields). A challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
-        from ..governor.cloud_connect import AWS_READ_ONLY_POLICY_ARN, CloudConnectRegistry, aws_trust_policy
+        from ..governor.cloud_connect import (AWS_READ_ONLY_POLICY_ARN, PROVIDER_CLOUDFLARE, CloudConnectRegistry,
+                                              aws_trust_policy, cloudflare_placement)
         with self._lock:
             self._connect_enabled_or_deny("cloud_connect_challenge", requester, requester_org_id,
                                           target=f"{provider}:{account_id}", cloud=True)
-            if not self._cloud_ready():
+            if not self._cloud_ready(provider):
                 raise ProvisionError("connecting a cloud account is not available on this deployment")
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
@@ -4552,8 +4570,13 @@ class Provisioner:
                 raise ProvisionDenied(str(e)) from None
             self._audit("cloud_connect_challenge", requester=requester, org_id=requester_org_id,
                         target=f"{ch.provider}:{ch.account_id}", outcome="resumed" if resumed else "issued")
-        return {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id,
-                "resumed": resumed, "principal_arn": self.cloud_principal_arn,
+        base = {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id,
+                "resumed": resumed}
+        if ch.provider == PROVIDER_CLOUDFLARE:
+            # Cloudflare: the customer creates a read-only, single-account API token named vigil-verify-{external_id}
+            # and pastes it ONCE; VIGIL holds no connector principal and prints no trust policy (see cloudflare_fetch).
+            return {**base, **cloudflare_placement(ch.external_id, ch.account_id)}
+        return {**base, "principal_arn": self.cloud_principal_arn,
                 "trust_policy": aws_trust_policy(self.cloud_principal_arn, ch.external_id),
                 "permissions_policy_arn": AWS_READ_ONLY_POLICY_ARN, "role_name_hint": "VigilSecurityAudit"}
 
@@ -4572,7 +4595,7 @@ class Provisioner:
         with self._lock:                                            # authorize BEFORE spending a network fetch
             self._connect_enabled_or_deny("cloud_connect_verify", requester, requester_org_id,
                                           target=f"{provider}:{account_id}", cloud=True)
-            if not self._cloud_ready():
+            if not self._cloud_ready(provider):
                 raise ProvisionError("connecting a cloud account is not available on this deployment")
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
@@ -4592,10 +4615,14 @@ class Provisioner:
                 raise ProvisionRateLimited(wait)
         control = _secrets.token_urlsafe(32)                        # the same-shape negative control's random id
         from .cloud_fetch import CloudFetchError
+        # The trusted fetcher for this provider (AWS assumes the role; Cloudflare reads the bearer token ONCE). For
+        # Cloudflare ``role_ref`` carries the customer's SECRET token — it reaches ONLY the fetcher, never a record,
+        # log, audit line or return (see below: only the token's public id + a sha256 are recorded).
+        fetcher = self._cloud_fetcher_for(ch.provider)
         try:
-            observed = self.cloud_fetcher.assume(provider=ch.provider, account_id=ch.account_id, role_ref=role_ref,
-                                                 external_id=ch.external_id, control_external_id=control, now=t)
-        except CloudFetchError as e:   # the fetcher's OWN fixed reason reaches the customer; AWS detail is audit-only
+            observed = fetcher.assume(provider=ch.provider, account_id=ch.account_id, role_ref=role_ref,
+                                      external_id=ch.external_id, control_external_id=control, now=t)
+        except CloudFetchError as e:   # the fetcher's OWN fixed reason reaches the customer; the detail is audit-only
             self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                         target=f"{provider}:{account_id}", outcome="fetch_failed", reason=e.detail or str(e))
             raise ProvisionDenied(str(e)) from None
@@ -4603,15 +4630,26 @@ class Provisioner:
             self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                         target=f"{provider}:{account_id}", outcome="assume_failed")
             raise ProvisionDenied("could not assume the read-only role with the issued external id") from None
-        from ..governor.cloud_connect import CloudConnectRegistry
+        from ..governor.cloud_connect import PROVIDER_CLOUDFLARE, CloudConnectRegistry
+        # For Cloudflare the grant records the token's PUBLIC id (from the trusted observation) and a sha256 of the
+        # token — NEVER the token. ``role_ref`` here is the token id (public); ``token_sha256`` ties the grant to the
+        # token that was verified without storing it. For AWS the grant records the role ARN and no token sha256.
+        if ch.provider == PROVIDER_CLOUDFLARE:
+            from ..reuse import sha256_hex
+            grant_role_ref = str(observed.get("token_id") or "")
+            grant_token_sha256 = sha256_hex(str(role_ref or "").encode("utf-8"))
+        else:
+            grant_role_ref = role_ref
+            grant_token_sha256 = ""
+        role_ref = None                                             # shed the token reference past the fetch (Cloudflare)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
                 raise ProvisionDenied("requester may not register assets for this org")  # TOCTOU
             try:
                 grant = CloudConnectRegistry(self.store).verify_and_connect(
-                    requester_org_id, provider, account_id, role_ref=role_ref, observed=observed,
-                    control_external_id=control, now=t)
+                    requester_org_id, provider, account_id, role_ref=grant_role_ref, observed=observed,
+                    control_external_id=control, now=t, token_sha256=grant_token_sha256)
             except ValueError as e:
                 self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                             target=f"{provider}:{account_id}", outcome="not_proven", reason=str(e))
@@ -5231,6 +5269,9 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                                 max_lock_s=6 * Provisioner._CLOUD_VERIFY_WINDOW_S)
                                if config.customer_cloud_connect_enabled() else None),
         cloud_fetcher=config.cloud_connect_fetcher(),
+        # Cloudflare leg: VIGIL holds no connector identity of its own (the customer brings a read-only token), so the
+        # fetcher is built whenever the cloud leg's flag is on (None otherwise ⇒ Cloudflare connect is offered nowhere).
+        cloudflare_fetcher=config.cloud_connect_cloudflare_fetcher(),
         cloud_principal_arn=(config.cloud_connect_aws_principal_arn()
                              if config.customer_cloud_connect_enabled() else ""),
         # E2a/E2b — the owner-signed customer-credential registry (always wired; finish_login's federated
