@@ -183,6 +183,34 @@ def test_registry_providers_tuple_refuses_in_place_mutation() -> None:
     assert reg.register(extra).provider_ids == ("sigil_gateway", "guardduty")
 
 
+def test_registry_inner_descriptor_and_capability_are_frozen_and_singleton_unpoisonable() -> None:
+    # red-pen wufm8d7z1: the OUTER tuple was immutable but a HELD descriptor and its capabilities list were not, so an
+    # in-place edit could over-claim an outcome class, bypass clean_token on title via assignment, and — through the
+    # shared BASELINE_SIGIL_PROVIDER singleton — poison every other caller process-wide. Lock all of it.
+    import pydantic
+
+    from vigil_core.protection_contract import BASELINE_SIGIL_PROVIDER
+
+    reg_a = baseline_provider_registry()
+    reg_b = baseline_provider_registry()
+    assert reg_a.providers[0] is reg_b.providers[0] is BASELINE_SIGIL_PROVIDER   # still a shared singleton...
+    assert isinstance(reg_a.providers[0].capabilities, tuple)                    # ...now deeply immutable, so safe
+    with pytest.raises(pydantic.ValidationError):
+        reg_a.providers[0].provider_id = "x"                                    # frozen descriptor
+    with pytest.raises(pydantic.ValidationError):
+        reg_a.providers[0].title = "SIGIL spoof"                                # assignment cannot bypass clean_token
+    with pytest.raises(AttributeError):
+        reg_a.providers[0].capabilities.append(                                 # tuple, not list
+            AdapterCapability(kind="contain", outcome_class=OutcomeClass.CONTAINED_AFTER_COMPROMISE,
+                              effect_verification=EffectVerification.NONE))
+    with pytest.raises(pydantic.ValidationError):
+        reg_a.providers[0].capabilities[0].outcome_class = OutcomeClass.CONTAINED_AFTER_COMPROMISE  # frozen capability
+    # a brand-new baseline is uncontaminated — nothing leaked through the singleton:
+    fresh = baseline_provider_registry().providers[0]
+    assert OutcomeClass.CONTAINED_AFTER_COMPROMISE not in fresh.outcome_classes
+    assert fresh.title == "SIGIL in-request-path gateway"
+
+
 def test_registry_refuses_duplicate_provider_id() -> None:
     reg = baseline_provider_registry()
     dup = ProviderDescriptor(provider_id="sigil_gateway",
