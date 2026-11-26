@@ -112,7 +112,9 @@ def _edge_stub(session):
 # --- the executed-JS harness for the screen (node) --------------------------------------------------------------------
 def _privacy_block(src: str) -> str:
     i = src.index("  // ---- Privacy centre (VIGIL_CUSTOMER_PRIVACY_CENTER)")
-    return src[i:src.index("  // ---- misc", i)]
+    # the block ends at the NEXT section header (another legal screen, e.g. Seller identity, may now follow it
+    # before "// ---- misc" once the sibling disclosure slices are integrated), never spilling into it.
+    return src[i:src.index("\n  // ----", i + 1)]
 
 
 _WORLD_P = r"""

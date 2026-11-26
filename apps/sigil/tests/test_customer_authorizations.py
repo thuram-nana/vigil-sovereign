@@ -413,7 +413,9 @@ function show() { VUI.mount(root, ROUTES["#/settings/authorizations"]()); return
 
 def _authz_block(src: str) -> str:
     i = src.index("  // ---- Authorizations (VIGIL_CUSTOMER_AUTHORIZATIONS)")
-    return src[i:src.index("  // ---- misc", i)]
+    # the block ends at the NEXT section header (sibling legal screens — e.g. Privacy centre, Seller identity —
+    # may now sit between it and "// ---- misc" once the disclosure slices are integrated), never spilling in.
+    return src[i:src.index("\n  // ----", i + 1)]
 
 
 def _authz_app(flag: str = "1", data=None) -> str:
