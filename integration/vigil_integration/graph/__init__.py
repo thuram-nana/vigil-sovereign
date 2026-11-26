@@ -22,8 +22,22 @@ S4 (default-OFF behind ``VIGIL_GRAPH_LIFECYCLE``) projects the existing signed r
 the INERT ``REMEDIATION`` / ``RETEST`` nodes and ``REMEDIATED_BY`` / ``RETESTED_BY`` edges, re-verified
 through an injected :class:`LifecycleVerifier` (no second verifier, no live retest); with the flag off the
 view is byte-identical to the pre-S4 read-model.
+
+S5 (default-OFF behind ``VIGIL_COVERAGE_VIEW``) adds the INERT ``ChainStep -[TESTED]-> asset`` coverage edge
+(from the executor's pinned, gate-authorized target) and a NON-AUTHORITATIVE coverage rollup over the combined
+read-model (``graph.coverage.coverage``, exposed from ``graph.query`` ONLY when the flag is armed). It grants
+nothing and NEVER reports silence as CLEAN: an un-tested surface reads ``not_tested``, a benign/negative record
+``tested_no_finding``; a LEAD stays a lead; an unverified remediation never reads ``verified_fixed``. With the
+flag off the view and the query public API are byte-identical to the pre-S5 read-model.
 """
 
+from .coverage import (
+    AssetCoverage,
+    CoverageView,
+    FindingCoverage,
+    GoalCoverage,
+)
+from .coverage_flag import COVERAGE_ENV, coverage_view_enabled
 from .model import (
     ConfirmationStatus,
     EdgeType,
@@ -70,6 +84,12 @@ __all__ = [
     "lifecycle_enabled",
     # S3 charter-objective flag (default-OFF)
     "OBJECTIVES_ENV", "objectives_enabled",
+    # S5 coverage flag + frozen result types (default-OFF). The flag helpers + types grant nothing and are
+    # always safe to import. The gated coverage READ itself is reached via ``graph.query.coverage`` — which is
+    # exposed ONLY when VIGIL_COVERAGE_VIEW is armed (no coverage function on the query API while the flag is
+    # off; see graph.query.__getattr__).
+    "COVERAGE_ENV", "coverage_view_enabled",
+    "CoverageView", "GoalCoverage", "AssetCoverage", "FindingCoverage",
     # query
     "PriorChainContext", "FindingSummary", "FailureLesson", "query_prior_chains", "successful_tools",
     "ObjectiveContext", "ObjectiveSummary", "objectives",

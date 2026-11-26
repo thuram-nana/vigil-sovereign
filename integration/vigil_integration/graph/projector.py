@@ -103,6 +103,7 @@ from .model import (
     NodeLabel,
     Provenance,
 )
+from .coverage_flag import coverage_view_enabled
 from .objectives_flag import objectives_enabled
 
 
@@ -209,6 +210,69 @@ def lifecycle_enabled() -> bool:
     """True iff ``VIGIL_GRAPH_LIFECYCLE`` is affirmative (default False). When False, the lifecycle record
     kinds are inert and the projector reaches no ``framework`` import (FATAL-2 / flag-OFF byte-identity)."""
     return (os.environ.get(_LIFECYCLE_ENV) or "").strip().lower() in _LIFECYCLE_AFFIRMATIVE
+
+
+# ==========================================================================================================
+# F4 slice S5 — coverage: the ``tested`` record kind projects ``ChainStep -[TESTED]-> asset`` (default-OFF
+# behind ``VIGIL_COVERAGE_VIEW``). The edge is written from the executor's PINNED, gate-authorized target
+# (scope-gated by the SAME ``_host_in_scope`` the finding bridges use), keyed by the EntityRef node id. It is
+# INERT — a coverage link, never a proof — and carries ``benign_record`` ONLY when a RETAINED benign/negative
+# RESPONSE record accompanied the test. Absence of a response record is NEVER "nothing found": silence stays
+# un-covered. The coverage read (``graph.coverage.coverage``) honours the split; this is just the projection.
+# ==========================================================================================================
+_TESTED_KIND = "tested"
+# Negative/benign RESPONSE result tokens — the ONLY ones that, WITH a retained ``response_ref``, mark a test as
+# "no finding" (``tested_no_finding``). Note the deliberate ABSENCE of "clean"/"protected"/"safe": a benign
+# response is reported as measured (benign/negative/no-finding), never as a completeness/CLEAN guarantee (D13).
+_BENIGN_RESULTS = frozenset({"benign", "negative", "no_finding", "not_vulnerable"})
+
+
+def _is_benign_record(result: Any, response_ref: Any) -> bool:
+    """A RETAINED benign/negative response record — the ONLY thing that lifts an asset from ``not_tested`` to
+    ``tested_no_finding``. REQUIRES both a negative RESULT token AND a non-empty retained ``response_ref``
+    (bytes that were kept). Mere absence of a finding, or a ``tested`` edge with no retained response, is NOT a
+    benign record — silence is never "nothing found"."""
+    tok = str(result or "").strip().lower()
+    ref = str(response_ref or "").strip()
+    return bool(ref) and tok in _BENIGN_RESULTS
+
+
+def _project_tested(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate]) -> None:
+    """S5 — project ``ChainStep -[TESTED]-> asset`` from the executor's PINNED, gate-authorized target(s). Each
+    target is a recon bridge asset (host/endpoint/port/cve/tech); a host-bearing asset must clear the SAME
+    ``_host_in_scope`` gate the finding bridges use (what the gate authorized — an out-of-scope host enters
+    under no label). The asset NODE is a plain recon node (LEAD); the TESTED EDGE is ALWAYS LEAD/inert (a
+    coverage link, never a proof — a ``tested`` record that CLAIMS fact still projects a lead edge, so a test
+    can never launder itself into a confirmed relationship). The edge is keyed to the asset by the EntityRef
+    node id (``kind:key`` — the SAME id a finding AFFECTS / a path REACHES), and carries ``benign_record`` ONLY
+    when a retained benign/negative response accompanied the test (never on mere absence)."""
+    sid = (rec.step_id or rec.parent_step_id or "").strip()
+    if not sid:
+        return                                   # a test with no ChainStep carries no coverage edge
+    step_node_id = f"step:{sid}"
+    rec_result = rec.props.get("result")
+    rec_response = rec.props.get("response_ref")
+    for t in rec.targets:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type", "")).lower()
+        value = str(t.get("value", "")).strip()
+        label = _BRIDGE_LABELS.get(ttype)
+        if not label or not value:
+            continue
+        if not _host_in_scope(ttype, value, scope_gate):
+            continue
+        tid = f"{label.value.lower()}:{value}"
+        view.upsert_node(GraphNode(id=tid, label=label, props={"value": value},
+                                   provenance=_provenance(rec, False), valid_from=rec.seq))
+        # per-target result/response override the record-level default; either may carry the retained response.
+        result = t.get("result", rec_result)
+        response_ref = t.get("response_ref", rec_response)
+        entity_ref = str(t.get("entity_ref") or "").strip() or tid   # explicit EntityRef id, else the node id
+        view.add_edge(GraphEdge(
+            src=step_node_id, dst=tid, type=EdgeType.TESTED,
+            props={"entity_ref": entity_ref, "benign_record": _is_benign_record(result, response_ref)},
+            provenance=_provenance(rec, False), valid_from=rec.seq))   # ALWAYS LEAD / inert
 
 
 @dataclass(frozen=True)
@@ -448,7 +512,8 @@ def _evidence_join_confirms(rec: SpineRecord, *, group_id: str, evidence_root: A
 
 
 def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate], *,
-                    objectives: bool = False, lifecycle: Optional["LifecycleVerifier"] = None,
+                    objectives: bool = False, coverage: bool = False,
+                    lifecycle: Optional["LifecycleVerifier"] = None,
                     group_id: str = "", evidence_root: Any = None,
                     contexts: Optional[dict] = None, trust_root_fingerprint: Optional[str] = None) -> None:
     kind = (rec.kind or "").lower()
@@ -572,6 +637,12 @@ def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[Scop
         # id ⇒ nothing projected (never fabricate linkage).
         if rec.objective_id:
             _project_reach(view, rec, f"objective:{rec.objective_id}", scope_gate)
+        return
+
+    # S5 — coverage ``tested`` edge, gated DEFAULT-OFF. With the flag off this kind is NOT recognised and
+    # falls through to the unknown-kind fail-closed-ignore below, byte-identical to the pre-S5 read-model.
+    if coverage and kind == _TESTED_KIND:
+        _project_tested(view, rec, scope_gate)
         return
     # unknown kind → silently ignored (fail-closed: an unrecognized record projects nothing)
 
@@ -796,6 +867,7 @@ def spine_record_from_finding(finding: Any, *, seq: int, hash: str, signature_re
 
 def project(records: list[SpineRecord], *, group_id: str = "",
             scope_gate: Optional[ScopeGate] = None, objectives: Optional[bool] = None,
+            coverage: Optional[bool] = None,
             evidence_root: Any = None, contexts: Optional[dict] = None,
             trust_root_fingerprint: Optional[str] = None,
             lifecycle: Optional["LifecycleVerifier"] = None) -> GraphView:
@@ -827,8 +899,15 @@ def project(records: list[SpineRecord], *, group_id: str = "",
 
     ``lifecycle`` (F4 slice S4) is the INJECTED re-verification seam for the flag-gated ``remediation`` /
     ``retest`` record kinds. With ``VIGIL_GRAPH_LIFECYCLE`` OFF (the default), or with ``lifecycle`` None,
-    those kinds project NOTHING and this function is byte-identical to the pre-slice projector."""
+    those kinds project NOTHING and this function is byte-identical to the pre-slice projector.
+
+    ``coverage`` (F4 slice S5) gates the ``tested`` record kind and the ``ChainStep -[TESTED]-> asset``
+    coverage edge. ``None`` (the default) reads the DEFAULT-OFF ``VIGIL_COVERAGE_VIEW`` env flag; an explicit
+    ``True`` / ``False`` pins it for deterministic offline tests. With it OFF, ``tested`` is an unknown kind
+    (projects nothing) and the view is byte-identical to the pre-S5 read-model. The TESTED edge is INERT/LEAD
+    (a coverage link, never a proof) and authorises nothing."""
     objectives_on = objectives_enabled() if objectives is None else bool(objectives)
+    coverage_on = coverage_view_enabled() if coverage is None else bool(coverage)
     view = GraphView(group_id=group_id)
     clean = [r for r in (records or []) if isinstance(r, SpineRecord)]   # pre-filter → total on garbage
     # total order: (seq, hash, canonical body) so two records sharing (seq, hash) still sort
@@ -843,9 +922,9 @@ def project(records: list[SpineRecord], *, group_id: str = "",
 
     for rec in sorted(clean, key=_sort_key):
         try:
-            _project_record(view, rec, scope_gate, objectives=objectives_on, lifecycle=lifecycle,
-                            group_id=group_id, evidence_root=evidence_root, contexts=contexts,
-                            trust_root_fingerprint=trust_root_fingerprint)
+            _project_record(view, rec, scope_gate, objectives=objectives_on, coverage=coverage_on,
+                            lifecycle=lifecycle, group_id=group_id, evidence_root=evidence_root,
+                            contexts=contexts, trust_root_fingerprint=trust_root_fingerprint)
         except Exception:   # noqa: BLE001 — a malformed record must not abort the whole projection
             continue
     return view

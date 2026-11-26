@@ -83,6 +83,12 @@ class EdgeType(str, Enum):
     # PURSUES: an Action/ChainStep to the Goal its declared objective id names (no objective id ⇒ no edge).
     REACHES = "REACHES"             # Asset -> Goal
     PURSUES = "PURSUES"             # Action/ChainStep -> Goal
+    # S5 — coverage: a ChainStep TESTED an asset. Written from the executor's PINNED, gate-authorized target
+    # (keyed by the EntityRef node id ``kind:key`` — the SAME form every recon/bridge asset is keyed on, so a
+    # TESTED asset is the SAME node a finding AFFECTS or a path REACHES). INERT/LEAD provenance: a TESTED edge
+    # is a coverage link, NEVER a proof — the asset's coverage STATE is independent of any finding verdict, and
+    # an edge's mere presence is never "nothing found" (that needs a RETAINED benign/negative response record).
+    TESTED = "TESTED"               # ChainStep -> Asset (coverage; default-OFF behind VIGIL_COVERAGE_VIEW)
     # --- F4 slice S4: remediation/retest lifecycle. The one traversal finding->remediation->retest. ---
     REMEDIATED_BY = "REMEDIATED_BY"   # Finding -> Remediation (only when the referenced finding cert re-verifies)
     RETESTED_BY = "RETESTED_BY"       # Remediation -> Retest
