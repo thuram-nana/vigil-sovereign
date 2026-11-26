@@ -28,6 +28,7 @@ import pytest
 from sigil.ui import cloudflare_fetch as cf
 from sigil.ui.cloudflare_fetch import CloudflareTokenConnectFetcher
 from sigil.ui.cloud_fetch import CloudFetchError
+from sigil.reuse import sha256_hex
 
 ACCT = "a1b2c3d4e5f6071829304a5b6c7d8e9f"           # 32 lowercase hex (a Cloudflare account id)
 OTHER_ACCT = "ffeeddccbbaa00998877665544332211"
@@ -103,9 +104,19 @@ def test_a_good_read_only_single_account_token_is_observed_in_two_calls():
     api = FakeCloudflare()
     obs = _assume(_fetcher(api))
     assert obs == {"token_id": TOKEN_ID, "account": ACCT, "name_matched": True, "external_id": EXT,
-                   "read_only": True, "single_account": True}
+                   "read_only": True, "single_account": True,
+                   "token_sha256": sha256_hex(TOKEN.encode("utf-8"))}
     assert [c[0] for c in api.calls] == ["user/tokens/verify", f"user/tokens/{TOKEN_ID}"]
     assert all(c[1] == TOKEN for c in api.calls)        # both reads carried the customer's bearer token
+
+
+def test_the_recorded_token_sha256_is_of_the_stripped_token_not_the_raw_field():
+    # red-pen wyi72aiax (LOW): the fetcher strips the pasted token (e.g. a trailing newline from copy-paste) BEFORE it
+    # verifies it, so the sha256 it records — the hash the grant recognises a re-presented token by — must be of the
+    # STRIPPED bytes, never the raw field. A pasted token with surrounding whitespace yields the canonical hash.
+    clean = _assume(_fetcher(FakeCloudflare()))["token_sha256"]
+    padded = _assume(_fetcher(FakeCloudflare()), token=f"  {TOKEN}\n")["token_sha256"]
+    assert clean == padded == sha256_hex(TOKEN.encode("utf-8"))
 
 
 def test_a_token_named_for_a_different_challenge_reports_name_not_matched():

@@ -4633,11 +4633,12 @@ class Provisioner:
         from ..governor.cloud_connect import PROVIDER_CLOUDFLARE, CloudConnectRegistry
         # For Cloudflare the grant records the token's PUBLIC id (from the trusted observation) and a sha256 of the
         # token — NEVER the token. ``role_ref`` here is the token id (public); ``token_sha256`` ties the grant to the
-        # token that was verified without storing it. For AWS the grant records the role ARN and no token sha256.
+        # token that was verified without storing it. The hash comes from the FETCHER, which hashes the exact (stripped)
+        # bytes it verified — so a re-presented token in canonical form is recognised (provision never re-hashes the raw
+        # field, which could carry copy-paste whitespace). For AWS the grant records the role ARN and no token sha256.
         if ch.provider == PROVIDER_CLOUDFLARE:
-            from ..reuse import sha256_hex
             grant_role_ref = str(observed.get("token_id") or "")
-            grant_token_sha256 = sha256_hex(str(role_ref or "").encode("utf-8"))
+            grant_token_sha256 = str(observed.get("token_sha256") or "")
         else:
             grant_role_ref = role_ref
             grant_token_sha256 = ""

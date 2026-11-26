@@ -150,6 +150,30 @@ _CHALLENGE_CORE = ("signal", "org_id", "provider", "account_id", "external_id", 
 # every time; the fold, the overview projection and the prune tripwire all carry it transparently.
 _GRANT_CORE = ("signal", "org_id", "provider", "account_id", "role_ref", "external_id", "token_sha256",
                "verified_at", "expires_at", "state", "issued_at")
+# ``token_sha256`` JOINED the grant core after grants were already persisted under the narrower core, so a grant
+# written before it carries NO ``token_sha256`` key. ``verify_signed`` rebuilds the core with ``payload.get(k)``, so
+# such a grant re-canonicalises to ``{...,"token_sha256":null,...}`` — bytes the owner never signed — and would be
+# dropped as forged: a genesis re-verify would silently disconnect every pre-existing AWS account, and the prune
+# high-water (which re-verifies the same core on ANY hard prune, cloud-connect flag or not) would not see it, so its
+# only durable copy could be pruned away. A legacy grant is recognised by the ABSENCE of the key and verified under
+# the core it was ACTUALLY signed with. The owner Ed25519 signature still binds every other field, so this neither
+# accepts a forgery nor permits a downgrade: adding ``token_sha256`` to a legacy payload, or stripping it from a
+# current one, fails verification under BOTH cores.
+_GRANT_CORE_LEGACY = tuple(f for f in _GRANT_CORE if f != "token_sha256")
+
+
+def _verify_cloud_active(payload: dict, core_fields, pubkey) -> bool:
+    """Verify the owner signature of an ACTIVE cloud record, tolerating a pre-``token_sha256`` grant. Shared by the
+    registry fold (``_apply_cloud_record``) and the spine prune tripwire (``spine.prune``) so the two can never
+    disagree on which grants are authentic. The challenge core carries no ``token_sha256`` → the single check."""
+    if verify_signed(payload, core_fields, pubkey):
+        return True
+    if "token_sha256" in core_fields and "token_sha256" not in payload:
+        legacy = _GRANT_CORE_LEGACY if core_fields is _GRANT_CORE else tuple(
+            f for f in core_fields if f != "token_sha256")
+        return verify_signed(payload, legacy, pubkey)
+    return False
+
 
 _SKIP = object()          # the shared fold step: the record touched no (org_id, provider, account_id)
 _LOAD_FROM_VAULT = object()
@@ -447,7 +471,7 @@ def _apply_cloud_record(r, resolver, signal: str, core_fields, row_of, state: di
         state[key] = "revoked"                     # honor ANY revoke (even unsigned) — safe direction
         return key
     if rec_state == "active":
-        if not verify_signed(p, core_fields, resolver.at(r.seq)):
+        if not _verify_cloud_active(p, core_fields, resolver.at(r.seq)):
             return _SKIP                           # fail-closed: unsigned/forged/wrong-epoch-key grant
         at = as_issued_at(p.get("issued_at"))
         if at <= issued.get(key, NO_HIGHWATER):

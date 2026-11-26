@@ -62,7 +62,7 @@ import urllib.request
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlsplit
 
-from ..reuse import assert_no_offense
+from ..reuse import assert_no_offense, sha256_hex
 
 assert_no_offense()
 
@@ -330,6 +330,7 @@ class CloudflareTokenConnectFetcher:
                 raise CloudFetchError("the Cloudflare API token is not active — create a fresh read-only token and "
                                       "try again", detail=f"token status {status!r}")
             name, read_only, single_account, scoped_account = self._token_scope(token, token_id)
+            tok_sha = sha256_hex(token.encode("utf-8"))   # hash the EXACT bytes verified above (log-safe; never stored)
         finally:
             # Drop the token reference as early as possible. NOTE: a Python ``str`` is immutable, so this cannot
             # truly zero the bytes in memory — the caller likewise never stores it, and it is dropped here so it is
@@ -338,4 +339,5 @@ class CloudflareTokenConnectFetcher:
             del token
         name_matched = _ct_eq(name, f"{_CF_TOKEN_NAME_PREFIX}{ext}")
         return {"token_id": token_id, "account": scoped_account, "name_matched": name_matched,
-                "external_id": ext, "read_only": bool(read_only), "single_account": bool(single_account)}
+                "external_id": ext, "read_only": bool(read_only), "single_account": bool(single_account),
+                "token_sha256": tok_sha}
