@@ -381,6 +381,41 @@ def test_in_domain_foreign_sweep_is_bounded():
     assert quarantined_count(w.rejected) == 4
 
 
+def test_in_domain_foreign_dir_sweep_is_aggregate_bounded(monkeypatch):
+    # RESIDUAL #1 (re-review): the in-domain-foreign loop must thread a DECREMENTING AGGREGATE budget, exactly
+    # like _sweep_off_domain — NOT pass the full off_domain_limit per entry. `foreign` can hold up to
+    # off_domain_limit DIRECTORY entries, and _sweep_entry on a directory scandir-sweeps up to its budget of
+    # children; the full limit per entry therefore did up to off_domain_limit x off_domain_limit os.replace +
+    # sidecar writes in ONE pass. A subtree with off_domain_limit nested dirs, each holding off_domain_limit
+    # files, is the witness: the TOTAL sweep work must be <= off_domain_limit (== lim here), never lim*lim.
+    lim = 4
+    s, _, w = _strict_rig(domains=(A,), off_domain_limit=lim)
+    ddir = _domain_dir(w, *A)
+    for d in range(lim):                                       # off_domain_limit NESTED DIRS ...
+        nest = ddir / f"nest{d}"
+        nest.mkdir()
+        for f in range(lim):                                  # ... each holding off_domain_limit files
+            (nest / f"j{f}.json").write_text("x")             # lim*lim == 16 files total would be the blow-up
+    moves = {"n": 0}
+    real_replace = os.replace
+
+    def _counting_replace(src, dst):
+        moves["n"] += 1
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ms.os, "replace", _counting_replace)
+    pulled = _scandir_counter(monkeypatch)
+    r = w.drain()
+    # TOTAL sweep/os.replace work in the pass is the AGGREGATE bound off_domain_limit, NOT off_domain_limit**2.
+    assert r["in_domain_foreign"] == lim                      # aggregate, not lim*lim (== 16)
+    assert quarantined_count(w.rejected) == lim
+    assert moves["n"] <= lim                                   # the os.replace moves themselves are bounded
+    # and the enumeration is bounded too: only the first nested dir is ever opened (budget exhausts there),
+    # the rest are never scandir'd in this pass (no lim x lim read either).
+    nested_pulled = sum(v for k, v in pulled.items() if os.fspath(ddir) in k and k != os.fspath(ddir))
+    assert nested_pulled <= lim
+
+
 # --- MEDIUM #3: per-domain flood must not starve another declared tenant in one pass ------------------------
 def test_per_domain_limit_has_a_bounded_safe_default():
     # Before: per_domain_limit=None meant UNBOUNDED, so a flooded tenant whose slug sorts first ate the whole

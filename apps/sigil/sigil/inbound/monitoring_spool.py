@@ -285,10 +285,15 @@ class MonitoringSpoolWatcher:
                     deduped += 1
                 elif status == "rejected":
                     rejected += 1
-            for entry in foreign:                      # quarantine by LOCATION — never opened, never retained
-                in_domain_foreign += self._sweep_entry(
+            swept_foreign = 0                          # per-subtree AGGREGATE: bound the TOTAL in-domain-foreign
+            for entry in foreign:                      # sweep by off_domain_limit (not off_domain_limit PER entry).
+                if swept_foreign >= self.off_domain_limit:  # `foreign` can hold up to off_domain_limit DIRECTORY
+                    break                              # entries, each of which _sweep_entry drains up to its budget
+                got = self._sweep_entry(               # of children — so a full off_domain_limit per entry would do
                     entry, f"in-domain foreign: not a flat *.json report under declared domain '{slug}'",
-                    self.off_domain_limit)
+                    self.off_domain_limit - swept_foreign)  # off_domain_limit**2 moves. A DECREMENTING budget, exactly
+                swept_foreign += got                   # like _sweep_off_domain, caps the whole subtree's foreign
+                in_domain_foreign += got               # work at off_domain_limit and keeps the reported count honest.
         # 2) BOUNDED off-domain sweep — quarantine by location, never scanning content.
         off_domain = self._sweep_off_domain(set(declared))
         # 3) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
