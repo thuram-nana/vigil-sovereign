@@ -1,0 +1,967 @@
+{
+  "program": "AEGIS",
+  "source": "plan \u00a79.3/\u00a79.4 (parsed-popping-lemur.md) \u2014 72 reviewable slices in 24 dependency waves",
+  "hot_sets": {
+    "GW": [
+      "gateway",
+      "cli",
+      "monitoring_authority_check",
+      "monitoring_report",
+      "boundary"
+    ],
+    "UI": [
+      "provision",
+      "custui",
+      "app.js",
+      "guide.js"
+    ],
+    "SPOOL": [
+      "monitoring_spool"
+    ],
+    "FLEET": [
+      "aegis_fleet"
+    ],
+    "MA": [
+      "monitoring_authority"
+    ],
+    "SC": [
+      "supply-chain"
+    ],
+    "INFRA": [
+      "infra/aws/platform"
+    ],
+    "CON": [
+      "contract-evaluator"
+    ],
+    "RBAC": [
+      "rbac"
+    ]
+  },
+  "tokens": [
+    "VERIFY",
+    "GP"
+  ],
+  "slices": {
+    "AS-0": {
+      "wave": 0,
+      "deps": [],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-25": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-1a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-7a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [
+        "SC"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-27a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-3a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [
+        "SPOOL"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-4a": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [
+        "UI"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-2l": {
+      "wave": 1,
+      "deps": [
+        "AS-0"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-2b": {
+      "wave": 2,
+      "deps": [
+        "AS-2a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2i": {
+      "wave": 2,
+      "deps": [
+        "AS-2a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2h": {
+      "wave": 2,
+      "deps": [
+        "AS-2a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-28": {
+      "wave": 2,
+      "deps": [
+        "AS-7a"
+      ],
+      "hot": [
+        "SC"
+      ],
+      "tokens": [
+        "VERIFY",
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-2j": {
+      "wave": 2,
+      "deps": [
+        "AS-1a",
+        "AS-2a",
+        "AS-27a"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2f": {
+      "wave": 2,
+      "deps": [
+        "AS-2a",
+        "AS-4a"
+      ],
+      "hot": [
+        "UI",
+        "MA"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-2c": {
+      "wave": 3,
+      "deps": [
+        "AS-2a",
+        "AS-2j"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-6a": {
+      "wave": 3,
+      "deps": [
+        "AS-2a",
+        "AS-2j",
+        "AS-28"
+      ],
+      "hot": [
+        "FLEET"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-26": {
+      "wave": 4,
+      "deps": [
+        "AS-7a",
+        "AS-28",
+        "AS-6a"
+      ],
+      "hot": [
+        "INFRA"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2d": {
+      "wave": 4,
+      "deps": [
+        "AS-2c",
+        "AS-2j"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-30": {
+      "wave": 4,
+      "deps": [
+        "AS-6a",
+        "AS-28"
+      ],
+      "hot": [],
+      "tokens": [
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-1b": {
+      "wave": 5,
+      "deps": [
+        "AS-1a",
+        "AS-25",
+        "AS-26"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2g": {
+      "wave": 5,
+      "deps": [
+        "AS-2f",
+        "AS-2d"
+      ],
+      "hot": [
+        "UI",
+        "MA"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-2e": {
+      "wave": 5,
+      "deps": [
+        "AS-2d"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-3c": {
+      "wave": 5,
+      "deps": [
+        "AS-3a",
+        "AS-2b",
+        "AS-26"
+      ],
+      "hot": [
+        "SPOOL"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-17a": {
+      "wave": 5,
+      "deps": [
+        "AS-30"
+      ],
+      "hot": [],
+      "tokens": [
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-9a": {
+      "wave": 5,
+      "deps": [
+        "AS-30",
+        "AS-2a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-6c": {
+      "wave": 5,
+      "deps": [
+        "AS-6a",
+        "AS-26"
+      ],
+      "hot": [
+        "INFRA"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-2k": {
+      "wave": 6,
+      "deps": [
+        "AS-2g"
+      ],
+      "hot": [
+        "UI"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-3b": {
+      "wave": 6,
+      "deps": [
+        "AS-2e",
+        "AS-3c"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-9c": {
+      "wave": 6,
+      "deps": [
+        "AS-9a",
+        "AS-2b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-9b": {
+      "wave": 6,
+      "deps": [
+        "AS-9a",
+        "AS-3c"
+      ],
+      "hot": [
+        "SPOOL"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-21a": {
+      "wave": 7,
+      "deps": [
+        "AS-2k"
+      ],
+      "hot": [
+        "UI"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-5a": {
+      "wave": 7,
+      "deps": [
+        "AS-3b"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-17b": {
+      "wave": 7,
+      "deps": [
+        "AS-17a",
+        "AS-9c",
+        "AS-9b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-10b": {
+      "wave": 7,
+      "deps": [
+        "AS-9b",
+        "AS-30"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-20": {
+      "wave": 7,
+      "deps": [
+        "AS-9b",
+        "AS-30",
+        "AS-7a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-29": {
+      "wave": 8,
+      "deps": [
+        "AS-2c",
+        "AS-2f",
+        "AS-6a",
+        "AS-21a",
+        "AS-27a"
+      ],
+      "hot": [
+        "UI",
+        "FLEET"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-5c": {
+      "wave": 8,
+      "deps": [
+        "AS-5a"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-10a": {
+      "wave": 8,
+      "deps": [
+        "AS-17b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-17c": {
+      "wave": 8,
+      "deps": [
+        "AS-17b",
+        "AS-9c"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-3d": {
+      "wave": 9,
+      "deps": [
+        "AS-3b",
+        "AS-2c",
+        "AS-29"
+      ],
+      "hot": [
+        "UI"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-5d": {
+      "wave": 9,
+      "deps": [
+        "AS-5c",
+        "AS-29"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-6e": {
+      "wave": 9,
+      "deps": [
+        "AS-6c",
+        "AS-2c",
+        "AS-29"
+      ],
+      "hot": [
+        "FLEET"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-4b": {
+      "wave": 10,
+      "deps": [
+        "AS-3d",
+        "AS-4a",
+        "AS-29"
+      ],
+      "hot": [
+        "UI",
+        "CON"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-5e": {
+      "wave": 10,
+      "deps": [
+        "AS-5d"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-27b": {
+      "wave": 11,
+      "deps": [
+        "AS-2a",
+        "AS-27a",
+        "AS-4b",
+        "AS-6e"
+      ],
+      "hot": [
+        "UI",
+        "FLEET",
+        "RBAC"
+      ],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-5b": {
+      "wave": 11,
+      "deps": [
+        "AS-5e",
+        "AS-6c"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-6d": {
+      "wave": 12,
+      "deps": [
+        "AS-6c",
+        "AS-4b",
+        "AS-2g",
+        "AS-27b",
+        "AS-17a"
+      ],
+      "hot": [
+        "UI"
+      ],
+      "tokens": [
+        "GP"
+      ],
+      "x_ct": true
+    },
+    "AS-7b": {
+      "wave": 12,
+      "deps": [
+        "AS-5b",
+        "AS-7a",
+        "AS-6e",
+        "AS-28"
+      ],
+      "hot": [
+        "SC"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-8": {
+      "wave": 13,
+      "deps": [
+        "AS-7b",
+        "AS-4b",
+        "AS-6d"
+      ],
+      "hot": [],
+      "tokens": [
+        "VERIFY",
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-31": {
+      "wave": 13,
+      "deps": [
+        "AS-30",
+        "AS-3b",
+        "AS-7b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-10c": {
+      "wave": 13,
+      "deps": [
+        "AS-17a",
+        "AS-9b",
+        "AS-7b"
+      ],
+      "hot": [
+        "SC"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-34": {
+      "wave": 13,
+      "deps": [
+        "AS-6d",
+        "AS-6e",
+        "AS-3d",
+        "AS-4b",
+        "AS-6c"
+      ],
+      "hot": [
+        "INFRA"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-23a": {
+      "wave": 14,
+      "deps": [
+        "AS-7b",
+        "AS-31",
+        "AS-8"
+      ],
+      "hot": [],
+      "tokens": [
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-18a": {
+      "wave": 14,
+      "deps": [
+        "AS-9b",
+        "AS-31",
+        "AS-4b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-11a": {
+      "wave": 14,
+      "deps": [
+        "AS-5b",
+        "AS-8",
+        "AS-31"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-11b": {
+      "wave": 15,
+      "deps": [
+        "AS-11a",
+        "AS-23a"
+      ],
+      "hot": [],
+      "tokens": [
+        "GP"
+      ],
+      "x_ct": false
+    },
+    "AS-12": {
+      "wave": 15,
+      "deps": [
+        "AS-11a",
+        "AS-29"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-33": {
+      "wave": 15,
+      "deps": [
+        "AS-11a",
+        "AS-3d"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-22": {
+      "wave": 15,
+      "deps": [
+        "AS-11a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": true
+    },
+    "AS-13a": {
+      "wave": 16,
+      "deps": [
+        "AS-12",
+        "AS-30",
+        "AS-27b"
+      ],
+      "hot": [
+        "RBAC"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-13b": {
+      "wave": 17,
+      "deps": [
+        "AS-13a",
+        "AS-7b",
+        "AS-5b"
+      ],
+      "hot": [
+        "GW"
+      ],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-13c": {
+      "wave": 18,
+      "deps": [
+        "AS-13b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-14": {
+      "wave": 19,
+      "deps": [
+        "AS-13c"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-21": {
+      "wave": 20,
+      "deps": [
+        "AS-14",
+        "AS-11b",
+        "AS-21a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-32": {
+      "wave": 20,
+      "deps": [
+        "AS-14",
+        "AS-9b"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-19": {
+      "wave": 20,
+      "deps": [
+        "AS-17c",
+        "AS-13a",
+        "AS-14"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-18b": {
+      "wave": 21,
+      "deps": [
+        "AS-21",
+        "AS-18a",
+        "AS-13a",
+        "AS-14"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-15": {
+      "wave": 21,
+      "deps": [
+        "AS-14",
+        "AS-21"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-16": {
+      "wave": 22,
+      "deps": [
+        "AS-15",
+        "AS-11b",
+        "AS-6e",
+        "AS-9c",
+        "AS-2l"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-23b": {
+      "wave": 22,
+      "deps": [
+        "AS-15",
+        "AS-21",
+        "AS-18b",
+        "AS-23a"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    },
+    "AS-24": {
+      "wave": 23,
+      "deps": [
+        "__ALL__"
+      ],
+      "hot": [],
+      "tokens": [],
+      "x_ct": false
+    }
+  },
+  "chains": {
+    "GW": [
+      "AS-27a",
+      "AS-2j",
+      "AS-2c",
+      "AS-2d",
+      "AS-2e",
+      "AS-3b",
+      "AS-5a",
+      "AS-5c",
+      "AS-5d",
+      "AS-5e",
+      "AS-5b",
+      "AS-13b"
+    ],
+    "UI": [
+      "AS-4a",
+      "AS-2f",
+      "AS-2g",
+      "AS-2k",
+      "AS-21a",
+      "AS-29",
+      "AS-3d",
+      "AS-4b",
+      "AS-27b",
+      "AS-6d"
+    ],
+    "SPOOL": [
+      "AS-3a",
+      "AS-3c",
+      "AS-9b"
+    ],
+    "FLEET": [
+      "AS-6a",
+      "AS-29",
+      "AS-6e",
+      "AS-27b"
+    ],
+    "SC": [
+      "AS-7a",
+      "AS-28",
+      "AS-7b",
+      "AS-10c"
+    ],
+    "INFRA": [
+      "AS-26",
+      "AS-6c",
+      "AS-34"
+    ],
+    "GP": [
+      "AS-28",
+      "AS-30",
+      "AS-17a",
+      "AS-6d",
+      "AS-8",
+      "AS-23a",
+      "AS-11b"
+    ],
+    "VERIFY": [
+      "AS-28",
+      "AS-8"
+    ],
+    "RBAC": [
+      "AS-27b",
+      "AS-13a"
+    ]
+  },
+  "critical_path": [
+    "AS-0",
+    "AS-27a",
+    "AS-2j",
+    "AS-2c",
+    "AS-2d",
+    "AS-2e",
+    "AS-3b",
+    "AS-5a",
+    "AS-5c",
+    "AS-5d",
+    "AS-5e",
+    "AS-5b",
+    "AS-7b",
+    "AS-8",
+    "AS-31",
+    "AS-11a",
+    "AS-12",
+    "AS-13a",
+    "AS-13b",
+    "AS-13c",
+    "AS-14",
+    "AS-21",
+    "AS-18b",
+    "AS-15",
+    "AS-16",
+    "AS-23b",
+    "AS-24"
+  ]
+}

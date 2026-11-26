@@ -26,6 +26,10 @@
 # required guard red. Keep this list and _CRITICAL_PREFIXES in that test in agreement.
 /engine/crucible/framework/v2/verify/      @thuram-nana
 /engine/crucible/framework/v2/veracity/    @thuram-nana
+# The AEGIS defensive gateway and its slice-graph governance — the availability-first enforce gate, the
+# kill-switch / authority integration and the program's dependency contract (slice_graph.json). An
+# unreviewed edit here changes what customer traffic is blocked or let through, so it carries its own rule.
+/engine/crucible/framework/v2/aegis/       @thuram-nana
 /integration/vigil_integration/live/       @thuram-nana
 /gateway/                                  @thuram-nana
 /tools/egress-guard/                       @thuram-nana

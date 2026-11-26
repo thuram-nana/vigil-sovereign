@@ -218,8 +218,39 @@ def test_a_second_plan_is_refused_while_one_is_active(monkeypatch):
         p.billing_checkout(admin, org, _PLAN, now=5000.0)
     assert posted == []
     p.billing_checkout(admin, org, "vigil_topup_1k", now=5000.0)          # top-ups stay available
-    p.billing_checkout(admin, org, _PLAN, now=10_001.0)                  # once the plan has lapsed, allowed
+    # PL01 CHK-1b: a just-lapsed plan stays "live" through a 72h renewal/retry grace, so a SECOND plan is STILL
+    # refused immediately past period_end — the window the processor can still renew or retry the old
+    # subscription in, where selling a second one would double-bill (monthly) for one allotment.
+    with pytest.raises(ProvisionDenied, match="already has a plan"):
+        p.billing_checkout(admin, org, _PLAN, now=10_001.0)
+    # Only once the grace has fully elapsed (72h past period_end) is a fresh plan allowed.
+    p.billing_checkout(admin, org, _PLAN, now=10_000.0 + 72 * 3600 + 1.0)
     assert [x.get("payment_plan") for x in posted] == [None, _PLAN]
+
+
+def test_a_second_plan_is_refused_through_the_whole_past_due_dunning_window(monkeypatch):
+    """HIGH (red-pen): a PAST_DUE subscription can RECOVER on a late processor retry — re-activating with a
+    pushed-forward period_end — so a second plan sold anywhere in the multi-week dunning window double-bills. The
+    guard must stay on for the full past_due grace (~30d), NOT the short active renewal grace (~72h)."""
+    from sigil.ui.provision import ProvisionDenied
+    _plans_on(monkeypatch)
+    from sigil.governor.identity import ensure_owner_keypair
+    ensure_owner_keypair()
+    p, admin, _t, org, _o, _w = _provisioner()
+    subs = SubscriptionRegistry(p.store)
+    subs.subscribe(org, "research", 2000, period_start=100.0, period_end=10_000.0, issued_at=100.0)
+    subs.mark_past_due(org, issued_at=10_000.0)              # the renewal invoice failed; dunning begins (period_end stays stale at T)
+    posted: list = []
+    p._checkout_provider = lambda: _real_provider(posted)
+    # 10 days past period_end: WELL beyond the 72h active grace, but inside the ~30d past_due dunning window — the
+    # original can still be recovered by a late retry, so a second plan is still refused (would double-bill).
+    with pytest.raises(ProvisionDenied, match="already has a plan"):
+        p.billing_checkout(admin, org, _PLAN, now=10_000.0 + 10 * 24 * 3600)
+    assert posted == []
+    # Only once the dunning window has fully elapsed (the plan is presumed dead; no terminal-cancel webhook is
+    # wired) is a fresh plan allowed.
+    p.billing_checkout(admin, org, _PLAN, now=10_000.0 + 30 * 24 * 3600 + 1.0)
+    assert [x.get("payment_plan") for x in posted] == [_PLAN]
 
 
 def test_a_plan_price_charge_without_payment_plan_alarms():

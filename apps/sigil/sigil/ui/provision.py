@@ -431,6 +431,25 @@ def _member_target(username) -> str:
 #: How long a member verb waits for the membership critical section before it gives up (nothing written).
 _MEMBERS_LOCK_WAIT_S = 10.0
 
+def _subscription_is_live(cur, t: float) -> bool:
+    """PL01 CHK-1b — does a (credit or monitoring) subscription still block a SECOND plan of its kind at time t?
+    It blocks while the FIRST subscription can still produce a charge; selling a second one in that window would
+    double-bill. A canceled/expired subscription (status outside ACTIVE/PAST_DUE) never blocks. The grace past
+    period_end is SPLIT by status, because the two gaps differ by orders of magnitude:
+      * ACTIVE  — a successful auto-renewal webhook lands within minutes, so a SHORT grace
+        (config.PLAN_RENEWAL_GRACE_SECONDS, ~72h) covers the stale-period_end window before it lands.
+      * PAST_DUE — the processor keeps RETRYING for its full dunning window (weeks) and a late success
+        RE-ACTIVATES this subscription with a pushed-forward period_end, so the guard must stay on for the whole
+        dunning deadline (config.PLAN_PAST_DUE_GRACE_SECONDS, ~30d). After it the plan is presumed dead (no
+        terminal-cancel webhook is wired) and a fresh purchase is allowed."""
+    from .. import config
+    from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE
+    if cur is None or getattr(cur, "status", None) not in (STATUS_ACTIVE, STATUS_PAST_DUE):
+        return False
+    grace = (config.PLAN_PAST_DUE_GRACE_SECONDS if cur.status == STATUS_PAST_DUE
+             else config.PLAN_RENEWAL_GRACE_SECONDS)
+    return t < float(cur.period_end) + grace
+
 
 def _members_lock(store, *, wait_s: "Optional[float]" = None):
     """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
@@ -1023,10 +1042,12 @@ class Provisioner:
         paused = self._latch_refusal("customer_signup")    # the owner's latch: no NEW sign-up is started
         if paused is not None:
             raise ProvisionDenied(paused)
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP signup counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
-        self.rate_limiter.record_failure(f"signup:ip:{ip}", now=t)   # count every attempt (anti-flood)
+        ipk = f"signup:ip:{ip_rate_key(ip)}"
+        self._rate_guard(ipk, f"signup:email:{email_l}", now=t)
+        self.rate_limiter.record_failure(ipk, now=t)   # count every attempt (anti-flood)
         if self.signup_email_limiter is not None:
             from ..governor.trial_policy import canonical_email
             ekey = canonical_email(email_l)
@@ -1200,18 +1221,23 @@ class Provisioner:
         Returns {username, orgs:[...]} (the orgs the customer is an active member of — the edge binds ONE as
         the session's active org). Raises on lockout / bad credentials. Behaviour is identical to the pre-E3a
         inline path; the provider + finish_login seam is what Google-OIDC / passkey login reuse (E2/E3)."""
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP login counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"login:email:{email_l}", f"login:ip:{ip}", now=t)
+        ipk = f"login:ip:{ip_rate_key(ip)}"
+        self._rate_guard(f"login:email:{email_l}", ipk, now=t)
         try:
             identity = PasswordIdentityProvider(self.customers).verify(email=email_l, password=password)
         except IdentityRefused:
             self.rate_limiter.record_failure(f"login:email:{email_l}", now=t)
-            self.rate_limiter.record_failure(f"login:ip:{ip}", now=t)
+            self.rate_limiter.record_failure(ipk, now=t)
             self._audit("login", target=email_l, outcome="denied")
             raise ProvisionDenied("invalid email or password")
+        # PL01: a successful login clears only THIS EMAIL's failure counter (so a legitimate user is never locked
+        # out by their own earlier typos). The per-IP counter is deliberately NOT cleared on success: otherwise an
+        # attacker holding one valid account on the IP could reset it at will and brute-force OTHER accounts from
+        # the same address unthrottled.
         self.rate_limiter.record_success(f"login:email:{email_l}")
-        self.rate_limiter.record_success(f"login:ip:{ip}")
         result = self.finish_login(identity)
         self._audit("login", requester=result["username"], target=result["username"], outcome="ok")
         return result
@@ -1720,10 +1746,12 @@ class Provisioner:
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
         response (never reveals whether the email exists); only issues a token when the account exists."""
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP recover counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"recover:ip:{ip}", f"recover:email:{email_l}", now=t)
-        self.rate_limiter.record_failure(f"recover:ip:{ip}", now=t)
+        ipk = f"recover:ip:{ip_rate_key(ip)}"
+        self._rate_guard(ipk, f"recover:email:{email_l}", now=t)
+        self.rate_limiter.record_failure(ipk, now=t)
         out: "dict[str, object]" = {"status": "recovery_sent"}
         if self.email_codes is not None:
             out["code"] = True                         # the deployment sends codes (the same answer for every email)
@@ -2282,9 +2310,8 @@ class Provisioner:
         CHK-1b double-billing guard (checkout refuses a second credit plan; the offers read reports it so the UI
         does not offer one). Reads the credit-plan line (``governor.subscription``) ONLY: a live AEGIS monitoring
         plan is on a different line and never blocks a credit plan (one plan per KIND)."""
-        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
-        cur = SubscriptionRegistry(self.store).subscription(org_id)
-        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+        from ..governor.subscription import SubscriptionRegistry
+        return _subscription_is_live(SubscriptionRegistry(self.store).subscription(org_id), t)
 
     def _org_has_live_monitoring_plan(self, org_id: str, t: float) -> bool:
         """True iff the org already holds an AEGIS MONITORING plan that is active or past_due and not yet expired
@@ -2292,9 +2319,7 @@ class Provisioner:
         (``governor.monitoring_subscription``) ONLY, so a live AEGIS plan blocks a second AEGIS plan but NEVER a
         credit plan, and vice-versa. Keyless read (``owner_key=None``)."""
         from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
-        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE
-        cur = MonitoringSubscriptionRegistry(self.store, owner_key=None).subscription(org_id)
-        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+        return _subscription_is_live(MonitoringSubscriptionRegistry(self.store, owner_key=None).subscription(org_id), t)
 
     def _spine_plan_checkouts(self, org_id: str, t: float, *, monitoring: bool) -> "tuple[str, list[str]]":
         """Audit E1b backstop — the PLAN checkouts of ONE kind the spine audit shows CREATED for ``org_id`` (a

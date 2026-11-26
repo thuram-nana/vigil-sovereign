@@ -293,6 +293,19 @@ MONITORING_WINDOW_SECONDS = _int_env("VIGIL_MONITORING_WINDOW_SECONDS", 30 * 24 
 # (already inert, clamped-to-period_end) grants this long so a late renewal can re-mint them; then it retires.
 MONITORING_RENEWAL_GRACE_SECONDS = _int_env("VIGIL_MONITORING_RENEWAL_GRACE_SECONDS", 72 * 3600)
 
+# PL01 CHK-1b — how long PAST period_end the "org already holds a live plan" double-bill guard keeps refusing a
+# SECOND plan of that kind, so one is never sold in the window where the FIRST can still produce a charge (which
+# would double-bill). SPLIT by subscription status, because the two gaps differ by orders of magnitude:
+#   * ACTIVE: a successful auto-renewal webhook lands within minutes, so a SHORT grace covers the stale-period_end
+#     window between the paid month ending and the renewal landing.
+#   * PAST_DUE: Stripe keeps RETRYING (Smart Retries) for its whole dunning window (~2-3 weeks) and a late
+#     success RE-ACTIVATES the subscription with a pushed-forward period_end — so a second plan sold anywhere in
+#     that window double-bills. Keep the guard on for the full dunning deadline; after it the plan is presumed
+#     dead (no terminal-cancel webhook is wired yet) and a fresh purchase is allowed. Tune to the configured
+#     Stripe retry horizon if it differs.
+PLAN_RENEWAL_GRACE_SECONDS = _int_env("VIGIL_PLAN_RENEWAL_GRACE_SECONDS", 72 * 3600)           # active renewal gap
+PLAN_PAST_DUE_GRACE_SECONDS = _int_env("VIGIL_PLAN_PAST_DUE_GRACE_SECONDS", 30 * 24 * 3600)     # past_due dunning window
+
 
 def customer_monitoring_enabled() -> bool:
     """True iff the customer monitoring-authority routes are ON (`VIGIL_CUSTOMER_MONITORING_ENABLED`
