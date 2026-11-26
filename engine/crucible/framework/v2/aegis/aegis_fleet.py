@@ -645,12 +645,20 @@ class FleetReconciler:
                 continue
 
             rendered = self._render(w, now=now)
-            cred_status = self._deliver_credentials(w, actions, now)
             prior = new_workers.get(key)
-            if (prior is not None and prior.health in (WorkerHealth.HEALTHY, WorkerHealth.STARTING)
-                    and prior.epoch == w.epoch and prior.image_digest == w.image_digest
-                    and prior.mode == rendered.mode and prior.credential_status == cred_status):
-                continue  # already converged — NO action (idempotent, no operator step)
+            # Decide convergence BEFORE delivering credentials. Credential delivery is a real SSM write (a side
+            # effect) plus an audit action, so it must NOT run on an already-converged worker whose credentials
+            # have already reached a terminal, no-further-work state ("delivered", or the no-op "none"/"deferred").
+            # Otherwise a steady HEALTHY fleet would re-push its sealed secrets to SSM and emit a
+            # deliver_credentials action on EVERY reconcile tick — breaking the "converged => no action
+            # (idempotent, no operator step)" contract and determinism. A prior "refused" delivery is NOT terminal:
+            # it falls through below and is retried.
+            base_converged = (prior is not None and prior.health in (WorkerHealth.HEALTHY, WorkerHealth.STARTING)
+                              and prior.epoch == w.epoch and prior.image_digest == w.image_digest
+                              and prior.mode == rendered.mode)
+            if base_converged and prior is not None and prior.credential_status in ("delivered", "none", "deferred"):
+                continue  # already converged incl. credentials — NO action (idempotent, no operator step)
+            cred_status = self._deliver_credentials(w, actions, now)
 
             verb = "route"
             if prior is not None and prior.health != WorkerHealth.RETIRED and (

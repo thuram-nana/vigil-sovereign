@@ -415,3 +415,42 @@ def test_desired_worker_validates_inputs():
         base.update(kwargs)
         with pytest.raises(F.FleetError):
             F.DesiredWorker(**base)
+
+
+# ==================================================================================================
+# Regression (red-pen): a CONVERGED credentialed worker must be a true no-op — no SSM re-push, no
+# deliver_credentials action — on later reconcile passes (idempotency incl. the credential path).
+# ==================================================================================================
+def test_reconcile_with_credentials_is_idempotent_no_ssm_resend(fleet_on):
+    class _CountingChannel(MemSsmChannel):
+        def __init__(self):
+            super().__init__()
+            self.puts = 0
+
+        def put_parameter(self, name, sealed_blob):
+            self.puts += 1
+            return super().put_parameter(name, sealed_blob)
+
+    channel = _CountingChannel()
+    r = _reconciler(channel=channel)
+    w = _observe_worker(bundles=(_bundle(),))
+    first = r.reconcile([w], F.FleetState(), now=NOW)
+    assert first.state.get(w.key).credential_status == "delivered"
+    assert any(a.verb == "deliver_credentials" for a in first.actions)
+    puts_after_first = channel.puts
+    assert puts_after_first >= 1
+    # second pass on the already-converged state: NO action and NO new SSM write
+    second = r.reconcile([w], first.state, now=NOW + 10)
+    assert second.actions == ()                               # converged incl. credentials => no-op
+    assert channel.puts == puts_after_first                   # sealed secret NOT re-pushed to SSM
+    assert second.state.get(w.key).credential_status == "delivered"
+
+
+def test_reconcile_refused_credential_delivery_retries_next_pass(fleet_on):
+    # A REFUSED delivery is not terminal: the reconciler must retry it (re-emit) rather than treat it as converged.
+    r = _reconciler(channel=FailSsmChannel())
+    w = _observe_worker(bundles=(_bundle(),))
+    first = r.reconcile([w], F.FleetState(), now=NOW)
+    assert first.state.get(w.key).credential_status == "refused"
+    second = r.reconcile([w], first.state, now=NOW + 10)
+    assert any(a.verb == "deliver_credentials" for a in second.actions)   # retried, not silently converged
