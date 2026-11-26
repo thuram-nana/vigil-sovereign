@@ -1770,6 +1770,26 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # AEGIS AS-2f — SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a contracts). Absent (unknown
+        # action -> 404) unless BOTH the monitoring master flag AND the strict v2 flag are ON; requester is the
+        # hop principal, org from the edge SESSION (never a free body field), step-up stamp from the session.
+        if action in ("monitor_authorize_v2", "monitor_revoke_v2", "monitor_renew"):
+            from .. import config as _config
+            if not (_config.customer_monitoring_enabled() and _config.aegis_sovereign_v2_enabled()):
+                return None
+            org = str(body.get("org_id", ""))
+            host = str(body.get("host", ""))
+            if action == "monitor_authorize_v2":
+                return p.monitor_authorize_v2(requester, org, host, capabilities=body.get("capabilities"),
+                                              window_s=body.get("window_s"),
+                                              instance_id=str(body.get("instance_id", "default")),
+                                              ip=ip, mfa_at=body.get("mfa_at"))
+            if action == "monitor_renew":
+                return p.monitor_renew(requester, org, host,
+                                       instance_id=str(body.get("instance_id", "default")),
+                                       window_s=body.get("window_s"), ip=ip, mfa_at=body.get("mfa_at"))
+            return p.monitor_revoke_v2(requester, org, host,
+                                       instance_id=str(body.get("instance_id", "default")), ip=ip)
         # APEX consumer PR-B — the Fix-first screen's reads: the posture + worst-first list + trend, and the trend alone
         # (the Overview's Posture card). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_POSTURE is on together
         # with its master flag VIGIL_APEX_PRESENTATION; requester = the hop principal, org = the edge SESSION's.

@@ -48,8 +48,27 @@ shorter than 16 bytes (exit 2).
 `AEGIS_SAAS_PUBLISH_DIR`, `AEGIS_SAAS_AUTHORITY_ROOT_DIR`, `AEGIS_SAAS_SECRET_FILE`, `AEGIS_SAAS_SPOOL_DIR`, then
 `docker compose --profile aegis-saas up -d aegis-saas-gateway`. Missing env refuses to start.
 
-**systemd:** `infra/systemd/aegis-saas-gateway@.service` + `/etc/aegis-saas/<instance>.env` from
-`infra/systemd/aegis-saas-gateway.env.example`; `systemctl enable --now aegis-saas-gateway@<instance>`.
+**systemd (R15 isolated unit — AS-2j):** `infra/systemd/aegis-saas-gateway@.service` is the hardened unit.
+It is `DynamicUser=yes` (a distinct uid per instance — TT-B's uid cannot reach TT-A), `PrivateNetwork=yes`
+with `RestrictAddressFamilies=AF_UNIX` + `IPAddressDeny=any` (no route/DNS/IMDS — the gateway cannot create
+an IP socket at all), serves ingress over a `--listen-unix` socket (SO_PEERCRED = the ALB-front's uid; no
+TCP), mounts the publish dir + trust root read-only, and bounds memory (`MemoryMax`/`MemoryHigh`/`TasksMax`).
+Both secrets come through `LoadCredential=` (never the environment — the N-A fix), so provision them as
+root-owned 0600 files the unit loads: `/etc/aegis-saas/<instance>.report.secret` (the export from §2) and
+`/etc/aegis-saas/<instance>.gw.secret` (the pseudonymization secret, >=16 random bytes). Then
+`/etc/aegis-saas/<instance>.env` from `infra/systemd/aegis-saas-gateway.env.example` (NO secrets in it) and
+`systemctl enable --now aegis-saas-gateway@<instance>`.
+
+Lint the unit before shipping any change to it (fail-closed; CI runs it too):
+`python -m vigil_integration.aegis_unit_lint infra/systemd/aegis-saas-gateway@.service` (GREEN == hardened).
+
+> DEFERRED (owner/infra-gated, AS-2c/2d/26 + a provisioned host): the gateway's `--listen-unix` ingress
+> (SO_PEERCRED) and broker egress over a unix socket are gateway-v2 (AS-2c) + broker (AS-2d); live
+> `systemctl enable --now`, `systemd-analyze security`, and the EACCES / no-IMDS probe
+> (`docs/runbooks/aegis-saas-gateway-r15-probe.sh`) run on a provisioned host. Until then the unit ships
+> validated OFFLINE by the lint + `integration/tests/test_aegis_gateway_unit_hardening.py`; it is not yet
+> `systemctl`-activatable. The pre-AS-2j TCP/env-secret unit is frozen as the N-A negative control at
+> `integration/tests/fixtures/aegis-saas-gateway-NA-negative-control.service.txt`.
 
 Keep the gateway in `observe` mode. Without a valid authority for (tenant, host) the gateway passes traffic
 through uninspected and spools nothing.

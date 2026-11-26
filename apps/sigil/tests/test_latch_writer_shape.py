@@ -221,6 +221,7 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/customer_credentials.py", "governor/customers.py", "governor/eval_capability_grant.py",
     "governor/eval_offense_attestation.py", "governor/invoices.py", "governor/killswitch.py",
     "governor/launch_settlement.py", "governor/metering.py", "governor/monitoring_authority.py",
+    "governor/monitoring_authority_v2.py",  # AS-2f: owner-signed v2 monitoring-authority registry (own literal signals)
     "governor/offense_gate.py", "governor/orgs.py", "governor/postpaid.py", "governor/promotion.py",
     "governor/report_unlock.py", "governor/subscription.py", "governor/trial_claim.py", "governor/wallet.py",
     "governor/billing_reversal.py",   # W5: owner-signed reversal/arrears ledger (its own literal signal governor.billing_reversal)

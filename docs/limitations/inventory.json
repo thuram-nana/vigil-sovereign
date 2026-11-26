@@ -1,938 +1,968 @@
 {
-  "$schema_note": "VIGIL documented-limitation inventory (W15-1 #393, feeding the W16 burndown). Machine-checked by docs/tests/test_limitation_inventory.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest, so PyYAML is unavailable and the guard parses this file with the stdlib json module. Every real-unfinished-code limitation names a code anchor the guard resolves by AST (no import); every re-verified-closed item names an evidence path the guard asserts exists. 'honest_limit_sites' is the code-scan census: the guard scans every non-test product .py for a curated set of honest-limit/deferred debt phrases ('not wired', 'does not yet', 'is a stub', '*-gated', ...) and REFUSES any hit that is neither a VIGIL-LIMIT marker line nor registered here — so adding an unregistered honest-limit docstring turns the build red, and a registered site whose prose is gone turns it red too (bidirectional). See docs/limitations/README.md for the schema, the VIGIL-LIMIT:<id> marker convention, and the thirteen re-verified-closed items listed by name so nobody re-works them.",
-  "inventory_version": 2,
-  "classes": {
-    "doc-only": "The limitation is a property of the world (hardware absent, no external audit team, a record that can only accrue in the field), not unfinished code. There is nothing to build; the honest state is documented and must not be worded as completeness.",
-    "real-unfinished-code": "A capability whose software layer is present but deliberately incomplete: a stub that raises, an interface with no runtime, or a path gated on infra/credentials/tooling that is absent here. The anchor names the symbol that carries the honest limit."
+ "$schema_note": "VIGIL documented-limitation inventory (W15-1 #393, feeding the W16 burndown). Machine-checked by docs/tests/test_limitation_inventory.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest, so PyYAML is unavailable and the guard parses this file with the stdlib json module. Every real-unfinished-code limitation names a code anchor the guard resolves by AST (no import); every re-verified-closed item names an evidence path the guard asserts exists. 'honest_limit_sites' is the code-scan census: the guard scans every non-test product .py for a curated set of honest-limit/deferred debt phrases ('not wired', 'does not yet', 'is a stub', '*-gated', ...) and REFUSES any hit that is neither a VIGIL-LIMIT marker line nor registered here — so adding an unregistered honest-limit docstring turns the build red, and a registered site whose prose is gone turns it red too (bidirectional). See docs/limitations/README.md for the schema, the VIGIL-LIMIT:<id> marker convention, and the thirteen re-verified-closed items listed by name so nobody re-works them.",
+ "inventory_version": 2,
+ "classes": {
+  "doc-only": "The limitation is a property of the world (hardware absent, no external audit team, a record that can only accrue in the field), not unfinished code. There is nothing to build; the honest state is documented and must not be worded as completeness.",
+  "real-unfinished-code": "A capability whose software layer is present but deliberately incomplete: a stub that raises, an interface with no runtime, or a path gated on infra/credentials/tooling that is absent here. The anchor names the symbol that carries the honest limit."
+ },
+ "severities": {
+  "critical": "Would block a third-party (national-agency) deployment or is a security/safety defect.",
+  "high": "Materially limits a deployment; a deploying institution must plan around it.",
+  "medium": "A real gap a careful operator will hit, with a documented fallback.",
+  "low": "A narrow residual with a working default path; defense-in-depth or quality, not safety.",
+  "info": "A deliberate, correctly-deferred boundary (hardware/research/external-team). Not debt to burn down; recorded so it is never overclaimed."
+ },
+ "dispositions": {
+  "file-into-w16": "An open limitation to be tracked as an issue in the W16 milestone (DECLARED-LIMITATION BURNDOWN). w16_issue carries the issue number once filed, or null while filing is pending owner review.",
+  "re-verified-closed": "Named on an older audit list but re-verified against the current tree as already done. Listed here by name, with the evidence, so no one re-works it."
+ },
+ "re_verified_closed": [
+  {
+   "id": "RVC-governance-grant-replay",
+   "name": "Signed governance grants are replayable (promotion + capability latches)",
+   "summary": "The anti-replay pattern was present in one governor file and absent from its two siblings, so a revoked grant was replay-resurrectable. Re-verified closed: the replay guard is now enforced and pinned by a test.",
+   "evidence": "apps/sigil/tests/test_governance_replay_guard.py"
   },
-  "severities": {
-    "critical": "Would block a third-party (national-agency) deployment or is a security/safety defect.",
-    "high": "Materially limits a deployment; a deploying institution must plan around it.",
-    "medium": "A real gap a careful operator will hit, with a documented fallback.",
-    "low": "A narrow residual with a working default path; defense-in-depth or quality, not safety.",
-    "info": "A deliberate, correctly-deferred boundary (hardware/research/external-team). Not debt to burn down; recorded so it is never overclaimed."
+  {
+   "id": "RVC-engine-rawsock-egress-floor",
+   "name": "Engine raw-socket egress sites (CSWSH / race / smuggling) were not software-floored",
+   "summary": "The never-liftable egress floor was wired only on the engine capture paths in #874; the raw sockets in scanner/websocket.py (CSWSH), scanner/race.py::raw_race, and scanner/smuggling.py (raw_send + _desync_leg) still connected on a re-resolved name with no IP floor, so a charter-scoped name resolving or rebinding to metadata/RFC1918 could be dialled. Re-verified closed (WS1.1b, #879): all three now resolve once, run vigil_gateway.denylist.is_egress_denied over every resolved address, refuse metadata/link-local/RFC1918 (and DNS-rebinding), and dial the pinned IP; fail-closed throughout. Channel-only: no FACT minted, _ALL_ORACLES frozen at 15. Proof: scanner/tests/test_{websocket,race,smuggling}.py (floor + anti-rebinding + fail-closed negative controls). FOURTH/last site closed by G2 (#919): the engine's httpx capture path now routes through agents/http_executor.py's SovereignHttpxTransport (built on agents/egress_guard.py), so no httpx request skips the floor either. Gateway-less backstop (G2): common/egress_pin.py degrades to a pure-stdlib ipaddress structural floor (_stdlib_floor_denied) that still refuses metadata/link-local/RFC1918 before any socket opens even when the sidecar gateway is down; its drift-guard mirror tests are common/tests/test_egress_backstop.py and integration/tests/test_egress_backstop_mirror.py.",
+   "evidence": "engine/crucible/framework/v2/scanner/tests/test_smuggling.py"
   },
-  "dispositions": {
-    "file-into-w16": "An open limitation to be tracked as an issue in the W16 milestone (DECLARED-LIMITATION BURNDOWN). w16_issue carries the issue number once filed, or null while filing is pending owner review.",
-    "re-verified-closed": "Named on an older audit list but re-verified against the current tree as already done. Listed here by name, with the evidence, so no one re-works it."
+  {
+   "id": "RVC-offense-backup-restore",
+   "name": "No backup or restore for offense-side state",
+   "summary": "There was no backup/restore path for any offense-side state. Re-verified closed: off-host backup and unit-scoped restore ship as vigil backup / vigil restore.",
+   "evidence": "integration/vigil_integration/backup.py"
   },
-  "re_verified_closed": [
-    {
-      "id": "RVC-governance-grant-replay",
-      "name": "Signed governance grants are replayable (promotion + capability latches)",
-      "summary": "The anti-replay pattern was present in one governor file and absent from its two siblings, so a revoked grant was replay-resurrectable. Re-verified closed: the replay guard is now enforced and pinned by a test.",
-      "evidence": "apps/sigil/tests/test_governance_replay_guard.py"
-    },
-    {
-      "id": "RVC-engine-rawsock-egress-floor",
-      "name": "Engine raw-socket egress sites (CSWSH / race / smuggling) were not software-floored",
-      "summary": "The never-liftable egress floor was wired only on the engine capture paths in #874; the raw sockets in scanner/websocket.py (CSWSH), scanner/race.py::raw_race, and scanner/smuggling.py (raw_send + _desync_leg) still connected on a re-resolved name with no IP floor, so a charter-scoped name resolving or rebinding to metadata/RFC1918 could be dialled. Re-verified closed (WS1.1b, #879): all three now resolve once, run vigil_gateway.denylist.is_egress_denied over every resolved address, refuse metadata/link-local/RFC1918 (and DNS-rebinding), and dial the pinned IP; fail-closed throughout. Channel-only: no FACT minted, _ALL_ORACLES frozen at 15. Proof: scanner/tests/test_{websocket,race,smuggling}.py (floor + anti-rebinding + fail-closed negative controls). FOURTH/last site closed by G2 (#919): the engine's httpx capture path now routes through agents/http_executor.py's SovereignHttpxTransport (built on agents/egress_guard.py), so no httpx request skips the floor either. Gateway-less backstop (G2): common/egress_pin.py degrades to a pure-stdlib ipaddress structural floor (_stdlib_floor_denied) that still refuses metadata/link-local/RFC1918 before any socket opens even when the sidecar gateway is down; its drift-guard mirror tests are common/tests/test_egress_backstop.py and integration/tests/test_egress_backstop_mirror.py.",
-      "evidence": "engine/crucible/framework/v2/scanner/tests/test_smuggling.py"
-    },
-    {
-      "id": "RVC-offense-backup-restore",
-      "name": "No backup or restore for offense-side state",
-      "summary": "There was no backup/restore path for any offense-side state. Re-verified closed: off-host backup and unit-scoped restore ship as vigil backup / vigil restore.",
-      "evidence": "integration/vigil_integration/backup.py"
-    },
-    {
-      "id": "RVC-use-library-ui-scan",
-      "name": "A UI-launched scan silently skipped ~93% of the check corpus",
-      "summary": "console.actions.launch_scan did not honour use_library, so a UI scan ran only the 11 default checks, not the ~172-check declarative library. Re-verified closed: it now passes use_library and appends --library.",
-      "evidence": "docs/decisions/W16-4-default-check-corpus.md"
-    },
-    {
-      "id": "RVC-crash-resume",
-      "name": "Engagement crash/restart resume",
-      "summary": "Re-verified closed: the live engine resumes from a signed checkpoint after a crash/restart, pinned by an in-process resume test and the crash-restart release-gate test.",
-      "evidence": "integration/tests/test_engine_resume.py"
-    },
-    {
-      "id": "RVC-k8s-rbac-livefire",
-      "name": "Kubernetes RBAC exploitation had no live-fire proof",
-      "summary": "Re-verified closed: the two K8s RBAC branches are adjudicated over bytes a real k3s API server produced by a harness VIGIL stands up, owns, and destroys. The harness now runs in a scheduled (nightly, non-blocking) CI job (W11-2 #483) rather than by hand; the required-CI guarantee is narrower and honestly so — the fail-closed-on-missing-tool preflight (tools/livefire/require_tools.py) that guards it, not the nightly cluster run itself.",
-      "evidence": "tools/livefire/k8s_rbac_livefire.py"
-    },
-    {
-      "id": "RVC-console-credential-gate",
-      "name": "The console/legacy-owner-token credential surface",
-      "summary": "Re-verified closed: the legacy owner token is gated for PRODUCTION posture and the UI proxy enforces per-user authentication.",
-      "evidence": "integration/tests/test_uiproxy_peruser_auth.py"
-    },
-    {
-      "id": "RVC-per-action-approval-token",
-      "name": "Signed per-action approval token",
-      "summary": "Re-verified closed: the signed per-action approval token and broker ship and are wired to vigil approve provision-authority|list|sign, despite an older doc marking it absent.",
-      "evidence": "integration/vigil_integration/live/approval_token.py"
-    },
-    {
-      "id": "RVC-sandbox-exec-wiring",
-      "name": "execute_sandbox / vigil sandbox wiring",
-      "summary": "Re-verified closed: the sandboxed executor and its vigil sandbox verb are wired and tested.",
-      "evidence": "integration/tests/test_executor_sandbox.py"
-    },
-    {
-      "id": "RVC-neo4j-client-body",
-      "name": "Neo4jGraphStore is only a scaffold",
-      "summary": "Re-verified closed: Neo4jGraphStore is a real, reviewable client body behind the same interface (its live construction is deploy-gated on the neo4j driver, which is a separate, honestly-recorded residual).",
-      "evidence": "engine/crucible/framework/v2/graph/store.py"
-    },
-    {
-      "id": "RVC-k8s-workload-oracle-wired",
-      "name": "k8s_workload_posture_oracle is not wired into the verifier",
-      "summary": "Re-verified closed: the oracle is wired into the verifier run path (gated on k8s_workload_control in the context); the doc claiming it unwired was the defect.",
-      "evidence": "engine/crucible/framework/v2/verify/verifier.py"
-    },
-    {
-      "id": "RVC-warden-strix-fail-closed",
-      "name": "The WARDEN gate on Strix's shell",
-      "summary": "Re-verified closed: the WARDEN gate on Strix's tool/shell surface is fail-closed (an unknown/unclassified tool is denied, not auto-run).",
-      "evidence": "integration/vigil_integration/warden_gate.py"
-    },
-    {
-      "id": "RVC-console-orphan-routes",
-      "name": "Console orphan routes",
-      "summary": "Re-verified closed: the orphan-route class was paid down (B7/A6) and is now guarded by the W17-14 orphan-route guard, so a new orphan route turns CI red.",
-      "evidence": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py"
-    },
-    {
-      "id": "RVC-a12-request-smuggling-timing-lead",
-      "name": "Audit A12 (#269) — the request-smuggling TIMING mint. Closed; the class itself stays a LEAD",
-      "summary": "SCOPE: what is re-verified closed here is A12's DEFECT — that a bare TIMING anomaly minted a High request_smuggling FACT. That mint is deleted and guarded: scanner.smuggling.detect labels its own result severity Low / 'TIMING LEAD' / UNCONFIRMED, scanner.campaign._smuggling_leads no longer builds any latency FindingContext, and a hanging origin is pinned to produce no finding. NOT CLOSED, and explicitly re-opened by the audit-A red-pen (B1): the Wave-4.2 replacement — a single-connection canary DIFFERENTIAL minting a DIFFERENTIAL_RESPONSE FACT at conf 0.95 — is itself an overclaim, because CWE-444 is two parsers disagreeing and the differential is observed on the one connection VIGIL pipelined the smuggled prefix onto. A benign single origin with no proxy (TE preferred over CL per RFC 9112 6.1, keep-alive pipelining, a stock path-echoing 404) reproduces it, and two ORDINARY pipelined requests with no framing conflict produce the identical canary echo. request_smuggling is therefore LEAD-only on every VIGIL path today; request_smuggling.differential_desync is fact_capable=false with the cross-connection, operator-authorised co-tenant probe named as blocking_work.",
-      "evidence": "engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py"
-    }
-  ],
-  "limitations": [
-    {
-      "id": "LIMIT-attest-tee-hardware",
-      "title": "Hardware-backed (TEE) attestation is a hardware-gated stub",
-      "summary": "SEV-SNP / TDX attestation providers exist behind the AttestationProvider interface but every method fails closed with NotImplementedError. The SoftwareAttestationProvider proves integrity + origin, never hardware confidentiality; hardware_backed is always False on that path.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/attest/provider.py",
-        "symbol": "_HardwareGatedProvider.attest"
-      },
-      "marker": true,
-      "check": "stub-raises",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-symbolic-crash-repair",
-      "title": "General automated native-patch synthesis (cyber-reasoning system) is not built",
-      "summary": "SymbolicCrashRepairTier is a full stub behind the BinaryPatchTier interface; SanitizerSilenceTier proves a fix by oracle silence but its output-based synthesize_patch also raises. The narrow strcpy->strncpy source synthesiser is real; an unrecognised class fabricates no patch.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
-        "symbol": "SymbolicCrashRepairTier.synthesize_patch"
-      },
-      "marker": true,
-      "check": "stub-raises",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-sanitizer-output-synthesis",
-      "title": "Output-based sanitizer patch synthesis is not built",
-      "summary": "SanitizerSilenceTier.synthesize_patch (the output-based synthesis interface) raises NotImplementedError; the tier's value is proving a fix by oracle silence, not generating it.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
-        "symbol": "SanitizerSilenceTier.synthesize_patch"
-      },
-      "marker": true,
-      "check": "stub-raises",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-neo4j-deploy-gated",
-      "title": "The Neo4j graph store's live construction is deploy-gated",
-      "summary": "Neo4jGraphStore is a real client body, but constructing a LIVE store with no injected driver raises NotImplementedError until the neo4j driver package and a running service are provisioned. EmbeddedGraphStore is the working default.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/graph/store.py",
-        "symbol": "Neo4jGraphStore.__init__"
-      },
-      "marker": true,
-      "check": "stub-raises",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-agent-body-scaffold",
-      "title": "The pluggable next-gen agent-body is an interface-only scaffold",
-      "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/agent_body/interface.py",
-        "symbol": "AgentBody"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-llm-redteam-tools-deferred",
-      "title": "LLM red-team tool live-fire (garak / PyRIT / promptfoo) is tooling-gated",
-      "summary": "The external-tool runner is tool-agnostic and live-proven with nmap, but garak/PyRIT/promptfoo are absent from this environment, so their live-fire is deferred and no garak/PyRIT/promptfoo FACT is minted. A new ToolSpec (+ oracle mapping for a non-reachability signal) is all a new tool needs.",
-      "classification": "real-unfinished-code",
-      "severity": "medium",
-      "anchor": {
-        "file": "integration/vigil_integration/live/external_tool.py",
-        "symbol": "run_external_tool"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-cloud-exploit-fixture-proven",
-      "title": "Cloud exploitation branches (E1/E2/E3/E5) are fixture-proven, not live-fired",
-      "summary": "The IMDS-capture, IAM-escalation, GCP SA-impersonation and secret-validity branches are proven offline over fixtures; no live cloud FACT has been claimed and none exists in the evidence store. Each branch's limitation string in the evidence-branches registry governs admission, so the deferral is enforced, not merely described. Activation needs an operator-provisioned throwaway lab credential.",
-      "classification": "real-unfinished-code",
-      "severity": "medium",
-      "anchor": {
-        "file": "docs/capability-matrix/evidence-branches.json"
-      },
-      "marker": false,
-      "check": "doc-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-audit-package-reproduction",
-      "title": "The offline audit package re-derives EVERY portable (stdlib+cryptography) oracle verdict standalone; only three oracles remain genuinely irreducible (their import-closure needs a non-stdlib module)",
-      "summary": "verify_offline.py / docs/proof-carrying-finding/verify_vf.py re-verify authenticity + binding + integrity + chain with no VIGIL runtime AND re-fire (Step 2) every oracle whose body is PURE (import-closure = stdlib + the one Ed25519 lib, cryptography), re-deriving the verdict from the retained oracle_context with nothing installed: the SIX posture oracles (reexecute_posture_oracle), the ACHIEVED_STATE predicate kernel, the GENERAL web-vuln families (reexecute_general_oracle: differential_response (+ smuggling_desync), timing, boolean_inference, side_effect, reflection_context, evaluation (+ ssi), error_signature, sanitizer_signal, system_prompt_disclosure, prompt_injection, sql/command/nosql_injection_breakout, weak_crypto_artifact, prototype_pollution), and — this slice (Lane C/G1) — the former A-prime residual, now ALL ported byte-faithfully: service_reachability, tls_weakness (live-handshake path), active_exposure, dom_execution (+ csp_bypass), credential_stuffing, automated_access/honeypot, jwt_forgery (HS/structural), static_rule, session_fixation, mfa_bypass, password_reset_invariant, csrf_achieved, workflow_abuse, the client-side posture oracles (clickjacking/csrf/postmessage/csp), email_auth/identity posture, certificate_validity (cryptography.x509 DER parse), mobile_posture (cryptography key classification), credential_acceptance, and the WARDEN-gated cloud/cluster capture oracles (imds/secret/gcp/iam/k8s_rbac). Each ported body is a byte-for-byte copy of framework.v2.verify.oracles, pinned to the in-tree oracle on BOTH fired AND conclusive by integration/tests/test_general_reexecutable.py (an oracle-level battery + a dispatch SOUND/FORGE-A-FALSE harness over real retained evidence). HONEST BOUND (unchanged, same as posture): re-firing proves the verdict is the correct FUNCTION of the retained evidence, not that the evidence reflects the live target (a live re-run is still required for that). Re-execution is over RETAINED evidence, so a family whose LIVE capture needed a socket/browser/subprocess/cloud-API is still PURE at re-exec (it reads retained bytes); that is why the capture oracles are portable. What REMAINS genuinely IRREDUCIBLE is EXACTLY three oracles whose re-fire import-closure needs a module NOT in stdlib + cryptography — version_range (packaging), saml_forgery (signxml / lxml), and oob_callback (the framework verify.oob receipt-verification backing an EXTERNAL collector). These are NAMED here, never faked as reproduced; their re-verification rests on the signature + an in-VIGIL re-run (the sound maximum). The classification is enforced OBJECTIVELY by import-closure and PINNED by integration/tests/test_general_reexecutable.py::test_bucket_classification_is_enforced (_PORTED must be stdlib-closure and callable in verify_vf; _PURE_BUT_DEFERRED is now EMPTY; the irreducible set must be EXACTLY those three). This limitation is NOT claimed closed — the function-of-retained-evidence bound and the three-oracle irreducible boundary are named precisely.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "docs/proof-carrying-finding/verify_vf.py",
-        "symbol": "reexecute_general_oracle"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-evidence-empty-engagement-slug",
-      "title": "single_engagement guard discards an empty engagement_slug",
-      "summary": "A certificate with an empty engagement_slug can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only; it still requires a governance-signed head over the mixed chain. Deferred so uniform legacy empty-slug bundles under a named head keep verifying.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/evidence/certify.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-evidence-producer-refs-unique",
-      "title": "The evidence producer does not yet guarantee unique finding_refs",
-      "summary": "The verifier refuses a bundle with duplicate finding_refs (closing a context-lookup collision), but the producer can still fall back to bug_class, so a legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: key/emit unique refs at the producer.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "integration/vigil_integration/proof/bundle.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-field-record-accrual",
-      "title": "The field record accrues only over real authorized engagements",
-      "summary": "Deterministic-scanner recall is MEASURED (M1) on a planted loopback corpus; a genuine field record of finding real bugs on diverse authorized real targets is not manufacturable in a lab and this repo does not claim one exists. State the planted-corpus number and any field record separately; never word an accruing record as completeness.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "docs/H3-FIELD-RECORD-RUNBOOK.md"
-      },
-      "marker": false,
-      "check": "doc-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-external-audit-team",
-      "title": "The independent third-party audit needs an external team",
-      "summary": "VIGIL prepares a reproducible, offline-verifiable audit package, but it cannot BE the independent third party. That conclusion is the external auditor's to write; it is a property of the world, not unfinished code.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "docs/DEFERRED-INFRA.md"
-      },
-      "marker": false,
-      "check": "doc-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-spine-seal-at-capture",
-      "title": "Seal-at-capture is wired: credential excerpts on the append-only spine are sealed under the per-engagement DEK before they are written",
-      "summary": "CLOSED (wave-a/waveA1-seal). Seal-at-capture is now wired at the single append-only writer: Blackboard.post seals ObservationPayload.raw_excerpt and ResultPayload.body_excerpt under the per-engagement DEK (crypto_shred.seal_excerpt) BEFORE the row is written, so a credential excerpt never reaches the spine in plaintext; every in-engagement reader unseals transparently (Blackboard.reveal_excerpt: hypothesis-agent, the console Live tailer, the tier-3 audit observation), and after a crypto-shred the excerpt is unrecoverable while the append-only row and the spine hash-chain stay byte-for-byte unchanged. Proven end-to-end (seal -> reveal -> shred) by engine/crucible/framework/v2/agents/tests/test_spine_seal_at_capture.py, alongside the existing evidence_dir shred proof in test_evidence_erasure.py. RESIDUALS (honest scope): (1) FindingPayload.oracle_context is retained in plaintext on the spine because framework.v2 verify re-fires over it offline; it is intentionally NOT sealed by this slice (sealing it would need a verify-path-aware unseal), so a credential reflected inside a retained proof remains plaintext and is tracked as a separate, narrower concern. (2) Only captures written AFTER this wiring are sealed; append-only rows written before it cannot be retroactively sealed without rewriting them (which would break tamper-evidence), so a legacy spine's pre-wiring excerpts remain as they were, while every fresh engagement is fully protected. (3) The console Live tailer opens its own Blackboard/keyring and reveals excerpts only when its evidence_keys_dir resolves to the same path as the engine's (the default in a single-host deployment); if an operator splits the keystore across the two processes, the Live view shows the redacted placeholder rather than plaintext -- a display-availability caveat, never a leak and never a crash.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/agents/blackboard.py",
-        "symbol": "Blackboard._seal_excerpt_in_place"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/PRIVACY.md",
-      "disposition": "re-verified-closed",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-posture-no-structured-findings",
-      "title": "Cloud / Kubernetes / infrastructure posture assessments record no structured findings or retained proofs",
-      "summary": "The cloud, k8s and infra OperationTypes record only that a run happened and their own summary text; they do not yet write a structured findings record or retained proofs the way a web test does (records_findings=False, records_proofs=False). A deploying institution running these gets narrative output, not graded findings.",
-      "classification": "real-unfinished-code",
-      "severity": "medium",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/report/runinfo.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "engine/crucible/framework/v2/report/runinfo.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-container-kill-unwired",
-      "title": "Container-level kill of the Strix sandbox is not wired into the VIGIL plane",
-      "summary": "The vendored kill_run exists but has no VIGIL caller, so a force-remove of the sandbox container is honestly declared UNAVAILABLE in the console rather than shown as a working control. Orphaned containers are reaped at the next launch; the engagement kill-switch (halts the loop) and process-stop (ends the host pid) are the working controls.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/console/api.py",
-        "symbol": "_strix_killswitch_state"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "engine/crucible/framework/v2/console/api.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-favicon-fingerprint-stub",
-      "title": "The favicon-fingerprint table is an illustrative stub, not a crawled corpus",
-      "summary": "_KNOWN_FAVICONS holds a handful of illustrative fixture entries so the fingerprint code path is real and deterministically testable; a production build would hash real product favicons from a crawled corpus. Because the table is a stub, favicon matches are scored conservatively and never mint a high-confidence technology fact.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/scanner/fingerprint.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "engine/crucible/framework/v2/scanner/fingerprint.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-a11y-capture-unwired",
-      "title": "The richer accessibility-tree capture path is a documented seam, not wired",
-      "summary": "SIGIL perception captures the screen via a screenshot tool + OCR (grab_screen); the richer accessibility-tree path (C4) is a documented seam that is not wired, so on headless hosts with no screenshot tool grab_screen returns None rather than falling back to an a11y tree.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/perception/capture.py",
-        "symbol": "grab_screen"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "apps/sigil/sigil/perception/capture.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-gesture-native-inject-unwired",
-      "title": "Native gesture/input injection on macOS and Windows is not wired (backend is honestly inert)",
-      "summary": "SIGIL's gesture session injects input via a platform backend; the macOS/Windows native path is not wired (and Linux needs ydotool/xdotool). A backend whose available() is False is honestly INERT: it no-ops, and an injection is never recorded/returned as done when it physically did nothing.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/gesture/session.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "apps/sigil/sigil/gesture/session.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-target-authz-owner-anchor-writable",
-      "title": "The target-authorization owner anchor + trust root live under the offense-writable root",
-      "summary": "Phase 1.c ties a UI-authorized target to the PINNED owner key AT INSTALL, and the launch gate verifies the authority against the on-disk trust root. Both the owner-pubkey anchor (the .vigil-live seam) and the persisted .authority-root trust root live, by default, under paths a full owner-uid filesystem-write actor could rewrite — such an actor could plant their own trust root + self-signed authority, and is outside the meaningful threat model (they could equally edit code, the kill-switch, or the keys). The install-time owner-pin raises the bar from 'write a plaintext charter' to 'produce an owner-signed authority whose trust root is the pinned owner key over the target host'. Closing even the full-FS-write case is a DEPLOYMENT choice (not unfinished code): anchor the launch-gate authority root out-of-band on a read-only / HSM-backed .authority-root mount via VIGIL_AUTHORITY_ROOT_DIR. This is now VISIBLE — `vigil doctor`'s authority-root-anchor posture line reports DEFAULT-IN-TREE vs OUT-OF-BAND — and DOCUMENTED in docs/runbooks/anchor-trust-root-out-of-band.md (incl. the caveat that the trust root must be CLI-provisioned before the mount is made read-only). The hard root pin (CRUCIBLE_ROOT_STRICT, claim PHASE1-5) additionally prevents a sentinel-less root from silently resolving elsewhere.",
-      "classification": "doc-only",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/console/actions.py",
-        "symbol": "_install_target_authorization"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/runbooks/anchor-trust-root-out-of-band.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-profile-packs-incremental",
-      "title": "The deep/full engagement profile names packs wired incrementally across the FACT-coverage waves",
-      "summary": "Wave 0.2 ships `--profile {surface,deep,full}` as additive-only flag expansion (resolve_profile), and the enable_* passes the roster flips (browser DOM/stored-XSS, SSO acceptance, GraphQL amplification; full adds the operator-spec access-control pack) were wired end-to-end into engage.py by slice 0.2 and the earlier waves that built each pass. Wave 6's diff does NOT touch engage.py: it added the benchmark-side profile mirror (_PROFILE_ROSTER) plus the corpus-wide zero-FP gate (zero_fp_gate) and fixed the browser DOM-XSS endpoint field, so the whole deep/full roster is now proven zero-FP corpus-wide. As of Wave 6 the deep/full rosters STILL name some packs that have no dedicated enable_* flag and so remain profile-deferred — deep names time-based / NoSQL / LDAP / XPath SQLi, full additionally names business-logic and race; _PROFILE_DEFERRED lists them. resolve_profile expands to NOTHING for a not-yet-wired name (it never invents a pack), and the profile manifest + an operator note surface the gap so it is visible and auditable. Wiring a dedicated profile enable_* flag (and any missing pack) for these remaining names is a later-wave item; the profile stays pure flag-expansion until then.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/engage.py",
-        "symbol": "resolve_profile"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/capability-matrix/ORACLE-RECIPE.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-dns-oob-resolver-ip-not-target-ip",
-      "title": "The DNS OOB collector records the RESOLVER's source IP, not the target's",
-      "summary": "A blind DNS callback to <token>.<base-domain> reaches the authoritative DNS collector via the target's RECURSIVE RESOLVER, so the client_ip on the recorded OOBHit is the resolver's, not the target's. This is a property of DNS, not unfinished code. The FACT still holds because the correlator is the UNIQUE per-probe secret token (secrets.token_hex(16)) embedded in the callback host — a DNS query VIGIL did not cause cannot carry it — not the source IP. Documented on the oob_callback.dns_collector evidence branch and in ARCHITECTURE.md / OPERATOR-GUIDE.md.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
-        "symbol": "DNSCollector"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/capability-matrix/evidence-branches.json",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
-      "title": "The DNS OOB collector assumes an operator-owned domain whose NS delegate to it",
-      "summary": "The authoritative DNS collector confirms a DNS-only interaction only when the base domain it serves is an operator-OWNED domain whose NS records delegate to the collector's public IP (UDP :53). This is a deployment assumption (own + delegate a domain), a property of the deployment rather than unfinished code; without the delegation, no target resolver forwards <token>.<base-domain> to us. The CLI serve-dns subcommand prints the exact NS-delegation instructions. Documented on the oob_callback.dns_collector evidence branch.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
-        "symbol": "DNSCollector"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/capability-matrix/evidence-branches.json",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-dns-oob-proves-resolution-not-completed-connection",
-      "title": "A DNS lookup proves resolution reached us, not that a full connection completed",
-      "summary": "A fired DNS OOB FACT proves the target's resolver forwarded a token-bearing lookup to the authoritative collector — i.e. resolution reached us — NOT that a full HTTP (or other) connection then completed. This is a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof, and a property of the DNS channel rather than unfinished code. It is exactly why DNS-only confirmation is valuable against a target that blocks outbound HTTP but still resolves. Documented on the oob_callback.dns_collector evidence branch.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
-        "symbol": "DNSCollector"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/capability-matrix/evidence-branches.json",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-dns-oob-token-cleartext-broadcast",
-      "title": "A DNS OOB token is broadcast in cleartext, so token-only (VF-2a) is forgeable within the window",
-      "summary": "A DNS out-of-band correlation token rides as a QNAME label, broadcast in cleartext to every recursive/forwarding resolver on the path and captured by passive-DNS, so token equality alone (VF-2a) does NOT prove the target emitted the lookup — anyone who observes the query can replay the label within the window. This is why a DNS OOB FACT REQUIRES the VF-2b independent-collector receipt (signed by an owner-pinned out-of-band key). Anti-replay for a receipt-bearing hit is bounded by the OWNER-SIGNED ENGAGEMENT WINDOW: the collector-signed, target-observed received_at must fall inside [not_before, not_after] (± skew) taken from the same signed EngagementAuthority as the pin, never from the producer context — this is NON-FORGEABLE and closes cross-engagement and gross-stale (e.g. year-1970 / prior-engagement) replay, and it cannot be slid because the producer cannot move an owner-signed window. (One precise corner: reusing the SAME owner-signed collector pin across two engagements whose authorized windows OVERLAP admits a receipt observed during the overlap in both — its signed received_at is temporally in-scope for each, so it degenerates into the intra-window residual below rather than a stale/out-of-scope replay; distinct collector pins or non-overlapping windows eliminate this corner.) The producer-recorded mint anchor issued_at is kept only as a best-effort intra-engagement freshness hint (it may narrow the window, never widen it, and is never the sole boundary); because the mint time is not cryptographically committed into the token, this is COARSE anti-replay: NOT tight anti-replay against a fully-dishonest producer WITHIN the window — a real receipt observed during the authorized window, re-presented later within the SAME window, remains indistinguishable. That residual is bounded to the owner-signed engagement window. The receipt + owner-signed window are what make the FACT sound, not token secrecy. A property of the DNS channel plus the uncommitted mint time, not unfinished code.",
-      "classification": "doc-only",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
-        "symbol": "DNSCollector"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-tls-certificate-validity-unwired",
-      "title": "The legacy tls_breadth.classify_certificate_defects derivation is superseded and on no live path",
-      "summary": "TLS certificate-validity classification IS now wired on the live path (M1.3, commit 98b33744): OracleKind.CERTIFICATE_VALIDITY / verify.oracles.certificate_validity_oracle adjudicates a presented leaf's validity defects (expired / not-yet-valid against a retained instant, hostname-mismatch, structural self-signed), captured by external_tool._tls_cert_capture and re-driven via the certificate_validity BUG_CLASS_ORACLES row, so evidence branch tls_weakness.certificate_validity is now wired:true / fact_capable:true and a minted FACT re-verifies offline. What remains is the OLDER derivation this entry anchors: tls_breadth.classify_certificate_defects re-derives the same defect set from the retained leaf, deterministically and offline against a retained capture instant, but M1.3 wired a SEPARATE oracle rather than this function. So classify_certificate_defects is reviewed and tested yet on no live path (this module stamps no captured_at_epoch and no re-drive calls it) — superseded legacy code. The three tls_breadth.py honest-limit docstrings this entry still covers continue to describe that FUNCTION as BUILT/TESTED/NOT WIRED, which remains true of the function itself even though the capability is now served by the new oracle. Future work (file-into-w16): remove or consolidate the superseded derivation and the now-stale claim-4 prose in tls_breadth.py, then retire this entry together with its remaining sites.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "integration/vigil_integration/live/tls_breadth.py",
-        "symbol": "classify_certificate_defects"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-sigil-voice-probe-egress-not-gatewayed",
-      "title": "SIGIL sovereign-plane voice + credential-probe provider egress is sovereignty-tier-governed but not gateway-routed/redacted",
-      "summary": "M4.1 routes the SIGIL sovereign plane's cloud LLM egress (frontier vision upload + cloud memory consolidation) through the shared chokepoint vigil_core.ai_gateway.egress (classify -> redact -> audit), and the no-bypass guard (integration/tests/test_egress_no_bypass_guard.py) now scans apps/sigil to enforce it. Two sovereign-plane provider-egress classes are NOT routed through that chokepoint: (1) the ElevenLabs VOICE provider (voice.backends.ElevenLabsTts.synth sends TTS text; ElevenLabsAsr.transcribe sends STT audio; find_voices does a voice-library lookup) and (2) the credential-validation probes (platform.secret_probes, which POST a candidate key to a provider's metadata endpoint to validate it). Both are governed by the SIGIL sovereignty tier (sigil.sovereignty.assert_endpoint_permitted — an air-gapped/sovereign tier REFUSES them before any socket opens) and are honestly out of the LLM-gateway's scope: voice is a distinct egress class (audio synthesis/recognition; STT carries no text prompt to redact; TTS speaks SIGIL's own already-governed responses), and a probe deliberately sends the credential itself to verify it (redaction cannot help). The residual gap vs. the LLM sites: their accompanying text is not symmetrically masked and they emit no unified ai_gateway audit record. Future work (file-into-w16, the recorded blocking_work): route ElevenLabsTts.synth's text through a voice-aware egress case (redact the text, let audio bytes pass like image bytes) and emit a unified audit record for the voice + probe egress. The local PiperTts / WhisperAsr backends remain the sovereign zero-egress alternative.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "apps/sigil/sigil/voice/backends.py",
-        "symbol": "ElevenLabsTts.synth"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "engine/crucible/SECURITY.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-capture-attestation-offense-plane",
-      "title": "NAMED FRONTIER (TM-B): reflection PD2 + in-process-capture families trust the keyless offense plane to not fabricate the captured operand",
-      "summary": "The reflection (REFLECTION_CONTEXT / PD2) and in-process-capture families — e.g. the runner-owned gated HTTP re-drive (live/web_redrive.py::web_redrive) that retains the in-band HTTP response operand an oracle then re-fires over — are SOUND against the normal gated pipeline and are function-correct over the retained evidence: offline re-verification re-derives the verdict from the captured bytes exactly. The named frontier (TM-B, classified here as real-unfinished-code because the sound close is a capability not yet built): a FULLY-COMPROMISED in-process OFFENSE-plane producer could fabricate the captured operand before the oracle ever sees it — the oracle re-fires faithfully over a forged input. This is NOT the normal threat model (the offense plane is keyless and cannot mint a trusted record; the sovereign plane verifies signatures and never loads offense code), so the class is not underclaimed: it is sound against every non-compromised pipeline. The sound close is a NON-OFFENSE capture-attestation collector (the VF-2b pattern applied to the in-band HTTP response) that stamps provenance outside the offense producer; signing the injection in-band would be theater (the compromised producer would sign the forgery too). This is the same irreducible owner-vault trust base as every signed artifact. Not built; recorded so it is never overclaimed as closed.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "integration/vigil_integration/live/web_redrive.py",
-        "symbol": "web_redrive"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "engine/crucible/V2-LIMITATIONS.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-witness-quorum-action-gate-default-off",
-      "title": "M4.4 witness-quorum ACTION gate is wired into the live caller but DEFAULT-OFF; arming it is per-deployment policy configuration",
-      "summary": "M4.4 adds an OPT-IN, DEFAULT-OFF, DEMOTE-ONLY witness-quorum conjunct (6c) to the authority gate: when armed (authority/gate.py::authorize_action is passed witness_quorum_fn / witness_quorum_ack, evaluated by authority/witness_quorum_gate.py::witness_quorum_predicate over veracity/witness_quorum.py) it DENIES (denial_code witness_quorum) an otherwise-authorized action for which fewer than N-of-M independent oracle-witnesses corroborate. It is DEMOTE-ONLY (never widens authority), runs only as the final conjunct after every other leg clears, is byte-identical to the gate without it when unarmed (test_passing_none_kwargs_is_byte_identical_to_omitting_them), and adds NO OracleKind (still 49) and no _ALL_ORACLES change (still 15). The conjunct is now wired into the live engagement caller build_offense_gate (integration/vigil_integration/conjunctive_gate.py, via veracity/witness_quorum.py::load_quorum_config), unconditionally of any eval grant; it stays DEFAULT-OFF (no policy => load_quorum_config inactive => the gate does not enforce and is byte-identical). The remaining follow-on is per-deployment policy configuration (the critical-class set and N), not wiring.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/authority/witness_quorum_gate.py",
-        "symbol": "witness_quorum_predicate"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "engine/crucible/V2-LIMITATIONS.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-restore-hard-pruned-spine",
-      "title": "sigil restore does not restore a hard-pruned spine",
-      "summary": "A hard-pruned spine is recovered from a file-level copy of SIGIL_HOME (the spine with its signed head and floor, together). Every reader refuses a pruned live window that no signed head anchors, so `sigil restore` of such a home fails closed rather than reading it as un-pruned. A path-aware staged restore of a pruned home (archive, head, floor and manifest verified as one unit) is planned.",
-      "classification": "real-unfinished-code",
-      "severity": "medium",
-      "anchor": {
-        "file": "apps/sigil/sigil/spine/snapshot.py",
-        "symbol": "_refuse_unanchored_prune"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-frontc-shard-cross-host-deploy",
-      "title": "Front C S2/S3 multi-shard routing + migration is proven in-repo but the cross-host dispatch/copy and the routing-edge wiring are owner deploy work",
-      "summary": "The owner-signed ShardAssignment record + fold, the pure routing resolver (tenant -> dedicated CRUCIBLE_ROOT on its shard, fail-closed on an unassigned tenant), the per-shard job-queue key, and the live-migration orchestrator (pause -> drain -> copy+hash-verify -> owner-signed epoch bump -> resume, crash-safe, idempotent, no split-brain) are all built and tested offline with two in-process shards (two root dirs), behind VIGIL_MULTI_SHARD (default-OFF, byte-identical singleton when off). What remains owner deploy and is NOT claimed here: the real cross-HOST copy/dispatch (the orchestrator's _copy_tree is a local shutil.copytree a deploy swaps for its host-to-host transport, which the same hash-verify + atomic-publish + epoch discipline then guards), the keyless routing-EDGE wiring (uiproxy/custui/provision) and the offense worker's assert_tenant_fleet_isolated startup call, and the S4 cluster acceptance at the owner's N. The production multi-shard flip stays the owner's, after S4 is green.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/governor/shard_routing.py",
-        "symbol": "resolve"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-cloud-connect-gcp-azure-verdict",
-      "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
-      "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/governor/cloud_connect.py",
-        "symbol": "_VERIFIABLE_PROVIDERS"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-customer-cloud-posture-run",
-      "title": "A customer's connected cloud account is recorded read-only, but no gated posture run consumes the grant yet",
-      "summary": "Consumer PR-C records an owner-signed READ-ONLY cloud grant and exposes CloudConnectRegistry.assume_target, the default-deny read a later cloud-posture engagement consumes (the role + external id of an active, unexpired, owner-signed grant of a verifiable provider, for exactly that org/account). The engine-side consumer is not built: the existing live cloud sensor (engine/crucible/framework/v2/sensors/cloud_live.py) reads the HOST's own ambient identity, not a customer's cross-account role. Running posture for a customer is an engagement with the same owner go-live bar as live external targets (owner-signed authority + the posture gate + VIGIL_CUSTOMER_PROD_EXECUTION) and must pass build_offense_gate -> conjunctive_decide. Until it lands a connected account is an owner-verified asset record only: nothing reads the customer's cloud beyond the three STS calls of the connect proof itself, and a grant authorizes no offense.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "apps/sigil/sigil/governor/cloud_connect.py",
-        "symbol": "CloudConnectRegistry.assume_target"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
-      "title": "The customer proof badge covers the positive finding certificate only: a remediation's signed negative clearance certificate is not surfaced to the customer",
-      "summary": "The customer proof badge and per-finding PCF export (consumer PR-I, Area 8) surface the governance-signed POSITIVE finding certificate only. A remediation's signed NEGATIVE clearance certificate (vigil-remediation-cert-v2, minted offense-side by the APEX PCR close-the-loop and the prove driver) does not reach the customer (sovereign) plane: nothing carries it across the offense-to-sovereign seam until the Area 10 fix-it wiring (consumer PR-K) dispatches the fix worker and carries its certificate, which then surfaces through this same export (plan Area 10, step 2). Fail-closed meanwhile: the badge and the bundle assert nothing about a fix, and a retest's 'fixed' verdict is shown as the retest's own result, never as a signed clearance.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {
-        "file": "apps/sigil/sigil/ui/proof_export.py"
-      },
-      "marker": false,
-      "check": "file-exists",
-      "source_doc": "apps/sigil/sigil/ui/proof_export.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-consumer-shard-on-signup-ops",
-      "title": "Shard-placement-on-sign-up pins hard-prune: the spine snapshot seed does not yet carry shard-assignment rows",
-      "summary": "With VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD on and an owner shard topology (VIGIL_SHARD_IDS), every sign-up owner-signs a ShardPlacement (apps/sigil/sigil/governor/shard_on_signup.assign_on_signup, under the cross-process placement_lock), and 'sigil shard backfill' places tenants created before the switch was on -- all built and tested (test_shard_on_signup, test_shard_on_signup_provision). The operational limit of turning placement on: carrying shard-assignment rows into the spine snapshot seed is not yet built, so a hard prune (spine.prune) FAILS CLOSED past any active placement until the owner re-signs it above the prune point. It is fail-safe (a placement is never silently dropped by a prune), not a data-loss path; the only consequence is that, with a placement per sign-up, the oldest active placement bounds how far hard-prune advances until the seed carries shard rows. Default-OFF: with the flag off no placement is minted and prune is unaffected (byte-identical).",
-      "classification": "doc-only",
-      "severity": "low",
-      "anchor": {
-        "file": "apps/sigil/sigil/governor/shard_on_signup.py",
-        "symbol": "assign_on_signup"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
-      "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
-      "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
-      "classification": "real-unfinished-code",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/ui/saml.py",
-        "symbol": "signxml_sig_verifier"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "apps/sigil/sigil/ui/saml.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
-      "id": "LIMIT-report-pdf-renderer-unprovisioned",
-      "title": "The customer report's PDF download needs an owner-provisioned HTML-to-PDF renderer that lives outside the customer venv",
-      "summary": "PR-G (Area 6). The shareable assessment report is built in the sovereign venv as a deterministic, self-contained HTML document that is complete on its own (VIGIL_CUSTOMER_PDF_REPORT, default OFF). Its PDF form needs a headless HTML-to-PDF renderer: a large native dependency that must NOT be installed in the customer/sovereign venv (FATAL-2 and dependency hygiene), so providing it is an owner/ops step: install the reference wrapper tools/report_pdf/render_pdf.py with its library in a dedicated environment and set VIGIL_REPORT_PDF_RENDERER to its absolute path. Until then the PDF download REFUSES with a customer-safe message (fail-closed) and the HTML download is unaffected. The seam itself is built and tested with a stand-in renderer: the path must be absolute, a regular executable that no group/other may write, and outside the running venv; it runs with a fixed argv (no shell), a minimal environment (no secret reaches it), a private temporary directory, a wall-clock timeout that kills its whole process group, an output-size cap, and a %PDF-/%%EOF check on what it returns. No real renderer runs in CI, so the visual fidelity of the PDF is not claimed here.",
-      "classification": "doc-only",
-      "severity": "info",
-      "anchor": {
-        "file": "apps/sigil/sigil/ui/report_pdf.py",
-        "symbol": "renderer_path"
-      },
-      "marker": true,
-      "check": "symbol-exists",
-      "source_doc": "tools/report_pdf/render_pdf.py",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    }
-  ],
-  "honest_limit_sites_note":"The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
-  "honest_limit_sites": [
-    {
-      "file": "engine/crucible/framework/v2/attest/__init__.py",
-      "snippet": "hardware-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-attest-tee-hardware",
-      "note": "TEE backends-are-stubs summary in the package docstring."
-    },
-    {
-      "file": "engine/crucible/framework/v2/attest/provider.py",
-      "snippet": "hardware-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-attest-tee-hardware",
-      "note": "SEV-SNP/TDX hardware-gated stub docstrings, raise message and backend name."
-    },
-    {
-      "file": "engine/crucible/framework/v2/attest/provider.py",
-      "snippet": "those are stubs",
-      "kind": "debt",
-      "limit_id": "LIMIT-attest-tee-hardware",
-      "note": "Module docstring: the TEE backends are honestly-labelled stubs."
-    },
-    {
-      "file": "engine/crucible/framework/v2/attest/provider.py",
-      "snippet": "SEV-SNP/TDX attestation is a stub",
-      "kind": "debt",
-      "limit_id": "LIMIT-attest-tee-hardware",
-      "note": "Continuation of the VIGIL-LIMIT marker docstring for the TEE-hardware limit."
-    },
-    {
-      "file": "engine/crucible/framework/v2/agent_body/__init__.py",
-      "snippet": "research-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-agent-body-scaffold",
-      "note": "Package docstring: interface-only, research-gated scaffold."
-    },
-    {
-      "file": "engine/crucible/framework/v2/agent_body/interface.py",
-      "snippet": "research-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-agent-body-scaffold",
-      "note": "Module docstring: SCAFFOLD, research-gated, wires no engine."
-    },
-    {
-      "file": "engine/crucible/framework/v2/agent_body/interface.py",
-      "snippet": "is a scaffold",
-      "kind": "debt",
-      "limit_id": "LIMIT-agent-body-scaffold",
-      "note": "AgentBody is abstract because it is a scaffold."
-    },
-    {
-      "file": "engine/crucible/framework/v2/graph/store.py",
-      "snippet": "deploy-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-neo4j-deploy-gated",
-      "note": "Neo4jGraphStore live construction is deploy-gated (marker + prose)."
-    },
-    {
-      "file": "engine/crucible/framework/v2/remediation_binary/__init__.py",
-      "snippet": "research-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-symbolic-crash-repair",
-      "note": "Package docstring: patch synthesis (CRS engine) is a research-gated stub."
-    },
-    {
-      "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
-      "snippet": "research-gated",
-      "kind": "debt",
-      "limit_id": "LIMIT-symbolic-crash-repair",
-      "note": "The research-gated CRS/symbolic-synthesis tier docstrings and raise messages."
-    },
-    {
-      "file": "engine/crucible/framework/v2/console/api.py",
-      "snippet": "NOT wired into the VIGIL plane",
-      "kind": "debt",
-      "limit_id": "LIMIT-container-kill-unwired",
-      "note": "container_kill docstring: force-remove has no VIGIL caller."
-    },
-    {
-      "file": "engine/crucible/framework/v2/console/api.py",
-      "snippet": "container-level kill (force-remove the sandbox container) is not wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-container-kill-unwired",
-      "note": "container_kill user-facing note: declared UNAVAILABLE."
-    },
-    {
-      "file": "engine/crucible/framework/v2/report/runinfo.py",
-      "snippet": "does not yet write a structured findings record",
-      "kind": "debt",
-      "limit_id": "LIMIT-posture-no-structured-findings",
-      "note": "cloud/k8s/infra posture assessments record no structured findings/proofs."
-    },
-    {
-      "file": "engine/crucible/framework/v2/scanner/fingerprint.py",
-      "snippet": "the table is a stub",
-      "kind": "debt",
-      "limit_id": "LIMIT-favicon-fingerprint-stub",
-      "note": "favicon fingerprint table is illustrative fixtures; matches scored conservatively."
-    },
-    {
-      "file": "apps/sigil/sigil/perception/capture.py",
-      "snippet": "documented seam, not wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-a11y-capture-unwired",
-      "note": "accessibility-tree capture path not wired on headless hosts."
-    },
-    {
-      "file": "apps/sigil/sigil/gesture/session.py",
-      "snippet": "native path not wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-gesture-native-inject-unwired",
-      "note": "macOS/Windows native input injection path not wired; backend honestly inert."
-    },
-    {
-      "file": "engine/crucible/framework/v2/engage_autonomous.py",
-      "snippet": "deliberately NOT wired here",
-      "kind": "non-debt",
-      "note": "Deliberate architectural choice: the LLM CritiqueAgent is intentionally not wired into this sinks-construction path. Not deferred work."
-    },
-    {
-      "file": "engine/crucible/framework/v2/engage_autonomous.py",
-      "snippet": "does not yet have a confirmed finding",
-      "kind": "non-debt",
-      "note": "Describes the runtime state of a hypothesis node (no confirmed finding yet), not a capability limit."
-    },
-    {
-      "file": "engine/crucible/framework/v2/veracity/firewall.py",
-      "snippet": "note that outlives",
-      "kind": "non-debt",
-      "note": "Meta-prose about keeping the WHERE-THIS-IS-WIRED note current; it is not itself a limit."
-    },
-    {
-      "file": "integration/vigil_integration/attestation/anchor.py",
-      "snippet": "does not yet exist",
-      "kind": "non-debt",
-      "note": "Describes a runtime state (the per-host counter file is absent on first write), not a capability limit."
-    },
-    {
-      "file": "tools/backup/transport.py",
-      "snippet": "none is a stub",
-      "kind": "non-debt",
-      "note": "Explicitly asserts all THREE backup backends (local/rsync/s3) are REAL (the opposite of a stub)."
-    },
-    {
-      "file": "tools/ha/require_networkpolicy.py",
-      "snippet": "not wired into the kustomization",
-      "kind": "non-debt",
-      "note": "Describes the TARGET condition this HA check detects (a NetworkPolicy the operator did not wire), not a VIGIL capability limit."
-    },
-    {
-      "file": "tools/ha/require_probes.py",
-      "snippet": "not wired to /readyz",
-      "kind": "non-debt",
-      "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."
-    },
-    {
-      "file": "engine/crucible/framework/v2/engage.py",
-      "snippet": "not wired yet",
-      "kind": "debt",
-      "limit_id": "LIMIT-profile-packs-incremental",
-      "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."
-    },
-    {
-      "file": "integration/vigil_integration/live/tls_breadth.py",
-      "snippet": "BUILT, TESTED, **NOT WIRED**",
-      "kind": "debt",
-      "limit_id": "LIMIT-tls-certificate-validity-unwired",
-      "note": "Module docstring, claim 4 of 4: certificate defects are derived but not on any live path."
-    },
-    {
-      "file": "integration/vigil_integration/live/tls_breadth.py",
-      "snippet": "BUILT AND TESTED, **NOT WIRED**",
-      "kind": "debt",
-      "limit_id": "LIMIT-tls-certificate-validity-unwired",
-      "note": "Guard comment above the derivation: no re-drive admits to the branch and no capture stamps the instant."
-    },
-    {
-      "file": "integration/vigil_integration/live/tls_breadth.py",
-      "snippet": "Nothing in the product calls this on live evidence",
-      "kind": "debt",
-      "limit_id": "LIMIT-tls-certificate-validity-unwired",
-      "note": "classify_certificate_defects docstring: states the inertness and what wiring it would require."
-    },
-    {
-      "file": "integration/vigil_integration/live/runtime_redrive.py",
-      "snippet": "LEAD PROPOSERS (not wired here)",
-      "kind": "non-debt",
-      "note": "Deliberate doctrine, not debt (M-11.2 credential arm): hydra/john are EXTERNAL LEAD proposers and are intentionally never wired as FACT-minting tool executors — a credential FACT comes only from VIGIL's own gated re-drive + the credential_acceptance oracle. The arm consumes the operator-planted TEST corpus, never a recovered real-user secret."
-    },
-    {
-      "file": "integration/vigil_integration/live/runtime_redrive.py",
-      "snippet": "EXTERNAL LEAD PROPOSERS (not wired",
-      "kind": "non-debt",
-      "note": "Same deliberate doctrine in the credential_acceptance_redrive docstring: hydra/john stay external LEAD proposers; the FACT is VIGIL-owned (the oracle re-fires over VIGIL's own gated capture). Not deferred work."
-    },
-    {
-      "file": "apps/sigil/sigil/cli.py",
-      "snippet": "auto-void was not wired this slice",
-      "kind": "non-debt",
-      "note": "Deliberate design decision, not debt (M-11 EvalCapabilityGrant FIX C2/F): the `sigil eval-grant status` budget_note states honestly that a durable spine-anchored covered-action AUTO-VOID was DROPPED this slice (the resettable http_executor process counter is deliberately NOT used, as it would be a trivial reset-to-arm fail-open). max_covered_actions stays signed+PoP-bound and attributable, and the grant's REAL durable ceiling is fully enforced by the four void_conditions listed alongside it (owner revoke + offense-gate/engagement close + per-engagement kill-switch + signed engagement scope + the covering attestation not_after). A capability consciously scoped out with its security ceiling complete by other means, not deferred/unfinished code."
-    },
-    {
-      "file": "apps/sigil/sigil/ui/assessments.py",
-      "snippet": "does not yet carry a signed",
-      "kind": "debt",
-      "limit_id": "LIMIT-evidence-empty-engagement-slug",
-      "note": "The customer assessment API (Slice K) surfaces FINDINGS only; a detection FACT is withheld because its certificate carries no signed engagement_slug (it cannot be per-engagement-confined — symmetric with finding_receiver.ingest_detection), the same unsigned/empty engagement_slug root the evidence single_engagement limit tracks. Detections return once the detection cert declares a signed slug."
-    },
-    {
-      "file": "packages/core/vigil_core/vigil_core/credit_lease.py",
-      "snippet": "not wired into the live launch-gate money path yet",
-      "kind": "non-debt",
-      "note": "Deliberate design decision, not debt (EC-4 per-tenant token-cost envelope ledger): the cost ledger ships as a DEFAULT-OFF primitive BY DESIGN, per the money doctrine that money-doctrine numbers — here ENVELOPE_TOKENS_PER_CREDIT, the credit->token conversion E — stay behind default-OFF placeholders until explicit owner ratification, so no unratified money number can drive production spend. The primitive itself is complete, owner-signed, mutation-verified and prune-durable (governor/cost_ledger.py + the v9 snapshot fold + the two spine/prune.py tripwires); it is simply not yet consulted by the live gate. Wiring it into the live launch-gate money path (reserve on reserve_launch, settle from the ACTUAL recorded tokens on settle_launch) + the EC-5 global pool meter + the keyless engine's actual-token delivery is the planned EC-4b increment, not unfinished/deferred debt."
-    },
-    {
-      "file": "apps/sigil/sigil/spine/snapshot.py",
-      "snippet": "`sigil restore` does not yet restore a hard-pruned spine",
-      "kind": "debt",
-      "limit_id": "LIMIT-restore-hard-pruned-spine",
-      "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
-    },
-    {
-      "file": "apps/sigil/sigil/spine/checkpoint.py",
-      "snippet": "`sigil restore` does not yet restore a hard-pruned",
-      "kind": "debt",
-      "limit_id": "LIMIT-restore-hard-pruned-spine",
-      "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
-    },
-    {
-      "file": "apps/sigil/sigil/ui/provision.py",
-      "snippet": "Not wired by the factory yet",
-      "kind": "non-debt",
-      "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
-    },
-    {
-      "file": "apps/sigil/sigil/ui/proof_export.py",
-      "snippet": "clearance certificate does not yet reach this plane",
-      "kind": "debt",
-      "limit_id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
-      "note": "Consumer PR-I proof badge: the module docstring states that a remediation's signed NEGATIVE clearance certificate is not surfaced by the badge/export because no clearance certificate crosses to the customer plane until PR-K (Area 10) carries it; the badge and bundle speak for the positive finding certificate only."
-    },
-    {
-      "file": "apps/sigil/sigil/config.py",
-      "snippet": "deploy-gated and outside",
-      "kind": "debt",
-      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
-      "note": "customer_fair_queue_enabled + shard_ids docstrings: standing up the elastic we-host shard fleet the shard ids name is owner deploy work (Front C cross-host)."
-    },
-    {
-      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
-      "snippet": "deploy-gated and outside this module",
-      "kind": "debt",
-      "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
-      "note": "module docstring: standing up / scaling the cross-HOST we-host fleet, and the cross-host dispatch/copy, are owner deploy work (Front C cross-host)."
-    },
-    {
-      "file": "apps/sigil/sigil/governor/shard_on_signup.py",
-      "snippet": "not yet built",
-      "kind": "debt",
-      "limit_id": "LIMIT-consumer-shard-on-signup-ops",
-      "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
-    }
-  ]
+  {
+   "id": "RVC-use-library-ui-scan",
+   "name": "A UI-launched scan silently skipped ~93% of the check corpus",
+   "summary": "console.actions.launch_scan did not honour use_library, so a UI scan ran only the 11 default checks, not the ~172-check declarative library. Re-verified closed: it now passes use_library and appends --library.",
+   "evidence": "docs/decisions/W16-4-default-check-corpus.md"
+  },
+  {
+   "id": "RVC-crash-resume",
+   "name": "Engagement crash/restart resume",
+   "summary": "Re-verified closed: the live engine resumes from a signed checkpoint after a crash/restart, pinned by an in-process resume test and the crash-restart release-gate test.",
+   "evidence": "integration/tests/test_engine_resume.py"
+  },
+  {
+   "id": "RVC-k8s-rbac-livefire",
+   "name": "Kubernetes RBAC exploitation had no live-fire proof",
+   "summary": "Re-verified closed: the two K8s RBAC branches are adjudicated over bytes a real k3s API server produced by a harness VIGIL stands up, owns, and destroys. The harness now runs in a scheduled (nightly, non-blocking) CI job (W11-2 #483) rather than by hand; the required-CI guarantee is narrower and honestly so — the fail-closed-on-missing-tool preflight (tools/livefire/require_tools.py) that guards it, not the nightly cluster run itself.",
+   "evidence": "tools/livefire/k8s_rbac_livefire.py"
+  },
+  {
+   "id": "RVC-console-credential-gate",
+   "name": "The console/legacy-owner-token credential surface",
+   "summary": "Re-verified closed: the legacy owner token is gated for PRODUCTION posture and the UI proxy enforces per-user authentication.",
+   "evidence": "integration/tests/test_uiproxy_peruser_auth.py"
+  },
+  {
+   "id": "RVC-per-action-approval-token",
+   "name": "Signed per-action approval token",
+   "summary": "Re-verified closed: the signed per-action approval token and broker ship and are wired to vigil approve provision-authority|list|sign, despite an older doc marking it absent.",
+   "evidence": "integration/vigil_integration/live/approval_token.py"
+  },
+  {
+   "id": "RVC-sandbox-exec-wiring",
+   "name": "execute_sandbox / vigil sandbox wiring",
+   "summary": "Re-verified closed: the sandboxed executor and its vigil sandbox verb are wired and tested.",
+   "evidence": "integration/tests/test_executor_sandbox.py"
+  },
+  {
+   "id": "RVC-neo4j-client-body",
+   "name": "Neo4jGraphStore is only a scaffold",
+   "summary": "Re-verified closed: Neo4jGraphStore is a real, reviewable client body behind the same interface (its live construction is deploy-gated on the neo4j driver, which is a separate, honestly-recorded residual).",
+   "evidence": "engine/crucible/framework/v2/graph/store.py"
+  },
+  {
+   "id": "RVC-k8s-workload-oracle-wired",
+   "name": "k8s_workload_posture_oracle is not wired into the verifier",
+   "summary": "Re-verified closed: the oracle is wired into the verifier run path (gated on k8s_workload_control in the context); the doc claiming it unwired was the defect.",
+   "evidence": "engine/crucible/framework/v2/verify/verifier.py"
+  },
+  {
+   "id": "RVC-warden-strix-fail-closed",
+   "name": "The WARDEN gate on Strix's shell",
+   "summary": "Re-verified closed: the WARDEN gate on Strix's tool/shell surface is fail-closed (an unknown/unclassified tool is denied, not auto-run).",
+   "evidence": "integration/vigil_integration/warden_gate.py"
+  },
+  {
+   "id": "RVC-console-orphan-routes",
+   "name": "Console orphan routes",
+   "summary": "Re-verified closed: the orphan-route class was paid down (B7/A6) and is now guarded by the W17-14 orphan-route guard, so a new orphan route turns CI red.",
+   "evidence": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py"
+  },
+  {
+   "id": "RVC-a12-request-smuggling-timing-lead",
+   "name": "Audit A12 (#269) — the request-smuggling TIMING mint. Closed; the class itself stays a LEAD",
+   "summary": "SCOPE: what is re-verified closed here is A12's DEFECT — that a bare TIMING anomaly minted a High request_smuggling FACT. That mint is deleted and guarded: scanner.smuggling.detect labels its own result severity Low / 'TIMING LEAD' / UNCONFIRMED, scanner.campaign._smuggling_leads no longer builds any latency FindingContext, and a hanging origin is pinned to produce no finding. NOT CLOSED, and explicitly re-opened by the audit-A red-pen (B1): the Wave-4.2 replacement — a single-connection canary DIFFERENTIAL minting a DIFFERENTIAL_RESPONSE FACT at conf 0.95 — is itself an overclaim, because CWE-444 is two parsers disagreeing and the differential is observed on the one connection VIGIL pipelined the smuggled prefix onto. A benign single origin with no proxy (TE preferred over CL per RFC 9112 6.1, keep-alive pipelining, a stock path-echoing 404) reproduces it, and two ORDINARY pipelined requests with no framing conflict produce the identical canary echo. request_smuggling is therefore LEAD-only on every VIGIL path today; request_smuggling.differential_desync is fact_capable=false with the cross-connection, operator-authorised co-tenant probe named as blocking_work.",
+   "evidence": "engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py"
+  }
+ ],
+ "limitations": [
+  {
+   "id": "LIMIT-attest-tee-hardware",
+   "title": "Hardware-backed (TEE) attestation is a hardware-gated stub",
+   "summary": "SEV-SNP / TDX attestation providers exist behind the AttestationProvider interface but every method fails closed with NotImplementedError. The SoftwareAttestationProvider proves integrity + origin, never hardware confidentiality; hardware_backed is always False on that path.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/attest/provider.py",
+    "symbol": "_HardwareGatedProvider.attest"
+   },
+   "marker": true,
+   "check": "stub-raises",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-symbolic-crash-repair",
+   "title": "General automated native-patch synthesis (cyber-reasoning system) is not built",
+   "summary": "SymbolicCrashRepairTier is a full stub behind the BinaryPatchTier interface; SanitizerSilenceTier proves a fix by oracle silence but its output-based synthesize_patch also raises. The narrow strcpy->strncpy source synthesiser is real; an unrecognised class fabricates no patch.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+    "symbol": "SymbolicCrashRepairTier.synthesize_patch"
+   },
+   "marker": true,
+   "check": "stub-raises",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-sanitizer-output-synthesis",
+   "title": "Output-based sanitizer patch synthesis is not built",
+   "summary": "SanitizerSilenceTier.synthesize_patch (the output-based synthesis interface) raises NotImplementedError; the tier's value is proving a fix by oracle silence, not generating it.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+    "symbol": "SanitizerSilenceTier.synthesize_patch"
+   },
+   "marker": true,
+   "check": "stub-raises",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-neo4j-deploy-gated",
+   "title": "The Neo4j graph store's live construction is deploy-gated",
+   "summary": "Neo4jGraphStore is a real client body, but constructing a LIVE store with no injected driver raises NotImplementedError until the neo4j driver package and a running service are provisioned. EmbeddedGraphStore is the working default.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/graph/store.py",
+    "symbol": "Neo4jGraphStore.__init__"
+   },
+   "marker": true,
+   "check": "stub-raises",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-agent-body-scaffold",
+   "title": "The pluggable next-gen agent-body is an interface-only scaffold",
+   "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/agent_body/interface.py",
+    "symbol": "AgentBody"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-llm-redteam-tools-deferred",
+   "title": "LLM red-team tool live-fire (garak / PyRIT / promptfoo) is tooling-gated",
+   "summary": "The external-tool runner is tool-agnostic and live-proven with nmap, but garak/PyRIT/promptfoo are absent from this environment, so their live-fire is deferred and no garak/PyRIT/promptfoo FACT is minted. A new ToolSpec (+ oracle mapping for a non-reachability signal) is all a new tool needs.",
+   "classification": "real-unfinished-code",
+   "severity": "medium",
+   "anchor": {
+    "file": "integration/vigil_integration/live/external_tool.py",
+    "symbol": "run_external_tool"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-cloud-exploit-fixture-proven",
+   "title": "Cloud exploitation branches (E1/E2/E3/E5) are fixture-proven, not live-fired",
+   "summary": "The IMDS-capture, IAM-escalation, GCP SA-impersonation and secret-validity branches are proven offline over fixtures; no live cloud FACT has been claimed and none exists in the evidence store. Each branch's limitation string in the evidence-branches registry governs admission, so the deferral is enforced, not merely described. Activation needs an operator-provisioned throwaway lab credential.",
+   "classification": "real-unfinished-code",
+   "severity": "medium",
+   "anchor": {
+    "file": "docs/capability-matrix/evidence-branches.json"
+   },
+   "marker": false,
+   "check": "doc-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-audit-package-reproduction",
+   "title": "The offline audit package re-derives EVERY portable (stdlib+cryptography) oracle verdict standalone; only three oracles remain genuinely irreducible (their import-closure needs a non-stdlib module)",
+   "summary": "verify_offline.py / docs/proof-carrying-finding/verify_vf.py re-verify authenticity + binding + integrity + chain with no VIGIL runtime AND re-fire (Step 2) every oracle whose body is PURE (import-closure = stdlib + the one Ed25519 lib, cryptography), re-deriving the verdict from the retained oracle_context with nothing installed: the SIX posture oracles (reexecute_posture_oracle), the ACHIEVED_STATE predicate kernel, the GENERAL web-vuln families (reexecute_general_oracle: differential_response (+ smuggling_desync), timing, boolean_inference, side_effect, reflection_context, evaluation (+ ssi), error_signature, sanitizer_signal, system_prompt_disclosure, prompt_injection, sql/command/nosql_injection_breakout, weak_crypto_artifact, prototype_pollution), and — this slice (Lane C/G1) — the former A-prime residual, now ALL ported byte-faithfully: service_reachability, tls_weakness (live-handshake path), active_exposure, dom_execution (+ csp_bypass), credential_stuffing, automated_access/honeypot, jwt_forgery (HS/structural), static_rule, session_fixation, mfa_bypass, password_reset_invariant, csrf_achieved, workflow_abuse, the client-side posture oracles (clickjacking/csrf/postmessage/csp), email_auth/identity posture, certificate_validity (cryptography.x509 DER parse), mobile_posture (cryptography key classification), credential_acceptance, and the WARDEN-gated cloud/cluster capture oracles (imds/secret/gcp/iam/k8s_rbac). Each ported body is a byte-for-byte copy of framework.v2.verify.oracles, pinned to the in-tree oracle on BOTH fired AND conclusive by integration/tests/test_general_reexecutable.py (an oracle-level battery + a dispatch SOUND/FORGE-A-FALSE harness over real retained evidence). HONEST BOUND (unchanged, same as posture): re-firing proves the verdict is the correct FUNCTION of the retained evidence, not that the evidence reflects the live target (a live re-run is still required for that). Re-execution is over RETAINED evidence, so a family whose LIVE capture needed a socket/browser/subprocess/cloud-API is still PURE at re-exec (it reads retained bytes); that is why the capture oracles are portable. What REMAINS genuinely IRREDUCIBLE is EXACTLY three oracles whose re-fire import-closure needs a module NOT in stdlib + cryptography — version_range (packaging), saml_forgery (signxml / lxml), and oob_callback (the framework verify.oob receipt-verification backing an EXTERNAL collector). These are NAMED here, never faked as reproduced; their re-verification rests on the signature + an in-VIGIL re-run (the sound maximum). The classification is enforced OBJECTIVELY by import-closure and PINNED by integration/tests/test_general_reexecutable.py::test_bucket_classification_is_enforced (_PORTED must be stdlib-closure and callable in verify_vf; _PURE_BUT_DEFERRED is now EMPTY; the irreducible set must be EXACTLY those three). This limitation is NOT claimed closed — the function-of-retained-evidence bound and the three-oracle irreducible boundary are named precisely.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "docs/proof-carrying-finding/verify_vf.py",
+    "symbol": "reexecute_general_oracle"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-evidence-empty-engagement-slug",
+   "title": "single_engagement guard discards an empty engagement_slug",
+   "summary": "A certificate with an empty engagement_slug can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only; it still requires a governance-signed head over the mixed chain. Deferred so uniform legacy empty-slug bundles under a named head keep verifying.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/evidence/certify.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-evidence-producer-refs-unique",
+   "title": "The evidence producer does not yet guarantee unique finding_refs",
+   "summary": "The verifier refuses a bundle with duplicate finding_refs (closing a context-lookup collision), but the producer can still fall back to bug_class, so a legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: key/emit unique refs at the producer.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "integration/vigil_integration/proof/bundle.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-field-record-accrual",
+   "title": "The field record accrues only over real authorized engagements",
+   "summary": "Deterministic-scanner recall is MEASURED (M1) on a planted loopback corpus; a genuine field record of finding real bugs on diverse authorized real targets is not manufacturable in a lab and this repo does not claim one exists. State the planted-corpus number and any field record separately; never word an accruing record as completeness.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "docs/H3-FIELD-RECORD-RUNBOOK.md"
+   },
+   "marker": false,
+   "check": "doc-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-external-audit-team",
+   "title": "The independent third-party audit needs an external team",
+   "summary": "VIGIL prepares a reproducible, offline-verifiable audit package, but it cannot BE the independent third party. That conclusion is the external auditor's to write; it is a property of the world, not unfinished code.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "docs/DEFERRED-INFRA.md"
+   },
+   "marker": false,
+   "check": "doc-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-spine-seal-at-capture",
+   "title": "Seal-at-capture is wired: credential excerpts on the append-only spine are sealed under the per-engagement DEK before they are written",
+   "summary": "CLOSED (wave-a/waveA1-seal). Seal-at-capture is now wired at the single append-only writer: Blackboard.post seals ObservationPayload.raw_excerpt and ResultPayload.body_excerpt under the per-engagement DEK (crypto_shred.seal_excerpt) BEFORE the row is written, so a credential excerpt never reaches the spine in plaintext; every in-engagement reader unseals transparently (Blackboard.reveal_excerpt: hypothesis-agent, the console Live tailer, the tier-3 audit observation), and after a crypto-shred the excerpt is unrecoverable while the append-only row and the spine hash-chain stay byte-for-byte unchanged. Proven end-to-end (seal -> reveal -> shred) by engine/crucible/framework/v2/agents/tests/test_spine_seal_at_capture.py, alongside the existing evidence_dir shred proof in test_evidence_erasure.py. RESIDUALS (honest scope): (1) FindingPayload.oracle_context is retained in plaintext on the spine because framework.v2 verify re-fires over it offline; it is intentionally NOT sealed by this slice (sealing it would need a verify-path-aware unseal), so a credential reflected inside a retained proof remains plaintext and is tracked as a separate, narrower concern. (2) Only captures written AFTER this wiring are sealed; append-only rows written before it cannot be retroactively sealed without rewriting them (which would break tamper-evidence), so a legacy spine's pre-wiring excerpts remain as they were, while every fresh engagement is fully protected. (3) The console Live tailer opens its own Blackboard/keyring and reveals excerpts only when its evidence_keys_dir resolves to the same path as the engine's (the default in a single-host deployment); if an operator splits the keystore across the two processes, the Live view shows the redacted placeholder rather than plaintext -- a display-availability caveat, never a leak and never a crash.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/agents/blackboard.py",
+    "symbol": "Blackboard._seal_excerpt_in_place"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/PRIVACY.md",
+   "disposition": "re-verified-closed",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-posture-no-structured-findings",
+   "title": "Cloud / Kubernetes / infrastructure posture assessments record no structured findings or retained proofs",
+   "summary": "The cloud, k8s and infra OperationTypes record only that a run happened and their own summary text; they do not yet write a structured findings record or retained proofs the way a web test does (records_findings=False, records_proofs=False). A deploying institution running these gets narrative output, not graded findings.",
+   "classification": "real-unfinished-code",
+   "severity": "medium",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/report/runinfo.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "engine/crucible/framework/v2/report/runinfo.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-container-kill-unwired",
+   "title": "Container-level kill of the Strix sandbox is not wired into the VIGIL plane",
+   "summary": "The vendored kill_run exists but has no VIGIL caller, so a force-remove of the sandbox container is honestly declared UNAVAILABLE in the console rather than shown as a working control. Orphaned containers are reaped at the next launch; the engagement kill-switch (halts the loop) and process-stop (ends the host pid) are the working controls.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/console/api.py",
+    "symbol": "_strix_killswitch_state"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/framework/v2/console/api.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-favicon-fingerprint-stub",
+   "title": "The favicon-fingerprint table is an illustrative stub, not a crawled corpus",
+   "summary": "_KNOWN_FAVICONS holds a handful of illustrative fixture entries so the fingerprint code path is real and deterministically testable; a production build would hash real product favicons from a crawled corpus. Because the table is a stub, favicon matches are scored conservatively and never mint a high-confidence technology fact.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/scanner/fingerprint.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "engine/crucible/framework/v2/scanner/fingerprint.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-a11y-capture-unwired",
+   "title": "The richer accessibility-tree capture path is a documented seam, not wired",
+   "summary": "SIGIL perception captures the screen via a screenshot tool + OCR (grab_screen); the richer accessibility-tree path (C4) is a documented seam that is not wired, so on headless hosts with no screenshot tool grab_screen returns None rather than falling back to an a11y tree.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/perception/capture.py",
+    "symbol": "grab_screen"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/perception/capture.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-gesture-native-inject-unwired",
+   "title": "Native gesture/input injection on macOS and Windows is not wired (backend is honestly inert)",
+   "summary": "SIGIL's gesture session injects input via a platform backend; the macOS/Windows native path is not wired (and Linux needs ydotool/xdotool). A backend whose available() is False is honestly INERT: it no-ops, and an injection is never recorded/returned as done when it physically did nothing.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/gesture/session.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "apps/sigil/sigil/gesture/session.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-target-authz-owner-anchor-writable",
+   "title": "The target-authorization owner anchor + trust root live under the offense-writable root",
+   "summary": "Phase 1.c ties a UI-authorized target to the PINNED owner key AT INSTALL, and the launch gate verifies the authority against the on-disk trust root. Both the owner-pubkey anchor (the .vigil-live seam) and the persisted .authority-root trust root live, by default, under paths a full owner-uid filesystem-write actor could rewrite — such an actor could plant their own trust root + self-signed authority, and is outside the meaningful threat model (they could equally edit code, the kill-switch, or the keys). The install-time owner-pin raises the bar from 'write a plaintext charter' to 'produce an owner-signed authority whose trust root is the pinned owner key over the target host'. Closing even the full-FS-write case is a DEPLOYMENT choice (not unfinished code): anchor the launch-gate authority root out-of-band on a read-only / HSM-backed .authority-root mount via VIGIL_AUTHORITY_ROOT_DIR. This is now VISIBLE — `vigil doctor`'s authority-root-anchor posture line reports DEFAULT-IN-TREE vs OUT-OF-BAND — and DOCUMENTED in docs/runbooks/anchor-trust-root-out-of-band.md (incl. the caveat that the trust root must be CLI-provisioned before the mount is made read-only). The hard root pin (CRUCIBLE_ROOT_STRICT, claim PHASE1-5) additionally prevents a sentinel-less root from silently resolving elsewhere.",
+   "classification": "doc-only",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/console/actions.py",
+    "symbol": "_install_target_authorization"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/runbooks/anchor-trust-root-out-of-band.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-profile-packs-incremental",
+   "title": "The deep/full engagement profile names packs wired incrementally across the FACT-coverage waves",
+   "summary": "Wave 0.2 ships `--profile {surface,deep,full}` as additive-only flag expansion (resolve_profile), and the enable_* passes the roster flips (browser DOM/stored-XSS, SSO acceptance, GraphQL amplification; full adds the operator-spec access-control pack) were wired end-to-end into engage.py by slice 0.2 and the earlier waves that built each pass. Wave 6's diff does NOT touch engage.py: it added the benchmark-side profile mirror (_PROFILE_ROSTER) plus the corpus-wide zero-FP gate (zero_fp_gate) and fixed the browser DOM-XSS endpoint field, so the whole deep/full roster is now proven zero-FP corpus-wide. As of Wave 6 the deep/full rosters STILL name some packs that have no dedicated enable_* flag and so remain profile-deferred — deep names time-based / NoSQL / LDAP / XPath SQLi, full additionally names business-logic and race; _PROFILE_DEFERRED lists them. resolve_profile expands to NOTHING for a not-yet-wired name (it never invents a pack), and the profile manifest + an operator note surface the gap so it is visible and auditable. Wiring a dedicated profile enable_* flag (and any missing pack) for these remaining names is a later-wave item; the profile stays pure flag-expansion until then.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/engage.py",
+    "symbol": "resolve_profile"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/capability-matrix/ORACLE-RECIPE.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-dns-oob-resolver-ip-not-target-ip",
+   "title": "The DNS OOB collector records the RESOLVER's source IP, not the target's",
+   "summary": "A blind DNS callback to <token>.<base-domain> reaches the authoritative DNS collector via the target's RECURSIVE RESOLVER, so the client_ip on the recorded OOBHit is the resolver's, not the target's. This is a property of DNS, not unfinished code. The FACT still holds because the correlator is the UNIQUE per-probe secret token (secrets.token_hex(16)) embedded in the callback host — a DNS query VIGIL did not cause cannot carry it — not the source IP. Documented on the oob_callback.dns_collector evidence branch and in ARCHITECTURE.md / OPERATOR-GUIDE.md.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+    "symbol": "DNSCollector"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/capability-matrix/evidence-branches.json",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
+   "title": "The DNS OOB collector assumes an operator-owned domain whose NS delegate to it",
+   "summary": "The authoritative DNS collector confirms a DNS-only interaction only when the base domain it serves is an operator-OWNED domain whose NS records delegate to the collector's public IP (UDP :53). This is a deployment assumption (own + delegate a domain), a property of the deployment rather than unfinished code; without the delegation, no target resolver forwards <token>.<base-domain> to us. The CLI serve-dns subcommand prints the exact NS-delegation instructions. Documented on the oob_callback.dns_collector evidence branch.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+    "symbol": "DNSCollector"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/capability-matrix/evidence-branches.json",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-dns-oob-proves-resolution-not-completed-connection",
+   "title": "A DNS lookup proves resolution reached us, not that a full connection completed",
+   "summary": "A fired DNS OOB FACT proves the target's resolver forwarded a token-bearing lookup to the authoritative collector — i.e. resolution reached us — NOT that a full HTTP (or other) connection then completed. This is a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof, and a property of the DNS channel rather than unfinished code. It is exactly why DNS-only confirmation is valuable against a target that blocks outbound HTTP but still resolves. Documented on the oob_callback.dns_collector evidence branch.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+    "symbol": "DNSCollector"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/capability-matrix/evidence-branches.json",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-dns-oob-token-cleartext-broadcast",
+   "title": "A DNS OOB token is broadcast in cleartext, so token-only (VF-2a) is forgeable within the window",
+   "summary": "A DNS out-of-band correlation token rides as a QNAME label, broadcast in cleartext to every recursive/forwarding resolver on the path and captured by passive-DNS, so token equality alone (VF-2a) does NOT prove the target emitted the lookup — anyone who observes the query can replay the label within the window. This is why a DNS OOB FACT REQUIRES the VF-2b independent-collector receipt (signed by an owner-pinned out-of-band key). Anti-replay for a receipt-bearing hit is bounded by the OWNER-SIGNED ENGAGEMENT WINDOW: the collector-signed, target-observed received_at must fall inside [not_before, not_after] (± skew) taken from the same signed EngagementAuthority as the pin, never from the producer context — this is NON-FORGEABLE and closes cross-engagement and gross-stale (e.g. year-1970 / prior-engagement) replay, and it cannot be slid because the producer cannot move an owner-signed window. (One precise corner: reusing the SAME owner-signed collector pin across two engagements whose authorized windows OVERLAP admits a receipt observed during the overlap in both — its signed received_at is temporally in-scope for each, so it degenerates into the intra-window residual below rather than a stale/out-of-scope replay; distinct collector pins or non-overlapping windows eliminate this corner.) The producer-recorded mint anchor issued_at is kept only as a best-effort intra-engagement freshness hint (it may narrow the window, never widen it, and is never the sole boundary); because the mint time is not cryptographically committed into the token, this is COARSE anti-replay: NOT tight anti-replay against a fully-dishonest producer WITHIN the window — a real receipt observed during the authorized window, re-presented later within the SAME window, remains indistinguishable. That residual is bounded to the owner-signed engagement window. The receipt + owner-signed window are what make the FACT sound, not token secrecy. A property of the DNS channel plus the uncommitted mint time, not unfinished code.",
+   "classification": "doc-only",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+    "symbol": "DNSCollector"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-tls-certificate-validity-unwired",
+   "title": "The legacy tls_breadth.classify_certificate_defects derivation is superseded and on no live path",
+   "summary": "TLS certificate-validity classification IS now wired on the live path (M1.3, commit 98b33744): OracleKind.CERTIFICATE_VALIDITY / verify.oracles.certificate_validity_oracle adjudicates a presented leaf's validity defects (expired / not-yet-valid against a retained instant, hostname-mismatch, structural self-signed), captured by external_tool._tls_cert_capture and re-driven via the certificate_validity BUG_CLASS_ORACLES row, so evidence branch tls_weakness.certificate_validity is now wired:true / fact_capable:true and a minted FACT re-verifies offline. What remains is the OLDER derivation this entry anchors: tls_breadth.classify_certificate_defects re-derives the same defect set from the retained leaf, deterministically and offline against a retained capture instant, but M1.3 wired a SEPARATE oracle rather than this function. So classify_certificate_defects is reviewed and tested yet on no live path (this module stamps no captured_at_epoch and no re-drive calls it) — superseded legacy code. The three tls_breadth.py honest-limit docstrings this entry still covers continue to describe that FUNCTION as BUILT/TESTED/NOT WIRED, which remains true of the function itself even though the capability is now served by the new oracle. Future work (file-into-w16): remove or consolidate the superseded derivation and the now-stale claim-4 prose in tls_breadth.py, then retire this entry together with its remaining sites.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "integration/vigil_integration/live/tls_breadth.py",
+    "symbol": "classify_certificate_defects"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-sigil-voice-probe-egress-not-gatewayed",
+   "title": "SIGIL sovereign-plane voice + credential-probe provider egress is sovereignty-tier-governed but not gateway-routed/redacted",
+   "summary": "M4.1 routes the SIGIL sovereign plane's cloud LLM egress (frontier vision upload + cloud memory consolidation) through the shared chokepoint vigil_core.ai_gateway.egress (classify -> redact -> audit), and the no-bypass guard (integration/tests/test_egress_no_bypass_guard.py) now scans apps/sigil to enforce it. Two sovereign-plane provider-egress classes are NOT routed through that chokepoint: (1) the ElevenLabs VOICE provider (voice.backends.ElevenLabsTts.synth sends TTS text; ElevenLabsAsr.transcribe sends STT audio; find_voices does a voice-library lookup) and (2) the credential-validation probes (platform.secret_probes, which POST a candidate key to a provider's metadata endpoint to validate it). Both are governed by the SIGIL sovereignty tier (sigil.sovereignty.assert_endpoint_permitted — an air-gapped/sovereign tier REFUSES them before any socket opens) and are honestly out of the LLM-gateway's scope: voice is a distinct egress class (audio synthesis/recognition; STT carries no text prompt to redact; TTS speaks SIGIL's own already-governed responses), and a probe deliberately sends the credential itself to verify it (redaction cannot help). The residual gap vs. the LLM sites: their accompanying text is not symmetrically masked and they emit no unified ai_gateway audit record. Future work (file-into-w16, the recorded blocking_work): route ElevenLabsTts.synth's text through a voice-aware egress case (redact the text, let audio bytes pass like image bytes) and emit a unified audit record for the voice + probe egress. The local PiperTts / WhisperAsr backends remain the sovereign zero-egress alternative.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "apps/sigil/sigil/voice/backends.py",
+    "symbol": "ElevenLabsTts.synth"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/SECURITY.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-capture-attestation-offense-plane",
+   "title": "NAMED FRONTIER (TM-B): reflection PD2 + in-process-capture families trust the keyless offense plane to not fabricate the captured operand",
+   "summary": "The reflection (REFLECTION_CONTEXT / PD2) and in-process-capture families — e.g. the runner-owned gated HTTP re-drive (live/web_redrive.py::web_redrive) that retains the in-band HTTP response operand an oracle then re-fires over — are SOUND against the normal gated pipeline and are function-correct over the retained evidence: offline re-verification re-derives the verdict from the captured bytes exactly. The named frontier (TM-B, classified here as real-unfinished-code because the sound close is a capability not yet built): a FULLY-COMPROMISED in-process OFFENSE-plane producer could fabricate the captured operand before the oracle ever sees it — the oracle re-fires faithfully over a forged input. This is NOT the normal threat model (the offense plane is keyless and cannot mint a trusted record; the sovereign plane verifies signatures and never loads offense code), so the class is not underclaimed: it is sound against every non-compromised pipeline. The sound close is a NON-OFFENSE capture-attestation collector (the VF-2b pattern applied to the in-band HTTP response) that stamps provenance outside the offense producer; signing the injection in-band would be theater (the compromised producer would sign the forgery too). This is the same irreducible owner-vault trust base as every signed artifact. Not built; recorded so it is never overclaimed as closed.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "integration/vigil_integration/live/web_redrive.py",
+    "symbol": "web_redrive"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/V2-LIMITATIONS.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-witness-quorum-action-gate-default-off",
+   "title": "M4.4 witness-quorum ACTION gate is wired into the live caller but DEFAULT-OFF; arming it is per-deployment policy configuration",
+   "summary": "M4.4 adds an OPT-IN, DEFAULT-OFF, DEMOTE-ONLY witness-quorum conjunct (6c) to the authority gate: when armed (authority/gate.py::authorize_action is passed witness_quorum_fn / witness_quorum_ack, evaluated by authority/witness_quorum_gate.py::witness_quorum_predicate over veracity/witness_quorum.py) it DENIES (denial_code witness_quorum) an otherwise-authorized action for which fewer than N-of-M independent oracle-witnesses corroborate. It is DEMOTE-ONLY (never widens authority), runs only as the final conjunct after every other leg clears, is byte-identical to the gate without it when unarmed (test_passing_none_kwargs_is_byte_identical_to_omitting_them), and adds NO OracleKind (still 49) and no _ALL_ORACLES change (still 15). The conjunct is now wired into the live engagement caller build_offense_gate (integration/vigil_integration/conjunctive_gate.py, via veracity/witness_quorum.py::load_quorum_config), unconditionally of any eval grant; it stays DEFAULT-OFF (no policy => load_quorum_config inactive => the gate does not enforce and is byte-identical). The remaining follow-on is per-deployment policy configuration (the critical-class set and N), not wiring.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/authority/witness_quorum_gate.py",
+    "symbol": "witness_quorum_predicate"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/V2-LIMITATIONS.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-restore-hard-pruned-spine",
+   "title": "sigil restore does not restore a hard-pruned spine",
+   "summary": "A hard-pruned spine is recovered from a file-level copy of SIGIL_HOME (the spine with its signed head and floor, together). Every reader refuses a pruned live window that no signed head anchors, so `sigil restore` of such a home fails closed rather than reading it as un-pruned. A path-aware staged restore of a pruned home (archive, head, floor and manifest verified as one unit) is planned.",
+   "classification": "real-unfinished-code",
+   "severity": "medium",
+   "anchor": {
+    "file": "apps/sigil/sigil/spine/snapshot.py",
+    "symbol": "_refuse_unanchored_prune"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-frontc-shard-cross-host-deploy",
+   "title": "Front C S2/S3 multi-shard routing + migration is proven in-repo but the cross-host dispatch/copy and the routing-edge wiring are owner deploy work",
+   "summary": "The owner-signed ShardAssignment record + fold, the pure routing resolver (tenant -> dedicated CRUCIBLE_ROOT on its shard, fail-closed on an unassigned tenant), the per-shard job-queue key, and the live-migration orchestrator (pause -> drain -> copy+hash-verify -> owner-signed epoch bump -> resume, crash-safe, idempotent, no split-brain) are all built and tested offline with two in-process shards (two root dirs), behind VIGIL_MULTI_SHARD (default-OFF, byte-identical singleton when off). What remains owner deploy and is NOT claimed here: the real cross-HOST copy/dispatch (the orchestrator's _copy_tree is a local shutil.copytree a deploy swaps for its host-to-host transport, which the same hash-verify + atomic-publish + epoch discipline then guards), the keyless routing-EDGE wiring (uiproxy/custui/provision) and the offense worker's assert_tenant_fleet_isolated startup call, and the S4 cluster acceptance at the owner's N. The production multi-shard flip stays the owner's, after S4 is green.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/governor/shard_routing.py",
+    "symbol": "resolve"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-cloud-connect-gcp-azure-verdict",
+   "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
+   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/governor/cloud_connect.py",
+    "symbol": "_VERIFIABLE_PROVIDERS"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-customer-cloud-posture-run",
+   "title": "A customer's connected cloud account is recorded read-only, but no gated posture run consumes the grant yet",
+   "summary": "Consumer PR-C records an owner-signed READ-ONLY cloud grant and exposes CloudConnectRegistry.assume_target, the default-deny read a later cloud-posture engagement consumes (the role + external id of an active, unexpired, owner-signed grant of a verifiable provider, for exactly that org/account). The engine-side consumer is not built: the existing live cloud sensor (engine/crucible/framework/v2/sensors/cloud_live.py) reads the HOST's own ambient identity, not a customer's cross-account role. Running posture for a customer is an engagement with the same owner go-live bar as live external targets (owner-signed authority + the posture gate + VIGIL_CUSTOMER_PROD_EXECUTION) and must pass build_offense_gate -> conjunctive_decide. Until it lands a connected account is an owner-verified asset record only: nothing reads the customer's cloud beyond the three STS calls of the connect proof itself, and a grant authorizes no offense.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "apps/sigil/sigil/governor/cloud_connect.py",
+    "symbol": "CloudConnectRegistry.assume_target"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
+   "title": "The customer proof badge covers the positive finding certificate only: a remediation's signed negative clearance certificate is not surfaced to the customer",
+   "summary": "The customer proof badge and per-finding PCF export (consumer PR-I, Area 8) surface the governance-signed POSITIVE finding certificate only. A remediation's signed NEGATIVE clearance certificate (vigil-remediation-cert-v2, minted offense-side by the APEX PCR close-the-loop and the prove driver) does not reach the customer (sovereign) plane: nothing carries it across the offense-to-sovereign seam until the Area 10 fix-it wiring (consumer PR-K) dispatches the fix worker and carries its certificate, which then surfaces through this same export (plan Area 10, step 2). Fail-closed meanwhile: the badge and the bundle assert nothing about a fix, and a retest's 'fixed' verdict is shown as the retest's own result, never as a signed clearance.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/proof_export.py"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "apps/sigil/sigil/ui/proof_export.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-consumer-shard-on-signup-ops",
+   "title": "Shard-placement-on-sign-up pins hard-prune: the spine snapshot seed does not yet carry shard-assignment rows",
+   "summary": "With VIGIL_CUSTOMER_FAIR_QUEUE + VIGIL_MULTI_SHARD on and an owner shard topology (VIGIL_SHARD_IDS), every sign-up owner-signs a ShardPlacement (apps/sigil/sigil/governor/shard_on_signup.assign_on_signup, under the cross-process placement_lock), and 'sigil shard backfill' places tenants created before the switch was on -- all built and tested (test_shard_on_signup, test_shard_on_signup_provision). The operational limit of turning placement on: carrying shard-assignment rows into the spine snapshot seed is not yet built, so a hard prune (spine.prune) FAILS CLOSED past any active placement until the owner re-signs it above the prune point. It is fail-safe (a placement is never silently dropped by a prune), not a data-loss path; the only consequence is that, with a placement per sign-up, the oldest active placement bounds how far hard-prune advances until the seed carries shard rows. Default-OFF: with the flag off no placement is minted and prune is unaffected (byte-identical).",
+   "classification": "doc-only",
+   "severity": "low",
+   "anchor": {
+    "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+    "symbol": "assign_on_signup"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/decisions/FRONT-C-1M-SCALE-DESIGN.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-sso-saml-xmldsig-backend-unprovisioned",
+   "title": "SAML sign-in needs an owner-provisioned XML-DSig backend; each org's IdP is owner-registered",
+   "summary": "The SSO/SCIM HTTP edge is built and tested end-to-end behind VIGIL_CUSTOMER_SSO (SP-initiated SAML login + ACS bound to the AuthnRequest, enterprise-OIDC callback, bearer-authenticated SCIM 2.0 Users/Groups with live deactivation). What remains is owner provisioning, not unbuilt code: (1) a SAML assertion signature is verified only through a vetted XML-DSig library (signxml, needing exclusive XML canonicalisation) that is not installed in the sovereign venv — without it every SAML sign-in fails closed at the provisioner, and the edge never bypasses it (enterprise OIDC and SCIM do not need it); (2) each org's IdP (SAML entity id + signing certificate + sign-in URL, or the OIDC issuer/endpoints) and its SCIM bearer are registered by the owner with `sigil sso set-saml|set-oidc|rotate-scim-token`, and the printed public URLs are given to the customer's IdP administrator. The role ceiling (viewer/analyst/org_admin only) and org-scoping hold regardless.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/saml.py",
+    "symbol": "signxml_sig_verifier"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/ui/saml.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-report-pdf-renderer-unprovisioned",
+   "title": "The customer report's PDF download needs an owner-provisioned HTML-to-PDF renderer that lives outside the customer venv",
+   "summary": "PR-G (Area 6). The shareable assessment report is built in the sovereign venv as a deterministic, self-contained HTML document that is complete on its own (VIGIL_CUSTOMER_PDF_REPORT, default OFF). Its PDF form needs a headless HTML-to-PDF renderer: a large native dependency that must NOT be installed in the customer/sovereign venv (FATAL-2 and dependency hygiene), so providing it is an owner/ops step: install the reference wrapper tools/report_pdf/render_pdf.py with its library in a dedicated environment and set VIGIL_REPORT_PDF_RENDERER to its absolute path. Until then the PDF download REFUSES with a customer-safe message (fail-closed) and the HTML download is unaffected. The seam itself is built and tested with a stand-in renderer: the path must be absolute, a regular executable that no group/other may write, and outside the running venv; it runs with a fixed argv (no shell), a minimal environment (no secret reaches it), a private temporary directory, a wall-clock timeout that kills its whole process group, an output-size cap, and a %PDF-/%%EOF check on what it returns. No real renderer runs in CI, so the visual fidelity of the PDF is not claimed here.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/report_pdf.py",
+    "symbol": "renderer_path"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "tools/report_pdf/render_pdf.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-sealing-delivery-deferred",
+   "title": "AEGIS secret-sealing fleet delivery (AS-6a) is a default-OFF stub",
+   "summary": "aegis_sealing seals and rotates secret bundles with KMS+AAD, but the seam that pushes a sealed SecretBundle to the fleet units is the AS-6a reconciler, which is not yet built. Delivery is a default-OFF stub that stages the bundle and reports status 'deferred' (DeferredDelivery); no secret reaches the units until AS-6a is wired.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "packages/core/vigil_core/vigil_core/aegis_sealing.py",
+    "symbol": "DeferredDelivery"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  }
+ ],
+ "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
+ "honest_limit_sites": [
+  {
+   "file": "engine/crucible/framework/v2/attest/__init__.py",
+   "snippet": "hardware-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-attest-tee-hardware",
+   "note": "TEE backends-are-stubs summary in the package docstring."
+  },
+  {
+   "file": "engine/crucible/framework/v2/attest/provider.py",
+   "snippet": "hardware-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-attest-tee-hardware",
+   "note": "SEV-SNP/TDX hardware-gated stub docstrings, raise message and backend name."
+  },
+  {
+   "file": "engine/crucible/framework/v2/attest/provider.py",
+   "snippet": "those are stubs",
+   "kind": "debt",
+   "limit_id": "LIMIT-attest-tee-hardware",
+   "note": "Module docstring: the TEE backends are honestly-labelled stubs."
+  },
+  {
+   "file": "engine/crucible/framework/v2/attest/provider.py",
+   "snippet": "SEV-SNP/TDX attestation is a stub",
+   "kind": "debt",
+   "limit_id": "LIMIT-attest-tee-hardware",
+   "note": "Continuation of the VIGIL-LIMIT marker docstring for the TEE-hardware limit."
+  },
+  {
+   "file": "engine/crucible/framework/v2/agent_body/__init__.py",
+   "snippet": "research-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-agent-body-scaffold",
+   "note": "Package docstring: interface-only, research-gated scaffold."
+  },
+  {
+   "file": "engine/crucible/framework/v2/agent_body/interface.py",
+   "snippet": "research-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-agent-body-scaffold",
+   "note": "Module docstring: SCAFFOLD, research-gated, wires no engine."
+  },
+  {
+   "file": "engine/crucible/framework/v2/agent_body/interface.py",
+   "snippet": "is a scaffold",
+   "kind": "debt",
+   "limit_id": "LIMIT-agent-body-scaffold",
+   "note": "AgentBody is abstract because it is a scaffold."
+  },
+  {
+   "file": "engine/crucible/framework/v2/graph/store.py",
+   "snippet": "deploy-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-neo4j-deploy-gated",
+   "note": "Neo4jGraphStore live construction is deploy-gated (marker + prose)."
+  },
+  {
+   "file": "engine/crucible/framework/v2/remediation_binary/__init__.py",
+   "snippet": "research-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-symbolic-crash-repair",
+   "note": "Package docstring: patch synthesis (CRS engine) is a research-gated stub."
+  },
+  {
+   "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+   "snippet": "research-gated",
+   "kind": "debt",
+   "limit_id": "LIMIT-symbolic-crash-repair",
+   "note": "The research-gated CRS/symbolic-synthesis tier docstrings and raise messages."
+  },
+  {
+   "file": "engine/crucible/framework/v2/console/api.py",
+   "snippet": "NOT wired into the VIGIL plane",
+   "kind": "debt",
+   "limit_id": "LIMIT-container-kill-unwired",
+   "note": "container_kill docstring: force-remove has no VIGIL caller."
+  },
+  {
+   "file": "engine/crucible/framework/v2/console/api.py",
+   "snippet": "container-level kill (force-remove the sandbox container) is not wired",
+   "kind": "debt",
+   "limit_id": "LIMIT-container-kill-unwired",
+   "note": "container_kill user-facing note: declared UNAVAILABLE."
+  },
+  {
+   "file": "engine/crucible/framework/v2/report/runinfo.py",
+   "snippet": "does not yet write a structured findings record",
+   "kind": "debt",
+   "limit_id": "LIMIT-posture-no-structured-findings",
+   "note": "cloud/k8s/infra posture assessments record no structured findings/proofs."
+  },
+  {
+   "file": "engine/crucible/framework/v2/scanner/fingerprint.py",
+   "snippet": "the table is a stub",
+   "kind": "debt",
+   "limit_id": "LIMIT-favicon-fingerprint-stub",
+   "note": "favicon fingerprint table is illustrative fixtures; matches scored conservatively."
+  },
+  {
+   "file": "apps/sigil/sigil/perception/capture.py",
+   "snippet": "documented seam, not wired",
+   "kind": "debt",
+   "limit_id": "LIMIT-a11y-capture-unwired",
+   "note": "accessibility-tree capture path not wired on headless hosts."
+  },
+  {
+   "file": "apps/sigil/sigil/gesture/session.py",
+   "snippet": "native path not wired",
+   "kind": "debt",
+   "limit_id": "LIMIT-gesture-native-inject-unwired",
+   "note": "macOS/Windows native input injection path not wired; backend honestly inert."
+  },
+  {
+   "file": "engine/crucible/framework/v2/engage_autonomous.py",
+   "snippet": "deliberately NOT wired here",
+   "kind": "non-debt",
+   "note": "Deliberate architectural choice: the LLM CritiqueAgent is intentionally not wired into this sinks-construction path. Not deferred work."
+  },
+  {
+   "file": "engine/crucible/framework/v2/engage_autonomous.py",
+   "snippet": "does not yet have a confirmed finding",
+   "kind": "non-debt",
+   "note": "Describes the runtime state of a hypothesis node (no confirmed finding yet), not a capability limit."
+  },
+  {
+   "file": "engine/crucible/framework/v2/veracity/firewall.py",
+   "snippet": "note that outlives",
+   "kind": "non-debt",
+   "note": "Meta-prose about keeping the WHERE-THIS-IS-WIRED note current; it is not itself a limit."
+  },
+  {
+   "file": "integration/vigil_integration/attestation/anchor.py",
+   "snippet": "does not yet exist",
+   "kind": "non-debt",
+   "note": "Describes a runtime state (the per-host counter file is absent on first write), not a capability limit."
+  },
+  {
+   "file": "tools/backup/transport.py",
+   "snippet": "none is a stub",
+   "kind": "non-debt",
+   "note": "Explicitly asserts all THREE backup backends (local/rsync/s3) are REAL (the opposite of a stub)."
+  },
+  {
+   "file": "tools/ha/require_networkpolicy.py",
+   "snippet": "not wired into the kustomization",
+   "kind": "non-debt",
+   "note": "Describes the TARGET condition this HA check detects (a NetworkPolicy the operator did not wire), not a VIGIL capability limit."
+  },
+  {
+   "file": "tools/ha/require_probes.py",
+   "snippet": "not wired to /readyz",
+   "kind": "non-debt",
+   "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."
+  },
+  {
+   "file": "engine/crucible/framework/v2/engage.py",
+   "snippet": "not wired yet",
+   "kind": "debt",
+   "limit_id": "LIMIT-profile-packs-incremental",
+   "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."
+  },
+  {
+   "file": "integration/vigil_integration/live/tls_breadth.py",
+   "snippet": "BUILT, TESTED, **NOT WIRED**",
+   "kind": "debt",
+   "limit_id": "LIMIT-tls-certificate-validity-unwired",
+   "note": "Module docstring, claim 4 of 4: certificate defects are derived but not on any live path."
+  },
+  {
+   "file": "integration/vigil_integration/live/tls_breadth.py",
+   "snippet": "BUILT AND TESTED, **NOT WIRED**",
+   "kind": "debt",
+   "limit_id": "LIMIT-tls-certificate-validity-unwired",
+   "note": "Guard comment above the derivation: no re-drive admits to the branch and no capture stamps the instant."
+  },
+  {
+   "file": "integration/vigil_integration/live/tls_breadth.py",
+   "snippet": "Nothing in the product calls this on live evidence",
+   "kind": "debt",
+   "limit_id": "LIMIT-tls-certificate-validity-unwired",
+   "note": "classify_certificate_defects docstring: states the inertness and what wiring it would require."
+  },
+  {
+   "file": "integration/vigil_integration/live/runtime_redrive.py",
+   "snippet": "LEAD PROPOSERS (not wired here)",
+   "kind": "non-debt",
+   "note": "Deliberate doctrine, not debt (M-11.2 credential arm): hydra/john are EXTERNAL LEAD proposers and are intentionally never wired as FACT-minting tool executors — a credential FACT comes only from VIGIL's own gated re-drive + the credential_acceptance oracle. The arm consumes the operator-planted TEST corpus, never a recovered real-user secret."
+  },
+  {
+   "file": "integration/vigil_integration/live/runtime_redrive.py",
+   "snippet": "EXTERNAL LEAD PROPOSERS (not wired",
+   "kind": "non-debt",
+   "note": "Same deliberate doctrine in the credential_acceptance_redrive docstring: hydra/john stay external LEAD proposers; the FACT is VIGIL-owned (the oracle re-fires over VIGIL's own gated capture). Not deferred work."
+  },
+  {
+   "file": "apps/sigil/sigil/cli.py",
+   "snippet": "auto-void was not wired this slice",
+   "kind": "non-debt",
+   "note": "Deliberate design decision, not debt (M-11 EvalCapabilityGrant FIX C2/F): the `sigil eval-grant status` budget_note states honestly that a durable spine-anchored covered-action AUTO-VOID was DROPPED this slice (the resettable http_executor process counter is deliberately NOT used, as it would be a trivial reset-to-arm fail-open). max_covered_actions stays signed+PoP-bound and attributable, and the grant's REAL durable ceiling is fully enforced by the four void_conditions listed alongside it (owner revoke + offense-gate/engagement close + per-engagement kill-switch + signed engagement scope + the covering attestation not_after). A capability consciously scoped out with its security ceiling complete by other means, not deferred/unfinished code."
+  },
+  {
+   "file": "apps/sigil/sigil/ui/assessments.py",
+   "snippet": "does not yet carry a signed",
+   "kind": "debt",
+   "limit_id": "LIMIT-evidence-empty-engagement-slug",
+   "note": "The customer assessment API (Slice K) surfaces FINDINGS only; a detection FACT is withheld because its certificate carries no signed engagement_slug (it cannot be per-engagement-confined — symmetric with finding_receiver.ingest_detection), the same unsigned/empty engagement_slug root the evidence single_engagement limit tracks. Detections return once the detection cert declares a signed slug."
+  },
+  {
+   "file": "packages/core/vigil_core/vigil_core/credit_lease.py",
+   "snippet": "not wired into the live launch-gate money path yet",
+   "kind": "non-debt",
+   "note": "Deliberate design decision, not debt (EC-4 per-tenant token-cost envelope ledger): the cost ledger ships as a DEFAULT-OFF primitive BY DESIGN, per the money doctrine that money-doctrine numbers — here ENVELOPE_TOKENS_PER_CREDIT, the credit->token conversion E — stay behind default-OFF placeholders until explicit owner ratification, so no unratified money number can drive production spend. The primitive itself is complete, owner-signed, mutation-verified and prune-durable (governor/cost_ledger.py + the v9 snapshot fold + the two spine/prune.py tripwires); it is simply not yet consulted by the live gate. Wiring it into the live launch-gate money path (reserve on reserve_launch, settle from the ACTUAL recorded tokens on settle_launch) + the EC-5 global pool meter + the keyless engine's actual-token delivery is the planned EC-4b increment, not unfinished/deferred debt."
+  },
+  {
+   "file": "apps/sigil/sigil/spine/snapshot.py",
+   "snippet": "`sigil restore` does not yet restore a hard-pruned spine",
+   "kind": "debt",
+   "limit_id": "LIMIT-restore-hard-pruned-spine",
+   "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
+  },
+  {
+   "file": "apps/sigil/sigil/spine/checkpoint.py",
+   "snippet": "`sigil restore` does not yet restore a hard-pruned",
+   "kind": "debt",
+   "limit_id": "LIMIT-restore-hard-pruned-spine",
+   "note": "The pruned-spine refusal names the recovery step (a file-level copy of SIGIL_HOME) and says restore does not cover it yet."
+  },
+  {
+   "file": "apps/sigil/sigil/ui/provision.py",
+   "snippet": "Not wired by the factory yet",
+   "kind": "non-debt",
+   "note": "C6 GitHub-App connect callback: the Provisioner's installation_verifier is None until the owner wires it, because verifying that the returning person owns the installation needs the GitHub App's OAuth CLIENT SECRET (sovereign-only, provided at go-live per HANDOFF §6) plus github.com egress — an inherent deployment step, not deferred code. Fail-closed until then: the callback records nothing, so no unverified installation is ever connected. The whole screen is behind VIGIL_REDPEN_ENABLED (default OFF)."
+  },
+  {
+   "file": "apps/sigil/sigil/ui/proof_export.py",
+   "snippet": "clearance certificate does not yet reach this plane",
+   "kind": "debt",
+   "limit_id": "LIMIT-proofbadge-clearance-cert-unsurfaced",
+   "note": "Consumer PR-I proof badge: the module docstring states that a remediation's signed NEGATIVE clearance certificate is not surfaced by the badge/export because no clearance certificate crosses to the customer plane until PR-K (Area 10) carries it; the badge and bundle speak for the positive finding certificate only."
+  },
+  {
+   "file": "apps/sigil/sigil/config.py",
+   "snippet": "deploy-gated and outside",
+   "kind": "debt",
+   "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+   "note": "customer_fair_queue_enabled + shard_ids docstrings: standing up the elastic we-host shard fleet the shard ids name is owner deploy work (Front C cross-host)."
+  },
+  {
+   "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+   "snippet": "deploy-gated and outside this module",
+   "kind": "debt",
+   "limit_id": "LIMIT-frontc-shard-cross-host-deploy",
+   "note": "module docstring: standing up / scaling the cross-HOST we-host fleet, and the cross-host dispatch/copy, are owner deploy work (Front C cross-host)."
+  },
+  {
+   "file": "apps/sigil/sigil/governor/shard_on_signup.py",
+   "snippet": "not yet built",
+   "kind": "debt",
+   "limit_id": "LIMIT-consumer-shard-on-signup-ops",
+   "note": "module docstring: the spine snapshot seed does not yet carry shard rows, so hard-prune fail-closes past an active placement."
+  },
+  {
+   "file": "packages/core/vigil_core/vigil_core/aegis_sealing.py",
+   "snippet": "AS-6a",
+   "kind": "debt",
+   "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
+   "note": "AS-2h discloses the AS-6a fleet-delivery seam as a default-OFF stub (not yet built)."
+  },
+  {
+   "file": "packages/core/vigil_core/vigil_core/aegis_sealing.py",
+   "snippet": "Not yet implemented",
+   "kind": "debt",
+   "limit_id": "LIMIT-aegis-sealing-delivery-deferred",
+   "note": "AS-2h DeferredDelivery docstring — AS-6a reconciler not yet implemented."
+  }
+ ]
 }

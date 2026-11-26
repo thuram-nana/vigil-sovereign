@@ -1,56 +1,156 @@
-# AEGIS-SaaS (AE-6) MANAGED tenant gateway — one instance per (tenant org, protected host).
+# AEGIS-SaaS (AE-6) MANAGED tenant gateway — one isolated unit per (tenant org, protected host).
 #
-# Instance name = a deployment label (e.g. aegis-saas-gateway@acme-app.service). Each instance reads
-# its OWN env file: /etc/aegis-saas/%i.env (see aegis-saas-gateway.env.example).
+# AS-2j — ISOLATED UNIT (R15). This is the HARDENED replacement for the pre-AS-2j unit (the N-A negative
+# control, frozen at integration/tests/fixtures/aegis-saas-gateway-NA-negative-control.service.txt). The
+# lint integration/vigil_integration/aegis_unit_lint.py FAILS (fail-closed) if this shipped unit ever
+# regresses toward that control — a TCP bind, a secret in the environment, PrivateNetwork=no, a missing
+# ProtectProc, a shared read-write trust root, a missing MemoryMax, and so on. See the EACCES matrix below.
 #
-# KEYLESS + DEFAULT-OFF. The gateway holds no signing key: it verifies the tenant's owner-signed
-# monitoring authority (published dir + pinned owner trust root, both read-only) on every request, and
-# with no valid authority it is an uninspected pass-through. The per-(org,host) REPORT secret comes
-# from a 0600 FILE (--monitoring-secret-file) — never argv, never the env. Hard blocking further needs a
-# BLOCK grant + VIGIL_AEGIS_SAAS_ENFORCE=1 + AEGIS_SAAS_MODE=enforce + the AEGIS_RESPOND entitlement.
-# The deployment (pseudonymization) secret is passed via AEGIS_GW_SECRET in the env file, not argv.
+# Instance name = a deployment label (e.g. aegis-saas-gateway@acme-app.service); %i = that label. Each
+# instance reads its OWN env file /etc/aegis-saas/%i.env (see aegis-saas-gateway.env.example). The env file
+# carries ONLY non-secret configuration — never AEGIS_GW_SECRET, never the report secret (both come through
+# LoadCredential=, below; that is the N-A fix).
 #
-# INSTALL (root, dedicated unprivileged user `aegis`):
-#   install -d -m 0700 -o aegis /etc/aegis-saas /var/lib/aegis-saas
+# KEYLESS + DEFAULT-OFF. The gateway holds no signing key: it verifies the tenant's owner-signed monitoring
+# authority (published dir + pinned owner trust root, both READ-ONLY) on every request, and with no valid
+# authority it is an uninspected pass-through (R16). Hard blocking still needs a BLOCK grant +
+# VIGIL_AEGIS_SAAS_ENFORCE=1 + AEGIS_SAAS_MODE=enforce + the AEGIS_RESPOND entitlement.
+#
+# ============================== R15 ISOLATION (the whole point of AS-2j) ==============================
+# Request path (spec §5.7): VPC origin -> ALB -> ALB-only FRONT -> unix socket (SO_PEERCRED = the front's
+# uid) -> THIS gateway (PrivateNetwork; no route/DNS/IMDS) -> egress broker (unix socket) -> NAT -> origin.
+#   * Ingress is a UNIX SOCKET only (--listen-unix); there is NO TCP listener. SO_PEERCRED (enforced app
+#     side, AS-2c) pins the connecting peer to the front's uid, so loopback is never an edge identity.
+#   * PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX + IPAddressDeny=any: the gateway cannot create
+#     an IP socket at all, so 169.254.169.254 (IMDS), DNS (:53) and every route are UNREACHABLE by
+#     construction — not by policy. Egress to the origin is the AS-2d broker over a unix socket.
+#
+# ============================== EACCES MATRIX (gateway uid can / cannot touch) =========================
+#   /run/aegis-saas/%i/gw.sock         rw (bind own ingress socket)     RuntimeDirectory (own uid)
+#   /var/lib/aegis-saas/%i[/spool]     rw (own spool, this tenant only) StateDirectory (own uid, 0700)
+#   /var/lib/aegis-saas/<other inst>   EACCES (cannot reach TT-B)       per-instance StateDirectory+uid (T-HOP)
+#   monitoring_authority publish dir   READ-ONLY                        BindReadOnlyPaths + ProtectSystem=strict
+#   authority-root trust root          READ-ONLY                        BindReadOnlyPaths + ProtectSystem=strict
+#   $CREDENTIALS_DIRECTORY/{report-secret,gw-secret}  read-only 0400    LoadCredential (tmpfs, own uid)
+#   /etc/aegis-saas/*.secret (sources) EACCES at runtime                only systemd(root) reads them to seed creds
+#   /proc/<other-pid>/environ          invisible (no AEGIS_GW_SECRET leak) ProtectProc=invisible + ProcSubset=pid
+#   / (rest of rootfs)                 READ-ONLY                        ProtectSystem=strict
+#   /home                              invisible                        ProtectHome=yes
+#   /tmp                               private (own)                    PrivateTmp=yes
+#   169.254.169.254 / DNS / any route  UNREACHABLE (no IP socket)       PrivateNetwork + AF_UNIX + IPAddressDeny
+#   setuid / new privileges            denied                           NoNewPrivileges + CapabilityBoundingSet=
+#
+# ============================== DEFERRED (owner / infra gated — NOT fakeable offline) ==================
+#   * LIVE systemd activation (systemctl enable --now; `systemd-analyze security`; the IMDS/DNS/route
+#     probe at docs/runbooks/aegis-saas-gateway-r15-probe.sh) runs on a provisioned host — AS-26/AS-6a.
+#   * The gateway reading --listen-unix (ingress socket + SO_PEERCRED) and the deployment secret from
+#     $CREDENTIALS_DIRECTORY, and the broker egress over a unix socket, are GATEWAY-V2 (AS-2c) + BROKER
+#     (AS-2d). Until they land, this unit is validated OFFLINE by the lint only; it is not yet runnable.
+# This unit file + the lint + the deterministic tests ARE buildable now and ship here; the above is flagged
+# honestly rather than stubbed.
+#
+# INSTALL (root; no per-tenant OS user to provision — DynamicUser mints a distinct uid per instance):
+#   install -d -m 0750 /etc/aegis-saas
+#   install -m 0600 /dev/null /etc/aegis-saas/acme-app.gw.secret      # then write the pseudonymization secret
+#   install -m 0600 /dev/null /etc/aegis-saas/acme-app.report.secret  # then copy `sigil monitoring-secret`
 #   cp infra/systemd/aegis-saas-gateway@.service /etc/systemd/system/
-#   cp infra/systemd/aegis-saas-gateway.env.example /etc/aegis-saas/acme-app.env   # then edit, chmod 600
-#   systemctl daemon-reload && systemctl enable --now aegis-saas-gateway@acme-app
+#   cp infra/systemd/aegis-saas-gateway.env.example /etc/aegis-saas/acme-app.env   # edit; NO secrets in it
+#   systemctl daemon-reload && systemctl enable --now aegis-saas-gateway@acme-app   # (after AS-2c/2d/26)
 # Runbook: docs/runbooks/aegis-saas-onboarding.md
 
 [Unit]
-Description=AEGIS-SaaS managed tenant gateway (%i)
+Description=AEGIS-SaaS managed tenant gateway (%i) — R15 isolated
 After=network-online.target
 Wants=network-online.target
+# Ten restarts in five minutes means it is failing for a reason restarting will not fix: stop and leave the
+# failure visible (a bounded crash-loop, T-FO). systemd reads StartLimit* ONLY in [Unit] (W10-5 lesson).
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
-User=aegis
-Group=aegis
+# A DISTINCT transient uid per instance: TT-B's uid cannot read TT-A's spool/socket/creds (T-HOP, N-A fix).
+DynamicUser=yes
 EnvironmentFile=/etc/aegis-saas/%i.env
+
+# Secrets come through the systemd credential store (tmpfs, 0400, own uid) — NEVER the environment. This is
+# the N-A fix: with no secret in Environment=, /proc/<pid>/environ leaks nothing even before ProtectProc.
+LoadCredential=report-secret:/etc/aegis-saas/%i.report.secret
+LoadCredential=gw-secret:/etc/aegis-saas/%i.gw.secret
+
+# Ingress is a UNIX SOCKET ONLY (no --host/--port). The deployment + report secrets are read from the
+# credential dir systemd populates (${CREDENTIALS_DIRECTORY}); the app-side --listen-unix / credential read
+# land in AS-2c (see DEFERRED above).
 ExecStart=/opt/aegis/venv/bin/python -m framework.v2 aegis gateway \
-    --upstream ${AEGIS_SAAS_UPSTREAM} --host ${AEGIS_SAAS_BIND} --port ${AEGIS_SAAS_PORT} \
+    --upstream ${AEGIS_SAAS_UPSTREAM} --listen-unix /run/aegis-saas/%i/gw.sock \
     --mode ${AEGIS_SAAS_MODE} --slug aegis-saas-%i \
     --saas-tenant ${AEGIS_SAAS_TENANT} --saas-host ${AEGIS_SAAS_HOST} \
-    --monitoring-spool ${AEGIS_SAAS_SPOOL_DIR} --monitoring-secret-file ${AEGIS_SAAS_SECRET_FILE}
+    --monitoring-spool %S/aegis-saas/%i/spool \
+    --monitoring-secret-file ${CREDENTIALS_DIRECTORY}/report-secret \
+    --deployment-secret-file ${CREDENTIALS_DIRECTORY}/gw-secret
 
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 KillSignal=SIGTERM
+KillMode=mixed
 TimeoutStopSec=20
 
+# ---- writable surface: exactly the per-instance spool + the ingress socket dir; nothing shared ----------
+StateDirectory=aegis-saas/%i
+StateDirectoryMode=0700
+RuntimeDirectory=aegis-saas/%i
+RuntimeDirectoryMode=0750
+
+# ---- read-only verify inputs (published by the sovereign provisioner; the gateway only READS them) ------
+# NOTE: unit directives do not expand Environment=; these are the fixed convention paths. `-` = optional.
+BindReadOnlyPaths=-/var/lib/aegis-saas/monitoring_authority
+BindReadOnlyPaths=-/var/lib/aegis-saas/authority-root
+
+# ---- memory bound (defect #6 fail-open-under-exhaustion): hard cap + soft reclaim + bounded task count --
+# Formula (spec §5.7): MemoryMax >= pool * (max_req + 2*max_resp) + base.
+#   max_req  = gateway _MAX_REQUEST_BODY  = 10 MiB
+#   max_resp = gateway _MAX_RESPONSE_BYTES = 25 MiB  ->  per-slot R = 10 + 2*25 = 60 MiB
+#   base     = 192 MiB (interpreter + framework + httpx baseline RSS; AS-5a removes the join copy)
+# pool = 12 -> 12*60 + 192 = 912 MiB, rounded up to a clean 1024M. The admission ceiling the pool derives
+# from this (spec §8.1): P = floor((0.8*MemoryMax - base)/R) = floor((0.8*1024 - 192)/60) = 10 slots. The
+# aegis_unit_lint formula helpers assert this unit's MemoryMax satisfies the documented pool.
+MemoryMax=1024M
+MemoryHigh=819M
+TasksMax=64
+
+# ---- the full host-isolation set (spec §5.7 host isolation; mirrors/extends vigil-command's pattern) ----
 NoNewPrivileges=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/aegis-saas
 PrivateTmp=yes
 PrivateDevices=yes
+DevicePolicy=closed
+ProtectClock=yes
+ProtectHostname=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+RemoveIPC=yes
 CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io @cpu-emulation @module
+SystemCallErrorNumber=EPERM
 UMask=0077
+# MemoryDenyWriteExecute is deliberately NOT set: it breaks native crypto wheels (cffi/cryptography), the
+# same carve-out vigil-witness@.service documents. Every other W^X-adjacent protection above stays on.
 
 [Install]
 WantedBy=multi-user.target

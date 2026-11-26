@@ -52,7 +52,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 12  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 13  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
@@ -65,7 +65,11 @@ _MAX_SNAPSHOT_SCHEMA = 12  # refuse-newer gate (W5-3): a snapshot schema above t
 #                            governor.trial_claim claims (trial_claim_row) and the governor.report_unlock ledger
 #                            (report_unlock_billing/report_unlock_owner); v11 (W2c-1) ADDED the wallet's exact
 #                            metered usage total (wallet_usage_mc); v12 (W5) ADDED the governor.billing_reversal
-#                            ledger (billing_reversal_owed/ref/seen). Every bump is
+#                            ledger (billing_reversal_owed/ref/seen); v13 (AEGIS AS-2f) ADDED the SOVEREIGN
+#                            governor.monitoring_authority_v2 fold (monitoring_authority_v2_state/issued/epoch/row —
+#                            SEPARATE from the v1 governor.monitoring_authority line, carrying the per-(org,host)
+#                            EPOCH high-water a v2 grant mints strictly above, so a hard prune can never reset it to
+#                            0 and let the next grant mint a DUPLICATE epoch). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -77,14 +81,15 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 12  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    schema_version: int = 13  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
     #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
     #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
     #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
     #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger);
     #                           9->10 pricing S2 (trial claims + report unlocks); 10->11 W2c-1 (the wallet's
-    #                           exact metered usage total); 11->12 W5 (the billing reversal ledger).
-    #                           Every snapshot this build emits carries the v12 keys; a pre-bump build refuses it
+    #                           exact metered usage total); 11->12 W5 (the billing reversal ledger); 12->13 AEGIS
+    #                           AS-2f (the SOVEREIGN governor.monitoring_authority_v2 fold + its EPOCH high-water).
+    #                           Every snapshot this build emits carries the v13 keys; a pre-bump build refuses it
     #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
@@ -180,6 +185,23 @@ class SnapshotState(BaseModel):
     monitoring_authority_issued: list = []  # [[org_id, host, issued_at], ...] — per-(org,host) active high-water;
     #                                   MUST cross a prune or a captured owner-signed grant becomes replay-resurrectable.
     monitoring_authority_row: list = []  # [[org_id, host, mode, not_before, not_after, proof_sha256], ...] — rebuild a grant.
+    monitoring_authority_v2_state: list = []   # [[org_id, host, "active"|"revoked"], ...] — AEGIS AS-2f SOVEREIGN
+    #                                   governor.monitoring_authority_v2 LWW per (org_id, host). Keep revoked (v13).
+    #                                   SEPARATE from the v1 monitoring_authority_* line above (a v1 record is never
+    #                                   folded as a v2 record and vice versa).
+    monitoring_authority_v2_issued: list = []  # [[org_id, host, issued_at], ...] — per-(org,host) active ANTI-REPLAY
+    #                                   high-water (the DANGEROUS-direction grant floor). MUST cross a prune or a
+    #                                   captured owner-signed grant becomes replay-resurrectable.
+    monitoring_authority_v2_epoch: list = []   # [[org_id, host, epoch_hw], ...] — per-(org,host) monotone EPOCH
+    #                                   high-water (max epoch across grant/revoke/epoch-statement records). This is
+    #                                   the v2-ONLY carry the v1 line has no analogue of: the next grant mints at
+    #                                   epoch_hw+1, so a hard prune that reset it to 0 would mint a DUPLICATE epoch
+    #                                   (a captured old grant would no longer be detectably stale) and split-brain a
+    #                                   still-published grant. Carried for EVERY key the fold touches (active, revoked
+    #                                   or epoch-statement-only), so it is a superset of the state/row keys.
+    monitoring_authority_v2_row: list = []     # [[org_id, host, capabilities, epoch, not_before, not_after,
+    #                                   lease_not_before, lease_not_after, instance_id, replica_index, edge_chain,
+    #                                   proof_sha256, issued_at], ...] — the fields to REBUILD the active grant view.
     customer_credential_state: list = []  # [[username, cred_key, "active"|"revoked"], ...] —
     #                                   governor.customer_credential LWW, keyed PER-(username, cred_key). Keep
     #                                   revoked (Slice E2a schema v5; mirrors ownership_proof).
@@ -315,6 +337,18 @@ class SnapshotState(BaseModel):
 
     def monitoring_authority_issued_map(self) -> dict[tuple, float]:
         return {(row[0], row[1]): row[2] for row in self.monitoring_authority_issued}
+
+    def monitoring_authority_v2_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.monitoring_authority_v2_state}
+
+    def monitoring_authority_v2_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.monitoring_authority_v2_issued}
+
+    def monitoring_authority_v2_epoch_map(self) -> dict[tuple, int]:
+        return {(row[0], row[1]): row[2] for row in self.monitoring_authority_v2_epoch}
+    #   monitoring_authority_v2_row stays a raw list-of-rows: `MonitoringAuthorityV2Registry._seed` rebuilds the
+    #   active grant view from it (joining state from the v2 state map and the epoch/issued high-waters), keyed
+    #   PER-(org_id, host), so a pruned v2 grant survives and NEITHER its epoch NOR its issued_at high-water resets.
 
     def ownership_proof_state_map(self) -> dict[tuple, str]:
         return {(row[0], row[1]): row[2] for row in self.ownership_proof_state}
@@ -634,6 +668,14 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.monitoring_authority import SIGNAL as _MA_SIGNAL
     from ..governor.monitoring_authority import _CORE as _MA_CORE
     from ..governor.monitoring_authority import _MODES as _MA_MODES
+    # AEGIS AS-2f SOVEREIGN v2 authority — its signals + signed cores + cap normalizer imported from the live
+    # module (never restated — same drift guard as the v1 MA core above). The fold step below mirrors the live
+    # `MonitoringAuthorityV2Registry._fold` EXACTLY so the seed can never diverge from the live read.
+    from ..governor.monitoring_authority_v2 import (SIGNAL_V2 as _MA2_SIGNAL, SIGNAL_V2_EPOCH as _MA2_EPOCH,
+                                                    SIGNAL_V2_INTENT as _MA2_INTENT, STATE_ACTIVE as _MA2_ACTIVE,
+                                                    STATE_REVOKED as _MA2_REVOKED, _CORE as _MA2_CORE,
+                                                    _CORE_EPOCH as _MA2_CORE_EPOCH,
+                                                    _CORE_REVOKE as _MA2_CORE_REVOKE, _cap_values as _ma2_caps)
     from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL
     from ..governor.customer_credentials import _cred_core as _cred_core_fields
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
@@ -746,6 +788,13 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     ma_issued: dict[tuple, float] = dict(s.monitoring_authority_issued_map()) if s else {}   # (org,host) -> hw
     ma_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], (r[5] if len(r) > 5 else "")]
                                  for r in s.monitoring_authority_row} if s else {}   # ->[mode,nb,na,proof_sha]
+    # AEGIS AS-2f SOVEREIGN v2: (org,host) -> state / issued anti-replay hw / EPOCH hw / active-grant row. The
+    # epoch map is a SUPERSET of state/row keys (a revoked or epoch-statement-only subject still carries its epoch
+    # high-water, which the next grant mints strictly above).
+    ma2_state: dict[tuple, str] = dict(s.monitoring_authority_v2_state_map()) if s else {}
+    ma2_issued: dict[tuple, float] = dict(s.monitoring_authority_v2_issued_map()) if s else {}
+    ma2_epoch: dict[tuple, int] = dict(s.monitoring_authority_v2_epoch_map()) if s else {}
+    ma2_row: dict[tuple, list] = {(r[0], r[1]): list(r[2:]) for r in s.monitoring_authority_v2_row} if s else {}
     cc_state: dict[tuple, str] = dict(s.customer_credential_state_map()) if s else {}   # (user,cred_key) -> state
     cc_issued: dict[tuple, float] = dict(s.customer_credential_issued_map()) if s else {}   # (user,cred_key) -> hw
     cc_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]
@@ -975,6 +1024,42 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         ma_state[makey] = "active"
                         ma_row[makey] = [p.get("mode"), p.get("not_before"), p.get("not_after"),
                                          p.get("proof_sha256")]
+        # --- governor.monitoring_authority_v2 SOVEREIGN fold (AEGIS AS-2f) — mirrors the live `_fold` EXACTLY:
+        #     the intent row advances nothing; an epoch statement advances only the EPOCH high-water; a revoke
+        #     latches state=revoked (drops the active row) and advances the epoch floor; an active grant is
+        #     honoured only when owner-signed, non-empty-capabilities AND its issued_at is strictly above the
+        #     anti-replay high-water (the DANGEROUS direction), then advances issued/epoch and carries the row.
+        #     So a pruned subject keeps its epoch+issued high-water (the next grant mints strictly above) and a
+        #     still-active grant survives — else the fix's split-brain / duplicate-epoch failure. ---
+        if sig in (_MA2_SIGNAL, _MA2_INTENT, _MA2_EPOCH):
+            oid = p.get("org_id")
+            host = p.get("host")
+            if isinstance(oid, str) and oid and isinstance(host, str) and host and sig != _MA2_INTENT:
+                m2key = (oid, host)
+                ep = p.get("epoch")
+                ep_i = int(ep) if isinstance(ep, int) and not isinstance(ep, bool) and ep >= 1 else 0
+                if sig == _MA2_EPOCH:
+                    if verify_signed(p, _MA2_CORE_EPOCH, vpk) and ep_i > ma2_epoch.get(m2key, 0):
+                        ma2_epoch[m2key] = ep_i
+                elif p.get("state") == _MA2_REVOKED:
+                    if verify_signed(p, _MA2_CORE_REVOKE, vpk):
+                        ma2_state[m2key] = _MA2_REVOKED
+                        ma2_row.pop(m2key, None)
+                        if ep_i > ma2_epoch.get(m2key, 0):
+                            ma2_epoch[m2key] = ep_i
+                elif p.get("state") == _MA2_ACTIVE:
+                    if _ma2_caps(p.get("capabilities") or []) and verify_signed(p, _MA2_CORE, vpk):
+                        at = as_issued_at(p.get("issued_at"))
+                        if at > ma2_issued.get(m2key, NO_HIGHWATER):
+                            ma2_issued[m2key] = at
+                            ma2_state[m2key] = _MA2_ACTIVE
+                            ma2_row[m2key] = [p.get("capabilities"), p.get("epoch"), p.get("not_before"),
+                                              p.get("not_after"), p.get("lease_not_before"),
+                                              p.get("lease_not_after"), p.get("instance_id"),
+                                              p.get("replica_index"), p.get("edge_chain"),
+                                              p.get("proof_sha256"), at]
+                            if ep_i > ma2_epoch.get(m2key, 0):
+                                ma2_epoch[m2key] = ep_i
         # --- governor.customer_credential LWW + PER-(username, cred_key) high-water (mirrors the ownership_proof
         #     fold EXACTLY, so an active passkey/TOTP/OIDC-link whose only grant is pruned survives and its
         #     high-water is NOT reset — else a captured owner-signed active credential becomes replay-
@@ -1196,6 +1281,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         monitoring_authority_state=[[k[0], k[1], v] for k, v in ma_state.items()],
         monitoring_authority_issued=[[k[0], k[1], i] for k, i in ma_issued.items()],
         monitoring_authority_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in ma_row.items()],
+        monitoring_authority_v2_state=[[k[0], k[1], v] for k, v in ma2_state.items()],
+        monitoring_authority_v2_issued=[[k[0], k[1], i] for k, i in ma2_issued.items()],
+        monitoring_authority_v2_epoch=[[k[0], k[1], e] for k, e in ma2_epoch.items()],
+        monitoring_authority_v2_row=[[k[0], k[1], *r] for k, r in ma2_row.items()],
         customer_credential_state=[[k[0], k[1], v] for k, v in cc_state.items()],
         customer_credential_issued=[[k[0], k[1], i] for k, i in cc_issued.items()],
         customer_credential_row=[[k[0], k[1], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]

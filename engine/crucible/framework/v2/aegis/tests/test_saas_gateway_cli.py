@@ -119,6 +119,79 @@ def test_bad_secret_file_exits_2_without_serving(tmp_path, captured, capsys, mon
     assert SECRET not in capsys.readouterr().err
 
 
+# ---- AS-2j (N-A fix): the deployment/pseudonymization secret from a 0600 file / credential, never the env ----
+
+def test_deployment_secret_file_loads_into_config_not_from_env(tmp_path, captured):
+    """--deployment-secret-file reads the pseudonymization secret from a 0600 file (so it never sits in the
+    process environment / /proc/<pid>/environ). The loaded secret reaches AegisConfig.deployment_secret."""
+    sf = _secret_file(tmp_path, name="gw.secret")
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    # The file secret reaches the config as RAW BYTES (never UTF-8-decoded) — identical handling to the
+    # sibling report secret (see `monitoring_secret == SECRET.encode()` above), so random-byte provisioning works.
+    assert captured["config"].deployment_secret == SECRET.encode()
+
+
+def test_deployment_secret_file_wins_over_env_secret(tmp_path, captured, monkeypatch):
+    """The hardened unit passes the secret ONLY through LoadCredential; a stray AEGIS_GW_SECRET in the env must
+    not override the file source (the file is the isolated path)."""
+    sf = _secret_file(tmp_path, content="f" * 48, name="gw.secret")
+    monkeypatch.setenv("AEGIS_GW_SECRET", "e" * 48)   # set AFTER the fixture cleared AEGIS_GW_*
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert captured["config"].deployment_secret == b"f" * 48
+
+
+def test_deployment_secret_file_via_env_var(tmp_path, captured, monkeypatch):
+    sf = _secret_file(tmp_path, content="g" * 40, name="gw.secret")
+    monkeypatch.setenv("AEGIS_GW_SECRET_FILE", str(sf))
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9"])
+    assert captured["config"].deployment_secret == b"g" * 40
+
+
+def test_default_off_without_the_flag_is_unchanged(tmp_path, captured, monkeypatch):
+    """Byte-identical when off: with no file source, the legacy AEGIS_GW_SECRET env path is used verbatim."""
+    monkeypatch.setenv("AEGIS_GW_SECRET", "h" * 40)
+    with pytest.raises(_Stop):
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9"])
+    assert captured["config"].deployment_secret == "h" * 40
+
+
+# A fixed 32-byte RAW RANDOM secret (what the runbook's `head -c 32 /dev/urandom` yields). 0xff + lone
+# continuation bytes make it never valid UTF-8 — the exact input the pre-fix `.decode("utf-8")` crashed on.
+_NON_UTF8_SECRET = b"\xff\xfe\x80\x81\x82\x83\x84\x85" * 4
+
+
+def test_deployment_secret_file_accepts_non_utf8_random_bytes(tmp_path, captured):
+    """REGRESSION (AS-2j N-A): the runbook provisions the deployment secret as RAW RANDOM BYTES
+    (`head -c 32 /dev/urandom`), which are not valid UTF-8. The pre-fix loader `.decode("utf-8")` crashed on
+    them, so the documented provisioning path was broken (it exited 2 / never served). After the fix the raw
+    bytes reach AegisConfig.deployment_secret and the gateway serves — identical handling to the report secret.
+    """
+    assert len(_NON_UTF8_SECRET) == 32
+    with pytest.raises(UnicodeDecodeError):             # the bytes are non-UTF-8 (the pre-fix crash path)
+        _NON_UTF8_SECRET.decode("utf-8")
+    sf = tmp_path / "gw.secret"
+    sf.write_bytes(_NON_UTF8_SECRET)
+    os.chmod(sf, 0o600)
+    with pytest.raises(_Stop):                           # _Stop => serve_gateway was reached (load OK, no exit 2)
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert captured["config"].deployment_secret == _NON_UTF8_SECRET
+    # and the raw-bytes secret actually keys the pseudonymization HMAC: deterministic, non-empty, no crash.
+    from framework.v2.aegis.boundary import hmac_id
+    h = hmac_id("alice", secret=captured["config"].deployment_secret)
+    assert h and h == hmac_id("alice", secret=_NON_UTF8_SECRET)
+
+
+def test_bad_deployment_secret_file_exits_2_without_serving_or_leaking(tmp_path, captured, capsys, monkeypatch):
+    sf = _secret_file(tmp_path, name="gw.secret")
+    _report_loose_mode(monkeypatch, sf, 0o044)        # group/world readable -> fail-closed
+    rc = C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--deployment-secret-file", str(sf)])
+    assert rc == 2 and captured == {}
+    assert SECRET not in capsys.readouterr().err
+
+
 def test_real_gateway_refusals_exit_2(tmp_path, monkeypatch):
     for k in list(os.environ):
         if k.startswith("AEGIS_GW_"):

@@ -61,6 +61,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator, NoReturn
 
+from vigil_core.aegis_seam import (
+    AEGIS_SEAM_SUBDIR,
+    MONITORING_AUTHORITY_SUBDIR,
+    REPORT_SECRETS_SUBDIR,
+)
 from vigil_core.sealing import SealError, seal, unseal
 
 from .reuse import KeyPair, canonical_json, sha256_hex, sign, verify_one
@@ -234,6 +239,24 @@ _EXCLUSION_REASONS: dict[str, str] = {
                     "the OFFENSE leg's to capture (`vigil backup --base-dir` = that dir); the sovereign process "
                     "must never package it (FATAL-2: it would carry offense private keys), and two legs "
                     "restoring the same tree from different instants would clobber newer settlement markers",
+    AEGIS_SEAM_SUBDIR: (
+        # AS-2i. The AEGIS tenant-MONITORING seam subtree (``<seam>/aegis/`` — the published owner-signed
+        # monitoring authorities + the per-(org,host) report secrets). By default it sits UNDER the cross-plane
+        # seam (``credit-lease``, already excluded above), so this top-level entry only appears — and this
+        # reason only bites — when an override (VIGIL_MONITORING_PUBLISH_DIR / VIGIL_MONITORING_SECRETS_DIR, or
+        # VIGIL_BASE_DIR pointed AT SIGIL_HOME) places ``aegis/`` directly under SIGIL_HOME. EXCLUDED either
+        # way, fail-closed: the published authorities MIRROR the ``governor.monitoring_authority`` spine-of-
+        # record (captured) and the report secrets are re-provisionable, so a restore must leave AEGIS Off and
+        # resurrect nothing (acceptance: nothing inspected). The sovereign re-derives + re-publishes under fresh
+        # consent after a restore (full restore drill = legal-gov S1). The OFFENSE leg captures the seam, so its
+        # backup drops the SAME ``aegis/`` subtree UNCONDITIONALLY (a safety exclusion, not opt-in).
+        f"AS-2i: the AEGIS tenant-monitoring seam subtree (<seam>/{AEGIS_SEAM_SUBDIR}/"
+        f"{MONITORING_AUTHORITY_SUBDIR} published authorities + {REPORT_SECRETS_SUBDIR}). By default it lives "
+        f"UNDER the cross-plane seam (credit-lease, excluded above); this entry covers an override that places "
+        f"it directly under SIGIL_HOME. Never sovereign recovery state: the authorities mirror the "
+        f"governor.monitoring_authority spine (captured) and the report secrets are re-provisionable, so a "
+        f"restore leaves AEGIS Off and resurrects nothing. The offense leg captures the seam and drops the same "
+        f"monitoring subtree unconditionally"),
     "billing-spool": "the money-IN billing-webhook spool at the GO-LIVE runbook path ($SIGIL_HOME/billing-spool, "
                      "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
                      "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "

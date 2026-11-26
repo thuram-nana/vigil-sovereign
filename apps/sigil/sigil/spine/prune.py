@@ -193,6 +193,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active monitoring authorit(ies) {stranded_ma}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
+    # (c, AEGIS AS-2f) the SAME floor for the SOVEREIGN v2 authority (governor.monitoring_authority_v2): an active
+    # owner-signed v2 grant whose only record sits below K must be carried into the seed, or the prune drops it AND
+    # resets the per-(org,host) EPOCH + issued_at high-water — the next grant then mints a DUPLICATE epoch (a captured
+    # old grant is no longer detectably stale) and a still-published grant goes split-brain. SEPARATE from the v1 line.
+    stranded_ma2 = stranded_active_monitoring_authorities_v2(store, archived, K)
+    if stranded_ma2:
+        raise PruneUnsafe(f"K={K} would strand active v2 monitoring authorit(ies) {stranded_ma2}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) epoch + anti-replay high-water); lower K or resolve")
     # (c, Red-Pen R2) the SAME referential floor for governor.connected_repos: a connected repository whose only
     # authoritative owner-signed ACTIVE record sits below K and is not re-asserted live would be silently
     # disconnected (the registry folds a genesis scan with no seed in this slice) or, by resetting the
@@ -606,6 +615,53 @@ def stranded_active_monitoring_authorities(store, archived: list[Segment], K: in
     seed_state = seed.monitoring_authority_state_map()
     carried = {(row[0], row[1]) for row in seed.monitoring_authority_row
                if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_monitoring_authorities_v2(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, AEGIS AS-2f) — the ACTIVE SOVEREIGN v2 monitoring grants (`governor/monitoring_authority_v2.py`)
+    whose only owner-signed record sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot
+    seed. A dropped v2 grant is worse than a dropped v1 one: resetting the per-(org,host) EPOCH high-water to 0
+    makes the next grant mint a DUPLICATE epoch (a captured old grant is no longer detectably stale at the data
+    plane) and split-brains a still-published, still-honored grant. EMPTY in the happy path — `SnapshotState.build()`
+    carries every VERIFIED-active v2 grant (and the epoch/issued high-water). Mirrors
+    `stranded_active_monitoring_authorities`. Returns ``host@org_id``. VERIFIED-active only (a forged/unsigned
+    grant never blocks a prune). Read-only."""
+    from ..governor.monitoring_authority_v2 import (SIGNAL_V2 as MA2_SIGNAL, STATE_ACTIVE as MA2_ACTIVE,
+                                                    STATE_REVOKED as MA2_REVOKED, _CORE as MA2_CORE,
+                                                    _CORE_REVOKE as MA2_CORE_REVOKE, _cap_values as _ma2_caps)
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    st: dict[tuple, str] = {}
+    hw: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != MA2_SIGNAL:
+            continue                                        # an epoch statement / intent carries no active row
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == MA2_REVOKED:
+            if verify_signed(p, MA2_CORE_REVOKE, resolver.at(r.seq)):
+                st[key] = MA2_REVOKED
+        elif rst == MA2_ACTIVE and _ma2_caps(p.get("capabilities") or []) and verify_signed(p, MA2_CORE,
+                                                                                            resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > hw.get(key, NO_HIGHWATER):
+                hw[key], st[key] = at, MA2_ACTIVE
+    active = {k for k, v in st.items() if v == MA2_ACTIVE}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.monitoring_authority_v2_state_map()
+    carried = {(row[0], row[1]) for row in seed.monitoring_authority_v2_row
+               if seed_state.get((row[0], row[1])) == MA2_ACTIVE}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
 
