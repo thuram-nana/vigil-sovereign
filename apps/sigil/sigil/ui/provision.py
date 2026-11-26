@@ -3162,6 +3162,275 @@ class Provisioner:
                         outcome="revoked" if was_active else "noop", critical=True)
         return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
 
+    # -- AEGIS AS-2f: SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a authority-v2 contracts) --------
+    # Default-OFF behind `config.aegis_sovereign_v2_enabled` (a second gate on top of the monitoring master
+    # flag): with it off these actions are 404 and nothing v2 is minted or published (byte-identical). No tenant
+    # origins here (AS-2g). No LLM anywhere on this path (authority is never a model call). The v2 REGISTRY
+    # (`governor.monitoring_authority_v2`) holds the lifecycle/high-water/publish/read-back; these methods wire
+    # the sovereign ENFORCEMENT: flag -> admit (cross-tenant => 403) -> STEP-UP for Respond + capability changes
+    # -> INTENT ROW FIRST -> owner-signed grant -> EpochStatement -> READ-BACK -> audited activity line.
+    def _owner_root_single(self, trusted_pubkey: "Optional[str]"):
+        """The single-authoriser owner TrustRoot used to READ BACK (verify) a just-published v2 grant.
+        Fail-closed: no trusted owner pubkey => no root to verify against (read-back then refuses)."""
+        from vigil_core import AuthorizerKey, TrustRoot
+        if not trusted_pubkey:
+            raise ProvisionError("no owner trust root available to verify the published authority")
+        return TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=trusted_pubkey)])
+
+    def _require_stepup_v2(self, mfa_at, *, now: float, force: bool) -> None:
+        """Step-up for the v2 sensitive operations. When ``force`` (an ENFORCING capability such as RESPOND, or
+        ANY capability change), a FRESH second factor is ALWAYS required — independent of the global
+        ``customer_stepup_required`` toggle: these are A3, explicit-required acts. Otherwise defer to the shared
+        global-flag-gated ``_require_stepup`` (observe-only, no change => byte-identical to the v1 behaviour).
+        Fail-closed: a missing / stale / non-numeric ``mfa_at`` raises ProvisionStepUpRequired."""
+        if not force:
+            self._require_stepup(mfa_at, now=now)
+            return
+        from .. import config
+        try:
+            at = float(mfa_at)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= 0.0 or (now - at) > float(config.CUSTOMER_STEPUP_WINDOW_SECONDS):
+            raise ProvisionStepUpRequired("a fresh second-factor (step-up) is required to grant Respond or change "
+                                          "monitoring capabilities")
+
+    def _seed_last_issued(self, floor: float) -> None:
+        """SEED the provisioner's monotone ``issued_at`` high-water from the spine before a v2 mint. The HTTP
+        transport builds a fresh Provisioner per request (``_last_issued`` starts at 0.0), so without this a
+        per-request mint could carry an ``issued_at`` BELOW the subject's existing spine high-water and be
+        rejected as a replay. Caller holds the lock; only ever RAISES the floor (never lowers it)."""
+        try:
+            f = float(floor)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(f) and f > self._last_issued:
+            self._last_issued = f
+
+    @staticmethod
+    def _parse_v2_capabilities(capabilities) -> list:
+        """Parse the requested capability set FAIL-CLOSED to a list of ``MonitoringCapability``. Default (None /
+        empty) is the always-safe OBSERVE base. A bad capability value raises ProvisionError (=> 400)."""
+        from vigil_core.authority_v2 import MonitoringCapability
+        if capabilities is None:
+            return [MonitoringCapability.OBSERVE]
+        if isinstance(capabilities, (str, bytes)) or not hasattr(capabilities, "__iter__"):
+            raise ProvisionError("capabilities must be a list of capability values")
+        out = []
+        for c in capabilities:
+            try:
+                out.append(c if isinstance(c, MonitoringCapability) else MonitoringCapability(str(c)))
+            except ValueError:
+                raise ProvisionError(f"unknown monitoring capability: {c!r}") from None
+        return out or [MonitoringCapability.OBSERVE]
+
+    def _monitor_v2_plan_admit(self, reg, org_id: str, host: str, is_enforcing: bool, now: float) -> float:
+        """AE-5-style billing gate for v2 (reuses the SAME subscription registry + catalog as v1): the session
+        org needs an ACTIVE monitoring subscription with a free host slot (counted over the org's ACTIVE v2
+        grants; re-authorizing an already-granted host reuses its slot), and an ENFORCING capability needs a plan
+        tier that includes respond. Returns the plan ``period_end`` (the grant is clamped to it). Raises
+        ValueError (refused + audited)."""
+        from ..governor.asset_ownership import _check_host
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            raise ValueError("an active monitoring plan is required")
+        if is_enforcing and not plan.respond:
+            raise ValueError("an enforcing capability (block / respond / virtual_patch) requires a monitoring "
+                             "plan that includes respond")
+        h = _check_host(host)
+        used = {g.host for g in reg.grants(org_id) if reg.active_at(org_id, g.host, now=now) is not None} - {h}
+        if len(used) >= plan.host_slots:
+            raise ValueError("no free protected-host slot on the monitoring plan")
+        return float(sub.period_end)
+
+    def _monitor_v2_window(self, window_s, now: float) -> float:
+        """The SERVER-decided v2 window (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it.
+        Fail-closed ProvisionError on a non-positive / non-finite / bool ``window_s``."""
+        from .. import config
+        window = float(config.MONITORING_WINDOW_SECONDS)
+        if window_s is not None:
+            if isinstance(window_s, bool):
+                raise ProvisionError("window_s must be a positive number of seconds")
+            try:
+                asked = float(window_s)
+            except (TypeError, ValueError):
+                raise ProvisionError("window_s must be a positive number of seconds") from None
+            if not math.isfinite(asked) or asked <= 0.0:
+                raise ProvisionError("window_s must be a positive number of seconds")
+            window = min(window, asked)
+        return window
+
+    def monitor_authorize_v2(self, requester: str, requester_org_id: str, host: str, *, capabilities=None,
+                             window_s=None, instance_id: str = "default", replica_index: int = 0, ip: str = "",
+                             mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Owner-sign + publish a v2 DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag(v2) →
+        ``admit_customer(manage_monitoring)`` (org_admin; cross-tenant => ProvisionDenied => 403) → STEP-UP (for
+        an enforcing capability or any capability change) → plan gate → seed the issued high-water → INTENT ROW
+        FIRST → registry grant (monotone epoch read back from the spine, clamped to the ownership proof) →
+        publish → EpochStatement → READ-BACK verify → audited activity line. NO tenant origin (AS-2g seam)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from vigil_core.authority_v2 import ENFORCING_CAPABILITIES
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        caps = self._parse_v2_capabilities(capabilities)
+        requested = frozenset(c.value for c in caps)
+        enforcing = frozenset(c.value for c in ENFORCING_CAPABILITIES)
+        is_enforcing = bool(requested & enforcing)
+        window = self._monitor_v2_window(window_s, t)
+        lease_window = float(config.MONITORING_LEASE_SECONDS)
+        with self._lock:
+            self._monitor_admit("monitor_authorize_v2", requester, requester_org_id, host, "manage_monitoring")
+            reg = MonitoringAuthorityV2Registry(self.store)
+            current = reg.grant_for(requester_org_id, host)
+            current_caps = frozenset(c.value for c in current.capabilities) if current is not None else frozenset()
+            # A CAPABILITY CHANGE is a change to an EXISTING grant's capability set. The first grant establishing
+            # the always-safe OBSERVE baseline is not a "change" (an enforcing capability in it still forces
+            # step-up via `is_enforcing`); re-authorizing the SAME set is not a change either.
+            is_cap_change = current is not None and requested != current_caps
+            # STEP-UP for Respond + capability changes (always; a plain unchanged OBSERVE needs none).
+            self._require_stepup_v2(mfa_at, now=t, force=(is_enforcing or is_cap_change))
+            try:
+                period_end = self._monitor_v2_plan_admit(reg, requester_org_id, host, is_enforcing, t)
+            except ValueError as e:
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            self._seed_last_issued(reg.issued_highwater(requester_org_id, host))
+            not_after = min(t + window, period_end)
+            issued = self._next_issued()
+            # INTENT ROW FIRST — the explicit, human-authorized decision precedes the owner-signed mint.
+            reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
+                              now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0))
+            try:
+                view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
+                                         not_after=not_after, lease_not_before=t,
+                                         lease_not_after=min(t + lease_window, not_after),
+                                         instance_id=instance_id, now=t, issued_at=issued,
+                                         replica_index=replica_index)
+            except ValueError as e:
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            try:
+                path = reg.publish(signed)
+                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
+                                                 issued_at=self._next_issued())
+                reg.publish_epoch_statement(stmt)
+                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))      # fail-closed read-back
+            except Exception as e:  # noqa: BLE001 — never leave an active-but-unpublished/unverifiable grant
+                reg.revoke(requester_org_id, host, issued_at=self._next_issued(), reason="publish/read-back failed")
+                reg.unpublish(requester_org_id, host, instance_id=instance_id, replica_index=replica_index)
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not publish/verify the v2 monitoring authority: "
+                                     f"{type(e).__name__}") from e
+            self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                        outcome=f"granted_{'+'.join(sorted(requested))}", critical=True)
+        return {"org_id": requester_org_id, "host": host, "capabilities": sorted(requested), "epoch": view.epoch,
+                "not_before": view.not_before, "not_after": view.not_after,
+                "lease_not_before": view.lease_not_before, "lease_not_after": view.lease_not_after,
+                "instance_id": view.instance_id, "replica_index": view.replica_index, "published": path.name,
+                "authority": signed.model_dump(mode="json")}
+
+    def monitor_revoke_v2(self, requester: str, requester_org_id: str, host: str, *, instance_id: str = "default",
+                          replica_index: int = 0, ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Owner-sign a v2 revocation (the SAFE direction) + unpublish the (org, host) grant. Idempotent;
+        admit-gated so a tenant can only revoke ITS OWN org's grants (cross-tenant => 403). No step-up (revoking
+        only ever reduces authority). The revocation epoch is minted above the high-water so it supersedes."""
+        from .. import config
+        from ..governor.asset_ownership import _check_host
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        with self._lock:
+            self._monitor_admit("monitor_revoke_v2", requester, requester_org_id, host, "manage_monitoring")
+            try:
+                h = _check_host(host)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            reg = MonitoringAuthorityV2Registry(self.store)
+            was_active = reg.grant_for(requester_org_id, h) is not None
+            removed = reg.unpublish(requester_org_id, h, instance_id=instance_id, replica_index=replica_index)
+            if was_active:
+                reg.revoke(requester_org_id, h, issued_at=self._next_issued(), reason="tenant revoke")
+            self._audit("monitor_revoke_v2", requester=requester, org_id=requester_org_id, target=h,
+                        outcome="revoked" if was_active else "noop", critical=True)
+        return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
+
+    def monitor_renew(self, requester: str, requester_org_id: str, host: str, *, instance_id: str = "default",
+                      replica_index: int = 0, window_s=None, ip: str = "", mfa_at=0.0,
+                      now: "Optional[float]" = None) -> dict:
+        """Renew the LEASE of an ACTIVE v2 grant: re-mint the SAME capability set with a fresh lease + window and
+        a strictly-higher epoch, re-publish + re-issue the EpochStatement. A renewal is NOT a capability change,
+        so it needs no step-up (unless the current grant already carries an enforcing capability, which keeps the
+        step-up requirement). Fail-closed ProvisionDenied if no active grant exists for the (org, host)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from vigil_core.authority_v2 import ENFORCING_CAPABILITIES
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        window = self._monitor_v2_window(window_s, t)
+        lease_window = float(config.MONITORING_LEASE_SECONDS)
+        with self._lock:
+            self._monitor_admit("monitor_renew", requester, requester_org_id, host, "manage_monitoring")
+            reg = MonitoringAuthorityV2Registry(self.store)
+            current = reg.grant_for(requester_org_id, host)
+            if current is None:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason="no active grant")
+                raise ProvisionDenied("no active v2 grant to renew for this (org, host)")
+            caps = list(current.capabilities)
+            requested = frozenset(c.value for c in caps)
+            is_enforcing = bool(requested & frozenset(c.value for c in ENFORCING_CAPABILITIES))
+            # A renewal preserves capabilities (never an escalation) so it is not a capability change; an
+            # enforcing grant still requires a fresh step-up to keep renewing (defence in depth).
+            self._require_stepup_v2(mfa_at, now=t, force=is_enforcing)
+            try:
+                period_end = self._monitor_v2_plan_admit(reg, requester_org_id, host, is_enforcing, t)
+            except ValueError as e:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            self._seed_last_issued(reg.issued_highwater(requester_org_id, host))
+            not_after = min(t + window, period_end)
+            issued = self._next_issued()
+            reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
+                              now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0), note="INTENT: renew lease")
+            try:
+                view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
+                                         not_after=not_after, lease_not_before=t,
+                                         lease_not_after=min(t + lease_window, not_after),
+                                         instance_id=instance_id, now=t, issued_at=issued,
+                                         replica_index=replica_index)
+                path = reg.publish(signed)
+                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
+                                                 issued_at=self._next_issued())
+                reg.publish_epoch_statement(stmt)
+                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))
+            except ValueError as e:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            except Exception as e:  # noqa: BLE001 — fail-closed: never leave an unverifiable renewed grant
+                reg.revoke(requester_org_id, host, issued_at=self._next_issued(), reason="renew publish failed")
+                reg.unpublish(requester_org_id, host, instance_id=instance_id, replica_index=replica_index)
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not renew the v2 monitoring authority: {type(e).__name__}") from e
+            self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                        outcome=f"renewed_epoch_{view.epoch}", critical=True)
+        return {"org_id": requester_org_id, "host": host, "capabilities": sorted(requested), "epoch": view.epoch,
+                "not_before": view.not_before, "not_after": view.not_after,
+                "lease_not_before": view.lease_not_before, "lease_not_after": view.lease_not_after,
+                "published": path.name}
+
     def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                      now: "Optional[float]" = None) -> dict:
         """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership), and whether

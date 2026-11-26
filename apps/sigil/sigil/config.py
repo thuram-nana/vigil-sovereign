@@ -314,6 +314,34 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+# AEGIS AS-2f — the SOVEREIGN v2 authority surface (grant/revoke/renew over the AS-2a authority-v2 contracts).
+# STRICT, default-OFF. A SECOND, independent gate on top of `customer_monitoring_enabled`: the v2 provisioner
+# actions (`monitor_authorize_v2` / `monitor_revoke_v2` / `monitor_renew`) are ABSENT (404 exactly as an unknown
+# route) unless BOTH flags are affirmative, and nothing v2 is minted or published. With it off the build is
+# byte-identical to before (the v1 AE-1 path is untouched). Tenant origins stay OUT (deferred to AS-2g).
+def aegis_sovereign_v2_enabled() -> bool:
+    """True iff the AEGIS sovereign-v2 authority surface is ON (`VIGIL_AEGIS_SOVEREIGN_V2` affirmative). Read at
+    call time; fail-safe default OFF."""
+    return (os.environ.get("VIGIL_AEGIS_SOVEREIGN_V2") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# The short-lived v2 LEASE window (§4.7 proposed 1 h): the TIGHT end-to-end liveness bound inside the grant's
+# outer window. A lapsed lease degrades the data plane to uninspected pass-through (R16), so a grant is renewed
+# (`monitor_renew`) well before it lapses. Clamped to never exceed the grant window.
+MONITORING_LEASE_SECONDS = _int_env("VIGIL_MONITORING_LEASE_SECONDS", 3600)
+
+
+def monitoring_v2_publish_dir() -> Path:
+    """Where owner-signed v2 monitoring authorities + epoch statements are published for the KEYLESS AEGIS
+    gateway (AS-2c reads, verify-only). `VIGIL_MONITORING_V2_PUBLISH_DIR` overrides; default a dedicated `v2`
+    subtree under the v1 publish dir so v1 and v2 artifacts never share a file (distinct, content-addressed
+    names). Only signed public artifacts land here — never private material."""
+    override = (os.environ.get("VIGIL_MONITORING_V2_PUBLISH_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return monitoring_publish_dir() / "v2"
+
+
 def redpen_enabled() -> bool:
     """True iff the Red-Pen (code-review) surfaces are ON (`VIGIL_REDPEN_ENABLED` affirmative). OFF by default
     (mirrors `customer_monitoring_enabled`): with it off EVERY Red-Pen route / action / worker / check-run / schedule
