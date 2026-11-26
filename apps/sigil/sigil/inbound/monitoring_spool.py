@@ -49,6 +49,10 @@ _DECISIONS = frozenset({"confirmed", "lead"})
 _FIELDS = ("org_id", "host", "ts", "decision", "attack_class", "action", "confidence", "provenance_tier",
            "certificate_sha256", "report_id")
 _OFF_DOMAIN_SWEEP_CAP = 4096       # AS-3a: a single strict drain quarantines at most this many off-domain items
+_PER_DOMAIN_DRAIN_CAP = 1024       # AS-3a red-pen #3: the BOUNDED SAFE DEFAULT per-domain per-pass cost. A
+#                                    declared tenant drains at most this many reports per pass, so a flooded
+#                                    tenant whose slug sorts first can NEVER consume the whole pass and starve
+#                                    the next declared tenant — fairness is the DEFAULT, not opt-in.
 
 
 def domain_slug(org_id: str, host: str) -> str:
@@ -92,11 +96,14 @@ class MonitoringSpoolWatcher:
         # (byte-for-byte). A declared set ⇒ the strict drain: process each declared domain's OWN
         # ``incoming/<slug>/`` subtree in isolation, quarantine everything else off-domain by LOCATION
         # (never scanning its content), and fire one coalesced alert per pass. ``per_domain_limit`` bounds
-        # the files one domain can impose on a single pass (fairness); ``off_domain_limit`` bounds the
-        # off-domain sweep so even a flood of off-domain junk cannot blow up a drain pass.
+        # the reports one domain drains per pass (fairness) — ``None`` means the BOUNDED SAFE DEFAULT
+        # (``_PER_DOMAIN_DRAIN_CAP``), NOT unbounded, so a flooded tenant can never starve another (red-pen #3);
+        # ``off_domain_limit`` bounds the off-domain / in-domain-foreign sweeps so even a flood of junk cannot
+        # blow up a drain pass. Both bounds also bound the ENUMERATION itself (scandir early-stop), not just the
+        # processed slice (red-pen #1).
         self._domains: "Optional[dict[str, tuple[str, str]]]" = (
             None if domains is None else {domain_slug(str(o), str(h)): (str(o), str(h)) for o, h in domains})
-        self.per_domain_limit = None if per_domain_limit is None else max(0, int(per_domain_limit))
+        self.per_domain_limit = (_PER_DOMAIN_DRAIN_CAP if per_domain_limit is None else max(0, int(per_domain_limit)))
         self.off_domain_limit = max(0, int(off_domain_limit))
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
@@ -220,8 +227,8 @@ class MonitoringSpoolWatcher:
         """Drain the spool once. DEFAULT (``domains=None``): the unchanged GLOBAL drain — process every file in
         ``incoming/`` in one pass. STRICT (AS-3a, ``domains`` declared): process ONLY each declared domain's own
         ``incoming/<slug>/`` subtree, quarantine everything else OFF-DOMAIN by location (never scanning it), and
-        fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped, seqs[, off_domain, alert_seq]}``.
-        Never raises on one bad file."""
+        fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped, seqs}`` and, in strict mode,
+        also ``{off_domain, in_domain_foreign, alert_seq}``. Never raises on one bad file."""
         if self._domains is None:
             return self._drain_global()
         return self._drain_strict()
@@ -248,24 +255,29 @@ class MonitoringSpoolWatcher:
         or poison (TT-A's p95 holds while TT-B is flooded). Then a BOUNDED off-domain sweep quarantines, by
         LOCATION alone (no content read, no MAC/authority check — i.e. NO GLOBAL SCAN), anything that is not
         under a declared domain: flat files in ``incoming/`` and whole undeclared ``incoming/<x>/`` subtrees.
-        One coalesced alert per pass fires when any strictness quarantine happened."""
+        One coalesced alert per pass fires when any strictness quarantine happened.
+
+        THREE red-pen bounds hold every pass (AS-3a follow-up): (1) the ENUMERATION itself is bounded — each
+        declared subtree and the off-domain sweep read via ``os.scandir`` and EARLY-STOP at their caps, so a
+        sustained flood is read only up to the cap, never materialized/sorted in full; (2) every subtree entry
+        that is NOT a flat ``*.json`` report (a non-``.json`` file, a nested path) is swept BY LOCATION into
+        ``rejected/`` — never scanned as input and never silently retained; (3) ``per_domain_limit`` carries a
+        BOUNDED SAFE DEFAULT, so a flooded tenant drains at most that many reports per pass and the next declared
+        tenant is always served in the SAME pass (no starvation)."""
         declared = self._domains or {}
         recorded, rejected, deduped = 0, 0, 0
+        in_domain_foreign = 0
         seqs: "list[int]" = []
-        # 1) DECLARED domains first (so a declared tenant is always served before any off-domain work), each
-        #    isolated to its own subtree and bounded by per_domain_limit.
+        # 1) DECLARED domains first (so a declared tenant is always served before any off-domain work). Each is
+        #    read from its OWN subtree via a SINGLE bounded scandir pass: up to per_domain_limit flat *.json to
+        #    drain + up to off_domain_limit OTHER entries (non-.json, nested dirs) to quarantine by location.
         for slug in sorted(declared):
             ddir = self.incoming / slug
             if not ddir.is_dir():
                 continue
-            seen = 0
-            for src in sorted(ddir.glob("*.json")):
-                if src.name.startswith(".tmp-"):
-                    continue
-                if self.per_domain_limit is not None and seen >= self.per_domain_limit:
-                    break
-                seen += 1
-                status, seq = self._process_one(src)
+            picked, foreign = self._scan_declared_subtree(ddir, self.per_domain_limit, self.off_domain_limit)
+            for name in sorted(picked):                # determinism over the BOUNDED slice (signed-path order)
+                status, seq = self._process_one(ddir / name)
                 if status == "recorded":
                     recorded += 1
                     seqs.append(seq)
@@ -273,68 +285,135 @@ class MonitoringSpoolWatcher:
                     deduped += 1
                 elif status == "rejected":
                     rejected += 1
+            for entry in foreign:                      # quarantine by LOCATION — never opened, never retained
+                in_domain_foreign += self._sweep_entry(
+                    entry, f"in-domain foreign: not a flat *.json report under declared domain '{slug}'",
+                    self.off_domain_limit)
         # 2) BOUNDED off-domain sweep — quarantine by location, never scanning content.
         off_domain = self._sweep_off_domain(set(declared))
-        # 3) ONE coalesced alert per pass when strictness quarantined anything (off-domain OR a poisoned in-domain
-        #    item). Bounded to one spine event per drain so an off-domain flood can never amplify onto the spine.
+        # 3) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
+        #    entry, OR a poisoned in-domain report). Bounded to one spine event per drain so a flood can never
+        #    amplify onto the spine.
         alert_seq = -1
-        if off_domain or rejected:
-            alert_seq = self._emit_alert(off_domain=off_domain, poisoned=rejected)
+        if off_domain or rejected or in_domain_foreign:
+            alert_seq = self._emit_alert(off_domain=off_domain, poisoned=rejected,
+                                         in_domain_foreign=in_domain_foreign)
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs,
-                "off_domain": off_domain, "alert_seq": alert_seq}
+                "off_domain": off_domain, "in_domain_foreign": in_domain_foreign, "alert_seq": alert_seq}
+
+    def _scan_declared_subtree(self, ddir: Path, json_budget: int,
+                               foreign_budget: int) -> "tuple[list[str], list[os.DirEntry[str]]]":
+        """ONE bounded, UNSORTED ``os.scandir`` pass over a declared domain's OWN subtree (AS-3a red-pen #1/#2).
+        Collect up to ``json_budget`` flat ``*.json`` report NAMES to drain, and up to ``foreign_budget`` OTHER
+        entries (non-``.json`` files, nested dirs, a ``*.json`` that is not a regular file) to quarantine BY
+        LOCATION. The ENUMERATION is bounded: at most ``json_budget + foreign_budget`` entries are ever examined,
+        so a sustained flood is read only up to the caps, never the whole directory (across passes the claim-and-
+        move drain chews the backlog down bounded-per-pass). ``.tmp-`` producer temps are skipped. The caller
+        SORTS the returned names so the signed drain order is deterministic over the bounded slice. Never raises."""
+        picked: "list[str]" = []
+        foreign: "list[os.DirEntry[str]]" = []
+        examined = 0
+        cap = json_budget + foreign_budget
+        try:
+            it = os.scandir(ddir)
+        except OSError:
+            return picked, foreign
+        with it:
+            for entry in it:
+                if entry.name.startswith(".tmp-"):
+                    continue                           # a producer's in-flight temp — leave it
+                if len(picked) >= json_budget and len(foreign) >= foreign_budget:
+                    break                              # both budgets met — stop early (bounded enumeration)
+                examined += 1
+                if examined > cap:
+                    break                              # hard enumeration bound regardless of flood composition
+                if entry.name.endswith(".json"):
+                    try:
+                        regular = entry.is_file(follow_symlinks=False)
+                    except OSError:
+                        regular = False
+                    if regular:
+                        if len(picked) < json_budget:
+                            picked.append(entry.name)
+                        continue                       # a flat *.json report — drained by the caller
+                if len(foreign) < foreign_budget:
+                    foreign.append(entry)              # non-.json / nested dir / non-regular .json -> quarantine
+        return picked, foreign
+
+    def _sweep_entry(self, entry: "os.DirEntry[str]", reason: str, budget: int) -> int:
+        """Quarantine ONE off-/in-domain entry BY LOCATION (never reading file content), bounded by ``budget``.
+        A regular file (or symlink / other non-dir) is moved as-is into ``rejected/``; a real sub-directory has
+        its children moved (a BOUNDED scandir, early-stopping at ``budget``) and is then best-effort removed.
+        Symlinks are NOT followed (a symlinked dir is moved as the link, never walked out of the spool). Returns
+        the count quarantined (``<= budget``). Never raises."""
+        if budget <= 0:
+            return 0
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            self._quarantine(Path(entry.path), reason)
+            return 1
+        swept = 0
+        try:
+            sub = os.scandir(entry.path)
+        except OSError:
+            return 0
+        with sub:
+            for child in sub:
+                if swept >= budget:
+                    break                              # bounded: never read the whole nested dir in one pass
+                self._quarantine(Path(child.path), reason)
+                swept += 1
+        try:
+            Path(entry.path).rmdir()                    # best-effort tidy of the now-(maybe-)empty dir
+        except OSError:
+            pass
+        return swept
 
     def _sweep_off_domain(self, declared_slugs: "set[str]") -> int:
-        """Quarantine, by LOCATION only (no content read), everything in ``incoming/`` that is NOT a declared
-        domain subtree: a flat file placed directly in ``incoming/``, or any file inside an UNDECLARED
-        ``incoming/<x>/`` subtree. Bounded by ``off_domain_limit`` so a flood of off-domain junk cannot blow up
-        one drain pass. Returns the number quarantined. A declared domain's own subtree is NEVER swept (it was
-        drained in step 1); an in-flight ``.tmp-`` file is left for the producer. Never raises."""
+        """Quarantine, BY LOCATION only (no content read), everything in ``incoming/`` that is NOT a declared
+        domain subtree: a flat file placed directly in ``incoming/``, or any UNDECLARED ``incoming/<x>/`` subtree.
+        The ENUMERATION is bounded (AS-3a red-pen #1): ``incoming/`` is read via ``os.scandir`` and the sweep
+        EARLY-STOPS at ``off_domain_limit``, so a flood of off-domain junk is read only up to the cap, never
+        materialized/sorted in full. A declared domain's own subtree is NEVER swept (it was drained in step 1);
+        an in-flight ``.tmp-`` file is left for the producer. Returns the number quarantined. Never raises."""
         if self.off_domain_limit <= 0:
             return 0
         swept = 0
         try:
-            entries = sorted(self.incoming.iterdir())
+            it = os.scandir(self.incoming)
         except OSError:
             return 0
-        for entry in entries:
-            if swept >= self.off_domain_limit:
-                break
-            name = entry.name
-            if name.startswith(".tmp-"):
-                continue                               # a producer's in-flight temp — never quarantine mid-write
-            try:
-                is_dir = entry.is_dir()
-            except OSError:
-                is_dir = False
-            if is_dir and name in declared_slugs:
-                continue                               # a declared domain subtree — handled in step 1
-            if is_dir:
+        with it:
+            for entry in it:
+                if swept >= self.off_domain_limit:
+                    break                              # bounded enumeration — stop at the cap, never read on
+                name = entry.name
+                if name.startswith(".tmp-"):
+                    continue                           # a producer's in-flight temp — never quarantine mid-write
                 try:
-                    sub = sorted(entry.iterdir())
+                    is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
-                    sub = []
-                for f in sub:
-                    if swept >= self.off_domain_limit:
-                        break
-                    self._quarantine(f, f"off-domain: '{name}' is not a declared monitoring domain")
-                    swept += 1
-                try:
-                    entry.rmdir()                      # best-effort tidy of the now-(maybe-)empty undeclared dir
-                except OSError:
-                    pass
-            else:
-                self._quarantine(entry, "off-domain: file placed outside any declared domain subdir")
-                swept += 1
+                    is_dir = False
+                if is_dir and name in declared_slugs:
+                    continue                           # a declared domain subtree — handled in step 1
+                reason = (f"off-domain: '{name}' is not a declared monitoring domain" if is_dir
+                          else "off-domain: file placed outside any declared domain subdir")
+                swept += self._sweep_entry(entry, reason, self.off_domain_limit - swept)
         return swept
 
-    def _emit_alert(self, *, off_domain: int, poisoned: int) -> int:
+    def _emit_alert(self, *, off_domain: int, poisoned: int, in_domain_foreign: int = 0) -> int:
         """Append ONE coalesced strictness alert for this drain pass (signal ``aegis.monitoring_drain_alert``).
-        METADATA-ONLY counts — off-domain items are NEVER read, so there is no tenant content to leak. This
-        surfaces the strictness breach on the owner's monitoring line; the standing ``quarantined_count``
-        dead-man also fires off ``rejected/`` so a buried quarantine keeps alarming until a human clears it."""
+        METADATA-ONLY counts — off-domain and in-domain-foreign items are NEVER read, so there is no tenant
+        content to leak. This surfaces the strictness breach on the owner's monitoring line; the standing
+        ``quarantined_count`` dead-man also fires off ``rejected/`` so a buried quarantine keeps alarming until a
+        human clears it."""
         payload: "dict[str, object]" = {
             "signal": DRAIN_ALERT_SIGNAL, "source_class": "drain_strictness",
-            "off_domain": int(off_domain), "poisoned": int(poisoned), "scope": "monitoring_spool",
+            "off_domain": int(off_domain), "poisoned": int(poisoned),
+            "in_domain_foreign": int(in_domain_foreign), "scope": "monitoring_spool",
         }
         return self.store.append(kind="event", source="aegis", actor="AEGIS", payload=payload)
 

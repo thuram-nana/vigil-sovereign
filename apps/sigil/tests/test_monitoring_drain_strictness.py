@@ -273,3 +273,157 @@ def test_per_domain_limit_bounds_one_domains_work_per_pass():
     assert r["recorded"] == 2                                  # only 2 of org_a's 5 this pass (fairness bound)
     assert w.drain()["recorded"] == 2                          # next pass drains 2 more
     assert w.drain()["recorded"] == 1                          # and the last one
+
+
+# ============================================================================================================
+# AS-3a RED-PEN follow-up — three confirmed MEDIUM findings on _drain_strict's bounding.
+# ============================================================================================================
+def _scandir_counter(monkeypatch):
+    """Install a TRANSPARENT ``os.scandir`` spy that counts how many entries the drain PULLS from each directory.
+    Proves red-pen #1: the strict drain BOUNDS THE ENUMERATION (scandir early-stop) instead of materializing +
+    sorting the whole directory — so a flood is READ only up to the cap. Returns ``{dir_path_str: pulled}``."""
+    real = os.scandir
+    pulled: dict = {}
+
+    class _Counting:
+        def __init__(self, path):
+            self._inner = real(path)
+            self._key = os.fspath(path)
+            pulled.setdefault(self._key, 0)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self._inner)                          # raises StopIteration at the real end
+            pulled[self._key] += 1
+            return entry
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+
+        def close(self):
+            self._inner.close()
+
+    monkeypatch.setattr(ms.os, "scandir", lambda path: _Counting(path))
+    return pulled
+
+
+# --- MEDIUM #1: count-bounded -> COST-bounded (bound the ENUMERATION, not just the processed slice) ----------
+def test_off_domain_sweep_bounds_the_enumeration_not_just_the_slice(monkeypatch):
+    # Before: sorted(incoming.iterdir()) read + sorted the WHOLE dir before applying off_domain_limit, so a
+    # sustained flood was fully read every pass. The fix early-stops the scandir at the cap.
+    s, _, w = _strict_rig(domains=(A,), off_domain_limit=5)
+    for _ in range(200):
+        _drop_flat(w, b"off-domain-junk")
+    pulled = _scandir_counter(monkeypatch)
+    r = w.drain()
+    assert r["off_domain"] == 5                                # the sweep itself is still bounded
+    incoming_pulled = pulled.get(os.fspath(w.incoming), 0)
+    assert incoming_pulled <= 10                               # ~off_domain_limit + 1, decisively NOT 200
+    assert sum(pulled.values()) < 200                          # the 200-file flood was never read in full
+
+
+def test_declared_subtree_flood_bounds_the_enumeration(monkeypatch):
+    # Before: sorted(ddir.glob("*.json")) read + sorted the WHOLE subtree before per_domain_limit. The fix
+    # bounds the per-subtree enumeration too — a flood in a declared subtree is read only up to the caps.
+    s, _, w = _strict_rig(domains=(A,), per_domain_limit=3, off_domain_limit=3)
+    for _ in range(80):
+        _drop_in_domain(w, _seal(_report()), *A)
+    pulled = _scandir_counter(monkeypatch)
+    r = w.drain()
+    assert r["recorded"] == 3                                  # only per_domain_limit drained this pass
+    subtree_pulled = pulled.get(os.fspath(w.incoming / ms.domain_slug(*A)), 0)
+    assert subtree_pulled <= 3 + 3 + 2                         # ~ per_domain_limit + off_domain_limit (+ slack)
+    assert subtree_pulled < 80                                 # the 80-deep flood was never read in full
+
+
+# --- MEDIUM #2: declared-subtree blind spot (non-.json / nested is SWEPT by location + alerted, not retained) -
+def test_non_json_and_nested_in_declared_subtree_are_quarantined_and_alerted():
+    # Before: step 1 read ONLY sorted(ddir.glob("*.json")), so a non-.json file or any NESTED path inside a
+    # declared subtree was never claimed/scanned/quarantined/alerted -> silent retention. The fix sweeps every
+    # non-report entry BY LOCATION into rejected/ (never scanning it) and fires the coalesced alert.
+    s, _, w = _strict_rig(domains=(A,))
+    rep = _report()
+    _drop_in_domain(w, _seal(rep), *A)                         # a legit flat *.json report -> drains
+    ddir = _domain_dir(w, *A)
+    (ddir / "payload.bin").write_bytes(b"\x00\x01\x02")        # a non-.json file dropped into the subtree
+    nested = ddir / "nested"
+    nested.mkdir()
+    buried = _seal(_report())                                  # a would-be-VALID report, but NESTED one level down
+    (nested / "report.json").write_text(json.dumps(buried))
+    r = w.drain()
+    assert r["recorded"] == 1                                  # only the flat valid *.json drained
+    assert [e["report_id"] for e in _events(s, "org_a")] == [rep["report_id"]]
+    assert r["in_domain_foreign"] == 2                         # payload.bin (1) + nested/report.json (1)
+    assert not (ddir / "payload.bin").exists()                 # swept out — no silent retention
+    assert not (nested / "report.json").exists()
+    assert quarantined_count(w.rejected) == 2                  # both reached rejected/ for operator action
+    assert len(_events(s, "org_a")) == 1                       # the buried report was NEVER scanned/recorded
+    al = _alerts(s)
+    assert len(al) == 1 and al[0]["in_domain_foreign"] == 2 and al[0]["source_class"] == "drain_strictness"
+    # metadata-only: the by-location sweep leaks no tenant content into the alert
+    assert all(leak not in json.dumps(al[0]) for leak in ("org_a", "apme.cm", "sqli", "body", "mac"))
+
+
+def test_in_domain_foreign_sweep_is_bounded():
+    # the in-domain-foreign sweep is bounded (like the off-domain sweep) so a flood of junk in a declared
+    # subtree cannot blow up a drain pass either.
+    s, _, w = _strict_rig(domains=(A,), off_domain_limit=4)
+    ddir = _domain_dir(w, *A)
+    for i in range(20):
+        (ddir / f"junk{i}.bin").write_bytes(b"x")              # 20 non-.json files in the declared subtree
+    r = w.drain()
+    assert r["in_domain_foreign"] == 4                         # bounded by off_domain_limit, not all 20
+    assert quarantined_count(w.rejected) == 4
+
+
+# --- MEDIUM #3: per-domain flood must not starve another declared tenant in one pass ------------------------
+def test_per_domain_limit_has_a_bounded_safe_default():
+    # Before: per_domain_limit=None meant UNBOUNDED, so a flooded tenant whose slug sorts first ate the whole
+    # pass. The default is now a BOUNDED positive cap — fairness is the DEFAULT, not opt-in.
+    s, _, w = _strict_rig()                                    # no per_domain_limit passed
+    assert w.per_domain_limit is not None
+    assert isinstance(w.per_domain_limit, int) and w.per_domain_limit > 0
+    assert w.per_domain_limit == ms._PER_DOMAIN_DRAIN_CAP
+
+
+def test_flooded_first_tenant_does_not_starve_the_next():
+    # With a bounded per-domain cap, a flood in the FIRST-sorted declared tenant is capped to that many drains
+    # per pass, and the NEXT declared tenant is STILL served in the SAME pass (p95 isolation is real, not claimed).
+    s, _, w = _strict_rig(domains=(A, B), per_domain_limit=3)
+    first, second = (A, B) if ms.domain_slug(*A) < ms.domain_slug(*B) else (B, A)
+    for _ in range(8):                                         # flood whichever tenant the drain serves FIRST
+        _drop_in_domain(w, _seal(_report(org=first[0], host=first[1])), *first)
+    served = _report(org=second[0], host=second[1])
+    _drop_in_domain(w, _seal(served), *second)                # the next tenant drops a single report
+    r = w.drain()
+    assert len(_events(s, first[0])) == 3                      # flooded tenant drains only its cap, NOT all 8
+    assert [e["report_id"] for e in _events(s, second[0])] == [served["report_id"]]   # next tenant SERVED
+    assert r["recorded"] == 4
+
+
+# --- DEFAULT (domains=None) stays byte-identical: the three fixes are STRICT-ONLY --------------------------
+def test_default_global_drain_unchanged_ignores_non_json_and_subdirs():
+    # The DEFAULT global drain stays byte-identical to pre-AS-3a: it processes sorted(incoming/*.json) and
+    # IGNORES everything else — no off-domain/foreign sweep, no alert, no new return keys. (Complements
+    # test_default_mode_is_the_unchanged_global_drain.)
+    s = _store()
+    reg = _grant(s, *A)
+    w = ms.MonitoringSpoolWatcher(s, spool_dir=tempfile.mkdtemp(), secret_for=lambda o, h: SECRETS.get((o, h)),
+                                  authority=reg, now_fn=lambda: NOW)
+    rep = _report()
+    (w.incoming / "a.json").write_text(json.dumps(_seal(rep)))
+    (w.incoming / "ignore.bin").write_bytes(b"\x00\xff")       # a non-.json file
+    (w.incoming / "sub").mkdir()                               # a nested subdir with a would-be report
+    (w.incoming / "sub" / "x.json").write_text(json.dumps(_seal(_report())))
+    r = w.drain()
+    assert set(r) == {"recorded", "rejected", "deduped", "seqs"}   # NO off_domain/in_domain_foreign/alert_seq
+    assert (r["recorded"], r["rejected"], r["deduped"]) == (1, 0, 0)
+    assert _alerts(s) == []
+    assert (w.incoming / "ignore.bin").exists()                # untouched — the global drain leaves non-.json
+    assert (w.incoming / "sub" / "x.json").exists()            # nested: likewise untouched, never swept
+    assert quarantined_count(w.rejected) == 0
