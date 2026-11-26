@@ -816,6 +816,43 @@ def cloud_connect_fetcher():
     return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
 
 
+# --- GCP OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) ---------------------------
+# The ONLY hosts the GCP cloud-connect fetcher (`ui.cloud_fetch.GcpImpersonationConnectFetcher`) may reach, enforced
+# per-endpoint BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): the OAuth2 token endpoint (the connector
+# SA assertion exchange) and IAM Credentials (generateAccessToken on the challenge-named SA). No endpoint override:
+# the credential-holding egress can only ever reach these two Google hosts. The target SA email is VIGIL-COMPUTED
+# from the project id + the issued external id (never customer-supplied as a URL), so the customer can never steer
+# this egress anywhere.
+GCP_EGRESS_ALLOWLIST = frozenset({"oauth2.googleapis.com", "iamcredentials.googleapis.com"})
+
+# VIGIL's connector SERVICE-ACCOUNT email — the member a customer grants roles/iam.serviceAccountTokenCreator on
+# their target SA (analog to the AWS connector principal). Validated so a malformed value is never shown to a customer.
+_GCP_CONNECTOR_SA_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
+
+
+def cloud_connect_gcp_connector_sa() -> str:
+    """VIGIL's GCP connector SA email (`VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA`), format-checked, or "" when
+    unset/malformed (the GCP leg then offers nothing — fail closed, never placement naming a bad connector SA)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA") or "").strip()
+    return raw if _GCP_CONNECTOR_SA_RE.fullmatch(raw) else ""
+
+
+def cloud_connect_gcp_fetcher():
+    """The live GCP cloud-connect fetcher (``ui.cloud_fetch.GcpImpersonationConnectFetcher``: sign the connector SA
+    assertion, impersonate the customer's target SA, bind its description to the external id, and run the same-shape
+    negative control) when the cloud leg is ON and the owner has provisioned VIGIL's connector SA email + its RSA
+    private key, else None (fail closed: the provisioner then offers and verifies nothing for GCP). The private key
+    PEM comes from `VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY` (the owner-provisioned secret, analog to the AWS secret key).
+    Lazily imports the fetcher so `config` stays import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_gcp_connector_sa():
+        return None
+    pem = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY") or "").strip()
+    if not pem:
+        return None
+    from .ui.cloud_fetch import GcpImpersonationConnectFetcher
+    return GcpImpersonationConnectFetcher(connector_email=cloud_connect_gcp_connector_sa(), private_key_pem=pem)
+
+
 def customer_posture_enabled() -> bool:
     """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
     Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of

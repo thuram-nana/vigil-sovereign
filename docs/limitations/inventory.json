@@ -577,8 +577,8 @@
   },
   {
    "id": "LIMIT-cloud-connect-gcp-azure-verdict",
-   "title": "Customer cloud connect verifies AWS accounts only; GCP and Azure are refused at the first step",
-   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account: VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the caller identity (the account the role lands in), and requires a same-shape negative control (the same role must DENY a fresh random external id, else its trust policy does not enforce the id and any tenant could name it). GCP (service-account impersonation) and Azure (a multi-tenant app registration + role assignment) need a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws}, so issue_challenge and verify_and_connect both refuse gcp/azure before any record is written, and the connect screen offers only AWS - no customer is walked into a flow that cannot finish.",
+   "title": "Customer cloud connect verifies AWS and GCP accounts; Azure is refused at the first step",
+   "summary": "The connect screen's cloud leg (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) proves control of an AWS account (VIGIL's connector identity assumes the customer's read-only role with a VIGIL-issued external id, reads the account the role lands in, and requires a same-shape negative control) and of a GCP project (the customer creates a service account whose id encodes the unguessable external id, and VIGIL's connector service account impersonates exactly that service account via iamcredentials generateAccessToken under a project-admin-only roles/iam.serviceAccountTokenCreator grant; the unguessable per-challenge name is the confused-deputy closure). Azure (a multi-tenant app registration + role assignment) needs a different observation and verdict, which are not built. Fail-closed by construction: governor/cloud_connect.py::_VERIFIABLE_PROVIDERS is {aws, gcp}, so issue_challenge and verify_and_connect both refuse azure before any record is written, and the connect screen offers only AWS and GCP - no customer is walked into a flow that cannot finish.",
    "classification": "real-unfinished-code",
    "severity": "info",
    "anchor": {
@@ -588,6 +588,22 @@
    "marker": true,
    "check": "symbol-exists",
    "source_doc": "apps/sigil/sigil/governor/cloud_connect.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-cloud-connect-gcp-livefire",
+   "title": "GCP cloud-connect live round-trip is not exercised in CI (no live GCP project / connector SA in the hash-locked CI env)",
+   "summary": "The GCP cloud-connect proof-of-control (consumer PR-C, VIGIL_CUSTOMER_CLOUD_CONNECT, default OFF) is a complete, functional two-call round-trip: the connector service-account assertion JWT (RS256), the oauth2 token exchange, and iamcredentials generateAccessToken on the challenge-named service account. Every deterministic layer - RS256 signing (pinned against a known RSA key + a precomputed signature vector), request construction, the Google JSON parsing, the egress guard, and the name-binding verdict - is covered offline by apps/sigil/tests/test_cloud_fetch_gcp.py + test_cloud_connect.py against a fake Google transport. The residual is only that the LIVE round-trip against real Google endpoints is not exercised in CI: the hash-locked CI environment has no live GCP project and no owner-provisioned connector service account, so config.cloud_connect_gcp_fetcher builds the live fetcher only when the owner sets VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA + VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY, and when unprovisioned the GCP leg is simply not built and verify fails closed (not available on this deployment). No metadata read or negative control is made, so there is no live-only step that could fail after the offline tests pass.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "apps/sigil/sigil/ui/cloud_fetch.py",
+    "symbol": "GcpImpersonationConnectFetcher"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "apps/sigil/sigil/ui/cloud_fetch.py",
    "disposition": "file-into-w16",
    "w16_issue": null
   },

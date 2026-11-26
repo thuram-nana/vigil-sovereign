@@ -19,19 +19,41 @@ the credential-holding egress can only reach AWS STS); a redirect-BLOCKING opene
 request); a bounded response read; an XML parse that refuses any DTD. The customer supplies only a role ARN, which is
 format-checked and travels as a signed form PARAMETER, never as a URL.
 
-ERRORS: every failure is a ``CloudFetchError``. Its ``str()`` is this module's own fixed wording (it reaches the
-customer); the AWS error code/message and library text ride separately in ``detail`` for the operator audit only.
-AccessDenied on step 1 means the role does not trust VIGIL with the issued external id (the customer's fix); any other
-AWS error code, an HTTP 5xx or a transport fault is INCONCLUSIVE and fails closed — a control whose answer is anything
-but an explicit ``AccessDenied`` is never counted as denied (VIGIL's own bad credentials also answer HTTP 403, with a
-different code).
+WHAT IT OBSERVES (GCP, a cross-project service-account IMPERSONATION grant — NAME-bound). Under VIGIL's connector
+service-account credentials (``GcpImpersonationConnectFetcher``) it:
+  1. authenticates VIGIL's connector SA — signs a service-account assertion JWT (RS256 over the connector SA private
+     key) and exchanges it at ``oauth2.googleapis.com`` for a connector access token;
+  2. computes the EXACT, challenge-bound SA email from the project + the unguessable external id (``vgl-`` + a
+     SHA-256 tag — see ``_gcp_expected_sa_email``, never customer-steered), and calls
+     ``iamcredentials:generateAccessToken`` on THAT email. A 200 is the WHOLE positive proof: an SA whose NAME
+     encodes THIS challenge exists in the project (only the project admin could create a name derived from the
+     unguessable external id), VIGIL holds ``roles/iam.serviceAccountTokenCreator`` on it, and it is in the claimed
+     project (VIGIL built the email from ``account_id``). A 403/404 is the customer's fix (create the SA + grant);
+     anything else is INCONCLUSIVE and fails closed.
+The confused-deputy closure is the unguessable per-challenge NAME. There is deliberately NO metadata read (reading an
+SA's own resource under its impersonated token 403s — a target SA has no self-read) and NO never-created "control SA"
+(a never-created SA is ALWAYS denied in real GCP, so it can never catch a blanket grant — a vacuous control). It
+returns ``{impersonated, expected_email, project, external_id}`` and decides nothing: the deterministic verdict lives
+in ``governor.cloud_connect.cloud_grant_refusal`` (its gcp branch). The connector token is used for exactly this
+impersonation and is never stored, logged or returned.
 
-FATAL-2: sovereign-side, stdlib only, ``assert_no_offense()`` at import; no framework/strix import.
+ERRORS: every failure is a ``CloudFetchError``. Its ``str()`` is this module's own fixed wording (it reaches the
+customer); the AWS/Google error code/message and library text ride separately in ``detail`` for the operator audit
+only. AccessDenied on the AWS step-1 assume (or a 403 PERMISSION_DENIED on the GCP target impersonation) means the
+grant is absent (the customer's fix); any other error code, an HTTP 5xx or a transport fault is INCONCLUSIVE and fails
+closed — a control whose answer is anything but an explicit denial/not-found is never counted as denied (VIGIL's own
+bad credentials also answer HTTP 403, with a different code).
+
+FATAL-2: sovereign-side, ``assert_no_offense()`` at import; no framework/strix import. The AWS leg is stdlib-only; the
+GCP leg additionally uses the sovereign ``cryptography`` dep (the same library ``governor.github_app`` uses) for the
+one RSA-SHA256 JWT signature — ``cryptography`` is NOT an offense engine, so FATAL-2 holds.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import re
 import time
 import urllib.error
@@ -320,3 +342,236 @@ class AwsStsConnectFetcher:
         control, _ = self._assume(role, ctl)       # the same role, a fresh random id: must be explicitly DENIED
         return {"assumed_with_external_id": ext, "account": account, "control_external_id": ctl,
                 "control_denied": control == "denied"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# GCP service-account IMPERSONATION leg (confused-deputy-safe cross-project proof-of-control). The connector SA
+# assertion JWT is RS256-signed with the sovereign ``cryptography`` dep; everything else is stdlib ``urllib`` with
+# the same guarded-egress discipline as the AWS leg (guard -> redirect-blocking open -> bounded read).
+#
+# PROOF (NAME-BINDING): VIGIL computes, from the (trusted) project + the unguessable external id, the EXACT
+# service-account id the customer must create — local part ``vgl-`` + a SHA-256 tag of a domain-separated external
+# id (deterministic, lowercase, inside GCP's 6-30 char SA-id rule). VIGIL impersonates THAT email; a 200 proves, in
+# one call, that (a) an SA whose NAME encodes THIS challenge exists in the project — only the project admin could
+# create a name derived from the unguessable external id — (b) VIGIL holds roles/iam.serviceAccountTokenCreator on
+# it, and (c) the SA is IN ``account_id`` (VIGIL built the email from ``account_id``). The confused-deputy closure is
+# the unguessable per-challenge NAME (a malicious VIGIL tenant cannot guess another customer's external id, so cannot
+# make VIGIL impersonate a matching-named SA in a project it does not control) — NOT a negative control. No metadata
+# read and no never-created "control SA" are made: the first would 403 in real GCP (a target SA has no self-read),
+# and the second is vacuous (a never-created SA is ALWAYS denied, so it could never catch a blanket grant).
+#
+# VIGIL-LIMIT:LIMIT-cloud-connect-gcp-livefire — request construction, RS256 signing, JSON parsing and the verdict
+# are covered OFFLINE in full; the live GCP round-trip (token exchange + generateAccessToken on the challenge-named
+# SA) is not exercised in CI, as the hash-locked CI env has no live GCP project / connector SA.
+# ---------------------------------------------------------------------------------------------------------------
+
+_OAUTH_HOST = "oauth2.googleapis.com"
+_OAUTH_TOKEN_URL = f"https://{_OAUTH_HOST}/token"
+_IAMCREDS_HOST = "iamcredentials.googleapis.com"
+_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+_GCP_JWT_LIFETIME_S = 300          # the connector assertion's iat..exp window — a short, conservative bound
+_IMPERSONATION_LIFETIME = "300s"   # the minted impersonation token's lifetime (the generateAccessToken body)
+
+# A GCP project id: a lowercase letter, then [a-z0-9-], 6-30 chars total, no trailing hyphen. (The target SA email
+# is VIGIL-COMPUTED, never customer-parsed, so no SA-email regex is needed on this leg.)
+_GCP_PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+_GCP_DENIED_STATUS = frozenset({"PERMISSION_DENIED", "NOT_FOUND"})
+
+# The challenge-bound SA id derivation (DUPLICATED byte-for-byte in governor.cloud_connect, pinned equal by a test —
+# the same pattern as the AWS role-ARN regex). "vgl-" + 20 lowercase hex of a domain-separated SHA-256 of the
+# external id = 24 chars, which always satisfies GCP's SA-id rule (^[a-z][a-z0-9-]{4,28}[a-z0-9]$, 6-30 chars).
+_GCP_SA_ID_DOMAIN = "vigil-cloud-connect-gcp-sa-id:v1:"
+
+
+def _gcp_expected_sa_id(external_id: str) -> str:
+    return "vgl-" + hashlib.sha256((_GCP_SA_ID_DOMAIN + str(external_id)).encode("utf-8")).hexdigest()[:20]
+
+
+def _gcp_expected_sa_email(project: str, external_id: str) -> str:
+    return f"{_gcp_expected_sa_id(external_id)}@{project}.iam.gserviceaccount.com"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _sign_rs256(signing_input: bytes, pem: str) -> bytes:
+    """An RSA-SHA256 (PKCS#1 v1.5) signature over ``signing_input`` with the connector SA private-key PEM. Uses the
+    sovereign ``cryptography`` dep (imported here, function-local — the module stays import-light). Any
+    unreadable/encrypted/non-RSA key fails closed with a secret-free detail."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    try:
+        key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
+    except Exception as exc:  # noqa: BLE001 — any unreadable/encrypted/garbage PEM is a fail-closed refusal
+        raise CloudFetchError("the cloud check could not be made",
+                              detail=f"connector key not a readable unencrypted PEM ({type(exc).__name__})") from None
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise CloudFetchError("the cloud check could not be made", detail="connector key is not an RSA key")
+    return key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+
+
+def _gcp_allowlist() -> frozenset:
+    """The GCP egress host allowlist, read from ``config`` at call time. Empty ⇒ every host refused."""
+    from .. import config
+    return frozenset(h.lower() for h in config.GCP_EGRESS_ALLOWLIST)
+
+
+def _gcp_guard(url: str) -> None:
+    """Refuse a non-https scheme, userinfo, a non-default port, or an off-allowlist host BEFORE any socket opens
+    (mirrors ``_guard``; the per-endpoint allowlist pins the three Google hosts this leg may reach)."""
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "https":
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-https Google URL {parts.scheme!r}")
+    if "@" in (parts.netloc or ""):
+        raise CloudFetchError("the cloud check could not be made", detail="Google URL carries userinfo")
+    try:
+        port = parts.port
+    except ValueError:
+        raise CloudFetchError("the cloud check could not be made", detail="malformed Google port") from None
+    if port not in (None, 443):
+        raise CloudFetchError("the cloud check could not be made", detail="non-default Google port")
+    host = (parts.hostname or "").lower()
+    if host not in _gcp_allowlist():
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-allowlisted Google host {host!r}")
+
+
+def _json_body(raw: bytes):
+    """Parse a Google JSON answer into a dict ({} on any fault / non-object). JSON carries no DTD/entity surface."""
+    try:
+        v = json.loads(bytes(raw or b"").decode("utf-8"))
+    except Exception:  # noqa: BLE001 — a malformed body is an empty object (fail-closed at the call site)
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _gcp_request(method: str, url: str, headers: Mapping[str, str], body, timeout: float) -> "tuple[int, bytes]":
+    """One guarded request to a Google endpoint: ``(status, body)``, the body bounded. An HTTP error status is
+    RETURNED (its Google error document tells PERMISSION_DENIED from a fault); only a transport failure raises."""
+    _gcp_guard(url)
+    req = urllib.request.Request(url, data=body, method=method.upper(), headers=dict(headers))
+    try:
+        with _do_open(req, timeout) as r:
+            raw = r.read(_MAX_RESPONSE_BYTES + 1)
+            status = int(getattr(r, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(_MAX_RESPONSE_BYTES + 1) or b""
+        except Exception:  # noqa: BLE001 — an unreadable error body is an empty one
+            raw = b""
+        status = int(exc.code) if isinstance(exc.code, int) else 0
+    except Exception as exc:  # noqa: BLE001 — any transport fault fails closed, never a crash
+        raise CloudFetchError("Google could not be reached to make the cloud check; try again shortly",
+                              detail=f"{type(exc).__name__}: {exc}") from None
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise CloudFetchError("the cloud check could not be made", detail="Google response exceeded the size cap")
+    return status, raw
+
+
+class GcpImpersonationConnectFetcher:
+    """Observe a GCP cross-project service-account impersonation grant under VIGIL's connector SA (module docstring).
+    ``transport`` is an injectable ``(method, url, headers, body, timeout) -> (status, body)`` for offline tests (a
+    FAKE Google that still goes through ``_gcp_guard``); ``clock`` supplies the JWT signing time. SAME ``assume``
+    signature as ``AwsStsConnectFetcher`` so the provisioner dispatches either behind one seam."""
+
+    def __init__(self, *, connector_email: str, private_key_pem: str, timeout: float = _DEFAULT_TIMEOUT_S,
+                 transport: "Optional[Callable[[str, str, Mapping[str, str], Any, float], tuple[int, bytes]]]" = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        if not connector_email or not private_key_pem:
+            raise ValueError("the GCP connector credentials are required")
+        self._email = str(connector_email)
+        self._key_pem = str(private_key_pem)
+        self._timeout = float(timeout)
+        self._transport = transport
+        self._clock = clock
+
+    def __repr__(self) -> str:                    # never render the connector key
+        return "GcpImpersonationConnectFetcher(<connector credentials redacted>)"
+
+    def _call(self, method: str, url: str, body, headers: Mapping[str, str], *, bearer) -> "tuple[int, Any]":
+        hdrs = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+        hdrs.update(dict(headers or {}))
+        if bearer:
+            hdrs["Authorization"] = "Bearer " + str(bearer)
+        if self._transport is not None:
+            _gcp_guard(url)                        # a fake Google still exercises the egress pin
+            try:
+                status, raw = self._transport(method, url, hdrs, body, self._timeout)
+            except CloudFetchError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a transport fault fails closed
+                raise CloudFetchError("Google could not be reached to make the cloud check; try again shortly",
+                                      detail=f"{type(exc).__name__}: {exc}") from None
+        else:
+            status, raw = _gcp_request(method, url, hdrs, body, self._timeout)
+        return int(status), _json_body(bytes(raw or b""))
+
+    def _connector_token(self) -> str:
+        """Step 1: a connector access token from the SA assertion JWT (RS256), exchanged at oauth2.googleapis.com."""
+        now = int(self._clock())
+        header = {"alg": "RS256", "typ": "JWT"}
+        claims = {"iss": self._email, "sub": self._email, "aud": _OAUTH_TOKEN_URL, "scope": _CLOUD_PLATFORM_SCOPE,
+                  "iat": now, "exp": now + _GCP_JWT_LIFETIME_S}
+        seg = (_b64url(json.dumps(header, separators=(",", ":")).encode("ascii")) + "." +
+               _b64url(json.dumps(claims, separators=(",", ":")).encode("ascii")))
+        assertion = seg + "." + _b64url(_sign_rs256(seg.encode("ascii"), self._key_pem))
+        body = _form([("grant_type", _JWT_BEARER_GRANT), ("assertion", assertion)])
+        status, data = self._call("POST", _OAUTH_TOKEN_URL, body, {"Content-Type": _FORM_CONTENT_TYPE}, bearer=None)
+        token = data.get("access_token")
+        if status != 200 or not isinstance(token, str) or not token:
+            raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                                  detail=f"token exchange HTTP {status} {data.get('error')}")
+        return token
+
+    def _generate_token(self, sa_email: str, bearer: str) -> "tuple[str, str]":
+        """generateAccessToken on ``sa_email``: ``("ok", token)`` | ``("denied", "")`` (an explicit 403
+        PERMISSION_DENIED / 404 NOT_FOUND). Anything else raises (INCONCLUSIVE, fail closed)."""
+        url = (f"https://{_IAMCREDS_HOST}/v1/projects/-/serviceAccounts/"
+               f"{quote(sa_email, safe='@._-')}:generateAccessToken")
+        body = json.dumps({"scope": [_CLOUD_PLATFORM_SCOPE], "lifetime": _IMPERSONATION_LIFETIME}).encode("utf-8")
+        status, data = self._call("POST", url, body, {"Content-Type": _JSON_CONTENT_TYPE}, bearer=bearer)
+        if status == 200:
+            token = data.get("accessToken")
+            if not isinstance(token, str) or not token:
+                raise CloudFetchError("the cloud check could not be made",
+                                      detail="generateAccessToken answer carried no token")
+            return "ok", token
+        err = data.get("error") if isinstance(data.get("error"), dict) else {}
+        code = str(err.get("status") or "")
+        if status in (403, 404) and code in _GCP_DENIED_STATUS:
+            return "denied", ""
+        raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                              detail=f"generateAccessToken HTTP {status} {code}")
+
+    def assume(self, *, provider: str, account_id: str, role_ref: str, external_id: str, control_external_id: str = "",
+               now: Any = None) -> dict:
+        """Observe the grant (module docstring): ``{impersonated, expected_email, project, external_id}``. VIGIL
+        computes the EXPECTED, challenge-bound SA email from ``account_id`` + ``external_id`` (never customer-steered),
+        requires the submitted ``role_ref`` to equal it (so the recorded grant is the SA that was proven), and
+        impersonates THAT email. A 200 is the whole positive proof. Raises ``CloudFetchError`` (fail closed) on a
+        malformed input, a submitted SA that is not the one shown, a grant VIGIL cannot use yet (403/404 — the
+        customer's fix), or any inconclusive answer. ``control_external_id`` / ``now`` are accepted for interface
+        symmetry with the AWS fetcher; GCP binds the challenge by SA NAME and needs no negative control."""
+        if str(provider or "") != "gcp":
+            raise CloudFetchError("only GCP projects can be connected here", detail=f"provider {provider!r}")
+        project = str(account_id or "").strip()
+        if not _GCP_PROJECT_RE.fullmatch(project):
+            raise CloudFetchError("give the GCP project id you are connecting, e.g. my-company-prod")
+        ext = str(external_id or "")
+        if not _EXTERNAL_ID_RE.fullmatch(ext):
+            raise CloudFetchError("the cloud check could not be made", detail="bad external id")
+        expected_email = _gcp_expected_sa_email(project, ext)          # computed from TRUSTED (project, external id)
+        submitted = str(role_ref or "").strip()
+        if not hmac.compare_digest(submitted, expected_email):
+            raise CloudFetchError("create and connect the exact service account shown on the connect screen "
+                                  f"({expected_email})")
+        connector = self._connector_token()                            # step 1: VIGIL's connector access token
+        outcome, _tok = self._generate_token(expected_email, connector)  # step 2: impersonate the challenge-named SA
+        if outcome != "ok":
+            raise CloudFetchError("VIGIL could not impersonate the service account shown — create exactly that "
+                                  "service account and grant VIGIL's connector the "
+                                  "roles/iam.serviceAccountTokenCreator role on it, then try again")
+        return {"impersonated": True, "expected_email": expected_email, "project": project, "external_id": ext}

@@ -37,6 +37,8 @@ _iss = itertools.count(1)
 ACCT = "123456789012"
 ROLE = "arn:aws:iam::123456789012:role/VigilReadOnly"
 PRINCIPAL = "arn:aws:iam::111122223333:role/vigil-connector"
+GCP_PROJECT = "my-company-prod"
+GCP_CONNECTOR_SA = "vigil-connector@vigil-sovereign-prod.iam.gserviceaccount.com"
 HOST = "app.acme-test.com"
 
 
@@ -69,6 +71,27 @@ class _StubCloudFetcher:
                 "control_external_id": control_external_id, "control_denied": self.control_denied}
 
 
+class _StubGcpFetcher:
+    """Stands in for ``ui.cloud_fetch.GcpImpersonationConnectFetcher`` (NAME-bound): it impersonates the
+    challenge-named SA and reports ``{impersonated, expected_email, project, external_id}``. ``project_seen`` overrides
+    the observed project, ``impersonated`` the 200 flag, ``error`` a failure to raise. Records each call (SAME
+    ``assume`` signature as the AWS stub)."""
+
+    def __init__(self, *, project_seen=None, impersonated=True, error=None):
+        self.project_seen, self.impersonated, self.error = project_seen, impersonated, error
+        self.calls: list = []
+
+    def assume(self, *, provider, account_id, role_ref, external_id, control_external_id="", now=None):
+        self.calls.append({"external_id": external_id, "role": role_ref})
+        if self.error is not None:
+            raise self.error
+        from sigil.governor import cloud_connect as cc
+        return {"impersonated": self.impersonated,
+                "expected_email": cc._gcp_expected_sa_email(account_id, external_id),
+                "project": self.project_seen if self.project_seen is not None else account_id,
+                "external_id": external_id}
+
+
 class _StubOwnershipFetcher:
     """Stands in for the trusted ownership reader: until ``published`` the token is not there (the fetcher's own
     404 wording); afterwards it returns exactly what the customer published for the CURRENT challenge."""
@@ -96,8 +119,8 @@ def _limiter(max_fails, window):
                             max_lock_s=window)
 
 
-def _prov(*, cloud_fetcher=None, principal=PRINCIPAL, target_fetcher=None, limiters=True, org_max=240,
-          cloud_max=10):
+def _prov(*, cloud_fetcher=None, principal=PRINCIPAL, gcp_fetcher=None, gcp_connector_sa=GCP_CONNECTOR_SA,
+          target_fetcher=None, limiters=True, org_max=240, cloud_max=10):
     from sigil.governor.customers import CustomerRegistry
     from sigil.governor.identity import ensure_owner_keypair
     from sigil.governor.orgs import OrgRegistry
@@ -113,6 +136,8 @@ def _prov(*, cloud_fetcher=None, principal=PRINCIPAL, target_fetcher=None, limit
                     email_tokens=EmailTokenLedger(tempfile.mkdtemp(), ttl_s=1e4),
                     rate_limiter=LoginRateLimiter(tempfile.mkdtemp(), max_fails=1000, window_s=1e4, base_lock_s=1.0),
                     email_sender=NullEmailSender(), cloud_fetcher=cloud_fetcher, cloud_principal_arn=principal,
+                    cloud_gcp_fetcher=gcp_fetcher,
+                    cloud_gcp_connector_sa=(gcp_connector_sa if gcp_fetcher is not None else ""),
                     target_fetcher=target_fetcher,
                     connect_check_limiter=_limiter(1, 10.0) if limiters else None,
                     connect_org_limiter=_limiter(org_max, 3600.0) if limiters else None,
@@ -474,8 +499,8 @@ def test_unverifiable_providers_are_refused_before_any_record():
     p, s, orgs = _prov(cloud_fetcher=_StubCloudFetcher())
     _seat(orgs, "org_a", "u_f", "operator")
     before = s.next_seq
-    with pytest.raises(ProvisionDenied, match="only AWS"):
-        p.cloud_connect_challenge("u_f", "org_a", "gcp", "my-project")
+    with pytest.raises(ProvisionDenied, match="only AWS"):        # gcp is WIRED now; azure is the unverifiable one
+        p.cloud_connect_challenge("u_f", "org_a", "azure", "sub-1")
     assert s.next_seq == before                          # no challenge, no audit row: nothing written at all
 
 
@@ -520,3 +545,79 @@ def test_disconnect_latches_and_is_idempotent():
     assert p.cloud_disconnect("u_f", "org_a", "aws", ACCT)["disconnected"] is True
     assert p.customer_connect_overview("u_f", "org_a")["cloud"] == []
     assert p.cloud_disconnect("u_f", "org_a", "aws", ACCT)["disconnected"] is False
+
+
+# ---- the GCP leg (the second wired provider, NAME-bound) --------------------------------------------------------
+def test_the_gcp_challenge_hands_back_the_name_bound_placement():
+    from sigil.governor import cloud_connect as cc
+    p, s, orgs = _prov(gcp_fetcher=_StubGcpFetcher())
+    _seat(orgs, "org_a", "u_f", "operator")
+    ch = p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    assert ch["provider"] == "gcp" and ch["account_id"] == GCP_PROJECT
+    assert ch["connector_sa"] == GCP_CONNECTOR_SA
+    assert ch["token_creator_role"] == "roles/iam.serviceAccountTokenCreator"
+    assert ch["sa_id"] == cc._gcp_expected_sa_id(ch["external_id"])
+    assert ch["sa_email"] == cc._gcp_expected_sa_email(GCP_PROJECT, ch["external_id"])
+    assert any(f"create {ch['sa_id']}" in cmd for cmd in ch["gcloud"])
+    assert "trust_policy" not in ch and "principal_arn" not in ch and "description" not in ch   # AWS-only keys absent
+
+
+def test_gcp_challenge_then_verify_records_a_read_only_grant():
+    f = _StubGcpFetcher()
+    p, s, orgs = _prov(gcp_fetcher=f)
+    _seat(orgs, "org_a", "u_f", "operator")
+    ch = p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    res = p.cloud_connect_verify("u_f", "org_a", "gcp", GCP_PROJECT, ch["sa_email"])   # the SA shown on the screen
+    assert res["access"] == "read-only" and res["role_ref"] == ch["sa_email"] and res["provider"] == "gcp"
+    (call,) = f.calls
+    assert call["external_id"] == ch["external_id"] and call["role"] == ch["sa_email"]
+    ov = p.customer_connect_overview("u_f", "org_a")
+    assert [(c["provider"], c["account_id"], c["status"]) for c in ov["cloud"]] == [("gcp", GCP_PROJECT, "connected")]
+
+
+def test_a_gcp_grant_vigil_cannot_use_reaches_the_customer_in_the_fetchers_words():
+    from sigil.governor.cloud_connect import CloudConnectRegistry
+    from sigil.ui.cloud_fetch import CloudFetchError
+    err = CloudFetchError("VIGIL could not impersonate the service account shown — create exactly that service "
+                          "account and grant VIGIL's connector the roles/iam.serviceAccountTokenCreator role on it")
+    p, s, orgs = _prov(gcp_fetcher=_StubGcpFetcher(error=err))
+    _seat(orgs, "org_a", "u_f", "operator")
+    ch = p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    with pytest.raises(ProvisionDenied, match="serviceAccountTokenCreator"):
+        p.cloud_connect_verify("u_f", "org_a", "gcp", GCP_PROJECT, ch["sa_email"])
+    assert CloudConnectRegistry(s, owner_key=None).grant("org_a", "gcp", GCP_PROJECT) is None
+
+
+def test_connect_a_gcp_project_you_do_not_control_is_refused():
+    from sigil.governor.cloud_connect import CloudConnectRegistry
+    p, s, orgs = _prov(gcp_fetcher=_StubGcpFetcher(project_seen="evil-project"))
+    _seat(orgs, "org_a", "u_f", "operator")
+    ch = p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    with pytest.raises(ProvisionDenied, match="not proven"):
+        p.cloud_connect_verify("u_f", "org_a", "gcp", GCP_PROJECT, ch["sa_email"])
+    assert CloudConnectRegistry(s, owner_key=None).grant("org_a", "gcp", GCP_PROJECT) is None
+
+
+def test_the_gcp_leg_fails_closed_until_the_owner_provisions_it():
+    # an AWS-only deployment: a GCP challenge / verify refuses with "not available" (no dead-end flow), never a record
+    p, s, orgs = _prov(cloud_fetcher=_StubCloudFetcher())        # no GCP fetcher / connector SA
+    _seat(orgs, "org_a", "u_f", "operator")
+    before = s.next_seq
+    dummy_sa = f"vgl-aaaaaaaaaaaaaaaaaaaa@{GCP_PROJECT}.iam.gserviceaccount.com"
+    with pytest.raises(ProvisionError, match="not available"):
+        p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    with pytest.raises(ProvisionError, match="not available"):
+        p.cloud_connect_verify("u_f", "org_a", "gcp", GCP_PROJECT, dummy_sa)
+    assert s.next_seq == before
+
+
+def test_gcp_and_aws_can_both_be_connected_in_one_org():
+    p, s, orgs = _prov(cloud_fetcher=_StubCloudFetcher(), gcp_fetcher=_StubGcpFetcher())
+    _seat(orgs, "org_a", "u_f", "operator")
+    p.cloud_connect_challenge("u_f", "org_a", "aws", ACCT)
+    p.cloud_connect_verify("u_f", "org_a", "aws", ACCT, ROLE)
+    gch = p.cloud_connect_challenge("u_f", "org_a", "gcp", GCP_PROJECT)
+    p.cloud_connect_verify("u_f", "org_a", "gcp", GCP_PROJECT, gch["sa_email"])
+    ov = {c["provider"]: c["status"] for c in p.customer_connect_overview("u_f", "org_a")["cloud"]}
+    assert ov == {"aws": "connected", "gcp": "connected"}
+    assert p.customer_connect_overview("u_f", "org_a")["available"]["cloud_connect"] is True
