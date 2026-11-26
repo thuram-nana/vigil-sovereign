@@ -412,7 +412,7 @@ def _wiring(flags: dict, script: str) -> dict:
         "function ntfWidget() { return null; }\nasync function doLogout() {}",
         'function viewSoon(t) { return "viewSoon:" + t; }',
         ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-         "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false;")]
+         "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;")]
         + [f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS])
     # PR-L (Area 11): the shell also reads ATTACK_PATH_ON, so app.js's own flag line rides in beside PR-G's (read from
     # the page dataset like theirs: none of these flag sets names attackPath, so the shell shows no Attack-path link).
@@ -480,14 +480,21 @@ def test_the_guide_walks_through_plans_and_reports():
     faq = [f for f in out["faq"] if "Download report" in f["a"]]
     assert len(faq) == 1 and faq[0]["when"] == "reportExport"
     # every PR-G addition — and nothing else — is gated on a page switch (so with them off the guide is unchanged);
-    # the other gated entries are PR-B's (#1198) Fix-first step, on its own switch (data-posture), and legal/governance
-    # S1's Settings step, on its own switch (data-settings)
+    # the other gated entries are PR-B's (#1198) Fix-first step, on its own switch (data-posture), legal/governance
+    # S1's Settings step (data-settings), legal/governance S2's Privacy centre step (data-privacy-center),
+    # legal/governance S3's Data rights step (data-data-rights), legal/governance S5's AI governance step
+    # (data-ai-governance) and legal/governance S7's Seller identity step (data-seller-identity)
     gated = sorted([f"{ch['id']}/{st['id']}" for ch in out["chapters"] for st in ch["steps"] if st.get("when")]
                    + [f"faq/{f['q']}" for f in out["faq"] if f.get("when")]
                    + [f"{ch['id']}/{st['id']}:alt" for ch in out["chapters"] for st in ch["steps"] if st.get("alt")])
     assert gated == ["assess/fixfirst", "assess/report", "assess/standards", "credits/compare", "credits/plans:alt",
-                     "faq/Can I give our results to an auditor or a customer?", "workspace/organization",
-                     "workspace/organization:alt"]
+                     "faq/Can I give our results to an auditor or a customer?", "workspace/ai_governance",
+                     "workspace/datarights", "workspace/organization", "workspace/organization:alt",
+                     "workspace/privacy", "workspace/seller"]
+    assert steps[("workspace", "privacy")]["when"] == "privacyCenter"             # lgS2's step, never a PR-G switch
+    assert steps[("workspace", "datarights")]["when"] == "dataRights"            # lgS3's step, never a PR-G switch
+    assert steps[("workspace", "ai_governance")]["when"] == "aiGovernance"        # legal/governance S5's step
+    assert steps[("workspace", "seller")]["when"] == "sellerIdentity"            # legal/governance S7's step
     assert steps[("assess", "fixfirst")]["when"] == "posture"                     # PR-B's step, never a PR-G switch
     assert steps[("workspace", "organization")]["when"] == "settings"            # lgS1's step, never a PR-G switch
     assert steps[("workspace", "organization")]["alt"]["when"] == "security"     # its Account-security clicks
@@ -502,7 +509,7 @@ def test_the_guide_walks_through_plans_and_reports():
 # as it was before them — so the two renders can be compared.
 _GUIDE_RENDER = r"""
 Object.assign(document.body.dataset, %(flags)s);
-var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false;
+var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;
 %(page_flag)s
 %(route_shown)s
 const G = window.VIGIL_GUIDE;

@@ -60,6 +60,17 @@ def _with_prefs_dir(d, fn):
         _cfg.CUSTOMER_PREFERENCES_DIR = saved
 
 
+def _with_data_rights_dir(d, fn):
+    """Run ``fn`` with the data-rights store rooted at ``d`` (the store reads ``config.CUSTOMER_DATA_RIGHTS_DIR``)."""
+    import sigil.config as _cfg
+    saved = _cfg.CUSTOMER_DATA_RIGHTS_DIR
+    _cfg.CUSTOMER_DATA_RIGHTS_DIR = d
+    try:
+        return fn()
+    finally:
+        _cfg.CUSTOMER_DATA_RIGHTS_DIR = saved
+
+
 def make_fake_tpm():
     """A deterministic in-process stand-in for the tpm2 CLI (no real TPM in CI). Each Vault seals under its
     OWN generated KEK held in its OWN vault dir — two vaults => two KEKs, exactly like two machines."""
@@ -137,6 +148,11 @@ def _make_full_source(tmp_path, *, provision=True):
     # legal/governance S1: a customer's General profile, written by the REAL store (its own top-level unit).
     from sigil.ui import preferences_store
     _with_prefs_dir(src / "customer_preferences", lambda: preferences_store.write_prefs(_PREFS_USER, _PREFS, now=1.0))
+    # legal/governance S3: a customer's data-rights request, written by the REAL store (its own top-level unit).
+    from sigil.ui import data_rights_store
+    _with_data_rights_dir(src / "customer_data_rights",
+                          lambda: data_rights_store.record_request(_PREFS_USER, "org_dr", "close_account", "dr-1",
+                                                                   owner_key=owner, now=1.0))
     return src, v, owner, witness_kp
 
 

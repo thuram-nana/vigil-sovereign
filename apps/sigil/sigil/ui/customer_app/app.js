@@ -180,11 +180,14 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
   var SECURITY_ON = !!(SECURITY && pageFlag("security"));
+  // ---- data rights (data_rights.js, legal/governance S3): the Settings sub-screen behind data-data-rights="1" -------
+  var DATA_RIGHTS = window.VIGIL_DATA_RIGHTS;
+  var DATA_RIGHTS_ON = !!(DATA_RIGHTS && pageFlag("dataRights"));
   // STEP-UP — the one name every screen uses for a sensitive action (buying credits, changing the team, turning
   // monitoring on, launching): withStepUp(action, where) runs action() — a function returning the promise of ONE
   // request — and settles with its answer. When the server refuses it with 401 {step_up_required: true}, a "Verify with
@@ -3901,6 +3904,35 @@
   }
   // ---- end of Plans, Reports and the standards mapping (PR-G) ------------------------------------------------------
 
+  // ---- AI governance (VIGIL_CUSTOMER_AI_GOVERNANCE): the AI / human-in-the-loop disclosure sub-screen (S5) ----------
+  // Shown only while the edge writes data-ai-governance="1" (AI_GOVERNANCE_ON, read in the Settings section). One read
+  // (api/customer/ai-governance) over the existing one-read helper (area6View): the server returns the fixed negating
+  // statement and the cited sections, and the screen shows exactly those words and their sources — no control, no
+  // estimate, no engine name, nothing it rewords. Linked from the Settings hub.
+  function viewAiGovernance() {
+    return area6View("#/ai-governance", "How VIGIL uses AI",
+      "How VIGIL uses AI across the Service, and the human oversight around it — drawn word for word from your "
+      + "Terms of Service, the README and the Safety & Authorization briefing, each cited so you can check it.",
+      API + "/ai-governance",
+      "Only members who can see this workspace's assessments can open this page.", aiGovernanceBody);
+  }
+  // The disclosure as the server sent it: the one negating statement, then each cited section. Every sentence is the
+  // server's own (ui/ai_governance), shown verbatim with its source; the screen invents nothing and offers no control.
+  function aiGovernanceBody(d) {
+    var head = [];
+    if (d && d.statement) { head.push(h("p.cust-aig-statement", { role: "note", text: String(d.statement) })); }
+    var sections = (d && Array.isArray(d.sections)) ? d.sections : [];
+    var cards = sections.map(function (s) {
+      var rows = [];
+      ((s && Array.isArray(s.points)) ? s.points : []).forEach(function (pt) {
+        rows.push(h("p.cust-aig-point", { text: String((pt && pt.text) || "") }));
+        if (pt && pt.source) { rows.push(h("p.cust-muted.cust-aig-cite", { text: "Source: " + String(pt.source) })); }
+      });
+      return VUI.card(String((s && s.title) || ""), null, rows);
+    });
+    return h("div.cust-ai-governance", {}, head.concat(cards));
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -4106,6 +4138,11 @@
   // request; it mints no authority and changes no scope (the gate stays the sole authority). The screen itself lives in
   // its own block below (outside this hub's own code), so the hub still reaches the network through /preferences alone.
   var AUTHZ_ON = pageFlag("authorizations");
+  // Legal/governance S5: the AI / human-in-the-loop governance disclosure sub-screen (data-ai-governance="1",
+  // VIGIL_CUSTOMER_AI_GOVERNANCE). Off, #/ai-governance is the home screen exactly as any unknown route, the settings
+  // hub shows no link to it, and nothing is fetched. A pure read: it shows statements drawn word for word from the
+  // Terms, the README and the Safety & Authorization briefing (cited), and offers no control.
+  var AI_GOVERNANCE_ON = pageFlag("aiGovernance");
   // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
   // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
   var PREF_FIELDS = [
@@ -4134,6 +4171,8 @@
       settingsLink("Authorized administrators", "#/team"),
       settingsLink("Authorizations", "#/settings/authorizations"),
       settingsLink("Billing", "#/billing"),
+      settingsLink("Data rights", "#/data-rights"),
+      AI_GOVERNANCE_ON ? settingsLink("How VIGIL uses AI", "#/ai-governance") : null,   // S5: only while its flag is on
     ]);
   }
   // The General tab: the profile fields, pre-filled from what the server stored, with one Save. `shown` keeps each
@@ -4241,6 +4280,8 @@
         .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
         .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
+        .concat(PRIVACY_CENTER_ON ? [navLink("Privacy", "#/privacy")] : [])      // legal/governance S2
+        .concat(SELLER_IDENTITY_ON ? [navLink("Seller identity", "#/seller-identity")] : [])   // legal/governance S7
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -4404,12 +4445,138 @@
     return shell(h("div", {}, [h("h2", { text: "Authorizations" }), holder]), "#/settings/authorizations");
   }
 
+  // ---- Privacy centre (VIGIL_CUSTOMER_PRIVACY_CENTER) ----------------------------------------------
+  // A read-only screen (legal/governance S2) that SURFACES the privacy information this deployment has already
+  // published: the strictly-necessary cookie inventory, the subprocessor list, and links to the full pages. It renders
+  // the EXISTING canonical text the server reads from the public pages (never a reworded copy) and links out to them;
+  // it adds NO authority or money control and makes NO write — the one read, api/customer/privacy, is all it does. Off,
+  // #/privacy is the home screen exactly as any unknown route is (byte-identical), and no privacy read is made.
+  var PRIVACY_CENTER_ON = pageFlag("privacyCenter");
+  // The published pages' links as the server returns them (their canonical public-site paths): an anchor, or nothing.
+  function privacyLink(label, href) {
+    if (!href) { return null; }
+    return h("p.cust-privacy-link", {}, [h("a", { href: String(href), text: label + " →" })]);
+  }
+  // "3 strictly-necessary session cookies, 0 optional — nothing to consent to", from the server's own counts.
+  function cookieCountLine(summary) {
+    var s = Number(summary.strictly_necessary) || 0, o = Number(summary.optional) || 0;
+    return s + " strictly-necessary session cookie" + (s === 1 ? "" : "s") + ", " + o + " optional"
+      + (o === 0 ? " — nothing to consent to." : ".");
+  }
+  // One subprocessor, rendered as the published page words it: the bolded provider name, then the rest of its line.
+  function privacySub(sub) {
+    var name = String(sub.name || ""), detail = String(sub.detail || "");
+    var rest = (detail.indexOf(name) === 0) ? detail.slice(name.length)
+      : (detail && detail !== name ? " — " + detail : "");
+    return h("li.cust-privacy-sub", {}, [h("strong", { text: name }), rest ? h("span", { text: rest }) : null]);
+  }
+  function privacyBody(d) {
+    d = d || {};
+    var cookies = Array.isArray(d.cookies) ? d.cookies : [];
+    var subs = Array.isArray(d.subprocessors) ? d.subprocessors : [];
+    var summary = d.cookie_summary || {}, links = d.links || {};
+    var cookieTable = cookies.length ? h("table.cust-table.cust-privacy-cookies", {}, [
+      h("thead", {}, [h("tr", {}, [h("th", { scope: "col", text: "Cookie" }),
+        h("th", { scope: "col", text: "Purpose" }), h("th", { scope: "col", text: "Category" })])]),
+      h("tbody", {}, cookies.map(function (c) {
+        return h("tr", {}, [h("th", { scope: "row", text: String(c.name || "") }),
+          h("td", { text: String(c.purpose || "") }), h("td", { text: String(c.category || "") })]);
+      }))]) : null;
+    var cookieCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Cookies & local data" }),
+      summary.note ? h("p.cust-muted", { text: String(summary.note) }) : null,
+      h("p.cust-privacy-count", { text: cookieCountLine(summary) }),
+      cookieTable,
+      privacyLink("Full cookie notice", links.cookies),
+    ]);
+    var subCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Subprocessors" }),
+      h("p.cust-muted", { text: "The providers that process data for the hosted service." }),
+      subs.length ? h("ul.cust-privacy-subs", {}, subs.map(privacySub)) : null,
+      privacyLink("Full privacy policy", links.privacy),
+    ]);
+    return h("div", {}, [cookieCard, subCard]);
+  }
+  // The read, the loading holder, the honest "could not load" and the shell/heading are the shared area6View — the
+  // same read-only pattern the Reports screen uses, not a second copy.
+  function viewPrivacy() {
+    return area6View("#/privacy", "Privacy", "The cookies and subprocessors this service uses, and the full privacy "
+      + "policy — exactly as published.", API + "/privacy", "You do not have access to this screen.", privacyBody);
+  }
+
+  // ---- Seller identity (VIGIL_CUSTOMER_SELLER_IDENTITY): a READ-ONLY display of who provides the hosted service ------
+  // Shown only while the edge writes data-seller-identity="1". Off, #/seller-identity is the home screen exactly as any
+  // unknown route, and no seller-identity call is made. A PURE DISPLAY: it reads the published seller-identity block
+  // (GET api/customer/seller-identity) and renders it — SIGIL SARL's legal name, form, registered office, registration
+  // number, contact email, website and governing law. It has NO control of its own (no button in the happy path, no
+  // form, no POST): it mints nothing, mutates nothing, and changes no authority or money. The values are the SAME
+  // published facts the public Terms and Privacy pages carry; the screen renders them, it never restates them.
+  var SELLER_IDENTITY_ON = pageFlag("sellerIdentity");
+  // The fields the screen shows, in order: [key, label]. The server sends exactly these keys (ui/seller_identity.py);
+  // the browser renders what it is sent, it never invents a value.
+  var SELLER_FIELDS = [
+    ["legal_name", "Legal name"],
+    ["legal_name_expansion", "In full"],
+    ["legal_form", "Legal form"],
+    ["registered_city", "Registered in"],
+    ["registered_country", "Country"],
+    ["registration_number", "Registration number"],
+    ["contact_email", "Contact email"],
+    ["website", "Website"],
+    ["governing_law", "Governing law"],
+  ];
+  function sellerCard(s) {
+    var rows = [h("h3", { text: "Who provides this service" }),
+      h("p.cust-muted", { text: "The hosted VIGIL service is provided by this company. These are its published details." })];
+    SELLER_FIELDS.forEach(function (f) { rows.push(kv(f[1], s ? s[f[0]] : "")); });
+    return h("div.card", {}, rows);
+  }
+  // A read that failed for any reason but sign-in leaves the details unknown here: the screen says so and offers Try
+  // again — never a half-empty card. (The block is a global constant, so this is only ever a transient read failure.)
+  function sellerUnavailable(holder) {
+    return h("div.card", {}, [h("h3", { text: "Who provides this service" }),
+      h("p.cust-settings-error", { role: "alert", text: "The seller details could not be loaded right now." }),
+      h("div.row", {}, [h("button.btn", { type: "button", text: "Try again",
+        onClick: function () { return loadSeller(holder); } })])]);
+  }
+  async function loadSeller(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/seller-identity"); }
+    catch (e) {
+      if (here() !== "#/seller-identity") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, sellerUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/seller-identity") { return; }
+    var s = r && r.seller;
+    VUI.mount(holder, (s && typeof s === "object" && !Array.isArray(s)) ? sellerCard(s) : sellerUnavailable(holder));
+  }
+  function viewSellerIdentity() {
+    var holder = h("div#cust-seller-identity");
+    loadSeller(holder);                        // the loader at once, then the published details (or why they could not load)
+    return shell(h("div", {}, [h("h2", { text: "Seller identity" }), holder]), "#/seller-identity");
+  }
+
   // ---- misc ---------------------------------------------------------------------------------------
   function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
     if (e && e.data && e.data.error) return String(e.data.error);
     if (e && e.status === 429) return "Too many attempts — wait a moment and try again.";
     return fallback;
+  }
+
+  // ---- Data rights (data_rights.js, VIGIL_CUSTOMER_DATA_RIGHTS): a Settings sub-screen --------------------------
+  // Shown only while the edge writes data-data-rights="1" (DATA_RIGHTS_ON) and data_rights.js is on the page. It states
+  // the rights in VIGIL's published words, names the 30-day SLA and the contact, and offers the own-data export and the
+  // close-account / deletion request. app.js adds the <h2> and the shell; the module renders the body (and fires its one
+  // read, GET api/customer/data-rights, on arrival). No new authority or money control.
+  function viewDataRightsScreen() {
+    return shell(h("div", {}, [h("h2", { text: "Data rights" }),
+      DATA_RIGHTS.viewDataRights({ h: h, VUI: VUI, api: API, nav: nav, loading: loadingHolder, here: here,
+        onAuthLost: function () { refreshWho().then(function () { nav("#/login"); }); } })]),
+    "#/data-rights");
   }
 
   // ---- router -------------------------------------------------------------------------------------
@@ -4446,6 +4613,14 @@
     "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
     // S12 Authorizations off: #/settings/authorizations is the home screen, exactly as any unknown route is
     "#/settings/authorizations": function () { return authed() ? (AUTHZ_ON ? viewAuthorizations() : viewDashboard()) : viewLogin(); },
+    // the Privacy centre off: #/privacy is the home screen, exactly as any unknown route is (legal/governance S2)
+    "#/privacy": function () { return authed() ? (PRIVACY_CENTER_ON ? viewPrivacy() : viewDashboard()) : viewLogin(); },
+    // the data-rights screen off: #/data-rights is the home screen, exactly as any unknown route is
+    "#/data-rights": function () { return authed() ? (DATA_RIGHTS_ON ? viewDataRightsScreen() : viewDashboard()) : viewLogin(); },
+    // S5 off: #/ai-governance is the home screen, exactly as any unknown route is
+    "#/ai-governance": function () { return authed() ? (AI_GOVERNANCE_ON ? viewAiGovernance() : viewDashboard()) : viewLogin(); },
+    // the Seller identity screen off: #/seller-identity is the home screen, exactly as any unknown route is
+    "#/seller-identity": function () { return authed() ? (SELLER_IDENTITY_ON ? viewSellerIdentity() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash
