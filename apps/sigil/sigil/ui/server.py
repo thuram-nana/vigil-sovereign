@@ -1670,6 +1670,23 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.customer_privacy_center_enabled():
                 return None
             return p.privacy_center(requester, str(body.get("org_id", "")), ip=ip)
+        # Legal/governance S3 — the customer Data-rights screen: the account's rights statement + SLA + recorded
+        # requests (data_rights_overview), a tenant-scoped read-only export of the session org's own non-secret records
+        # (data_rights_export), and recording an owner-signed close-account / deletion request (data_rights_request).
+        # Absent (unknown action -> 404) unless VIGIL_CUSTOMER_DATA_RIGHTS is on, the same flag that gates the edge
+        # routes. Requester is the hop principal and the org is the edge SESSION org (never a free body field); a body
+        # `username`/`org_id` is ignored — only the request's own `kind`/`request_id` travel.
+        if action in ("data_rights_overview", "data_rights_export", "data_rights_request"):
+            from .. import config as _config
+            if not _config.customer_data_rights_enabled():
+                return None
+            if action == "data_rights_overview":
+                return p.data_rights_overview(requester, ip=ip)
+            if action == "data_rights_export":
+                return p.data_rights_export(requester, str(body.get("org_id", "")), ip=ip)
+            return p.data_rights_request(requester, str(body.get("org_id", "")),
+                                         kind=str(body.get("kind") or ""),
+                                         request_id=str(body.get("request_id") or ""), ip=ip)
         # The Account security screen's read: the requesting account's own second factors (never a secret).
         # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.

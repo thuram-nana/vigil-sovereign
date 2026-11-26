@@ -242,6 +242,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # list and the links to the full pages. Like every switch here, a non-secret on/off value written into the page,
     # counting in the build id; its route is served only when it is on.
     privacy_center = _config.customer_privacy_center_enabled()
+    # Legal/governance S3 — the Data-rights screen (the rights statement + SLA, the own-data export, the close-account /
+    # deletion request). The same VIGIL_CUSTOMER_DATA_RIGHTS that serves its routes, so the screen and its API are never
+    # out of step; a non-secret on/off value written into the page, counting in the build id.
+    data_rights = _config.customer_data_rights_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -295,6 +299,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
+                                     "__VIGIL_DATA_RIGHTS__": "1" if data_rights else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -731,6 +736,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("customer_authorizations_list")
         if path == "/api/customer/privacy" and _privacy_center_on():     # S2 Privacy centre (flag OFF -> unknown-route 404)
             return self._customer_read_relay("privacy_center")
+        if path == "/api/customer/data-rights" and _data_rights_on():    # S3 rights + SLA + requests (OFF -> 404)
+            return self._customer_read_relay("data_rights_overview")
+        if path == "/api/customer/data-rights/export" and _data_rights_on():   # S3 own-data export (flag OFF -> 404)
+            return self._customer_read_relay("data_rights_export")
         if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
@@ -1233,6 +1242,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._preferences(body)
         if action == "authorizations/request" and _authorizations_on():   # S12 drop an owner-review request (OFF -> 404)
             return self._authorization_request(body)
+        if action == "data-rights/request" and _data_rights_on():     # S3 close-account / deletion request (OFF -> 404)
+            return self._data_rights_request(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action == "mfa/totp/confirm" and _mfa_enroll_hardening_on():   # new route (flag OFF -> unknown-action 404)
@@ -1542,6 +1553,22 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                                 "host": str(host or ""), "note": str(note or ""), "ip": self._ip()})
         return self._json(r, c)
 
+    def _data_rights_request(self, body: dict):
+        """S3 — record the SESSION account's data-rights request (a close-account / deletion request). Account-level
+        like the preferences save: the acting REQUESTER and the ORG come from the SERVER-side session, NEVER the body
+        (a body ``username``/``org_id`` is ignored); only the request's own ``kind`` and the client-chosen
+        ``request_id`` (the idempotency key) travel to the provisioner, which records one owner-signed append-only row.
+        A caller with no customer session (or no bound org) is refused before the hop fires."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),           # the session's bound org, never body-supplied
+                   "kind": str(body.get("kind") or ""), "request_id": str(body.get("request_id") or ""),
+                   "ip": self._ip()}
+        c, r = self._provision("data_rights_request", requester, payload)
+        return self._json(r, c)
+
     def _security_status(self):
         """The Account security screen's read: which second factors the SESSION's account has (an authenticator app,
         its passkeys) — never a secret. Account-level like MFA: the REQUESTER is the server-side session username, never
@@ -1686,6 +1713,11 @@ def _privacy_center_on() -> bool:
     # S2 — the same flag the cockpit privacy_center read re-checks, so the screen and its route are never out of step.
     from .. import config as _config
     return _config.customer_privacy_center_enabled()
+
+
+def _data_rights_on() -> bool:
+    from .. import config as _config
+    return _config.customer_data_rights_enabled()
 
 
 def _plain_body_refusal(e: Exception) -> str:

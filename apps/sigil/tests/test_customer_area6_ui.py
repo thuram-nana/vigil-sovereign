@@ -481,14 +481,16 @@ def test_the_guide_walks_through_plans_and_reports():
     assert len(faq) == 1 and faq[0]["when"] == "reportExport"
     # every PR-G addition — and nothing else — is gated on a page switch (so with them off the guide is unchanged);
     # the other gated entries are PR-B's (#1198) Fix-first step, on its own switch (data-posture), legal/governance
-    # S1's Settings step (data-settings) and legal/governance S2's Privacy centre step (data-privacy-center)
+    # S1's Settings step (data-settings), legal/governance S2's Privacy centre step (data-privacy-center) and
+    # legal/governance S3's Data rights step (data-data-rights)
     gated = sorted([f"{ch['id']}/{st['id']}" for ch in out["chapters"] for st in ch["steps"] if st.get("when")]
                    + [f"faq/{f['q']}" for f in out["faq"] if f.get("when")]
                    + [f"{ch['id']}/{st['id']}:alt" for ch in out["chapters"] for st in ch["steps"] if st.get("alt")])
     assert gated == ["assess/fixfirst", "assess/report", "assess/standards", "credits/compare", "credits/plans:alt",
-                     "faq/Can I give our results to an auditor or a customer?", "workspace/organization",
-                     "workspace/organization:alt", "workspace/privacy"]
+                     "faq/Can I give our results to an auditor or a customer?", "workspace/datarights",
+                     "workspace/organization", "workspace/organization:alt", "workspace/privacy"]
     assert steps[("workspace", "privacy")]["when"] == "privacyCenter"             # lgS2's step, never a PR-G switch
+    assert steps[("workspace", "datarights")]["when"] == "dataRights"            # lgS3's step, never a PR-G switch
     assert steps[("assess", "fixfirst")]["when"] == "posture"                     # PR-B's step, never a PR-G switch
     assert steps[("workspace", "organization")]["when"] == "settings"            # lgS1's step, never a PR-G switch
     assert steps[("workspace", "organization")]["alt"]["when"] == "security"     # its Account-security clicks

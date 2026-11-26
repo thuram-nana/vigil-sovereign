@@ -628,5 +628,6 @@ process.stdout.write(JSON.stringify(out));
                      r'&& \(route !== "#/fix-first" \|\| POSTURE_ON\)'
                      r'( && [^;]*)?; \}', src)   # (PR-G appends Plans/Reports after PR-B's Fix first)
     assert re.search(r'function routeShown\(route\) \{[^\n]* && \(route !== "#/settings" \|\| SETTINGS_ON\)'
-                     r' && \(route !== "#/privacy" \|\| pageFlag\("privacyCenter"\)\); \}',
-                     src)   # (lgS1 appends Settings, then lgS2 appends the Privacy centre last)
+                     r'[^\n]* && \(route !== "#/privacy" \|\| pageFlag\("privacyCenter"\)\)'
+                     r'[^\n]* && \(route !== "#/data-rights" \|\| pageFlag\("dataRights"\)\)[^\n]*; \}',
+                     src)   # (lgS1 Settings, lgS2 Privacy centre, lgS3 Data rights — other legal screens may append)

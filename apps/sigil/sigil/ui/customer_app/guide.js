@@ -125,6 +125,12 @@
                    "Under Subprocessors, see the providers that process data for the hosted service.",
                    "Select Full cookie notice or Full privacy policy to open the published page with the complete details."],
           why: "The Privacy centre shows the privacy information VIGIL has already published, as published. It only reads and links out: it changes nothing, and it collects nothing new." },
+        // The Data-rights screen (legal/governance S3): served under data-data-rights (VIGIL_CUSTOMER_DATA_RIGHTS, default OFF).
+        { id: "datarights", title: "Your data rights", where: "Data rights", route: "#/data-rights", when: "dataRights",
+          clicks: ["Open Data rights from Settings, under Your organization.",
+                   "It states your rights — access, correction, deletion and export — in VIGIL's published words, and VIGIL responds to a data-rights request within 30 days at info@sigilsovereign.com.",
+                   "Select Export my data to download your workspace's own records (invoices, usage and findings), or Request account deletion to record a close-account request for VIGIL to act on."],
+          why: "Data rights states your rights and lets you export your own records or record a deletion request. Recording a request does not erase VIGIL's immutable, signed history by itself — that is the owner-gated hard-prune process; your request is what VIGIL acts on." },
       ],
     },
     {

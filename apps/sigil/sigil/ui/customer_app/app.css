@@ -544,3 +544,28 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
   background: var(--st-running, #5b9bd5); }
 .cust-chain-step-main { display: grid; gap: 2px; font-size: 0.86rem; }
 .cust-chain-step-main .cust-muted { font-size: 0.76rem; }
+
+/* Data rights (data_rights.js, VIGIL_CUSTOMER_DATA_RIGHTS): the Settings sub-screen — rights, SLA, export, request */
+.cust-data-rights { display: grid; gap: 16px; max-width: 720px; }
+.cust-data-rights-rights, .cust-data-rights-sla, .cust-data-rights-actions,
+.cust-data-rights-history { display: grid; gap: 8px; }
+.cust-data-rights-rights h3, .cust-data-rights-sla h3, .cust-data-rights-actions h3,
+.cust-data-rights-history h3 { margin: 0 0 4px; }
+.cust-data-rights-quote { margin: 0; display: grid; gap: 4px; padding: 10px 12px;
+  border-left: 3px solid var(--border-strong, #384050); background: var(--bg-2); border-radius: var(--r-1, 8px); }
+.cust-data-rights-quote blockquote { margin: 0; }
+.cust-data-rights-sla-line { font-weight: 600; }
+.cust-data-rights-contact { color: var(--st-running, #5b9bd5); }
+.cust-data-rights-actions .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.cust-data-rights-export, .cust-data-rights-delete,
+.cust-data-rights-delete-confirm, .cust-data-rights-delete-cancel { min-width: 0; }
+.cust-data-rights-confirm, .cust-data-rights-export-out { display: grid; gap: 8px; }
+.cust-data-rights-confirm-box { display: grid; gap: 8px; margin-top: 8px; padding: 10px 12px;
+  background: var(--bg-2); border: 1px solid var(--border, #2a2a2a); border-radius: var(--r-1, 8px); }
+.cust-data-rights-export-text { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem;
+  background: var(--bg-2); border-radius: var(--r-1, 8px); padding: 8px 10px; max-height: 240px; overflow: auto; }
+.cust-data-rights-recorded { font-weight: 600; }
+.cust-data-rights-requests { display: grid; gap: 6px; }
+.cust-data-rights-request-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.cust-data-rights-request { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.cust-data-rights-request-kind { font-weight: 600; }

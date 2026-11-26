@@ -230,6 +230,19 @@ CUSTOMER_PREFERENCES_DIR = SIGIL_HOME / "customer_preferences"
 # request (the customer re-requests; the authoritative authorities live owner-signed on the authority seam), so the
 # backup EXCLUDES it with a documented reason (backup._EXCLUSION_REASONS).
 CUSTOMER_AUTHORIZATION_REQUESTS_DIR = SIGIL_HOME / "customer_authorization_requests"
+# Legal/governance S3 — the customer data-rights request ledger (ui/data_rights_store.py): one owner-signed,
+# append-only record per deletion / close-account request a customer records from the Data-rights screen. It is a
+# DURABLE record of what the owner must act on, not money and not authority — it unlocks nothing by itself and never
+# touches the hot signed spine. Its own top-level directory (the customer recorded it and nothing regenerates it), so
+# the backup captures it (backup._STATE_DIRS) and a restore brings it back; written only while
+# VIGIL_CUSTOMER_DATA_RIGHTS is on.
+CUSTOMER_DATA_RIGHTS_DIR = SIGIL_HOME / "customer_data_rights"
+# Legal/governance S3 — the OWNER DECISION wired into the Data-rights screen: VIGIL responds to a data-rights request
+# (access / correction / deletion / export) within this many days (GDPR-standard), and the published data-subject
+# contact is this mailbox (as stated in the Privacy notice and Terms of Service). Single-sourced here so the screen,
+# the recorded request and the owner notification all state the same figures.
+CUSTOMER_DATA_RIGHTS_SLA_DAYS = 30
+CUSTOMER_DATA_RIGHTS_CONTACT = "info@sigilsovereign.com"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -865,6 +878,24 @@ def customer_privacy_center_enabled() -> bool:
     startup (it is written into the page) and on each request; the cockpit reads it on each request — set the SAME value
     in customer.env and cockpit.env."""
     return (os.environ.get("VIGIL_CUSTOMER_PRIVACY_CENTER") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_data_rights_enabled() -> bool:
+    """True iff the customer app shows its Data-rights screen (`VIGIL_CUSTOMER_DATA_RIGHTS` affirmative; legal/governance
+    S3): a settings sub-screen that states the customer's data rights (access / correction / deletion / export) in the
+    EXISTING published words of the Privacy notice and Terms of Service, names the 30-day response SLA
+    (``CUSTOMER_DATA_RIGHTS_SLA_DAYS``) and the data-subject contact (``CUSTOMER_DATA_RIGHTS_CONTACT``), lets a customer
+    EXPORT their own org's non-secret records (the same tenant-scoped, redacted invoices / usage / findings reads the
+    other screens use — no new authority, no mutation), and RECORD a close-account / deletion request (one owner-signed
+    append-only row in ``ui/data_rights_store.py``, idempotent per request_id; it does NOT auto-wipe the immutable spine
+    — that is the owner-gated hard-prune / VAULT-PRUNE path — and unlocks nothing by itself).
+    The edge's ``GET api/customer/data-rights`` + ``GET api/customer/data-rights/export`` + ``POST
+    api/customer/data-rights/request`` routes, and the cockpit's ``data_rights_overview`` / ``data_rights_export`` /
+    ``data_rights_request`` actions, exist only while this is on. OFF by default: the app is exactly as before (no
+    Data-rights link, #/data-rights is the home screen exactly as any unknown route, and no data-rights call is made).
+    The edge reads it at startup (it is written into the page) and on each request; the cockpit reads it on each
+    request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_DATA_RIGHTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_overview_enabled() -> bool:

@@ -180,11 +180,14 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
   var SECURITY_ON = !!(SECURITY && pageFlag("security"));
+  // ---- data rights (data_rights.js, legal/governance S3): the Settings sub-screen behind data-data-rights="1" -------
+  var DATA_RIGHTS = window.VIGIL_DATA_RIGHTS;
+  var DATA_RIGHTS_ON = !!(DATA_RIGHTS && pageFlag("dataRights"));
   // STEP-UP — the one name every screen uses for a sensitive action (buying credits, changing the team, turning
   // monitoring on, launching): withStepUp(action, where) runs action() — a function returning the promise of ONE
   // request — and settles with its answer. When the server refuses it with 401 {step_up_required: true}, a "Verify with
@@ -4134,6 +4137,7 @@
       settingsLink("Authorized administrators", "#/team"),
       settingsLink("Authorizations", "#/settings/authorizations"),
       settingsLink("Billing", "#/billing"),
+      settingsLink("Data rights", "#/data-rights"),
     ]);
   }
   // The General tab: the profile fields, pre-filled from what the server stored, with one Save. `shown` keeps each
@@ -4472,6 +4476,18 @@
     return fallback;
   }
 
+  // ---- Data rights (data_rights.js, VIGIL_CUSTOMER_DATA_RIGHTS): a Settings sub-screen --------------------------
+  // Shown only while the edge writes data-data-rights="1" (DATA_RIGHTS_ON) and data_rights.js is on the page. It states
+  // the rights in VIGIL's published words, names the 30-day SLA and the contact, and offers the own-data export and the
+  // close-account / deletion request. app.js adds the <h2> and the shell; the module renders the body (and fires its one
+  // read, GET api/customer/data-rights, on arrival). No new authority or money control.
+  function viewDataRightsScreen() {
+    return shell(h("div", {}, [h("h2", { text: "Data rights" }),
+      DATA_RIGHTS.viewDataRights({ h: h, VUI: VUI, api: API, nav: nav, loading: loadingHolder, here: here,
+        onAuthLost: function () { refreshWho().then(function () { nav("#/login"); }); } })]),
+    "#/data-rights");
+  }
+
   // ---- router -------------------------------------------------------------------------------------
   var ROUTES = {
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
@@ -4508,6 +4524,8 @@
     "#/settings/authorizations": function () { return authed() ? (AUTHZ_ON ? viewAuthorizations() : viewDashboard()) : viewLogin(); },
     // the Privacy centre off: #/privacy is the home screen, exactly as any unknown route is (legal/governance S2)
     "#/privacy": function () { return authed() ? (PRIVACY_CENTER_ON ? viewPrivacy() : viewDashboard()) : viewLogin(); },
+    // the data-rights screen off: #/data-rights is the home screen, exactly as any unknown route is
+    "#/data-rights": function () { return authed() ? (DATA_RIGHTS_ON ? viewDataRightsScreen() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash

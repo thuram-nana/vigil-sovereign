@@ -1621,6 +1621,99 @@ class Provisioner:
         from .privacy_center_store import read_privacy_center
         return {"ok": True, **read_privacy_center()}
 
+    # -- Legal/governance S3 — the customer data-rights screen (VIGIL_CUSTOMER_DATA_RIGHTS) --------------
+    def data_rights_overview(self, requester: str, *, ip: str = "") -> dict:
+        """The Data-rights screen's read for the requesting customer's OWN account: the published response SLA and
+        data-subject contact (the owner decision, single-sourced in ``config``) and the account's recorded data-rights
+        requests. Account-level, like the preferences read: the requester is the hop-bound session principal, never a
+        body field, and must be an ACTIVE customer. The request list is read STRICTLY: a ledger file that is there but
+        cannot be read (``data_rights_store.LedgerUnreadable``) is a store fault — the cockpit's clean 500 — never an
+        empty history the screen would show as the customer's."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .. import config as _config
+        from . import data_rights_store
+        pub = getattr(self.orgs, "trusted_pubkey", None)
+        requests = data_rights_store.list_requests(requester, trusted_pubkey=pub, strict=True)
+        return {"ok": True, "sla_days": int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS),
+                "contact": str(_config.CUSTOMER_DATA_RIGHTS_CONTACT), "requests": requests}
+
+    def data_rights_export(self, requester: str, requester_org_id: str, *, ip: str = "",
+                           now: "Optional[float]" = None) -> dict:
+        """Assemble the requesting customer's OWN org's non-secret records for export — the SAME tenant-scoped, redacted
+        invoices / usage / findings reads the other screens use (no new authority, no new read, no mutation). Each
+        section is ``admit_customer``-gated for the SESSION org (``requester``/``org_id`` are the hop-bound session
+        principal, NEVER a body field), so another org's rows are structurally absent (IDOR-safe); a section the role
+        may not read degrades to an honest ``{"restricted": true}`` marker, never another role's data and never an
+        error. The export carries only what those customer-safe projections carry — it adds NO secret material (API
+        keys, fingerprints), exactly as the screens redact them.
+
+        Rate-limited the same way a login / checkout is (``self.rate_limiter``): a locked key raises
+        ``ProvisionRateLimited`` BEFORE any read, and every attempt is counted."""
+        t = self._now() if now is None else float(now)
+        rk, ik = f"data_rights:export:{requester}", f"data_rights:export:ip:{ip or ''}"
+        locked = self.rate_limiter.check(rk, ik, now=t)
+        if locked is not None:
+            raise ProvisionRateLimited(locked)
+        self.rate_limiter.record_failure(rk, now=t)       # count every export attempt (anti-flood), like login/checkout
+        sections = {}
+        for key, reader in (("invoices", self.customer_invoices),
+                            ("usage", self.customer_billing_usage),
+                            ("findings", self.customer_assessment_findings)):
+            try:
+                sections[key] = reader(requester, requester_org_id, ip=ip)
+            except ProvisionDenied:
+                sections[key] = {"restricted": True}      # the role may not read this section: an honest marker, never
+                #                                           another role's data (the admit gate inside the reader held)
+        return {"ok": True, "org_id": requester_org_id, "generated_at": t, "export": sections,
+                "note": ("This export is a read of your own workspace's non-secret records (invoices, usage and "
+                         "findings). It contains no secret material such as API keys or fingerprints.")}
+
+    def data_rights_request(self, requester: str, requester_org_id: str, *, kind: str = "", request_id: str = "",
+                            ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Record a customer's data-rights request (a close-account / deletion request, or an export acknowledgement) as
+        ONE owner-signed, append-only row for the requesting account (``ui/data_rights_store``), idempotent per
+        ``request_id``. Account-level: the requester is the hop-bound session principal and the org is the session org —
+        NEVER a body field (a body ``username``/``org_id`` is ignored); only the ``kind`` and the client-chosen
+        ``request_id`` travel. The row carries NO role, money or authority — it unlocks nothing and never touches the
+        hot signed spine; it is the item the owner's documented 30-day process acts on, and the owner-gated hard-prune
+        (VAULT-PRUNE) is what actually removes records from the immutable spine, not this request.
+
+        With the request recorded, the owner is notified at the published contact through ``self.email_sender`` — OFF by
+        default (``NullEmailSender`` sends nothing): the record is kept REGARDLESS of send success. Every refusal of the
+        input is a ``ProvisionError`` (a 400) in plain words; a store that cannot be read / written, or no owner key to
+        sign with, is a store fault — the cockpit's clean 500 — never a 400 that blames the input."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        t = self._now() if now is None else float(now)
+        from .. import config as _config
+        from ..governor.identity import owner_keypair
+        from . import data_rights_store
+        try:
+            out = data_rights_store.record_request(requester, requester_org_id, str(kind or ""), str(request_id or ""),
+                                                   owner_key=owner_keypair(), now=t)
+        except ValueError as e:
+            raise ProvisionError(f"the data-rights request could not be recorded: {str(e)[:120]}") from None
+        # an OSError (LedgerUnreadable included) / a missing owner key is a store fault: it reaches the cockpit's clean
+        # 500, never a 400 that blames the input.
+        contact = str(_config.CUSTOMER_DATA_RIGHTS_CONTACT)
+        if out.get("recorded"):                           # notify the owner only for a NEW row; best-effort, never
+            try:                                          # failing the record (it is already written) on a send fault
+                req = out.get("request") or {}
+                self.email_sender.send(
+                    contact, "VIGIL data-rights request",
+                    f"A customer recorded a {req.get('kind')} data-rights request "
+                    f"(request {req.get('request_id')}, org {req.get('org_id')}). Respond within "
+                    f"{int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS)} days.")
+            except Exception:  # noqa: BLE001 — a notify fault must never undo a recorded request
+                pass
+        return {"ok": True, "recorded": bool(out.get("recorded")), "request": out.get("request"),
+                "sla_days": int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS), "contact": contact,
+                "note": ("Your request is recorded and we will respond within "
+                         f"{int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS)} days. Deleting records from our immutable, "
+                         "signed history is the owner-gated hard-prune (VAULT-PRUNE) process, not an instant erase; "
+                         "this request is what we act on.")}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an

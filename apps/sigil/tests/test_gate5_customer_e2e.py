@@ -110,6 +110,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/settings": ("Settings", ("api/customer/preferences",)),
     "#/settings/authorizations": ("Authorizations", ("api/customer/authorizations",)),   # legal/governance S12
     "#/privacy": ("Privacy", ("api/customer/privacy",)),                           # legal/governance S2
+    "#/data-rights": ("Data rights", ("api/customer/data-rights",)),             # legal/governance S3
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -142,10 +143,13 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
                    "Authorizations": 1,                             # S12: the hub's link to the Authorizations screen
+                   "Data rights": 1,                                # S3: the hub's Data-rights link
                    "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
     # S12 Authorizations: the representative data has one active authority (no button), one expired authority and one
     # not-authorized host — each non-active host offers a "Request authorization" (the expired one + the pending one).
     "#/settings/authorizations": {"Request authorization": 2},
+    "#/data-rights": {"Export my data": 1,                          # S3: the own-data export and the deletion request
+                      "Request account deletion": 1},
     "#/guide": {"Replay the welcome tour": 1,
                 "Mark as done": 7},   # the open chapter, Get started: six steps + the onlyIfShown Authorizations
                                       # step (listed here because the gate enables VIGIL_CUSTOMER_AUTHORIZATIONS)
@@ -176,7 +180,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "settings": "1", "authorizations": "1", "privacyCenter": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
@@ -188,7 +192,7 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VI
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
               "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
-              "VIGIL_CUSTOMER_PRIVACY_CENTER")   # + S2 (legal/governance)
+              "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS")   # + S2, S3 (legal/governance)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -344,6 +348,7 @@ def _connect_challenge(host: str, token: str) -> dict:
 # figure for what an assessment costs anywhere.
 _FAKE_SERVER = {
     "api/customer/onboarding": {"ok": True, "state": "done"},
+    "api/customer/data-rights": {"ok": True, "sla_days": 30, "contact": "info@sigilsovereign.com", "requests": []},
     "api/customer/notifications": {"notifications": [], "count": 0},
     "api/customer/billing": {"org_id": "org_acme", "active": False, "subscription": None,
                              "credits": {"available": 12, "persistent": 10, "plan_live": 2},
@@ -912,8 +917,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     try:
         for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
-                  "preferences", "authorizations", "privacy"):   # + S12, S2
-
+                  "preferences", "authorizations", "privacy",   # + S12, S2
+                  "data-rights", "data-rights/export"):                                  # + S3
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()
