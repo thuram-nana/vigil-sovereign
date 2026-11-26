@@ -25,7 +25,7 @@ import pytest
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
 from framework.v2.evidence.canonical import digest_payload
-from framework.v2.evidence.certify import build_certificate, sign_certificate
+from framework.v2.evidence.certify import build_certificate, sign_certificate, trust_root_fingerprint
 from framework.v2.evidence.chain import build_chain, sign_head
 from framework.v2.evidence.audit_package import write_package
 from framework.v2.evidence.resolver import (
@@ -188,16 +188,20 @@ def test_resolve_and_verify_ok_only_when_reproduces_over_retained_bytes(tmp_path
     signed, contexts = _write_bundle(tmp_path / "bundle", [finding], signers[:2], tr, evidence_root=ev)
     cid = signed[0].certificate.cert_digest
 
-    res = resolve_and_verify(cid, contexts, root=tmp_path)
+    # ok requires an out-of-band pin (the genuine trust-root fingerprint) — authenticity is never trusted
+    # from the bundle alone (see the self-authentication regression below).
+    fp = trust_root_fingerprint(tr)
+    res = resolve_and_verify(cid, contexts, root=tmp_path, expected_trust_root_fingerprint=fp)
     assert isinstance(res, ResolveVerification)
     assert res.ok is True
+    assert res.authenticity_pinned is True
     assert res.verification.reproduced is True          # the oracle actually re-fired over retained bytes
     assert res.verification.authentic is True
     assert res.verification.artifacts_ok is True
     assert res.signed.certificate.cert_digest == cid
 
     # the context fallback also works: with no contexts passed, the bundle's own contexts.json supplies it.
-    assert resolve_and_verify(cid, None, root=tmp_path).ok is True
+    assert resolve_and_verify(cid, None, root=tmp_path, expected_trust_root_fingerprint=fp).ok is True
 
 
 def test_resolve_and_verify_tampered_artifact_is_not_ok(tmp_path, monkeypatch):
@@ -212,13 +216,15 @@ def test_resolve_and_verify_tampered_artifact_is_not_ok(tmp_path, monkeypatch):
     tr, signers = _trust_root(2, 3)
     signed, contexts = _write_bundle(tmp_path / "bundle", [finding], signers[:2], tr, evidence_root=ev)
     cid = signed[0].certificate.cert_digest
-    assert resolve_and_verify(cid, contexts, root=tmp_path).ok is True     # sound before tamper
+    fp = trust_root_fingerprint(tr)
+    assert resolve_and_verify(cid, contexts, root=tmp_path,
+                              expected_trust_root_fingerprint=fp).ok is True     # sound before tamper
 
     # Flip the raw bytes in the SHIPPED evidence tree the certificate manifest binds by sha256.
     tampered = tmp_path / "bundle" / "evidence" / "act-1" / "response.http"
     tampered.write_text("SWAPPED-proof-bytes\n", encoding="utf-8")
-    res = resolve_and_verify(cid, contexts, root=tmp_path)
-    assert res is not None and res.ok is False
+    res = resolve_and_verify(cid, contexts, root=tmp_path, expected_trust_root_fingerprint=fp)
+    assert res is not None and res.ok is False     # pinned ⇒ ok=False is attributable to the tamper
     assert res.verification.artifacts_ok is False
 
 
@@ -300,10 +306,11 @@ def test_read_only_file_set_and_mtimes_unchanged(tmp_path, monkeypatch):
                 snap[str(p.relative_to(tmp_path))] = (st.st_size, st.st_mtime_ns)
         return snap
 
+    fp = trust_root_fingerprint(tr)
     before = snapshot()
     for _ in range(5):
         assert resolve(cid, root=tmp_path) is not None
-        assert resolve_and_verify(cid, contexts, root=tmp_path).ok is True
+        assert resolve_and_verify(cid, contexts, root=tmp_path, expected_trust_root_fingerprint=fp).ok is True
         assert resolve("f" * 64, root=tmp_path) is None
     after = snapshot()
     assert before == after, "resolver mutated the evidence tree (file set or mtimes changed)"
@@ -360,3 +367,91 @@ def test_import_pulls_no_offense_engine():
     net = ast.literal_eval(lines[1])
     assert bad == [], f"resolver import pulled offense-engine package(s): {bad}"
     assert net == [], f"resolver import pulled an HTTP client: {net}"
+
+
+# ==================================================================================================
+# Red-pen regressions: authenticity must be PINNED out-of-band (a bundle cannot self-authenticate),
+# and every malformed-on-disk shape fails closed — never raises, never follows a symlink.
+# ==================================================================================================
+def test_self_authenticating_forged_bundle_is_not_ok(tmp_path, monkeypatch):
+    """A bundle that ships its OWN (attacker-generated) trust root and signs itself under it must NOT
+    yield a clean ok: authenticity is UNPROVEN without an out-of-band pin, and a genuine pin rejects it."""
+    monkeypatch.setenv("VIGIL_EVIDENCE_RESOLVER", "1")
+    oc = _mesh_oc()
+    finding = _finding_from(oc, "mesh-forge")
+    tr_evil, evil_signers = _trust_root(2, 3)          # the attacker's OWN m-of-n governance root
+    signed, contexts = _write_bundle(tmp_path / "bundle", [finding], evil_signers[:2], tr_evil)
+    cid = signed[0].certificate.cert_digest
+
+    # (a) no out-of-band pin: the only root is the one shipped IN the bundle -> authenticity UNPROVEN -> not ok.
+    res = resolve_and_verify(cid, contexts, root=tmp_path)
+    assert res is not None                              # the id resolves (content exists)
+    assert res.authenticity_pinned is False
+    assert res.ok is False                              # a bundle cannot self-authenticate
+    assert res.verification.ok is True                 # internally consistent — exactly why a bare .ok was unsafe
+
+    # (b) pinned to a GENUINE fingerprint the attacker does not control -> pin mismatches the shipped evil root.
+    tr_genuine, _ = _trust_root(2, 3)
+    res2 = resolve_and_verify(cid, contexts, root=tmp_path,
+                              expected_trust_root_fingerprint=trust_root_fingerprint(tr_genuine))
+    assert res2.ok is False
+    assert res2.verification.authentic is False
+
+
+def test_genuine_bundle_unpinned_is_not_ok_but_internally_consistent(tmp_path, monkeypatch):
+    """Even a GENUINE bundle, resolved with no pin, is not ok (authenticity UNPROVEN); only a pin makes it ok."""
+    monkeypatch.setenv("VIGIL_EVIDENCE_RESOLVER", "1")
+    b = _simple_bundle(tmp_path)
+    res = resolve_and_verify(b["id"], b["contexts"], root=tmp_path)
+    assert res.authenticity_pinned is False and res.ok is False
+    assert res.verification.ok is True                 # internally consistent + reproduces, just not pinned
+    fp = trust_root_fingerprint(b["trust_root"])
+    assert resolve_and_verify(b["id"], b["contexts"], root=tmp_path,
+                              expected_trust_root_fingerprint=fp).ok is True
+
+
+def test_non_list_certificates_fails_closed(tmp_path, monkeypatch):
+    """A bundle whose "certificates" is not a list contributes nothing and never raises (fail-closed)."""
+    monkeypatch.setenv("VIGIL_EVIDENCE_RESOLVER", "1")
+    (tmp_path / "w1").mkdir()
+    (tmp_path / "w1" / "evidence-bundle.json").write_text('{"certificates": 1234}', encoding="utf-8")
+    (tmp_path / "w2").mkdir()
+    (tmp_path / "w2" / "evidence-bundle.json").write_text('{"certificates": {"not": "a list"}}', encoding="utf-8")
+    assert resolve("sha256:" + ("ab" * 32), root=tmp_path) is None           # no raise, no match
+    assert resolve_and_verify("sha256:" + ("ab" * 32), {}, root=tmp_path) is None
+
+
+def test_deeply_nested_bundle_json_fails_closed(tmp_path, monkeypatch):
+    """A deeply-nested bundle json (RecursionError in json.loads) fails closed to no match, never crashes."""
+    monkeypatch.setenv("VIGIL_EVIDENCE_RESOLVER", "1")
+    (tmp_path / "deep").mkdir()
+    payload = "[" * 20000 + "]" * 20000                 # nesting past the json recursion limit
+    (tmp_path / "deep" / "evidence-bundle.json").write_text(payload, encoding="utf-8")
+    assert resolve("sha256:" + ("cd" * 32), root=tmp_path) is None           # returns None, does not raise
+
+
+def test_symlinked_evidence_dir_not_followed(tmp_path, monkeypatch):
+    """A SYMLINKED evidence/ dir is treated as absent (not followed) — so swapped bytes behind a symlink are
+    never re-hashed as valid; the verdict fails closed rather than accepting the attacker's tree."""
+    import shutil
+    monkeypatch.setenv("VIGIL_EVIDENCE_RESOLVER", "1")
+    oc = _mesh_oc()
+    finding = _finding_from(oc, "mesh-sym", action_id="act-1")
+    ev = tmp_path / "ev"
+    (ev / "act-1").mkdir(parents=True)
+    (ev / "act-1" / "response.http").write_text("HTTP/1.1 200 OK\n\nbytes\n", encoding="utf-8")
+    tr, signers = _trust_root(2, 3)
+    signed, contexts = _write_bundle(tmp_path / "bundle", [finding], signers[:2], tr, evidence_root=ev)
+    cid = signed[0].certificate.cert_digest
+
+    bundle_ev = tmp_path / "bundle" / "evidence"
+    shutil.rmtree(bundle_ev)
+    outside = tmp_path / "outside"
+    (outside / "act-1").mkdir(parents=True)
+    (outside / "act-1" / "response.http").write_text("HTTP/1.1 200 OK\n\nSWAPPED\n", encoding="utf-8")
+    bundle_ev.symlink_to(outside, target_is_directory=True)
+
+    fp = trust_root_fingerprint(tr)
+    res = resolve_and_verify(cid, contexts, root=tmp_path, expected_trust_root_fingerprint=fp)
+    assert res is not None                              # does not raise
+    assert res.ok is False                              # evidence/ symlink treated as absent -> fail closed

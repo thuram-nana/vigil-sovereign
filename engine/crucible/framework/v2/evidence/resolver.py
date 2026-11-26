@@ -112,10 +112,19 @@ class ResolveVerification:
     cert_digest: str                     # the normalised id that resolved
     signed: SignedEvidence               # the exact on-disk SignedEvidence whose cert_digest == id
     verification: EvidenceVerification    # the reused verify_certificate verdict over retained bytes
+    authenticity_pinned: bool            # True iff an OUT-OF-BAND trust anchor governed authenticity (a
+    #                                      caller-supplied trust_root, or an expected_trust_root_fingerprint
+    #                                      pin). False when the ONLY trust root was the one shipped inside the
+    #                                      untrusted bundle — authenticity is then UNPROVEN (a bundle cannot
+    #                                      self-authenticate: anyone who can drop bytes under the root could
+    #                                      re-sign a cert under a fresh root they also ship).
 
     @property
     def ok(self) -> bool:
-        return self.verification.ok
+        # Mirror the standalone offline verifier (audit_offline_verifier: sound = all_ok AND authenticity_pinned)
+        # and the CLI's UNPINNED warning: internal consistency + reproduction is NOT authenticity. ok REQUIRES
+        # an out-of-band pin, so an unpinned, bundle-sourced trust root never surfaces as a clean ok.
+        return self.verification.ok and self.authenticity_pinned
 
 
 class EvidenceResolver:
@@ -166,12 +175,15 @@ class EvidenceResolver:
         entry that does not validate, contributes nothing (fail-closed — never raises)."""
         try:
             raw = json.loads(bundle_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        except Exception:  # noqa: BLE001 — a malformed / unreadable / deeply-nested (RecursionError) bundle
+            return []     #                 fails closed to the empty set, never fatal
         if not isinstance(raw, dict):
             return []
+        certs = raw.get("certificates")
+        if not isinstance(certs, list):  # a non-list "certificates" contributes nothing, and never raises
+            return []
         out: list[SignedEvidence] = []
-        for entry in raw.get("certificates") or []:
+        for entry in certs:
             try:
                 out.append(SignedEvidence.model_validate(entry))
             except Exception:  # noqa: BLE001 — a malformed cert is skipped, never fatal (fail-closed)
@@ -214,22 +226,31 @@ class EvidenceResolver:
         """Resolve the id, then re-establish its truth through the EXISTING ``verify_certificate``.
 
         Returns ``None`` when the id does not resolve (fail-closed — an unknown / dangling / cross-tenant
-        id never yields a fabricated verdict). Otherwise returns a :class:`ResolveVerification` whose
-        ``ok`` is True ONLY when ``verify_certificate`` confirms authenticity (m-of-n Ed25519 over the
-        pinned trust root) + binding + artifact integrity + reproduction + claim grounding + a known
-        schema over the retained bytes.
+        id never yields a fabricated verdict). Otherwise returns a :class:`ResolveVerification`.
+
+        ``ok`` is True ONLY when ``verify_certificate`` confirms binding + artifact integrity + reproduction
+        + claim grounding + a known schema over the retained bytes AND authenticity is **pinned to an
+        out-of-band anchor** — i.e. the caller supplied the genuine ``trust_root`` directly, or supplied an
+        ``expected_trust_root_fingerprint`` that the bundle's trust root matches. With NEITHER, the only
+        trust root is the one shipped inside the untrusted bundle: authenticity is UNPROVEN, ``ok`` is
+        False, and ``authenticity_pinned`` is False (a bundle cannot self-authenticate — mirrors the
+        standalone ``audit_offline_verifier`` and the CLI's UNPINNED-trust-root warning). FACT authority
+        only ever tightens.
 
         ``contexts`` maps ``finding_ref -> oracle_context`` (the re-fire evidence); the certificate's own
         ``finding_ref`` selects its context. When the ref is absent from ``contexts`` the bundle's own
-        ``contexts.json`` is used as a fallback. The governance trust root, the raw-artifact evidence
-        root, and any gating primary-artifact bytes come from the resolved certificate's own bundle dir
-        unless an explicit ``trust_root`` is supplied. ``expected_trust_root_fingerprint`` (optional)
-        pins the bundle's trust root to an out-of-band fingerprint — a mismatch fails authenticity
-        before any signature check (authority only ever tightens)."""
+        ``contexts.json`` is used as a fallback. The raw-artifact evidence root and any gating
+        primary-artifact bytes come from the resolved certificate's own bundle dir. The trust root comes
+        from the caller's ``trust_root`` when supplied, else from the bundle (which then only authenticates
+        when an ``expected_trust_root_fingerprint`` pins it)."""
         match = self._find(_normalize_id(cert_digest))
         if match is None:
             return None
         signed, bundle_dir = match
+        # Authenticity is PINNED only by an out-of-band anchor the caller vouches for: a trust_root object
+        # supplied directly, or an expected_trust_root_fingerprint the bundle's root must match. A root read
+        # from the bundle itself, with no fingerprint, authenticates nothing (fail-closed: ok stays False).
+        pinned = (trust_root is not None) or (expected_trust_root_fingerprint is not None)
         cert = signed.certificate
         ref = cert.finding_ref
 
@@ -249,11 +270,17 @@ class EvidenceResolver:
                 finding_ref=ref, authentic=False, bound=False,
                 reason="no trust root available for the resolved bundle — cannot authenticate (fail-closed)")
             return ResolveVerification(cert_digest=_normalize_id(cert_digest), signed=signed,
-                                       verification=verification)
+                                       verification=verification, authenticity_pinned=pinned)
 
         evidence_root_dir = bundle_dir / _EVIDENCE_SUBDIR
         try:
-            ev_root: Optional[Path] = evidence_root_dir if evidence_root_dir.is_dir() else None
+            # Treat a SYMLINKED evidence/ dir as absent (parity with the sibling sidecar readers): a symlink
+            # could redirect artifact re-hashing outside the bundle. is_dir() alone follows symlinks.
+            ev_root: Optional[Path] = (
+                evidence_root_dir
+                if (evidence_root_dir.is_dir() and not evidence_root_dir.is_symlink())
+                else None
+            )
         except OSError:
             ev_root = None
         artifact_bytes = self._primary_artifact_bytes(bundle_dir, ref, signed)
@@ -267,7 +294,7 @@ class EvidenceResolver:
             artifact_bytes=artifact_bytes,
         )
         return ResolveVerification(cert_digest=_normalize_id(cert_digest), signed=signed,
-                                   verification=verification)
+                                   verification=verification, authenticity_pinned=pinned)
 
     # -- bundle-sidecar readers (all read-only, all fail-closed) ------------------------------------
     def _bundle_trust_root(self, bundle_dir: Path) -> Optional[TrustRoot]:
