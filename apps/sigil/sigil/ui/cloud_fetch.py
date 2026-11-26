@@ -84,6 +84,8 @@ import urllib.request
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
+from vigil_core.cloud_session import MintedSession
+
 from ..reuse import assert_no_offense
 
 assert_no_offense()
@@ -338,6 +340,33 @@ class AwsStsConnectFetcher:
             raise CloudFetchError("the cloud check could not be completed; try again shortly",
                                   detail=f"GetCallerIdentity HTTP {status} {_find(root, 'Code')}")
         return account
+
+    def mint_read_only_session(self, target: Any, *, now: Any = None) -> MintedSession:
+        """Re-mint a SHORT-LIVED read-only AWS session for a verified grant ``target`` (a ``CloudAssumeTarget``) — a
+        FRESH ``sts:AssumeRole`` of the customer's read-only role under VIGIL's connector principal, NOT the
+        connect-time observation. Fails CLOSED: a non-aws target, a role that no longer trusts VIGIL (AccessDenied ->
+        reconnect), or a session that lands in a DIFFERENT account than the grant claims (the role was re-pointed) all
+        raise ``CloudFetchError``. Holding the result authorizes nothing — the posture run it feeds is a separate,
+        gated engagement (see ``vigil_core.cloud_session.MintedSession``)."""
+        if str(getattr(target, "provider", "")) != "aws":
+            raise CloudFetchError("the cloud check could not be made", detail="mint: non-aws target")
+        role = str(getattr(target, "role_ref", "") or "").strip()
+        ext = str(getattr(target, "external_id", "") or "")
+        claimed = str(getattr(target, "account_id", "") or "")
+        if not _ROLE_ARN_RE.fullmatch(role) or not ext or not re.fullmatch(r"[0-9]{12}", claimed):
+            raise CloudFetchError("the cloud check could not be made", detail="mint: malformed target")
+        outcome, creds = self._assume(role, ext)
+        if outcome == "denied":
+            raise CloudFetchError("VIGIL can no longer assume the connected read-only role — reconnect the account "
+                                  "(its trust policy or external id may have changed)",
+                                  detail="mint: AssumeRole denied")
+        landed = self._caller_account(creds)
+        if not hmac.compare_digest(landed.encode("utf-8"), claimed.encode("utf-8")):
+            raise CloudFetchError("the connected role now lands in a different AWS account — reconnect the account",
+                                  detail="mint: account drift")
+        return MintedSession(provider="aws", account_id=claimed, region=_STS_REGION,
+                             access_key_id=creds["key_id"], secret_access_key=creds["secret"],
+                             session_token=creds["token"], expires_at=float(self._clock()) + float(_DURATION_S))
 
     def assume(self, *, provider: str, account_id: str, role_ref: str, external_id: str, control_external_id: str,
                now: Any = None) -> dict:
