@@ -14,6 +14,15 @@ customer's account through VIGIL (the confused-deputy hole the external id exist
 assumes the SAME role with a FRESH RANDOM external id, and the verdict holds only if that control was explicitly
 DENIED. A role that admits an arbitrary external id is refused, for every tenant, with a message naming the fix.
 
+PROVIDERS: the proof is wired for AWS (above) and for GCP (service-account IMPERSONATION, NAME-bound — the customer
+creates a service account whose ID encodes the unguessable external id, and VIGIL's connector SA mints a token AS
+exactly that SA under a project-admin-only ``roles/iam.serviceAccountTokenCreator`` grant; one 200 proves control for
+THIS challenge, and the unguessable per-challenge NAME is the confused-deputy closure — mirroring how Azure would bind
+via a tenant-set tag, with no description read and no negative control). Azure (a multi-tenant app registration + role
+assignment) and Cloudflare remain unwired and fail closed at the first step (``_VERIFIABLE_PROVIDERS``). The
+observation shape differs per provider; the verdict (``cloud_grant_refusal``) has a branch per wired provider, and the
+registry below is provider-agnostic.
+
 WHY IT MATTERS (the doctrine, stated once, enforced): own-a-repo != own-a-host != CONNECT-A-CLOUD-ACCOUNT !=
 offense-test. Connecting a cloud account RECORDS an owner-verified asset; it is a DISTINCT, read-only capability.
 It NEVER, by itself, authorizes a live offense run — not against the cloud account, not against anything. The
@@ -62,6 +71,7 @@ FATAL-2: SOVEREIGN-side, ``assert_no_offense()`` at import; imports only the sha
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import re
@@ -84,24 +94,50 @@ CHALLENGE_SIGNAL = "governor.cloud_connect_challenge"
 GRANT_SIGNAL = "governor.cloud_connect_grant"
 
 # The cloud provider vocabulary. The proof is CONCRETE for AWS (external-id assume-role + caller-identity account
-# match + the same-shape negative control). GCP (service-account impersonation) and Azure (a multi-tenant app
-# registration) need a different observation; their verdict is not wired (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict),
-# so BOTH a challenge and a verify refuse them — a customer is never walked into a flow that cannot finish.
+# match + the same-shape negative control) and for GCP (impersonating a service account whose NAME encodes the
+# unguessable external id, under VIGIL's connector SA — the name-binding is the confused-deputy closure). Azure (a
+# multi-tenant app registration + role assignment) needs a different observation; its verdict stays unwired
+# (VIGIL-LIMIT:LIMIT-cloud-connect-gcp-azure-verdict), so BOTH a challenge and a verify refuse it — a customer is
+# never walked into a flow that cannot finish.
 PROVIDER_AWS = "aws"
 PROVIDER_GCP = "gcp"
 PROVIDER_AZURE = "azure"
 _PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE})
-# The providers whose deterministic proof-of-control verdict exists. Anything else fails closed at the first step.
-_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS})
+# The providers whose deterministic proof-of-control verdict exists (AWS cross-account assume-role; GCP SA
+# impersonation). Azure (and Cloudflare) remain unwired and fail closed at the first step.
+_VERIFIABLE_PROVIDERS = frozenset({PROVIDER_AWS, PROVIDER_GCP})
 
 # A cloud ACCOUNT id: a provider-agnostic single safe token (alnum start, then [A-Za-z0-9._-], max 128) — one safe
 # spine key component that can never widen scope. AWS additionally requires the exact 12-digit account id.
 _ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _AWS_ACCOUNT_RE = re.compile(r"[0-9]{12}")
+# A GCP project id: a lowercase letter start, then [a-z0-9-], 6-30 chars total, no trailing hyphen. (The generic
+# _ACCOUNT_RE admits it as the outer bound; this narrows the account for the gcp provider.)
+_GCP_PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 # A role / grant REFERENCE the customer created — a public identifier, never a secret. Bounded + control-char-free;
-# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected.
+# for AWS it must be the full IAM role ARN in the aws partition, IN the account being connected; for GCP it is the
+# target SERVICE-ACCOUNT email ([name]@[project].iam.gserviceaccount.com) whose project is the account being connected.
 _ROLE_REF_MAX = 512
 _AWS_ROLE_ARN_RE = re.compile(r"arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]{1,512}")
+_GCP_SA_EMAIL_RE = re.compile(
+    r"([a-z][a-z0-9-]{4,28}[a-z0-9])@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com")
+
+# The challenge-bound GCP SA id derivation (DUPLICATED byte-for-byte in ui.cloud_fetch, pinned equal by a test — the
+# same pattern the AWS role-ARN regex follows). The customer creates an SA whose NAME encodes THIS challenge's
+# unguessable external id; VIGIL recomputes the same email to impersonate and, in the verdict, to bind the
+# observation. "vgl-" + 20 lowercase hex = 24 chars, always inside GCP's SA-id rule (^[a-z][a-z0-9-]{4,28}[a-z0-9]$).
+_GCP_SA_ID_DOMAIN = "vigil-cloud-connect-gcp-sa-id:v1:"
+
+
+def _gcp_expected_sa_id(external_id: str) -> str:
+    return "vgl-" + hashlib.sha256((_GCP_SA_ID_DOMAIN + str(external_id)).encode("utf-8")).hexdigest()[:20]
+
+
+def _gcp_expected_sa_email(project: str, external_id: str) -> str:
+    """The EXACT service-account email the customer must create for (project, external_id) — the GCP analog of
+    ``aws_trust_policy``'s external-id condition. Deterministic; computed from the trusted project + the unguessable
+    external id, so a tenant can never steer VIGIL at another project's SA (confused-deputy closure)."""
+    return f"{_gcp_expected_sa_id(external_id)}@{project}.iam.gserviceaccount.com"
 
 # The AWS managed policy the connect screen asks the customer to attach: read-only access to security configuration
 # metadata (list/describe/get), the standard for cloud-posture tooling. Shown, never enforced by this module.
@@ -141,7 +177,8 @@ def _check_verifiable(provider: str) -> str:
     """A provider whose proof-of-control VIGIL can actually check — anything else refuses at the first step."""
     p = _check_provider(provider)
     if p not in _VERIFIABLE_PROVIDERS:
-        raise ValueError(f"connecting a {p!r} account is not available — only AWS accounts can be connected today")
+        raise ValueError(f"connecting a {p!r} account is not available — only AWS and GCP accounts can be "
+                         f"connected today")
     return p
 
 
@@ -152,6 +189,8 @@ def _check_account(account_id: str, provider: str = "") -> str:
                          "no separators / traversal / spaces (an AWS account id / GCP project / Azure subscription)")
     if provider == PROVIDER_AWS and not _AWS_ACCOUNT_RE.fullmatch(a):
         raise ValueError("an AWS account id is exactly 12 digits")
+    if provider == PROVIDER_GCP and not _GCP_PROJECT_RE.fullmatch(a):
+        raise ValueError("a GCP project id is a lowercase letter then [a-z0-9-], 6-30 chars, no trailing hyphen")
     return a
 
 
@@ -167,6 +206,13 @@ def _check_role_ref(role_ref: str, provider: str = "", account_id: str = "") -> 
             raise ValueError("give the role's full ARN, e.g. arn:aws:iam::123456789012:role/VigilSecurityAudit")
         if account_id and m.group(1) != account_id:
             raise ValueError("the role ARN names a different AWS account than the one you are connecting")
+    if provider == PROVIDER_GCP:
+        m = _GCP_SA_EMAIL_RE.fullmatch(r)
+        if not m:
+            raise ValueError("give the service account's full email, e.g. "
+                             "vigil-connect@my-company-prod.iam.gserviceaccount.com")
+        if account_id and m.group(2) != account_id:
+            raise ValueError("the service-account email names a different GCP project than the one you are connecting")
     return r
 
 
@@ -183,14 +229,46 @@ def _ct_eq(a: str, b: str) -> bool:
 _NOT_MADE = "the connection check was not completed — start it again"
 
 
+def _gcp_grant_refusal(external_id: str, account_id: str, observed: dict) -> Optional[str]:
+    """The GCP branch of the verdict (see :func:`cloud_grant_refusal`). ``observed`` is what the TRUSTED SOVEREIGN
+    FETCHER saw (never customer-supplied):
+
+        {"impersonated": <True iff generateAccessToken on the challenge-named SA returned 200>,
+         "expected_email": <the SA email VIGIL computed from (account_id, external_id) and impersonated>,
+         "project": <the project VIGIL built the email from>, "external_id": <the id VIGIL was asked to bind>}
+
+    Holds (returns ``None``) iff ALL of:
+      * ``impersonated`` is exactly ``True`` — VIGIL minted a token AS the challenge-named SA;
+      * ``expected_email`` equals the email VIGIL RE-COMPUTES from (``account_id``, this challenge's ``external_id``),
+        constant-time — so a replayed or forged observation (whose SA name does not encode THIS challenge) is refused;
+      * ``project`` equals the claimed ``account_id`` (constant-time).
+
+    The CONFUSED-DEPUTY CLOSURE is the unguessable per-challenge SA NAME (mirrors how Azure binds via a tenant-set
+    tag): a malicious VIGIL tenant cannot guess another customer's external id, so cannot make VIGIL impersonate a
+    matching-named SA in a project it does not control. There is deliberately no negative control — a never-created
+    "control SA" is ALWAYS denied in real GCP and so proves nothing about grant breadth."""
+    acct = str(account_id or "")
+    got_email, got_proj = observed.get("expected_email"), observed.get("project")
+    if observed.get("impersonated") is not True:
+        return _NOT_MADE                                   # no 200 from generateAccessToken (nothing was proven)
+    expected = _gcp_expected_sa_email(acct, external_id)
+    if not isinstance(got_email, str) or not _ct_eq(expected, got_email):
+        return _NOT_MADE                                   # the observation's SA name is not THIS challenge's (replay)
+    if not isinstance(got_proj, str) or not _ct_eq(acct, got_proj):
+        return (f"control of {account_id} was not proven — the service account VIGIL impersonated is not in that "
+                f"project (check the project id)")
+    return None
+
+
 def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observed, *,
                         control_external_id: str) -> Optional[str]:
     """``None`` iff ``observed`` proves CONTROL of ``account_id`` under ``provider`` via the VIGIL ``external_id``
-    AND that the role ENFORCES that id; otherwise the customer-facing reason it does not. TOTAL and FAIL-CLOSED: an
-    unknown/unverifiable provider, an empty id, a control id equal to the real one, or a malformed observation all
-    refuse (never raises).
+    (AWS: the role ENFORCES the id; GCP: the SA NAME encodes it); otherwise the customer-facing reason it does not.
+    TOTAL and FAIL-CLOSED: an unknown/unverifiable provider, an empty id, or a malformed observation all refuse
+    (never raises). The AWS branch additionally refuses an empty / equal-to-real control id.
 
-    ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw (never customer-supplied). For AWS:
+    ``observed`` is what the TRUSTED SOVEREIGN FETCHER saw (never customer-supplied); its shape and checks are
+    per-provider (the GCP branch is :func:`_gcp_grant_refusal`). For AWS:
 
         {"assumed_with_external_id": <the id VIGIL assumed with>, "account": <GetCallerIdentity account>,
          "control_external_id": <the random id of the control assume>, "control_denied": <True iff AccessDenied>}
@@ -203,10 +281,17 @@ def cloud_grant_refusal(provider: str, external_id: str, account_id: str, observ
         real id, and ``control_denied`` is exactly ``True`` — the same role REFUSED an arbitrary external id, so its
         trust policy enforces ours (the confused-deputy guard; see the module docstring)."""
     try:
-        ext, ctl = str(external_id or ""), str(control_external_id or "")
+        ext = str(external_id or "")
         if provider not in _VERIFIABLE_PROVIDERS:
             return "connecting this kind of cloud account is not available"
-        if not ext or not ctl or _ct_eq(ext, ctl) or not isinstance(observed, dict):
+        if not ext or not isinstance(observed, dict):
+            return _NOT_MADE
+        if provider == PROVIDER_GCP:
+            # GCP binds the challenge by the SA NAME (no negative control); the control id is unused here.
+            return _gcp_grant_refusal(ext, account_id, observed)
+        # AWS (cross-account assume-role) — the observation and its checks need the same-shape negative control:
+        ctl = str(control_external_id or "")
+        if not ctl or _ct_eq(ext, ctl):
             return _NOT_MADE
         got_ext, got_acct = observed.get("assumed_with_external_id"), observed.get("account")
         got_ctl, denied = observed.get("control_external_id"), observed.get("control_denied")
@@ -246,6 +331,40 @@ def aws_trust_policy(principal_arn: str, external_id: str) -> str:
            "Statement": [{"Effect": "Allow", "Principal": {"AWS": str(principal_arn)}, "Action": "sts:AssumeRole",
                           "Condition": {"StringEquals": {"sts:ExternalId": str(external_id)}}}]}
     return json.dumps(doc, indent=2)
+
+
+# The GCP role a customer grants VIGIL's connector SA ON the target service account — the one capability the
+# impersonation proof needs (and no more). Shown on the connect screen, never enforced by this module.
+GCP_TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
+
+
+def gcp_placement(connector_sa: str, project: str, external_id: str) -> dict:
+    """The exact steps the customer follows to prove control of ``project`` (the GCP analog of
+    :func:`aws_trust_policy`): in THAT project, create a service account whose ID is EXACTLY ``sa_id`` — its name
+    encodes THIS challenge's unguessable external id — and grant VIGIL's connector SA the
+    ``roles/iam.serviceAccountTokenCreator`` role ON that service account (resource-scoped; a project-wide grant also
+    works but is broader than needed). No description and no self-read grant are required: VIGIL proves control by
+    impersonating exactly that SA. Deterministic (stable text + key order) so the screen and a test agree
+    byte-for-byte. Returns the structured placement the screen renders, including the exact gcloud commands to paste."""
+    sa_id = _gcp_expected_sa_id(external_id)
+    sa_email = _gcp_expected_sa_email(project, external_id)
+    return {
+        "connector_sa": str(connector_sa),
+        "token_creator_role": GCP_TOKEN_CREATOR_ROLE,
+        "sa_id": sa_id,
+        "sa_email": sa_email,
+        "steps": [
+            f"In GCP project {project}, create a service account with EXACTLY this id (its name encodes your "
+            f"connection — do not change it): {sa_id}",
+            "Grant VIGIL's connector service account the Service Account Token Creator role ON that service "
+            "account (resource-scoped; a project-wide grant also works but is broader than needed).",
+        ],
+        "gcloud": [
+            (f'gcloud iam service-accounts create {sa_id} --project={project} --display-name="VIGIL connect"'),
+            (f'gcloud iam service-accounts add-iam-policy-binding {sa_email} --project={project} '
+             f'--member="serviceAccount:{connector_sa}" --role="{GCP_TOKEN_CREATOR_ROLE}"'),
+        ],
+    }
 
 
 @dataclass(frozen=True)

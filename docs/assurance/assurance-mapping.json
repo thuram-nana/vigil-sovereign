@@ -3784,6 +3784,7 @@
         "LIMIT-aegis-staging-cd-inert",
         "LIMIT-agent-body-scaffold",
         "LIMIT-cloud-connect-gcp-azure-verdict",
+        "LIMIT-cloud-connect-gcp-livefire",
         "LIMIT-consumer-shard-on-signup-ops",
         "LIMIT-external-audit-team",
         "LIMIT-frontc-shard-cross-host-deploy",
