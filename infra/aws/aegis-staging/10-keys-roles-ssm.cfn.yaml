@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AEGIS AS-26 (OPS-1) staging — KMS keys (one per zone + a TEST OWNER root and a separate TEST RELEASE
+  root, spec §4.6), permission-bounded IAM roles per zone (E2: one key per zone), an SSM command document
+  for staging bringup, and an IMDSv2-ENFORCED launch template (spec §5: HttpTokens required). The test
+  owner and test release key admin paths require MFA (aws:MultiFactorAuthPresent) — the offline posture
+  proxy for the "MFA sign-in" acceptance; the live console sign-in itself is a staging operator step.
+  STAGING-ONLY, merged-not-applied. Long-form intrinsics only (check-yaml parses it as plain YAML).
+
+Parameters:
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ARN of an account permissions-boundary policy applied to every zone role. Empty uses the
+      boundary this template defines (ZoneRolePermissionsBoundary).
+
+Conditions:
+  UseOwnBoundary:
+    Fn::Equals:
+      - Ref: PermissionsBoundaryArn
+      - ""
+
+Resources:
+  # --------------------------------------------------------------------------------------------------
+  # Permissions boundary shared by every zone role — a hard ceiling (no iam:*, no kms:ScheduleKeyDeletion,
+  # no wildcarded sts:AssumeRole) so a compromised zone role can never widen itself.
+  # --------------------------------------------------------------------------------------------------
+  ZoneRolePermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aegis-staging-zone-role-boundary
+      Description: Hard ceiling for every AEGIS staging zone role (no privilege escalation).
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBoundedOperations
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - secretsmanager:GetSecretValue
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - cloudwatch:PutMetricData
+            Resource: "*"
+          - Sid: DenyPrivilegeEscalation
+            Effect: Deny
+            Action:
+              - "iam:*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:PutKeyPolicy"
+              - "sts:AssumeRole"
+              - "organizations:*"
+            Resource: "*"
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-zone KMS keys (E2: one key per zone). Each key is usable only by its own zone role.
+  # --------------------------------------------------------------------------------------------------
+  Z2EKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging Z2E (enforcement) data key.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging Z2W (workers) data key.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging Z2X (actuation) provider-credential key. Only the Z2X role may use it.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging Z3 (control plane) KEK.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging Z4 (offense sandbox) key. Disjoint from every defense key (B-5).
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # TEST OWNER root and the SEPARATE TEST RELEASE root (spec §4.6: owner root + a distinct release root).
+  # Admin of either requires MFA — the offline posture proxy for the "MFA sign-in" acceptance. The live
+  # console/CLI sign-in with a hardware MFA device is the staging operator step (deploy-gated).
+  # --------------------------------------------------------------------------------------------------
+  TestOwnerKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS staging TEST OWNER root (signs host/origin proofs, grants, leases — test only).
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AdminRequiresMFA
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:PutKeyPolicy"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:DisableKey"
+              - "kms:CreateGrant"
+            Resource: "*"
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: "false"
+      Tags:
+        - Key: vigil:root
+          Value: test-owner
+
+  TestReleaseKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: >-
+        AEGIS staging TEST RELEASE root (enforce-release signing, separate from the owner root, spec §4.6).
+        A release is an owner act under this root (D30) — MFA-gated here, offline sign in AS-29.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AdminRequiresMFA
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:PutKeyPolicy"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:DisableKey"
+              - "kms:CreateGrant"
+            Resource: "*"
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: "false"
+      Tags:
+        - Key: vigil:root
+          Value: test-release
+
+  TestOwnerKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aegis-staging-test-owner
+      TargetKeyId:
+        Ref: TestOwnerKey
+
+  TestReleaseKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aegis-staging-test-release
+      TargetKeyId:
+        Ref: TestReleaseKey
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-zone IAM roles, each with the shared permissions boundary. EC2 service principal (instances
+  # assume via an instance profile). No role may assume another (B-5/escalation ceiling).
+  # --------------------------------------------------------------------------------------------------
+  Z2ERole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z2e
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z2w
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z2x
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z3
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z4
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # IMDSv2-ENFORCED launch template (spec §5; T-XT / cloud-metadata hardening). HttpTokens=required
+  # forces a session-token IMDS fetch; the hop limit of 1 keeps the token off any forwarded hop.
+  # --------------------------------------------------------------------------------------------------
+  Z2EInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aegis-staging-z2e
+      Roles:
+        - Ref: Z2ERole
+
+  ImdsV2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: aegis-staging-imdsv2
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        IamInstanceProfile:
+          Arn:
+            Fn::GetAtt:
+              - Z2EInstanceProfile
+              - Arn
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: vigil:imdsv2
+                Value: required
+
+  # --------------------------------------------------------------------------------------------------
+  # SSM command document for staging bringup. SSM-only (no SSH); the reconciler (AS-6a) drives workers
+  # through SSM, never an interactive shell.
+  # --------------------------------------------------------------------------------------------------
+  StagingBringupDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: aegis-staging-bringup
+      DocumentType: Command
+      DocumentFormat: YAML
+      Content:
+        schemaVersion: "2.2"
+        description: AEGIS staging bringup — pull the pinned image digest and start the tenant unit (SSM-only).
+        parameters:
+          imageDigest:
+            type: String
+            description: The sha256 image digest to run (AS-28 Dockerfile.saas), pinned by the reconciler.
+            allowedPattern: "^sha256:[0-9a-f]{64}$"
+        mainSteps:
+          - action: aws:runShellScript
+            name: bringup
+            inputs:
+              timeoutSeconds: "600"
+              runCommand:
+                - "set -euo pipefail"
+                - 'echo "aegis staging bringup for digest {{ imageDigest }}"'
+                - "systemctl --no-block start aegis-saas-gateway@staging.service"
+      Tags:
+        - Key: vigil:environment
+          Value: staging
+
+Outputs:
+  TestOwnerKeyArn:
+    Description: TEST OWNER root KMS key ARN (MFA-gated admin).
+    Value:
+      Fn::GetAtt:
+        - TestOwnerKey
+        - Arn
+  TestReleaseKeyArn:
+    Description: TEST RELEASE root KMS key ARN (separate from owner, MFA-gated admin).
+    Value:
+      Fn::GetAtt:
+        - TestReleaseKey
+        - Arn
+  ImdsV2LaunchTemplateId:
+    Description: IMDSv2-enforced launch template id.
+    Value:
+      Ref: ImdsV2LaunchTemplate
+  ZoneRoleBoundaryArn:
+    Description: Permissions-boundary managed policy applied to every zone role.
+    Value:
+      Ref: ZoneRolePermissionsBoundary
