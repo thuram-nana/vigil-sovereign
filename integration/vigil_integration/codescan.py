@@ -143,39 +143,68 @@ _STATIC_RULE_FOR_DAA: dict[str, str] = {
 }
 
 
+def _multilang_codescan_on() -> bool:
+    """True iff ``VIGIL_MULTILANG_CODESCAN`` routes the FACT path through the LanguagePlugin registry (MULTILANG-
+    P1). Default OFF, keyless env read (mirrors ``redpen_enabled``). The flag module is framework-free and is
+    NOT a ``langplugins`` module, so reading it never imports the plugin registry — the OFF path stays byte-
+    identical and no ``langplugins`` / ``tree_sitter`` module is imported."""
+    try:
+        from .multilang_flag import multilang_codescan_enabled  # noqa: PLC0415 — keyless flag, lazy
+    except Exception:  # noqa: BLE001 — flag module unavailable ⇒ OFF (byte-identical legacy path)
+        return False
+    return multilang_codescan_enabled()
+
+
+def _lp_for_path(path: str) -> Any:
+    """The registered ``LanguagePlugin`` that owns ``path``, or ``None`` (fail-closed). Imported ONLY on the
+    flag-ON path, so no ``langplugins`` module is imported when the flag is OFF."""
+    try:
+        from .langplugins import registry as _reg  # noqa: PLC0415 (FATAL-2: framework-free offense plugin)
+        return _reg.for_path(path)
+    except Exception:  # noqa: BLE001 — registry unavailable ⇒ fail-closed (no plugin)
+        return None
+
+
 def _static_rule_for(af: Any) -> str:
     """The CLOSED-vocabulary STATIC_RULE rule_id for a DAA finding on a PYTHON source file, or ``""`` when the
     finding is not FACT-capable through the single-region offline oracle (a non-Python file, or a DAA class with
     no sound static-FACT tier). ``""`` ⇒ the finding stays a DAA fact exactly as before and is NEVER promoted to
-    an oracle-re-verifiable static FACT."""
+    an oracle-re-verifiable static FACT.
+
+    MULTILANG-P1: behind ``VIGIL_MULTILANG_CODESCAN`` the FACT-capability decision routes through the plugin
+    registry — an unregistered language ⇒ ``""`` (fail-closed, exactly today's non-``.py`` refuse); a registered
+    language maps the DAA rule_id to the closed STATIC_RULE vocabulary and keeps it only when the plugin can
+    SOUNDLY mint it (it is in ``plugin.fact_capable_rule_ids``). For the Python plugin this is BYTE-IDENTICAL to
+    the flag-OFF path."""
     path = str(getattr(af, "path", "") or "")
+    rule_id = str(getattr(af, "rule_id", "") or "")
+    if _multilang_codescan_on():
+        plugin = _lp_for_path(path)
+        if plugin is None:
+            return ""      # unregistered language → fail-closed (today's non-.py refuse)
+        static_rule_id = _STATIC_RULE_FOR_DAA.get(rule_id, "")
+        if static_rule_id and static_rule_id in plugin.fact_capable_rule_ids:
+            return static_rule_id
+        return ""
+    # Flag OFF — today's behavior, BYTE-IDENTICAL.
     if not path.endswith(".py"):
         return ""      # the STATIC_RULE oracle re-parses Python only; any other language REFUSES (a LEAD)
-    return _STATIC_RULE_FOR_DAA.get(str(getattr(af, "rule_id", "") or ""), "")
+    return _STATIC_RULE_FOR_DAA.get(rule_id, "")
 
 
-def _retain_source_region(root: str, af: Any) -> str:
-    """The RETAINED source region the STATIC_RULE oracle re-parses OFFLINE to re-derive the code property: the
-    module's top-level import statements (the crypto/HTTP provenance the oracle RESOLVES) plus the top-level
-    statement enclosing the finding line — both at column 0, so the concatenation re-parses as a module. Falls
-    back to the whole file (unparseable module), then the one-line snippet (unreadable file); the oracle then
-    re-parses whatever is retained and REFUSES → a LEAD, never a crash. The retained bytes travel verbatim into
-    the finding, so a confirmed static FACT re-verifies OFFLINE and a tamper that removes the property no longer
-    re-fires."""
+def _retain_region_from_text(text: str, line: int) -> str:
+    """The import-provenance + enclosing-declaration retention over already-read ``text`` at ``line`` — the
+    shared kernel behind both :func:`_retain_source_region` (which reads the file) and the Python
+    ``LanguagePlugin``'s ``retain_region`` (which gets the source directly), so the two stay BYTE-IDENTICAL.
+    The module's top-level import statements (the provenance the oracle RESOLVES) plus the top-level statement
+    enclosing ``line`` — both at column 0, so the concatenation re-parses as a module. Fail-closed: an
+    unparseable module returns the whole ``text`` (the oracle then re-parses it or REFUSES → a LEAD, never a
+    crash)."""
     import ast as _ast
-    snippet = str(getattr(af, "snippet", "") or "")
-    try:
-        text = (Path(root) / str(af.path)).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return snippet
     try:
         tree = _ast.parse(text)
     except SyntaxError:
         return text                         # whole file; the oracle re-parses it (or REFUSES → a LEAD)
-    try:
-        line = int(af.line)
-    except (TypeError, ValueError):
-        line = 0
     imports: list[str] = []
     enclosing = ""
     for node in tree.body:                  # TOP-LEVEL statements only ⇒ each source segment starts at column 0
@@ -189,6 +218,38 @@ def _retain_source_region(root: str, af: Any) -> str:
             enclosing = _ast.get_source_segment(text, node) or ""
     region = "\n".join([*imports, enclosing]) if enclosing else "\n".join(imports)
     return region or text
+
+
+def _retain_source_region(root: str, af: Any) -> str:
+    """The RETAINED source region the STATIC_RULE oracle re-parses OFFLINE to re-derive the code property: the
+    module's top-level import statements (the crypto/HTTP provenance the oracle RESOLVES) plus the top-level
+    statement enclosing the finding line — both at column 0, so the concatenation re-parses as a module. Falls
+    back to the whole file (unparseable module), then the one-line snippet (unreadable file); the oracle then
+    re-parses whatever is retained and REFUSES → a LEAD, never a crash. The retained bytes travel verbatim into
+    the finding, so a confirmed static FACT re-verifies OFFLINE and a tamper that removes the property no longer
+    re-fires.
+
+    MULTILANG-P1: behind ``VIGIL_MULTILANG_CODESCAN`` retention routes through the registered plugin's
+    ``retain_region``. For the Python plugin that calls back into :func:`_retain_region_from_text`, so the bytes
+    are BYTE-IDENTICAL; any plugin fault fails closed to the shared Python retention. Flag OFF ⇒ the shared
+    helper directly (today's behavior)."""
+    snippet = str(getattr(af, "snippet", "") or "")
+    try:
+        text = (Path(root) / str(af.path)).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return snippet
+    try:
+        line = int(af.line)
+    except (TypeError, ValueError):
+        line = 0
+    if _multilang_codescan_on():
+        plugin = _lp_for_path(str(getattr(af, "path", "") or ""))
+        if plugin is not None:
+            try:
+                return plugin.retain_region(text, line)
+            except Exception:  # noqa: BLE001 — a plugin fault fails closed to the shared Python retention
+                pass
+    return _retain_region_from_text(text, line)
 
 
 def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000,

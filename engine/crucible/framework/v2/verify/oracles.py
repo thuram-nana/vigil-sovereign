@@ -6385,7 +6385,37 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
             evidence=(f"rule_id {rule_id!r} is a LEAD-only static-rule class ({_lead_reason}), out of scope for "
                       f"the offline re-parse — REFUSE (never mint), a LEAD"),
             observed={"rule_id": rule_id, "reason": "lead_only_not_fact_capable"})
-    if language not in ("python", "py"):
+    # MULTILANG-P1: behind the default-OFF ``VIGIL_MULTILANG_CODESCAN`` flag, route the re-parse + tier
+    # predicate through the LanguagePlugin registry (the ONLY new dispatch point). This adds NO new OracleKind
+    # and does NOT touch the single mint site — a plugin supplies ONLY the parse + predicate; the refuse/fire
+    # signal construction below is unchanged and shared, so the Python path is provably byte-identical.
+    #   * Flag OFF (default): ``_lang_plugin`` stays ``None`` — Python goes through ``ast.parse`` +
+    #     ``_static_tier_hit`` below (byte-identical), every non-Python language takes the EXISTING refuse→LEAD.
+    #   * Flag ON: a registered language routes through its plugin (Python IS the first plugin — proving the
+    #     refactor), and an UNREGISTERED language takes the IDENTICAL refuse shape (fail-closed — an unregistered
+    #     language == today's non-Python refuse). The imports are FUNCTION-LOCAL (FATAL-2): no ``langplugins`` /
+    #     ``tree_sitter`` module is imported when the flag is OFF.
+    _lang_plugin = None
+    _multilang = False
+    try:
+        from vigil_integration.multilang_flag import multilang_codescan_enabled  # noqa: PLC0415 (FATAL-2: framework-free offense flag)
+        _multilang = multilang_codescan_enabled()
+    except Exception:  # noqa: BLE001 — flag module unavailable ⇒ OFF (byte-identical legacy path)
+        _multilang = False
+    if _multilang:
+        try:
+            from vigil_integration.langplugins import registry as _lp_registry  # noqa: PLC0415 (FATAL-2: framework-free offense plugin)
+            _lang_plugin = _lp_registry.for_language(language)
+        except Exception:  # noqa: BLE001 — plugin machinery unavailable ⇒ degrade to the Python-only path (never raise)
+            _lang_plugin, _multilang = None, False
+        else:
+            if _lang_plugin is None:
+                # fail-closed: an unregistered language is EXACTLY today's non-Python refuse → a LEAD.
+                return OracleSignal(
+                    kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                    evidence=f"language {language!r} is not re-parseable by this oracle (Python-only) — REFUSE (lead)",
+                    observed={"rule_id": rule_id, "language": language, "reason": "unsupported_language"})
+    if not _multilang and language not in ("python", "py"):
         # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.
         return OracleSignal(
             kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
@@ -6395,7 +6425,7 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
         return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
                             evidence="no retained source bytes to re-parse — REFUSE (lead)")
     try:
-        tree = ast.parse(source)
+        tree = _lang_plugin.parse(source) if _lang_plugin is not None else ast.parse(source)
     except (SyntaxError, ValueError):
         # The retained source cannot be re-parsed (tampered / truncated / not a full statement) — REFUSE.
         return OracleSignal(
@@ -6404,7 +6434,8 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
             observed={"rule_id": rule_id, "reason": "unparseable"})
 
     confidence = _STATIC_TIER_CONF[rule_id]
-    fired, detail = _static_tier_hit(rule_id, tree)
+    fired, detail = (_lang_plugin.static_tier_predicate(rule_id, tree) if _lang_plugin is not None
+                     else _static_tier_hit(rule_id, tree))
     if fired:
         return OracleSignal(
             kind=OracleKind.STATIC_RULE, fired=True, confidence=confidence,
