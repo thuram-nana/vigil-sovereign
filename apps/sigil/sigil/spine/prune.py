@@ -723,8 +723,8 @@ def _cloud_grant_active_hw(records, resolver) -> "dict[tuple, float]":
     """``{(org_id, provider, account_id): max VERIFIED-active issued_at}`` over ``records`` (consumer PR-C). Only
     owner-signed active cloud-grant records (``authn`` bare-canonical, verified under the owner pubkey valid at their
     seq) count; a disconnect / forged / unsigned record contributes nothing. Pure read, never raises out of the scan."""
-    from ..governor.cloud_connect import GRANT_SIGNAL as CG_SIGNAL, _GRANT_CORE as CG_CORE
-    from ..governor.authn import as_issued_at, verify_signed
+    from ..governor.cloud_connect import GRANT_SIGNAL as CG_SIGNAL, _GRANT_CORE as CG_CORE, _verify_cloud_active
+    from ..governor.authn import as_issued_at
     hw: "dict[tuple, float]" = {}
     for r in sorted(records, key=lambda r: r.seq):
         p = getattr(r, "payload", None)
@@ -733,7 +733,9 @@ def _cloud_grant_active_hw(records, resolver) -> "dict[tuple, float]":
         oid, prov, acct = p.get("org_id"), p.get("provider"), p.get("account_id")
         if not (isinstance(oid, str) and oid and isinstance(prov, str) and prov and isinstance(acct, str) and acct):
             continue
-        if not verify_signed(p, CG_CORE, resolver.at(r.seq)):
+        # Same backward-compat as the registry fold: a grant persisted before ``token_sha256`` joined the core was
+        # signed under the narrower core; verify it there so its high-water is seen and it is never pruned as stranded.
+        if not _verify_cloud_active(p, CG_CORE, resolver.at(r.seq)):
             continue
         key = (oid, prov, acct)
         at = as_issued_at(p.get("issued_at"))

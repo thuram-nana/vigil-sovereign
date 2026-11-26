@@ -107,8 +107,8 @@ def test_verdict_refuses_a_control_that_is_not_the_one_issued_or_is_the_real_id(
 
 def test_verdict_refuses_unverifiable_providers_and_bad_input():
     good = _observed("EXT", ACCT)
-    assert cc.cloud_grant_proves("cloudflare", "EXT", ACCT, good, control_external_id=CTL) is False  # not verifiable here
-    # gcp and azure ARE verifiable now, but an AWS-shaped observation (no SA / tenant) never satisfies their verdicts
+    # every provider is verifiable now, but an AWS-shaped observation never satisfies the gcp / azure / cloudflare verdicts
+    assert cc.cloud_grant_proves("cloudflare", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("gcp", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("azure", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "", ACCT, _observed("", ACCT), control_external_id=CTL) is False
@@ -647,3 +647,84 @@ def test_gcp_placement_names_the_connector_sa_the_role_and_the_challenge_bound_s
     assert any(f"create {pl['sa_id']}" in c for c in pl["gcloud"])
     assert any("add-iam-policy-binding" in c and "serviceAccountTokenCreator" in c for c in pl["gcloud"])
     assert cc.gcp_placement(connector, "p", "e") == cc.gcp_placement(connector, "p", "e")   # deterministic text
+
+
+# ---- backward-compat: token_sha256 JOINED the grant core AFTER grants were persisted (red-pen wyi72aiax) --------
+# A grant written before token_sha256 existed carries NO such key and was owner-signed over the narrower 10-field
+# core. The fold (and the prune high-water, which re-verifies the same core on ANY hard prune) must still accept it —
+# else a genesis re-verify silently disconnects every pre-existing AWS account and the prune stops protecting it.
+# Tampering with the field must still fail closed.
+_BIG = 9e9
+
+
+def _legacy_grant_payload(signer=OWNER, *, ext="EXT1", acct=ACCT, role=ROLE, v=3.0):
+    """A grant EXACTLY as base code (pre-token_sha256) persisted it: the 10-field core, NO token_sha256 key."""
+    return signed_payload({"signal": cc.GRANT_SIGNAL, "org_id": "acme", "provider": "aws", "account_id": acct,
+                           "role_ref": role, "external_id": ext, "verified_at": v, "expires_at": v + _BIG,
+                           "state": "active", "issued_at": v}, signer)
+
+
+def _current_grant_payload(signer=OWNER, *, ext="EXT1", acct=ACCT, role=ROLE, v=3.0, token_sha256=""):
+    """A grant as the current code signs it: the 11-field core WITH token_sha256 ('' for AWS, a sha for Cloudflare)."""
+    return signed_payload({"signal": cc.GRANT_SIGNAL, "org_id": "acme", "provider": "aws", "account_id": acct,
+                           "role_ref": role, "external_id": ext, "token_sha256": token_sha256, "verified_at": v,
+                           "expires_at": v + _BIG, "state": "active", "issued_at": v}, signer)
+
+
+def test_verify_cloud_active_accepts_a_legacy_grant_and_rejects_tampering():
+    legacy = _legacy_grant_payload()
+    assert cc._verify_cloud_active(legacy, cc._GRANT_CORE, OP) is True           # pre-token_sha256 grant still authentic
+    assert cc._verify_cloud_active(_current_grant_payload(), cc._GRANT_CORE, OP) is True              # new AWS ("")
+    assert cc._verify_cloud_active(_current_grant_payload(token_sha256="ab" * 32), cc._GRANT_CORE, OP) is True  # CF sha
+    # ADD the field to a legacy grant -> validated under the 11-field core -> the owner signature no longer matches
+    assert cc._verify_cloud_active({**legacy, "token_sha256": "deadbeef"}, cc._GRANT_CORE, OP) is False
+    # STRIP the field from a current grant -> compat path tries the 10-field core -> signature no longer matches
+    cur = _current_grant_payload(token_sha256="ab" * 32)
+    assert cc._verify_cloud_active({k: v for k, v in cur.items() if k != "token_sha256"}, cc._GRANT_CORE, OP) is False
+    # a NON-owner legacy grant is inert on either path (the compat path never weakens the signature requirement)
+    assert cc._verify_cloud_active(_legacy_grant_payload(ATTACKER), cc._GRANT_CORE, OP) is False
+    # the challenge core carries no token_sha256 -> the compat path is never taken for it
+    assert cc._verify_cloud_active(legacy, cc._CHALLENGE_CORE, OP) is False
+
+
+def test_a_legacy_grant_without_token_sha256_still_reads_active(tmp_path):
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN", payload=_legacy_grant_payload(v=3.0))
+    r = _reg(s)
+    g = r.grant("acme", "aws", ACCT)
+    assert g is not None and g.role_ref == ROLE and g.external_id == "EXT1" and g.token_sha256 == ""
+    assert r.has_current_grant("acme", "aws", ACCT, now=100.0) is True
+    tgt = r.assume_target("acme", "aws", ACCT, now=100.0)
+    assert tgt is not None and tgt.role_ref == ROLE and tgt.external_id == "EXT1"
+
+
+def test_a_token_sha256_added_to_a_legacy_record_post_sign_is_dropped_on_read(tmp_path):
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN",
+             payload={**_legacy_grant_payload(), "token_sha256": "deadbeef"})     # field added after signing -> forged
+    assert _reg(s).grant("acme", "aws", ACCT) is None
+
+
+def _segmented_legacy(tmp_path):
+    """Like _segmented, but the deciding grant (seq 0) is a LEGACY (pre-token_sha256) owner-signed record."""
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN", payload=_legacy_grant_payload(v=3.0))   # seq 0
+    while s.next_seq < 5:
+        s.append(kind="event", source="t", actor="u", payload={"i": "pad"})
+    s.rotate()                                                                    # seal [0..4]
+    for _ in range(5):
+        s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})      # seq 5..9
+    s.rotate()                                                                     # seal [5..9]
+    return s
+
+
+def test_the_prune_tripwire_still_protects_a_legacy_grant(tmp_path, owner_is_test_key):
+    # the red-pen's exact failure mode: a pre-token_sha256 grant must still contribute the prune high-water, else a
+    # hard prune to K silently deletes its only authoritative copy. With the compat path it is seen and the prune refused.
+    s = _segmented_legacy(tmp_path)
+    assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == [f"aws:{ACCT}@acme"]
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(s, 5)

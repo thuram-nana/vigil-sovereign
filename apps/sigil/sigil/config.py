@@ -786,6 +786,12 @@ CLOUD_CONNECT_RATELIMIT_DIR = _customer / "cloud_connect_ratelimit"
 # request, never a URL — so the customer can never steer this egress anywhere.
 AWS_STS_EGRESS_ALLOWLIST = frozenset({"sts.amazonaws.com"})
 
+# The ONLY host the CLOUDFLARE cloud-connect fetcher (`ui.cloudflare_fetch`) may reach, enforced BEFORE any socket
+# opens (mirrors AWS_STS_EGRESS_ALLOWLIST). No endpoint override: the token-bearing egress can only ever reach the
+# Cloudflare API. A customer supplies only a bearer token (an Authorization HEADER, never a URL) and the account id;
+# the token id placed in a URL path is format-checked (32 hex) first, so the customer can never steer this egress.
+CLOUDFLARE_API_EGRESS_ALLOWLIST = frozenset({"api.cloudflare.com"})
+
 # VIGIL's connector principal (an IAM role or user in the aws partition) — the exact `Principal` a customer's
 # read-only role trusts. Validated so a malformed value can never be printed into a customer's trust policy.
 _AWS_PRINCIPAL_ARN_RE = re.compile(r"arn:aws:iam::[0-9]{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,512}")
@@ -893,6 +899,20 @@ def azure_connect_fetcher():
     from .ui.cloud_fetch import AzureConsentConnectFetcher
     return AzureConsentConnectFetcher(client_id=cloud_connect_azure_client_id(), client_secret=secret,
                                       client_assertion=assertion)
+
+
+def cloud_connect_cloudflare_fetcher():
+    """The live Cloudflare cloud-connect fetcher (``ui.cloudflare_fetch.CloudflareTokenConnectFetcher``: verify the
+    customer's read-only API token, read its own definition to bind the challenge and confirm read-only +
+    single-account) when the cloud leg is ON, else None (fail closed: the provisioner then offers and verifies
+    nothing for Cloudflare). Unlike AWS, VIGIL holds NO Cloudflare credential of its own — the customer's token is
+    the only secret and it travels per-verify, read once and never stored — so this fetcher needs no owner-provisioned
+    connector identity, only the cloud leg's flag. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled():
+        return None
+    from .ui.cloudflare_fetch import CloudflareTokenConnectFetcher
+    return CloudflareTokenConnectFetcher()
 
 
 def customer_posture_enabled() -> bool:
