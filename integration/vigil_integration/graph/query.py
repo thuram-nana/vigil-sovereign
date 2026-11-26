@@ -43,6 +43,17 @@ class FailureLesson(BaseModel):
     spine_hash: str = ""
 
 
+class ObjectiveSummary(BaseModel):
+    """A projected charter objective (S3). It carries NO ``evidence_ref`` and no confirmation: a Goal is
+    an inert read-model node, never a FACT. ``objective_id`` is the node's stable key (``objective:<id>``);
+    ``title`` is a best-effort label from the Goal's props (presented through the F3 redactor before any
+    export). This summary grants nothing — it is retrieval context only."""
+
+    objective_id: str
+    title: str = ""
+    spine_hash: str = ""
+
+
 class PriorChainContext(BaseModel):
     """Cross-session retrieval context. **Non-authoritative and FROZEN** — the model is immutable
     (``frozen=True``), so a consumer cannot flip ``authoritative``/``retrieval_only`` to fabricate a
@@ -57,6 +68,20 @@ class PriorChainContext(BaseModel):
     confirmed_findings: list[FindingSummary] = Field(default_factory=list)   # CONFIRMED only, ever
     leads: list[FindingSummary] = Field(default_factory=list)                # unproven, clearly separated
     failure_lessons: list[FailureLesson] = Field(default_factory=list)
+
+
+class ObjectiveContext(BaseModel):
+    """Retrieval context listing the projected charter objectives (S3). **Non-authoritative and FROZEN**,
+    exactly like ``PriorChainContext``: surfacing a Goal grants nothing. A Goal is inert — it is never a
+    finding, never confirmed, and its presence here never authorizes a tier, promotes a finding, or widens
+    scope; any action it suggests still clears WARDEN + the conjunctive gate + the egress gate."""
+
+    model_config = ConfigDict(frozen=True)
+
+    authoritative: bool = False
+    retrieval_only: bool = True
+    engagement_id: str = ""
+    objectives: list[ObjectiveSummary] = Field(default_factory=list)
 
 
 def _node_target(node_props: dict[str, Any]) -> str:
@@ -124,3 +149,27 @@ def successful_tools(view: GraphView) -> list[str]:
             if isinstance(tool, str) and tool:
                 tools.add(tool)
     return sorted(tools)
+
+
+def _objective_title(props: dict[str, Any]) -> str:
+    for k in ("title", "objective", "name", "description", "label"):
+        v = props.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def objectives(view: GraphView) -> ObjectiveContext:
+    """Surface the projected charter objectives (S3) as NON-AUTHORITATIVE, frozen retrieval context — the
+    "read surfacing a Goal" that proves a Goal authorizes nothing. Only ACTIVE (non-retired) OBJECTIVE
+    nodes are returned, deterministically ordered by node id. A Goal is inert: it carries no evidence_ref,
+    is never a finding, and nothing here grants a tier or promotes anything. Total on a non-view."""
+    if not isinstance(view, GraphView):
+        return ObjectiveContext()
+    rows = [
+        ObjectiveSummary(objective_id=n.id.split(":", 1)[1] if ":" in n.id else n.id,
+                         title=_objective_title(n.props), spine_hash=n.provenance.spine_hash)
+        for n in sorted(view.active_nodes(NodeLabel.OBJECTIVE), key=lambda n: n.id)
+    ]
+    return ObjectiveContext(authoritative=False, retrieval_only=True,
+                            engagement_id=view.group_id, objectives=rows)

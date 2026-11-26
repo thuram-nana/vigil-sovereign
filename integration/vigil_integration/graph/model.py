@@ -47,6 +47,10 @@ class NodeLabel(str, Enum):
     PORT = "Port"
     TECHNOLOGY = "Technology"
     ENDPOINT = "Endpoint"
+    # S3 — a declared charter objective projected as an INERT read-model node. An OBJECTIVE is NEVER a
+    # FACT: ``is_confirmed`` gates on CHAIN_FINDING, so an OBJECTIVE can never be CONFIRMED and can never
+    # be returned by ``confirmed_findings`` — it carries no evidence_ref and authorizes nothing.
+    OBJECTIVE = "Objective"
 
 
 class EdgeType(str, Enum):
@@ -67,6 +71,11 @@ class EdgeType(str, Enum):
     FINDING_AFFECTS_ENDPOINT = "FINDING_AFFECTS_ENDPOINT"
     FINDING_AFFECTS_PORT = "FINDING_AFFECTS_PORT"
     FINDING_AFFECTS_TECH = "FINDING_AFFECTS_TECH"
+    # S3 — charter-objective edges. REACHES: an asset (a worldmodel crown-jewel a PathCertificate reaches)
+    # to the Goal it reaches; the edge inherits the PATH's confirmation (a lead route is a lead edge).
+    # PURSUES: an Action/ChainStep to the Goal its declared objective id names (no objective id ⇒ no edge).
+    REACHES = "REACHES"             # Asset -> Goal
+    PURSUES = "PURSUES"             # Action/ChainStep -> Goal
 
 
 class ConfirmationStatus(str, Enum):
