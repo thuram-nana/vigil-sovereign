@@ -51,6 +51,13 @@ class NodeLabel(str, Enum):
     # FACT: ``is_confirmed`` gates on CHAIN_FINDING, so an OBJECTIVE can never be CONFIRMED and can never
     # be returned by ``confirmed_findings`` — it carries no evidence_ref and authorizes nothing.
     OBJECTIVE = "Objective"
+    # --- F4 slice S4: remediation/retest lifecycle (projected read-model over the signed certs + ledger) ---
+    # Both are INERT: a REMEDIATION/RETEST node is NEVER a FACT finding (``is_confirmed`` is a CHAIN_FINDING
+    # property), so ``confirmed_findings()`` can never return one — a lifecycle node cannot launder a 'fixed'
+    # into a confirmed vuln (or vice-versa). They project ONLY from the existing SIGNED remediation certs /
+    # attestation ticks, re-verified; nothing here issues traffic or runs a live retest.
+    REMEDIATION = "Remediation"   # a projected, re-verified RemediationCertificate (negative proof)
+    RETEST = "Retest"             # a projected, re-verified attestation-log re-proof tick (4-state verdict)
 
 
 class EdgeType(str, Enum):
@@ -76,6 +83,9 @@ class EdgeType(str, Enum):
     # PURSUES: an Action/ChainStep to the Goal its declared objective id names (no objective id ⇒ no edge).
     REACHES = "REACHES"             # Asset -> Goal
     PURSUES = "PURSUES"             # Action/ChainStep -> Goal
+    # --- F4 slice S4: remediation/retest lifecycle. The one traversal finding->remediation->retest. ---
+    REMEDIATED_BY = "REMEDIATED_BY"   # Finding -> Remediation (only when the referenced finding cert re-verifies)
+    RETESTED_BY = "RETESTED_BY"       # Remediation -> Retest
 
 
 class ConfirmationStatus(str, Enum):
@@ -138,6 +148,26 @@ class GraphEdge(BaseModel):
 
     def key(self) -> tuple[str, str, str]:
         return (self.src, self.dst, self.type.value)
+
+
+# --------------------------------------------------------------------------------------------------
+# S2 — JOIN-verified CONFIRMED (``VIGIL_GRAPH_EVIDENCE_JOIN``). The projector tags an INTRINSICALLY-
+# confirmed finding (status=fact + non-empty evidence_ref + signature_ref) with whether its evidence_ref
+# passed the dereference+re-verify JOIN, as a node PROP — it NEVER changes the node's intrinsic
+# ``is_confirmed``. So the refute/retirement/resurrection machinery (which reads ``is_confirmed``) behaves
+# IDENTICALLY to flag-OFF, and the join is applied here as a demote-only MEMBERSHIP FILTER at the
+# confirmed_findings() boundary. Because it only ever REMOVES from the flag-OFF confirmed set, ON ⊆ OFF
+# holds for EVERY spine (not merely per-record), and flag-OFF (no tag) is byte-identical.
+EVIDENCE_JOIN_PROP = "evidence_join"
+EVIDENCE_JOIN_CONFIRMED = "confirmed"              # the fact's evidence re-verified + bound under the join
+EVIDENCE_JOIN_UNRESOLVED = "unresolved_evidence"   # the join could not re-establish the evidence → a lead
+
+
+def _join_unresolved(node: "GraphNode") -> bool:
+    """True iff the S2 evidence-join tagged this (intrinsically-confirmed) finding's evidence as NOT
+    re-established — so it is surfaced as a lead/unresolved_evidence, never as a confirmed fact. Absent the
+    tag (flag OFF, or a non-finding node) this is False, so flag-OFF behaviour is unchanged."""
+    return node.props.get(EVIDENCE_JOIN_PROP) == EVIDENCE_JOIN_UNRESOLVED
 
 
 class GraphView(BaseModel):
@@ -212,9 +242,17 @@ class GraphView(BaseModel):
 
     def confirmed_findings(self) -> list[GraphNode]:
         """The ONLY facts. An active ChainFinding whose provenance is CONFIRMED — a lead can never
-        appear here (the anti-trust-laundering guarantee, at the query boundary)."""
-        return [n for n in self.nodes.values() if n.is_active and n.is_confirmed]
+        appear here (the anti-trust-laundering guarantee, at the query boundary). S2: an intrinsically
+        confirmed finding whose evidence FAILED the join (``_join_unresolved``) is EXCLUDED here and
+        surfaced as a lead — the join is a demote-only membership overlay at THIS boundary; it never
+        mutates ``is_confirmed`` (so the refute machinery is unchanged and ON ⊆ OFF for every spine)."""
+        return [n for n in self.nodes.values()
+                if n.is_active and n.is_confirmed and not _join_unresolved(n)]
 
     def lead_findings(self) -> list[GraphNode]:
+        """Active findings that are NOT confirmed facts — an intrinsic lead, OR an intrinsically-confirmed
+        finding the S2 join demoted (``_join_unresolved``). The two sets partition the active findings with
+        confirmed_findings(), so a join-demoted fact surfaces here (never lost, never a fact)."""
         return [n for n in self.nodes.values()
-                if n.is_active and n.label == NodeLabel.CHAIN_FINDING and not n.is_confirmed]
+                if n.is_active and n.label == NodeLabel.CHAIN_FINDING
+                and (not n.is_confirmed or _join_unresolved(n))]
