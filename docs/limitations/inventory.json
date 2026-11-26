@@ -685,6 +685,22 @@
    "source_doc": "docs/DEFERRED-INFRA.md",
    "disposition": "file-into-w16",
    "w16_issue": null
+  },
+  {
+   "id": "LIMIT-invgraph-s2-evidence-join-callsite-wiring",
+   "title": "Investigation-graph S2 evidence-join is proven in-repo and default-OFF; the live projection seam does not yet present the per-finding oracle_context",
+   "summary": "The F4 graph projector's S2 JOIN (VIGIL_GRAPH_EVIDENCE_JOIN, default-OFF) dereferences a finding's evidence_ref through the S1 resolver, RE-VERIFIES it with the existing verify_certificate (never a second verifier) with authenticity ANCHORED to the engagement's out-of-band governance-root fingerprint (expected_trust_root_fingerprint; a bundle can never self-authenticate), and demotes any fact whose cert does not resolve + re-verify-under-the-pin + bind to this finding/engagement/host-in-scope. It is built and tested fully offline (integration/tests/test_graph_evidence_join.py, incl. a forged self-signed-bundle control) and is byte-identical/framework-free when OFF. What is NOT claimed wired: the live projection seam (vigil_integration.live.graph_neo4j.GraphMirror.mirror calls project(records, group_id, scope_gate)) does not yet pass evidence_root, the per-finding contexts the join needs to bind a host-bearing fact, or the engagement's out-of-band trust_root_fingerprint; and both the join flag and the S1 resolver flag are default-OFF. So in production the join is inert until that call-site wiring (evidence_root + contexts + the out-of-band fingerprint) + flag arming land; with the flag on but any of those absent, a fact fail-closed DEMOTES (demote-only, never a false confirm). This is a deliberate default-OFF boundary, recorded so the graph is never overclaimed as re-verifying evidence in the live path.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "integration/vigil_integration/graph/projector.py",
+    "symbol": "evidence_join_enabled"
+   },
+   "marker": false,
+   "check": "symbol-exists",
+   "source_doc": "docs/research/fusion/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
   }
  ],
  "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",

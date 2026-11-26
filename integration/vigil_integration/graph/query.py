@@ -13,6 +13,15 @@ that value but binds it to the sovereign rule that **no consumer may read author
     surfaced, if at all, in a SEPARATE ``leads`` field that is explicitly labelled unproven.
   * Only ACTIVE (non-retired) nodes are returned — a refuted lead is excluded.
 
+**S2 — JOIN-verified CONFIRMED at this boundary.** The projector (``graph.projector``) is the single
+enforcement point for the evidence join (``VIGIL_GRAPH_EVIDENCE_JOIN``): under the flag a CONFIRMED node
+has already had its ``evidence_ref`` dereferenced + RE-VERIFIED (via the S1 resolver's reuse of
+``verify_certificate``) and bound to its finding/engagement/host-in-scope. So ``confirmed_findings()`` here
+returns ONLY join-verified facts WITHOUT re-running (or duplicating) any verification — this layer never
+mints a second verifier; it reads the already-tightened view. A fact the join could not re-establish was
+demoted UPSTREAM to a lead carrying ``props["evidence_join"] == "unresolved_evidence"``, so it appears only
+in the separate ``leads`` field, surfaced via ``FindingSummary.unresolved_reason`` (never as a fact).
+
 Import-clean: pydantic + .model + stdlib only.
 """
 
@@ -20,9 +29,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
-from .model import EdgeType, GraphView, NodeLabel
+from .model import EVIDENCE_JOIN_UNRESOLVED, EdgeType, GraphView, NodeLabel, _join_unresolved
 
 _HIGH_SEVERITIES = frozenset({"high", "critical"})
 
@@ -34,6 +43,17 @@ class FindingSummary(BaseModel):
     bug_class: str = ""
     evidence_ref: str = ""      # present ⇔ confirmed (the signed proof)
     spine_hash: str = ""
+    # S2: for a lead the projector DEMOTED because the evidence join failed, WHY ("unresolved_evidence").
+    # Dropped from the canonical form when empty (serializer below) so a confirmed finding — and every
+    # pre-S2 / flag-OFF summary — serialises BYTE-IDENTICALLY to before this field existed.
+    unresolved_reason: str = ""
+
+    @model_serializer(mode="wrap")
+    def _ser(self, handler):
+        data = handler(self)
+        if not data.get("unresolved_reason"):
+            data.pop("unresolved_reason", None)
+        return data
 
 
 class FailureLesson(BaseModel):
@@ -94,13 +114,18 @@ def _node_target(node_props: dict[str, Any]) -> str:
 
 def _summary(node) -> FindingSummary:
     p = node.props
+    # S2: a finding the join DEMOTED is intrinsically confirmed but surfaces as a lead — it carries NO
+    # proof (its evidence_ref did not re-establish), so the summary blanks evidence_ref and names the
+    # reason. A join-CONFIRMED node (tag == "confirmed") is a normal fact: no unresolved_reason.
+    demoted = _join_unresolved(node)
     return FindingSummary(
         ref=str(p.get("ref") or p.get("finding_ref") or node.id),
         title=str(p.get("title") or ""),
         severity=str(p.get("severity") or ""),
         bug_class=str(p.get("bug_class") or ""),
-        evidence_ref=node.provenance.evidence_ref,
+        evidence_ref="" if demoted else node.provenance.evidence_ref,
         spine_hash=node.provenance.spine_hash,
+        unresolved_reason=EVIDENCE_JOIN_UNRESOLVED if demoted else "",
     )
 
 

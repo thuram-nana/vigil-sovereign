@@ -26,6 +26,42 @@ def _finding_rec(seq, h, *, ref, status="lead", evidence_ref="", signature_ref="
                        props={"ref": ref, "severity": severity, **props}, targets=targets or [])
 
 
+# --- S2 flag-OFF byte-identity (framework-free; runs in BOTH CI legs) -------------------------
+
+def _s2_spine_fixture():
+    """A fixed spine: a chain → step → a signed-evidence FACT (confirmed under slice-1's non-empty check),
+    a bare lead, and a refute of the lead. Used to pin flag-OFF byte-identity."""
+    return [
+        SpineRecord(seq=1, hash="c1", kind="chain", chain_id="C", props={"objective": "o"}),
+        SpineRecord(seq=2, hash="s1", kind="step", step_id="S1", chain_id="C", props={"tool": "nmap"}),
+        _finding_rec(3, "f1", ref="F-fact", status="fact", evidence_ref="cert:abc", signature_ref="sig:1",
+                     parent_step_id="S1", targets=[{"type": "host", "value": "in-scope.tld"}]),
+        _finding_rec(4, "f2", ref="F-lead", status="lead", parent_step_id="S1"),
+        SpineRecord(seq=5, hash="r1", kind="refute", refutes_id="finding:F-lead"),
+    ]
+
+
+def test_s2_flag_off_projection_and_confirmed_findings_are_byte_identical(monkeypatch):
+    # Flag OFF (default): the S2 join NEVER runs. project() + confirmed_findings() are byte-identical to
+    # pre-slice — a non-empty evidence_ref still confirms (slice-1 check), the join params are inert, and
+    # no framework import / resolver is touched (this test runs in the framework-free sovereign leg).
+    monkeypatch.delenv("VIGIL_GRAPH_EVIDENCE_JOIN", raising=False)
+    recs = _s2_spine_fixture()
+    baseline = project(recs).model_dump()
+    # the confirmed set is exactly the non-empty-evidence FACT (pre-slice behaviour).
+    assert {n.props["ref"] for n in project(recs).confirmed_findings()} == {"F-fact"}
+    # passing the S2 join inputs (evidence_root / contexts / trust_root_fingerprint) changes NOTHING when
+    # the flag is OFF.
+    with_params = project(recs, evidence_root="/nonexistent/root",
+                          contexts={"F-fact": {"host": "in-scope.tld"}},
+                          trust_root_fingerprint="sha256:" + ("ab" * 32)).model_dump()
+    assert with_params == baseline, "S2 join params must be inert when the flag is OFF"
+    # no node carries the join demote marker (the join did not run).
+    assert all("evidence_join" not in n["props"] for n in baseline["nodes"].values())
+    # determinism: a second projection is byte-identical.
+    assert project(recs).model_dump() == baseline
+
+
 # --- the anti-trust-laundering core ----------------------------------------------------------
 
 def test_claimed_fact_without_signed_evidence_is_a_lead():

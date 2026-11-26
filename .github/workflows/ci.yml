@@ -575,6 +575,7 @@ jobs:
               integration/tests/test_seam_migration_engine_floor.py \
               integration/tests/test_ci_runner.py \
               integration/tests/test_findings_crossing.py \
+              integration/tests/test_graph_evidence_join.py \
               integration/tests/test_aegis_saas_acceptance.py \
               integration/tests/IT/test_aegis_tt_rig.py \
               integration/tests/test_langplugins.py \

@@ -11,6 +11,28 @@ are enforced HERE, deterministically:**
      carrying BOTH a non-empty signed ``evidence_ref`` AND a ``signature_ref`` (``_is_confirmed``).
      Anything else — including a record that merely *claims* ``status="fact"`` with no evidence — is a
      LEAD. The graph can never launder an unproven claim into a fact.
+
+     **S2 — JOIN-verified CONFIRMED (``VIGIL_GRAPH_EVIDENCE_JOIN``, default OFF; DEMOTE-ONLY).** When the
+     flag is OFF the ``evidence_ref`` is trusted on sight for being NON-EMPTY (slice-1 behaviour), and this
+     module imports no ``framework`` and is byte-identical to pre-slice. When the flag is ON, a non-empty
+     ``evidence_ref`` is no longer enough: it must **dereference** (the S1 ``evidence.resolver``) to a
+     ``SignedEvidence`` that **re-verifies with authenticity ANCHORED out-of-band** (``resolve_and_verify(
+     ..., expected_trust_root_fingerprint=<engagement pin>).ok`` — the REUSED ``verify_certificate``, never
+     a second verifier) AND whose cert binds to THIS finding (``finding_ref``), THIS tenant/engagement
+     (``engagement_slug``), and a **host-in-scope** that matches the finding's declared asset host
+     (``_host_in_scope``). Authenticity is credited ONLY against the engagement's genuine governance-root
+     fingerprint (the anchor that signs the spine); the trust root shipped inside the bundle is NEVER
+     trusted on its own (S1's hardened contract — ``.ok`` requires ``authenticity_pinned`` — closes the
+     self-signed-bundle hole). Any of these failing (incl. no pin supplied) marks the fact's evidence
+     ``unresolved_evidence``, surfacing it as a LEAD. Crucially the join is a MEMBERSHIP OVERLAY: it TAGS
+     the node (a prop) but NEVER changes its intrinsic ``is_confirmed``, so the refute / retirement /
+     resurrection machinery — which reads ``is_confirmed`` — behaves IDENTICALLY to flag-OFF, and the
+     demote is a FILTER at the ``confirmed_findings()`` boundary (``model.GraphView``). Because the ON
+     confirmed set is the OFF set minus the tagged nodes, ON ⊆ OFF holds for EVERY spine — not merely
+     per-record (a per-record demotion to LEAD would re-open the bare-refute / resurrection path and
+     PROMOTE on a multi-record spine: dangling-fact → bare refute → grounded refute → re-attestation). The
+     ``framework`` import that powers it is LAZY / function-local, inside the flag-ON branch ONLY
+     (FATAL-2), so the module stays framework-free wherever ``framework`` is absent (the sovereign leg).
   3. **Rebuildable + deterministic.** ``project`` sorts records by ``(seq, hash)`` and is a pure
      function — the same spine yields a byte-identical ``GraphView``, so the read-model can be rebuilt
      and independently verified against the spine and cannot silently diverge. No wallclock / RNG: the
@@ -37,12 +59,16 @@ Import-clean: pydantic + .model + stdlib only.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
 
 from .model import (
+    EVIDENCE_JOIN_CONFIRMED,
+    EVIDENCE_JOIN_PROP,
+    EVIDENCE_JOIN_UNRESOLVED,
     ConfirmationStatus,
     EdgeType,
     GraphEdge,
@@ -176,8 +202,140 @@ def _host_in_scope(target_type: str, value: str, scope_gate: Optional[ScopeGate]
     return True
 
 
-def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate],
-                    objectives: bool) -> None:
+# --------------------------------------------------------------------------------------------------
+# S2 — JOIN-verified CONFIRMED. Default-OFF affirmative flag (same vocabulary as the rest of the
+# program, e.g. the S1 resolver's ``VIGIL_EVIDENCE_RESOLVER``). When OFF, the join NEVER runs, no
+# ``framework`` import happens, and the module is byte-identical/framework-free.
+# --------------------------------------------------------------------------------------------------
+_JOIN_ENV = "VIGIL_GRAPH_EVIDENCE_JOIN"
+_JOIN_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+
+# Oracle-context keys whose VALUE is a bare host, and keys whose value is a URL whose AUTHORITY is the
+# host. The oracle_context is a strict ``verify.adapter.FindingContext`` (extra keys forbidden), so these
+# are the real host-bearing slots a reproducing posture context carries (e.g. the clickjacking/CSP
+# posture control's ``url``, a TLS/cert-validity context's ``host``). Scanned recursively (bounded depth)
+# because a control rides one level down under its own key (``clickjacking_control`` → ``url``).
+_CTX_HOST_KEYS = frozenset({"host", "hostname", "target_host", "authority"})
+_CTX_URL_KEYS = frozenset({"url", "uri", "endpoint", "target", "request_url", "source"})
+
+
+def evidence_join_enabled() -> bool:
+    """True iff ``VIGIL_GRAPH_EVIDENCE_JOIN`` is affirmative (default False). The single arming point:
+    when False the join never runs, nothing imports ``framework``, and projection is byte-identical to
+    slice-1 (``evidence_ref`` trusted for being non-empty)."""
+    return (os.environ.get(_JOIN_ENV) or "").strip().lower() in _JOIN_AFFIRMATIVE
+
+
+def _declared_hosts(rec: SpineRecord) -> "frozenset[str]":
+    """The finding's declared asset host(s) — every host a host/endpoint/port target names, via the SAME
+    client-independent ``_bridge_hosts`` extraction the scope gate uses. Empty ⇒ the finding claims no
+    host (the host-in-scope demote is then a no-op — a posture/CVE finding is not host-bound)."""
+    hosts: set[str] = set()
+    for t in rec.targets:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type", "")).lower()
+        if _BRIDGE_LABELS.get(ttype) in (NodeLabel.HOST, NodeLabel.ENDPOINT, NodeLabel.PORT):
+            for h in _bridge_hosts(ttype, str(t.get("value", "")).strip()):
+                if h:
+                    hosts.add(h)
+    return frozenset(hosts)
+
+
+def _context_hosts(oc: Any, _depth: int = 0) -> "frozenset[str]":
+    """Every host named in the cert's authenticated oracle-context — a bounded recursive scan of the
+    presented ``oracle_context`` for a bare-host key or a URL whose authority is the host (parsed by the
+    SAME client-independent ``_authority_host``). Empty ⇒ the context names no host (so a host-bound
+    finding cannot corroborate its asset host against it → fail-closed demote)."""
+    if _depth > 5 or not isinstance(oc, dict):
+        return frozenset()
+    found: set[str] = set()
+    for k, v in oc.items():
+        key = str(k).lower()
+        if isinstance(v, str) and v.strip():
+            if key in _CTX_HOST_KEYS:
+                found.add(v.strip().lower())
+            elif key in _CTX_URL_KEYS:
+                h = _authority_host(v, fold_backslash=True)
+                if h:
+                    found.add(h)
+        elif isinstance(v, dict):
+            found |= _context_hosts(v, _depth + 1)
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                if isinstance(item, dict):
+                    found |= _context_hosts(item, _depth + 1)
+    return frozenset(found)
+
+
+def _evidence_join_confirms(rec: SpineRecord, *, group_id: str, evidence_root: Any,
+                            contexts: Optional[dict], scope_gate: Optional[ScopeGate],
+                            trust_root_fingerprint: Optional[str]) -> bool:
+    """The S2 join: True iff ``rec.evidence_ref`` DEREFERENCES + RE-VERIFIES — authenticity ANCHORED to the
+    engagement's OUT-OF-BAND governance fingerprint — to a cert that binds to this finding, engagement, and
+    host-in-scope. Called ONLY when ``_is_confirmed(rec)`` already held, so its only effect is to TIGHTEN
+    (demote-only). Every failure path returns False (fail-closed). The ``framework`` import is
+    function-local and reached ONLY here (flag-ON branch) — FATAL-2. The import is itself inside the try,
+    so a process where ``framework`` is absent (the sovereign leg, were the flag somehow armed there)
+    demotes the fact to a LEAD rather than dropping the node — demote-only."""
+    # AUTHENTICITY MUST BE PINNED OUT-OF-BAND. Without the engagement's genuine governance fingerprint the
+    # S1 resolver would fall back to the trust root shipped INSIDE the (untrusted) bundle — which a forger
+    # can replace with their own self-signed root (the S1 red-pen HIGH). A caller that cannot supply the
+    # out-of-band pin cannot soundly confirm: fail-closed demote (never trust the bundle's own trust-root).
+    pin = trust_root_fingerprint.strip() if isinstance(trust_root_fingerprint, str) else ""
+    if not pin:
+        return False
+
+    try:
+        from framework.v2.evidence.resolver import get_resolver  # noqa: PLC0415 (FATAL-2: framework-only evidence join, flag-gated)
+        resolver = get_resolver(evidence_root)
+    except Exception:          # noqa: BLE001 — a missing framework / resolver-construction error is a fail-closed demote
+        return False
+    if resolver is None:
+        # the S1 resolver is not armed (``VIGIL_EVIDENCE_RESOLVER`` off) / unavailable → the evidence
+        # cannot be re-verified, so the fact cannot be JOIN-confirmed (fail-closed, demote-only).
+        return False
+
+    evidence_ref = (rec.evidence_ref or "").strip()
+    if not evidence_ref:
+        return False
+    ctx_map = contexts if isinstance(contexts, dict) else None
+    try:
+        # (1) RESOLVES + (2) RE-VERIFIES, PINNED to the out-of-band fingerprint — the REUSED
+        # verify_certificate verdict (never a second verifier). ``rv.ok`` already folds in
+        # ``authenticity_pinned`` (``.ok == verification.ok AND authenticity_pinned``); the explicit
+        # ``authenticity_pinned`` check below is belt-and-braces so an unpinned verdict can never confirm.
+        rv = resolver.resolve_and_verify(evidence_ref, ctx_map, expected_trust_root_fingerprint=pin)
+    except Exception:          # noqa: BLE001 — a resolver error is a fail-closed demote
+        return False
+    if rv is None or not rv.ok or not rv.authenticity_pinned:
+        return False
+    cert = rv.signed.certificate
+
+    # (3) the cert's finding_ref binds to THIS node's finding.
+    if not rec.finding_ref or cert.finding_ref != rec.finding_ref:
+        return False
+    # (4) same tenant/engagement — a cert that resolves only under another engagement does not confirm
+    # (tenant isolation is additionally enforced by the resolver, which indexes only its own root tree).
+    expected_engagement = rec.engagement_id or group_id
+    if cert.engagement_slug != expected_engagement:
+        return False
+    # (5) host-in-scope demote: the cert's oracle-context host must corroborate the finding's declared
+    # asset host AND that host must clear the charter scope gate (both reuse existing primitives).
+    declared = _declared_hosts(rec)
+    if declared:
+        for h in declared:
+            if not _host_in_scope("host", h, scope_gate):   # out of charter scope → demote
+                return False
+        ctx_hosts = _context_hosts(ctx_map.get(cert.finding_ref) if ctx_map else None)
+        if not declared <= ctx_hosts:                       # evidence does not name the claimed host → demote
+            return False
+    return True
+
+
+def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate], *,
+                    objectives: bool = False, group_id: str = "", evidence_root: Any = None,
+                    contexts: Optional[dict] = None, trust_root_fingerprint: Optional[str] = None) -> None:
     kind = (rec.kind or "").lower()
     if kind == "refute":
         if rec.refutes_id:
@@ -220,9 +378,25 @@ def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[Scop
         return
 
     if kind == "finding":
+        # ``confirmed`` is the INTRINSIC status (status=fact + non-empty evidence_ref + signature_ref). It
+        # drives the node's provenance, its edges, its bridges AND the refute/retirement/resurrection
+        # machinery EXACTLY as flag-OFF — the S2 join NEVER changes it.
         confirmed = _is_confirmed(rec)
+        props = dict(rec.props)
+        if confirmed and evidence_join_enabled():
+            # S2 MEMBERSHIP OVERLAY (demote-only): tag whether this intrinsic fact's evidence_ref
+            # dereferences + re-verifies + binds to this finding/engagement/host-in-scope. This is a
+            # QUERY-BOUNDARY marker ONLY — it does NOT touch ``confirmed`` — so the projection (incl.
+            # refutes/retirement/resurrection) stays identical to OFF and the demote is applied as a FILTER
+            # at confirmed_findings() (so ON ⊆ OFF holds for EVERY spine, not merely per-record — a
+            # per-record demotion would re-open the bare-refute/resurrection path and PROMOTE on a
+            # multi-record spine). A demoted fact surfaces as a lead/unresolved_evidence.
+            passed = _evidence_join_confirms(rec, group_id=group_id, evidence_root=evidence_root,
+                                             contexts=contexts, scope_gate=scope_gate,
+                                             trust_root_fingerprint=trust_root_fingerprint)
+            props[EVIDENCE_JOIN_PROP] = EVIDENCE_JOIN_CONFIRMED if passed else EVIDENCE_JOIN_UNRESOLVED
         fid = rec.finding_ref or rec.hash
-        node = GraphNode(id=f"finding:{fid}", label=NodeLabel.CHAIN_FINDING, props=dict(rec.props),
+        node = GraphNode(id=f"finding:{fid}", label=NodeLabel.CHAIN_FINDING, props=props,
                          provenance=_provenance(rec, confirmed), valid_from=rec.seq)
         node = view.upsert_node(node)
         if rec.parent_step_id:
@@ -350,7 +524,9 @@ def spine_record_from_finding(finding: Any, *, seq: int, hash: str, signature_re
 
 
 def project(records: list[SpineRecord], *, group_id: str = "",
-            scope_gate: Optional[ScopeGate] = None, objectives: Optional[bool] = None) -> GraphView:
+            scope_gate: Optional[ScopeGate] = None, objectives: Optional[bool] = None,
+            evidence_root: Any = None, contexts: Optional[dict] = None,
+            trust_root_fingerprint: Optional[str] = None) -> GraphView:
     """Project a list of signed spine records into a typed ``GraphView`` — the ONLY writer. Deterministic
     (records applied in ``(seq, hash)`` order), so the same spine rebuilds a byte-identical view. A
     finding is CONFIRMED only when its record carries signed oracle evidence; everything else is a LEAD.
@@ -361,7 +537,21 @@ def project(records: list[SpineRecord], *, group_id: str = "",
     ``PURSUES`` edge). ``None`` (the default) reads the DEFAULT-OFF ``VIGIL_GRAPH_OBJECTIVES`` env flag, so
     every existing caller is unchanged and the view is byte-identical to the pre-S3 read-model unless an
     operator opts in; an explicit ``True`` / ``False`` pins it (for deterministic offline tests). Reading
-    an env flag keeps the function deterministic for a fixed environment — no wallclock, no RNG."""
+    an env flag keeps the function deterministic for a fixed environment — no wallclock, no RNG.
+
+    ``evidence_root`` / ``contexts`` / ``trust_root_fingerprint`` feed the S2 JOIN
+    (``VIGIL_GRAPH_EVIDENCE_JOIN``, default OFF; see the module docstring). ``evidence_root`` is the tenant
+    root the S1 resolver dereferences under (defaults to ``crucible_root()``); ``contexts`` maps
+    ``finding_ref -> oracle_context`` — the presented re-fire evidence the join re-verifies binding against
+    AND extracts the cert's host from; ``trust_root_fingerprint`` is the engagement's OUT-OF-BAND pinned
+    governance-root fingerprint (``evidence.certify.trust_root_fingerprint`` of the anchor that signs the
+    spine — NOT the bundle's own ``trust-root.json``). The join passes it as
+    ``expected_trust_root_fingerprint`` so authenticity is anchored out-of-band; absent it the join
+    fail-closed demotes (a bundle cannot self-authenticate — S1's hardened contract: ``.ok`` requires
+    ``authenticity_pinned``). All three are IGNORED when the flag is OFF (no ``framework`` import,
+    byte-identical projection). Projection stays a PURE function of (spine records + resolver contents):
+    identical inputs → byte-identical ``GraphView`` (no wallclock / RNG; the re-verify is over retained
+    bytes via the existing verifier, with no traffic / live oracle)."""
     objectives_on = objectives_enabled() if objectives is None else bool(objectives)
     view = GraphView(group_id=group_id)
     clean = [r for r in (records or []) if isinstance(r, SpineRecord)]   # pre-filter → total on garbage
@@ -377,7 +567,9 @@ def project(records: list[SpineRecord], *, group_id: str = "",
 
     for rec in sorted(clean, key=_sort_key):
         try:
-            _project_record(view, rec, scope_gate, objectives_on)
+            _project_record(view, rec, scope_gate, objectives=objectives_on, group_id=group_id,
+                            evidence_root=evidence_root, contexts=contexts,
+                            trust_root_fingerprint=trust_root_fingerprint)
         except Exception:   # noqa: BLE001 — a malformed record must not abort the whole projection
             continue
     return view
