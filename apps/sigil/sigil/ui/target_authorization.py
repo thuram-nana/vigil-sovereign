@@ -608,7 +608,7 @@ def list_customer_authorities(org_id: Any, hosts: Any, *, now: float) -> list:
     unverified bundle is disclosed PRESENT-but-inactive — the surface never trusts it, and the launch/conjunctive gate
     refuses it independently. This DISCLOSES the enforced gate (scope/exclusions R1, expiry R2, out-of-scope/new-host
     refusal R3); it is NOT a second enforcement path and NEVER widens scope. Never raises, never writes, never signs."""
-    from vigil_core import verify_engagement_authority
+    from vigil_core import AuthorizerKey, TrustRoot, verify_engagement_authority
     from vigil_integration.live.authorization_broker import read_authorization
 
     kp = None
@@ -632,21 +632,29 @@ def list_customer_authorities(org_id: Any, hosts: Any, *, now: float) -> list:
             out.append({"host": h, "slug": slug, "authorized": False, "active": False})
             continue
         doc = ta.signed_authority.document
-        owner_ids = {a.public_key_b64 for a in ta.trust_root.authorizers}
-        bound = bool(kp and kp.public_key_b64 in owner_ids)
+        # SECURITY: the seam is written by untrusted cross-plane code, so the bundle's OWN trust_root is NEVER
+        # trusted for this verdict — an attacker who can write the seam could co-list the owner's PUBLIC key
+        # beside their own and sign with their own, passing a mere "owner key is listed" membership test.
+        # Verify against a LOCALLY-PINNED owner root and require scope == [this host], EXACTLY like the
+        # enforcement gate (launch_gate._authority_ok), so the screen never shows a host as authorized/active
+        # that the gate would refuse.
         verified = False
-        try:
-            verified, _reason = verify_engagement_authority(ta.signed_authority, ta.trust_root)
-        except Exception:  # noqa: BLE001 — a malformed bundle disclosed as unverified, never a crash
-            verified = False
+        if kp is not None:
+            try:
+                owner_root = TrustRoot(threshold=1, authorizers=[AuthorizerKey(
+                    key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+                verified, _reason = verify_engagement_authority(ta.signed_authority, owner_root)
+            except Exception:  # noqa: BLE001 — a malformed bundle disclosed as unverified, never a crash
+                verified = False
         try:
             nb, na = doc.not_before.timestamp(), doc.not_after.timestamp()
         except Exception:  # noqa: BLE001
             nb = na = 0.0
-        trusted = bool(bound and verified)
+        scope_ok = (list(doc.scope) == [h])          # exactly this host — no parent, wildcard, or other host
+        trusted = bool(verified and scope_ok)        # owner-signed against the pinned root AND scoped to this host
         out.append({
             "host": h, "slug": ta.slug, "authorized": True,
-            "bound": bound, "verified": bool(verified), "trusted": trusted,
+            "verified": bool(verified), "scope_ok": scope_ok, "trusted": trusted,
             "active": bool(trusted and nb <= float(now) < na),
             "scope": list(doc.scope),
             "environment": getattr(doc.environment, "value", str(doc.environment)),

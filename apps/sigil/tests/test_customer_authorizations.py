@@ -117,7 +117,7 @@ def test_list_customer_authorities_discloses_active_expired_scope_and_is_tenant_
     rows = ta.list_customer_authorities("acme", ["acmeone.cm", "acmetwo.cm"], now=T_READ)
     by_host = {r["host"]: r for r in rows}
     a, b = by_host["acmeone.cm"], by_host["acmetwo.cm"]
-    assert a["authorized"] and a["bound"] and a["verified"] and a["trusted"] and a["active"] is True
+    assert a["authorized"] and a["verified"] and a["scope_ok"] and a["trusted"] and a["active"] is True
     assert a["scope"] == ["acmeone.cm"] and a["environment"] == "live"
     assert a["allow_destructive"] is False and a["live_destructive_acknowledged"] is False   # GET-only disclosure
     assert a["issued_by"] == "customer:acme"
@@ -155,7 +155,39 @@ def test_a_forged_or_foreign_signed_authority_is_disclosed_present_but_inactive(
     write_authorization(ta._base_dir(), slug, signed, tr)
     row = ta.list_customer_authorities("acme", ["acmeone.cm"], now=T_READ)[0]
     assert row["authorized"] is True                           # a bundle is present ...
-    assert row["bound"] is False and row["active"] is False    # ... but it is not THIS owner's: never trusted/active
+    assert row["verified"] is False and row["active"] is False  # ... but it is not THIS owner's: never trusted/active
+
+
+def test_a_colisted_owner_key_forgery_is_disclosed_inactive():
+    """The co-listed-key forgery (the pinned-owner-root guarantee): a bundle whose OWN trust_root lists the
+    owner's PUBLIC key BESIDE an attacker key (threshold 1), signed by the ATTACKER ONLY, must be disclosed
+    present-but-INACTIVE. The surface verifies against a PINNED owner root (not the bundle's own trust_root),
+    exactly like the enforcement gate launch_gate._authority_ok, so a mere 'owner key is listed' membership
+    can never make a never-owner-signed bundle read as Active."""
+    from datetime import datetime, timedelta, timezone
+
+    from vigil_core import (
+        AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot, sign_engagement_authority,
+    )
+    from vigil_integration.live.authorization_broker import write_authorization
+
+    from sigil.reuse import generate_keypair
+    ensure_owner_keypair()
+    owner_pub = ta._owner_keypair().public_key_b64             # THIS cockpit's owner PUBLIC key (co-listed below)
+    attacker = generate_keypair()                             # NOT this cockpit's key
+    slug = ta._customer_slug("acme", "acmeone.cm")
+    t = datetime.fromtimestamp(T0, tz=timezone.utc)
+    doc = EngagementAuthority(engagement_slug=slug, environment=TargetEnvironment("live"), scope=["acmeone.cm"],
+                              not_before=t, not_after=t + timedelta(hours=720), issued_by="customer:acme")
+    signed = sign_engagement_authority(doc, {"attacker": attacker.private_key_b64})   # signed by the ATTACKER only
+    tr = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner_pub),          # owner co-listed (PUBLIC)
+        AuthorizerKey(key_id="attacker", name="attacker", public_key_b64=attacker.public_key_b64)])
+    write_authorization(ta._base_dir(), slug, signed, tr)
+    row = ta.list_customer_authorities("acme", ["acmeone.cm"], now=T_READ)[0]
+    assert row["authorized"] is True                          # a bundle is present ...
+    # ... but it was never signed by THIS owner's key: the pinned-root verify fails -> never trusted/active.
+    assert row["verified"] is False and row["trusted"] is False and row["active"] is False
 
 
 # =====================================================================================================================
