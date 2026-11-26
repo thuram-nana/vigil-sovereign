@@ -19,19 +19,64 @@ the credential-holding egress can only reach AWS STS); a redirect-BLOCKING opene
 request); a bounded response read; an XML parse that refuses any DTD. The customer supplies only a role ARN, which is
 format-checked and travels as a signed form PARAMETER, never as a URL.
 
-ERRORS: every failure is a ``CloudFetchError``. Its ``str()`` is this module's own fixed wording (it reaches the
-customer); the AWS error code/message and library text ride separately in ``detail`` for the operator audit only.
-AccessDenied on step 1 means the role does not trust VIGIL with the issued external id (the customer's fix); any other
-AWS error code, an HTTP 5xx or a transport fault is INCONCLUSIVE and fails closed — a control whose answer is anything
-but an explicit ``AccessDenied`` is never counted as denied (VIGIL's own bad credentials also answer HTTP 403, with a
-different code).
+WHAT IT OBSERVES (GCP, a cross-project service-account IMPERSONATION grant — NAME-bound). Under VIGIL's connector
+service-account credentials (``GcpImpersonationConnectFetcher``) it:
+  1. authenticates VIGIL's connector SA — signs a service-account assertion JWT (RS256 over the connector SA private
+     key) and exchanges it at ``oauth2.googleapis.com`` for a connector access token;
+  2. computes the EXACT, challenge-bound SA email from the project + the unguessable external id (``vgl-`` + a
+     SHA-256 tag — see ``_gcp_expected_sa_email``, never customer-steered), and calls
+     ``iamcredentials:generateAccessToken`` on THAT email. A 200 is the WHOLE positive proof: an SA whose NAME
+     encodes THIS challenge exists in the project (only the project admin could create a name derived from the
+     unguessable external id), VIGIL holds ``roles/iam.serviceAccountTokenCreator`` on it, and it is in the claimed
+     project (VIGIL built the email from ``account_id``). A 403/404 is the customer's fix (create the SA + grant);
+     anything else is INCONCLUSIVE and fails closed.
+The confused-deputy closure is the unguessable per-challenge NAME. There is deliberately NO metadata read (reading an
+SA's own resource under its impersonated token 403s — a target SA has no self-read) and NO never-created "control SA"
+(a never-created SA is ALWAYS denied in real GCP, so it can never catch a blanket grant — a vacuous control). It
+returns ``{impersonated, expected_email, project, external_id}`` and decides nothing: the deterministic verdict lives
+in ``governor.cloud_connect.cloud_grant_refusal`` (its gcp branch). The connector token is used for exactly this
+impersonation and is never stored, logged or returned.
 
-FATAL-2: sovereign-side, stdlib only, ``assert_no_offense()`` at import; no framework/strix import.
+ERRORS: every failure is a ``CloudFetchError``. Its ``str()`` is this module's own fixed wording (it reaches the
+customer); the AWS/Google error code/message and library text ride separately in ``detail`` for the operator audit
+only. AccessDenied on the AWS step-1 assume (or a 403 PERMISSION_DENIED on the GCP target impersonation) means the
+grant is absent (the customer's fix); any other error code, an HTTP 5xx or a transport fault is INCONCLUSIVE and fails
+closed — a control whose answer is anything but an explicit denial/not-found is never counted as denied (VIGIL's own
+bad credentials also answer HTTP 403, with a different code).
+
+FATAL-2: sovereign-side, ``assert_no_offense()`` at import; no framework/strix import. The AWS leg is stdlib-only; the
+GCP leg additionally uses the sovereign ``cryptography`` dep (the same library ``governor.github_app`` uses) for the
+one RSA-SHA256 JWT signature — ``cryptography`` is NOT an offense engine, so FATAL-2 holds.
+
+WHAT IT OBSERVES (AZURE, a multi-tenant app-registration consent — ``AzureConsentConnectFetcher``). Under VIGIL's
+own Azure app credentials it: (1) POSTs a client-credentials token request to the CUSTOMER tenant's token endpoint
+(``login.microsoftonline.com/{tid}/oauth2/v2.0/token``, scope ``graph/.default``) — a 200 proves a Global Admin
+admin-consented VIGIL's app INTO that tenant (a tenant-admin-only act); an explicit AADSTS no-consent/app-not-found
+error means the customer has not consented (their fix); VIGIL's own bad credential, a 5xx or a transport fault is
+INCONCLUSIVE and fails closed. It decodes the returned token's ``tid`` claim (pure base64url of the JWT payload; the
+token's provenance is the TLS-pinned login host, so no signature trust is needed beyond a well-formed JWT from an
+expected AAD issuer host) and requires ``tid == tenant_id``. (2) With that token it GETs VIGIL's OWN service
+principal over Microsoft Graph (``servicePrincipals(appId='{client_id}')``, keyed on VIGIL's constant client id —
+never customer-steerable) and confirms the admin-set ``external_id`` is among its tags (constant-time). (3) It POSTs
+a client-credentials token request against a FRESH RANDOM control tenant (derived from the control id); that must be
+an explicit AADSTS denial, proving the positive result is tenant-specific. It returns
+``{tenant, external_id_matched, external_id, control_tenant, control_denied}`` and decides nothing.
+
+EGRESS (AZURE) mirrors the AWS egress: stdlib ``urllib`` only (no azure-identity/azure-mgmt SDK), an https-only +
+exact-host allowlist guard (``config.AZURE_CLOUD_CONNECT_EGRESS_ALLOWLIST`` — Entra login + Graph only) BEFORE any
+socket, the same redirect-BLOCKING opener, and a bounded response read. The customer supplies only a tenant id and
+an enterprise-app Object ID — PATH segments of host-pinned requests, never a host.
+
+FATAL-2 (AZURE): sovereign-side, stdlib only, ``assert_no_offense()`` at import; no framework/strix import. No key
+material is provisioned by the tool (the Azure client secret/assertion is owner-provisioned and passed in); the only
+crypto is ``hmac.compare_digest`` (constant-time tag/tid compares) and a SHA-256 control-tenant derivation.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import re
 import time
 import urllib.error
@@ -320,3 +365,498 @@ class AwsStsConnectFetcher:
         control, _ = self._assume(role, ctl)       # the same role, a fresh random id: must be explicitly DENIED
         return {"assumed_with_external_id": ext, "account": account, "control_external_id": ctl,
                 "control_denied": control == "denied"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# GCP service-account IMPERSONATION leg (confused-deputy-safe cross-project proof-of-control). The connector SA
+# assertion JWT is RS256-signed with the sovereign ``cryptography`` dep; everything else is stdlib ``urllib`` with
+# the same guarded-egress discipline as the AWS leg (guard -> redirect-blocking open -> bounded read).
+#
+# PROOF (NAME-BINDING): VIGIL computes, from the (trusted) project + the unguessable external id, the EXACT
+# service-account id the customer must create — local part ``vgl-`` + a SHA-256 tag of a domain-separated external
+# id (deterministic, lowercase, inside GCP's 6-30 char SA-id rule). VIGIL impersonates THAT email; a 200 proves, in
+# one call, that (a) an SA whose NAME encodes THIS challenge exists in the project — only the project admin could
+# create a name derived from the unguessable external id — (b) VIGIL holds roles/iam.serviceAccountTokenCreator on
+# it, and (c) the SA is IN ``account_id`` (VIGIL built the email from ``account_id``). The confused-deputy closure is
+# the unguessable per-challenge NAME (a malicious VIGIL tenant cannot guess another customer's external id, so cannot
+# make VIGIL impersonate a matching-named SA in a project it does not control) — NOT a negative control. No metadata
+# read and no never-created "control SA" are made: the first would 403 in real GCP (a target SA has no self-read),
+# and the second is vacuous (a never-created SA is ALWAYS denied, so it could never catch a blanket grant).
+#
+# VIGIL-LIMIT:LIMIT-cloud-connect-gcp-livefire — request construction, RS256 signing, JSON parsing and the verdict
+# are covered OFFLINE in full; the live GCP round-trip (token exchange + generateAccessToken on the challenge-named
+# SA) is not exercised in CI, as the hash-locked CI env has no live GCP project / connector SA.
+# ---------------------------------------------------------------------------------------------------------------
+
+_OAUTH_HOST = "oauth2.googleapis.com"
+_OAUTH_TOKEN_URL = f"https://{_OAUTH_HOST}/token"
+_IAMCREDS_HOST = "iamcredentials.googleapis.com"
+_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+_GCP_JWT_LIFETIME_S = 300          # the connector assertion's iat..exp window — a short, conservative bound
+_IMPERSONATION_LIFETIME = "300s"   # the minted impersonation token's lifetime (the generateAccessToken body)
+
+# A GCP project id: a lowercase letter, then [a-z0-9-], 6-30 chars total, no trailing hyphen. (The target SA email
+# is VIGIL-COMPUTED, never customer-parsed, so no SA-email regex is needed on this leg.)
+_GCP_PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+_GCP_DENIED_STATUS = frozenset({"PERMISSION_DENIED", "NOT_FOUND"})
+
+# The challenge-bound SA id derivation (DUPLICATED byte-for-byte in governor.cloud_connect, pinned equal by a test —
+# the same pattern as the AWS role-ARN regex). "vgl-" + 20 lowercase hex of a domain-separated SHA-256 of the
+# external id = 24 chars, which always satisfies GCP's SA-id rule (^[a-z][a-z0-9-]{4,28}[a-z0-9]$, 6-30 chars).
+_GCP_SA_ID_DOMAIN = "vigil-cloud-connect-gcp-sa-id:v1:"
+
+
+def _gcp_expected_sa_id(external_id: str) -> str:
+    return "vgl-" + hashlib.sha256((_GCP_SA_ID_DOMAIN + str(external_id)).encode("utf-8")).hexdigest()[:20]
+
+
+def _gcp_expected_sa_email(project: str, external_id: str) -> str:
+    return f"{_gcp_expected_sa_id(external_id)}@{project}.iam.gserviceaccount.com"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _sign_rs256(signing_input: bytes, pem: str) -> bytes:
+    """An RSA-SHA256 (PKCS#1 v1.5) signature over ``signing_input`` with the connector SA private-key PEM. Uses the
+    sovereign ``cryptography`` dep (imported here, function-local — the module stays import-light). Any
+    unreadable/encrypted/non-RSA key fails closed with a secret-free detail."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    try:
+        key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
+    except Exception as exc:  # noqa: BLE001 — any unreadable/encrypted/garbage PEM is a fail-closed refusal
+        raise CloudFetchError("the cloud check could not be made",
+                              detail=f"connector key not a readable unencrypted PEM ({type(exc).__name__})") from None
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise CloudFetchError("the cloud check could not be made", detail="connector key is not an RSA key")
+    return key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+
+
+def _gcp_allowlist() -> frozenset:
+    """The GCP egress host allowlist, read from ``config`` at call time. Empty ⇒ every host refused."""
+    from .. import config
+    return frozenset(h.lower() for h in config.GCP_EGRESS_ALLOWLIST)
+
+
+def _gcp_guard(url: str) -> None:
+    """Refuse a non-https scheme, userinfo, a non-default port, or an off-allowlist host BEFORE any socket opens
+    (mirrors ``_guard``; the per-endpoint allowlist pins the three Google hosts this leg may reach)."""
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "https":
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-https Google URL {parts.scheme!r}")
+    if "@" in (parts.netloc or ""):
+        raise CloudFetchError("the cloud check could not be made", detail="Google URL carries userinfo")
+    try:
+        port = parts.port
+    except ValueError:
+        raise CloudFetchError("the cloud check could not be made", detail="malformed Google port") from None
+    if port not in (None, 443):
+        raise CloudFetchError("the cloud check could not be made", detail="non-default Google port")
+    host = (parts.hostname or "").lower()
+    if host not in _gcp_allowlist():
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-allowlisted Google host {host!r}")
+
+
+def _json_body(raw: bytes):
+    """Parse a Google JSON answer into a dict ({} on any fault / non-object). JSON carries no DTD/entity surface."""
+    try:
+        v = json.loads(bytes(raw or b"").decode("utf-8"))
+    except Exception:  # noqa: BLE001 — a malformed body is an empty object (fail-closed at the call site)
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _gcp_request(method: str, url: str, headers: Mapping[str, str], body, timeout: float) -> "tuple[int, bytes]":
+    """One guarded request to a Google endpoint: ``(status, body)``, the body bounded. An HTTP error status is
+    RETURNED (its Google error document tells PERMISSION_DENIED from a fault); only a transport failure raises."""
+    _gcp_guard(url)
+    req = urllib.request.Request(url, data=body, method=method.upper(), headers=dict(headers))
+    try:
+        with _do_open(req, timeout) as r:
+            raw = r.read(_MAX_RESPONSE_BYTES + 1)
+            status = int(getattr(r, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(_MAX_RESPONSE_BYTES + 1) or b""
+        except Exception:  # noqa: BLE001 — an unreadable error body is an empty one
+            raw = b""
+        status = int(exc.code) if isinstance(exc.code, int) else 0
+    except Exception as exc:  # noqa: BLE001 — any transport fault fails closed, never a crash
+        raise CloudFetchError("Google could not be reached to make the cloud check; try again shortly",
+                              detail=f"{type(exc).__name__}: {exc}") from None
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise CloudFetchError("the cloud check could not be made", detail="Google response exceeded the size cap")
+    return status, raw
+
+
+class GcpImpersonationConnectFetcher:
+    """Observe a GCP cross-project service-account impersonation grant under VIGIL's connector SA (module docstring).
+    ``transport`` is an injectable ``(method, url, headers, body, timeout) -> (status, body)`` for offline tests (a
+    FAKE Google that still goes through ``_gcp_guard``); ``clock`` supplies the JWT signing time. SAME ``assume``
+    signature as ``AwsStsConnectFetcher`` so the provisioner dispatches either behind one seam."""
+
+    def __init__(self, *, connector_email: str, private_key_pem: str, timeout: float = _DEFAULT_TIMEOUT_S,
+                 transport: "Optional[Callable[[str, str, Mapping[str, str], Any, float], tuple[int, bytes]]]" = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        if not connector_email or not private_key_pem:
+            raise ValueError("the GCP connector credentials are required")
+        self._email = str(connector_email)
+        self._key_pem = str(private_key_pem)
+        self._timeout = float(timeout)
+        self._transport = transport
+        self._clock = clock
+
+    def __repr__(self) -> str:                    # never render the connector key
+        return "GcpImpersonationConnectFetcher(<connector credentials redacted>)"
+
+    def _call(self, method: str, url: str, body, headers: Mapping[str, str], *, bearer) -> "tuple[int, Any]":
+        hdrs = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+        hdrs.update(dict(headers or {}))
+        if bearer:
+            hdrs["Authorization"] = "Bearer " + str(bearer)
+        if self._transport is not None:
+            _gcp_guard(url)                        # a fake Google still exercises the egress pin
+            try:
+                status, raw = self._transport(method, url, hdrs, body, self._timeout)
+            except CloudFetchError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a transport fault fails closed
+                raise CloudFetchError("Google could not be reached to make the cloud check; try again shortly",
+                                      detail=f"{type(exc).__name__}: {exc}") from None
+        else:
+            status, raw = _gcp_request(method, url, hdrs, body, self._timeout)
+        return int(status), _json_body(bytes(raw or b""))
+
+    def _connector_token(self) -> str:
+        """Step 1: a connector access token from the SA assertion JWT (RS256), exchanged at oauth2.googleapis.com."""
+        now = int(self._clock())
+        header = {"alg": "RS256", "typ": "JWT"}
+        claims = {"iss": self._email, "sub": self._email, "aud": _OAUTH_TOKEN_URL, "scope": _CLOUD_PLATFORM_SCOPE,
+                  "iat": now, "exp": now + _GCP_JWT_LIFETIME_S}
+        seg = (_b64url(json.dumps(header, separators=(",", ":")).encode("ascii")) + "." +
+               _b64url(json.dumps(claims, separators=(",", ":")).encode("ascii")))
+        assertion = seg + "." + _b64url(_sign_rs256(seg.encode("ascii"), self._key_pem))
+        body = _form([("grant_type", _JWT_BEARER_GRANT), ("assertion", assertion)])
+        status, data = self._call("POST", _OAUTH_TOKEN_URL, body, {"Content-Type": _FORM_CONTENT_TYPE}, bearer=None)
+        token = data.get("access_token")
+        if status != 200 or not isinstance(token, str) or not token:
+            raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                                  detail=f"token exchange HTTP {status} {data.get('error')}")
+        return token
+
+    def _generate_token(self, sa_email: str, bearer: str) -> "tuple[str, str]":
+        """generateAccessToken on ``sa_email``: ``("ok", token)`` | ``("denied", "")`` (an explicit 403
+        PERMISSION_DENIED / 404 NOT_FOUND). Anything else raises (INCONCLUSIVE, fail closed)."""
+        url = (f"https://{_IAMCREDS_HOST}/v1/projects/-/serviceAccounts/"
+               f"{quote(sa_email, safe='@._-')}:generateAccessToken")
+        body = json.dumps({"scope": [_CLOUD_PLATFORM_SCOPE], "lifetime": _IMPERSONATION_LIFETIME}).encode("utf-8")
+        status, data = self._call("POST", url, body, {"Content-Type": _JSON_CONTENT_TYPE}, bearer=bearer)
+        if status == 200:
+            token = data.get("accessToken")
+            if not isinstance(token, str) or not token:
+                raise CloudFetchError("the cloud check could not be made",
+                                      detail="generateAccessToken answer carried no token")
+            return "ok", token
+        err = data.get("error") if isinstance(data.get("error"), dict) else {}
+        code = str(err.get("status") or "")
+        if status in (403, 404) and code in _GCP_DENIED_STATUS:
+            return "denied", ""
+        raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                              detail=f"generateAccessToken HTTP {status} {code}")
+
+    def assume(self, *, provider: str, account_id: str, role_ref: str, external_id: str, control_external_id: str = "",
+               now: Any = None) -> dict:
+        """Observe the grant (module docstring): ``{impersonated, expected_email, project, external_id}``. VIGIL
+        computes the EXPECTED, challenge-bound SA email from ``account_id`` + ``external_id`` (never customer-steered),
+        requires the submitted ``role_ref`` to equal it (so the recorded grant is the SA that was proven), and
+        impersonates THAT email. A 200 is the whole positive proof. Raises ``CloudFetchError`` (fail closed) on a
+        malformed input, a submitted SA that is not the one shown, a grant VIGIL cannot use yet (403/404 — the
+        customer's fix), or any inconclusive answer. ``control_external_id`` / ``now`` are accepted for interface
+        symmetry with the AWS fetcher; GCP binds the challenge by SA NAME and needs no negative control."""
+        if str(provider or "") != "gcp":
+            raise CloudFetchError("only GCP projects can be connected here", detail=f"provider {provider!r}")
+        project = str(account_id or "").strip()
+        if not _GCP_PROJECT_RE.fullmatch(project):
+            raise CloudFetchError("give the GCP project id you are connecting, e.g. my-company-prod")
+        ext = str(external_id or "")
+        if not _EXTERNAL_ID_RE.fullmatch(ext):
+            raise CloudFetchError("the cloud check could not be made", detail="bad external id")
+        expected_email = _gcp_expected_sa_email(project, ext)          # computed from TRUSTED (project, external id)
+        submitted = str(role_ref or "").strip()
+        if not hmac.compare_digest(submitted, expected_email):
+            raise CloudFetchError("create and connect the exact service account shown on the connect screen "
+                                  f"({expected_email})")
+        connector = self._connector_token()                            # step 1: VIGIL's connector access token
+        outcome, _tok = self._generate_token(expected_email, connector)  # step 2: impersonate the challenge-named SA
+        if outcome != "ok":
+            raise CloudFetchError("VIGIL could not impersonate the service account shown — create exactly that "
+                                  "service account and grant VIGIL's connector the "
+                                  "roles/iam.serviceAccountTokenCreator role on it, then try again")
+        return {"impersonated": True, "expected_email": expected_email, "project": project, "external_id": ext}
+
+
+# ===============================================================================================================
+# Azure (a multi-tenant app-registration consent) — the Azure twin of the AWS fetcher above. Same error contract
+# (``CloudFetchError``), same guarded egress, same 3-call shape (token + Graph binding read + the negative control).
+# ===============================================================================================================
+
+_AAD_HOST = "login.microsoftonline.com"
+_GRAPH_HOST = "graph.microsoft.com"
+_AAD_SCOPE = "https://graph.microsoft.com/.default"
+_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+_FORM_CT = "application/x-www-form-urlencoded; charset=utf-8"
+# AAD issuer hosts a Graph access token legitimately carries (v1 sts.windows.net / v2 login.microsoftonline.com).
+_AAD_ISSUER_HOSTS = frozenset({"sts.windows.net", "login.microsoftonline.com"})
+# AADSTS codes meaning "VIGIL's app is NOT consented in this tenant" — an EXPLICIT denial the control relies on:
+# app-not-found (700016/70001), resource-not-consented (650057/500011), tenant-not-found (90002), consent required
+# (65001).
+_AAD_NO_CONSENT_CODES = frozenset({700016, 650057, 90002, 65001, 70001, 500011})
+# AADSTS codes that indicate VIGIL's OWN broken credential — never counted as a denial (INCONCLUSIVE, fail closed):
+# invalid/expired client secret (7000215/7000222), cert problems (700027/700024), credential-validation / missing
+# field (70002/90014).
+_AAD_BAD_CREDENTIAL_CODES = frozenset({7000215, 7000222, 700027, 700024, 70002, 90014})
+# An Azure tenant id / an enterprise-app Object ID are GUIDs (the fetcher's own bounds, like the AWS role-ARN regex).
+_AZURE_TENANT_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_AZURE_OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _azure_allowlist() -> frozenset:
+    """The Azure egress host allowlist, read from ``config`` at call time. Empty ⇒ every host refused."""
+    from .. import config
+    return frozenset(h.lower() for h in config.AZURE_CLOUD_CONNECT_EGRESS_ALLOWLIST)
+
+
+def _azure_guard(url: str) -> None:
+    """Refuse a non-https scheme, userinfo, a non-default port, or an off-allowlist host BEFORE any socket opens."""
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "https":
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-https Azure URL {parts.scheme!r}")
+    if "@" in (parts.netloc or ""):
+        raise CloudFetchError("the cloud check could not be made", detail="Azure URL carries userinfo")
+    try:
+        port = parts.port
+    except ValueError:
+        raise CloudFetchError("the cloud check could not be made", detail="malformed Azure port") from None
+    if port not in (None, 443):
+        raise CloudFetchError("the cloud check could not be made", detail="non-default Azure port")
+    host = (parts.hostname or "").lower()
+    if host not in _azure_allowlist():
+        raise CloudFetchError("the cloud check could not be made", detail=f"non-allowlisted Azure host {host!r}")
+
+
+def _azure_http(method: str, url: str, headers: Mapping[str, str], body: bytes,
+                timeout: float) -> "tuple[int, bytes]":
+    """One guarded Azure request (POST token / GET graph): ``(status, body)``, the body bounded. An HTTP error
+    status is RETURNED (its AADSTS error document tells a denial from a fault); only a transport failure raises."""
+    _azure_guard(url)
+    data = bytes(body or b"") if method.upper() == "POST" else None
+    req = urllib.request.Request(url, data=data, method=method.upper(), headers=dict(headers))
+    try:
+        with _do_open(req, timeout) as r:
+            raw = r.read(_MAX_RESPONSE_BYTES + 1)
+            status = int(getattr(r, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(_MAX_RESPONSE_BYTES + 1) or b""
+        except Exception:  # noqa: BLE001 — an unreadable error body is an empty one
+            raw = b""
+        status = int(exc.code) if isinstance(exc.code, int) else 0
+    except Exception as exc:  # noqa: BLE001 — any transport fault fails closed, never a crash
+        raise CloudFetchError("Microsoft Entra could not be reached to make the cloud check; try again shortly",
+                              detail=f"{type(exc).__name__}: {exc}") from None
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise CloudFetchError("the cloud check could not be made", detail="Azure response exceeded the size cap")
+    return status, raw
+
+
+def _json_obj(raw: bytes):
+    """Parse a JSON OBJECT answer (``None`` on any fault / a non-object)."""
+    try:
+        val = json.loads(bytes(raw or b"").decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    return val if isinstance(val, dict) else None
+
+
+def _aad_error_codes(data, raw: bytes) -> "frozenset[int]":
+    """The AADSTS numeric codes in a token error answer (from ``error_codes`` and any ``AADSTSnnnn`` in the body)."""
+    codes: set = set()
+    if isinstance(data, dict):
+        for c in (data.get("error_codes") or []):
+            try:
+                codes.add(int(c))
+            except (TypeError, ValueError):
+                pass
+    for m in re.findall(rb"AADSTS([0-9]{3,7})", bytes(raw or b"")):
+        try:
+            codes.add(int(m))
+        except ValueError:
+            pass
+    return frozenset(codes)
+
+
+def _jwt_claims(token: str) -> dict:
+    """The claims of a well-formed 3-part JWT (pure base64url decode of the payload; NO signature trust — the token's
+    provenance is the TLS-pinned login host). Raises (inconclusive) on anything not a well-formed JWT object."""
+    parts = str(token or "").split(".")
+    if len(parts) != 3 or not parts[1]:
+        raise CloudFetchError("the cloud check could not be made", detail="access token is not a well-formed JWT")
+    seg = parts[1]
+    seg += "=" * (-len(seg) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
+    except Exception:  # noqa: BLE001
+        raise CloudFetchError("the cloud check could not be made", detail="JWT payload did not decode") from None
+    if not isinstance(claims, dict):
+        raise CloudFetchError("the cloud check could not be made", detail="JWT payload is not an object")
+    return claims
+
+
+class AzureConsentConnectFetcher:
+    """Observe control of an Azure TENANT under VIGIL's multi-tenant app credentials (see the module docstring). SAME
+    ``assume(provider, account_id, role_ref, external_id, control_external_id, now)`` signature as the AWS fetcher.
+    ``transport`` is an injectable ``(method, url, headers, body, timeout) -> (status, body)`` for offline tests (a
+    FAKE Entra/Graph that still goes through the guard).
+
+    VIGIL-LIMIT:LIMIT-cloud-connect-azure-live-fire — this pure-protocol layer (token request + JWT ``tid`` decode +
+    Graph binding read + the negative control) is covered OFFLINE in full here; the real round-trip to live
+    Entra/Graph is an owner-provisioned, consent-dependent live-fire residual (there is no live AAD in CI)."""
+
+    def __init__(self, *, client_id: str, client_secret: str = "", client_assertion: str = "",
+                 timeout: float = _DEFAULT_TIMEOUT_S,
+                 transport: "Optional[Callable[[str, str, Mapping[str, str], bytes, float], tuple[int, bytes]]]" = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        if not client_id:
+            raise ValueError("the Azure connector app (client) id is required")
+        if not client_secret and not client_assertion:
+            raise ValueError("an Azure client secret or client assertion is required")
+        self._client_id = str(client_id)
+        self._secret = str(client_secret or "")
+        self._assertion = str(client_assertion or "")
+        self._timeout = float(timeout)
+        self._transport = transport
+        self._clock = clock                        # accepted for interface symmetry (Azure requests are not self-signed)
+
+    def __repr__(self) -> str:                     # never render a credential
+        return "AzureConsentConnectFetcher(<connector credentials redacted>)"
+
+    def _request(self, method: str, url: str, headers: Mapping[str, str], body: bytes) -> "tuple[int, bytes]":
+        if self._transport is not None:
+            _azure_guard(url)                      # a fake Entra/Graph still exercises the egress pin
+            try:
+                status, raw = self._transport(method, url, dict(headers), bytes(body or b""), self._timeout)
+            except CloudFetchError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a transport fault fails closed
+                raise CloudFetchError("Microsoft Entra could not be reached to make the cloud check; try again shortly",
+                                      detail=f"{type(exc).__name__}: {exc}") from None
+            return int(status), bytes(raw or b"")
+        return _azure_http(method, url, headers, body, self._timeout)
+
+    def _token(self, tenant_id: str) -> "tuple[str, str]":
+        """``("ok", access_token)`` iff a client-credentials token issued for ``tenant_id`` (VIGIL's app is admin-
+        consented there); ``("denied", "")`` on an EXPLICIT AADSTS no-consent / app-not-found / tenant-not-found
+        failure. VIGIL's own bad credential, a throttle, a 5xx, a transport fault or a 200 without a token is
+        INCONCLUSIVE and raises (fail closed) — a control whose answer is anything but an explicit denial is never
+        counted as denied."""
+        url = f"https://{_AAD_HOST}/{tenant_id}/oauth2/v2.0/token"
+        params = [("grant_type", "client_credentials"), ("scope", _AAD_SCOPE), ("client_id", self._client_id)]
+        if self._assertion:
+            params += [("client_assertion_type", _ASSERTION_TYPE), ("client_assertion", self._assertion)]
+        else:
+            params += [("client_secret", self._secret)]
+        status, raw = self._request("POST", url, {"Content-Type": _FORM_CT, "Accept": "application/json",
+                                                  "User-Agent": _USER_AGENT}, _form(params))
+        data = _json_obj(raw)
+        if status == 200:
+            tok = data.get("access_token") if isinstance(data, dict) else None
+            if not isinstance(tok, str) or not tok:
+                raise CloudFetchError("the cloud check could not be made",
+                                      detail="token response carried no access_token")
+            return "ok", tok
+        codes = _aad_error_codes(data, raw)
+        if codes & _AAD_BAD_CREDENTIAL_CODES:
+            raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                                  detail=f"AAD token HTTP {status} codes={sorted(codes)} (connector credential)")
+        if status in (400, 401, 403) and (codes & _AAD_NO_CONSENT_CODES):
+            return "denied", ""
+        raise CloudFetchError("Microsoft Entra could not be reached to make the cloud check; try again shortly",
+                              detail=f"AAD token HTTP {status} codes={sorted(codes)}")
+
+    def _verified_tid(self, token: str) -> str:
+        """The token's ``tid`` claim, after checking the JWT is well-formed and carries an expected AAD ``iss`` host
+        that references that tid. Raises (inconclusive) otherwise."""
+        claims = _jwt_claims(token)
+        tid = claims.get("tid")
+        iss = claims.get("iss")
+        if not isinstance(tid, str) or not _AZURE_TENANT_RE.fullmatch(tid.lower()):
+            raise CloudFetchError("the cloud check could not be made", detail="token carried no tenant id")
+        if not isinstance(iss, str):
+            raise CloudFetchError("the cloud check could not be made", detail="token carried no issuer")
+        host = (urlsplit(iss).hostname or "").lower()
+        if host not in _AAD_ISSUER_HOSTS or tid.lower() not in iss.lower():
+            raise CloudFetchError("the cloud check could not be made", detail=f"token issuer {iss!r} not an AAD issuer")
+        return tid.lower()
+
+    def _binding_matched(self, token: str, external_id: str) -> bool:
+        """Read VIGIL's OWN service principal in the token's tenant and return whether the admin-set ``external_id``
+        is among its tags (constant-time). A Graph fault / non-200 / wrong-appId answer is inconclusive and raises."""
+        url = (f"https://{_GRAPH_HOST}/v1.0/servicePrincipals(appId='{self._client_id}')"
+               f"?$select=appId,id,tags")
+        status, raw = self._request("GET", url, {"Authorization": "Bearer " + token, "Accept": "application/json",
+                                                 "User-Agent": _USER_AGENT}, b"")
+        data = _json_obj(raw)
+        if status != 200 or data is None:
+            raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                                  detail=f"Graph servicePrincipals HTTP {status}")
+        # appId is an Azure AD application GUID — a case-INSENSITIVE identifier. The client-id config permits an
+        # uppercase GUID, and Graph echoes it in Microsoft's own casing, so a case-only difference is the SAME app:
+        # compare case-insensitively (a genuinely different appId still fails closed) rather than bricking the connect.
+        if str(data.get("appId") or "").strip().lower() != self._client_id.strip().lower():
+            raise CloudFetchError("the cloud check could not be made", detail="Graph returned a different appId")
+        tags = data.get("tags")
+        if not isinstance(tags, list):
+            return False
+        want = external_id.encode("utf-8")
+        return any(isinstance(t, str) and hmac.compare_digest(t.encode("utf-8"), want) for t in tags)
+
+    def assume(self, *, provider: str, account_id: str, role_ref: str, external_id: str, control_external_id: str,
+               now: Any = None) -> dict:
+        """Observe the Azure grant (module docstring): ``{tenant, external_id_matched, external_id, control_tenant,
+        control_denied}``. Raises ``CloudFetchError`` (fail closed) on a malformed input, a tenant VIGIL's app is not
+        admin-consented into, a token for the wrong tenant, or any inconclusive answer. ``now`` is accepted for
+        interface symmetry with the AWS fetcher."""
+        if str(provider or "") != "azure":
+            raise CloudFetchError("only Azure tenants can be connected by this check", detail=f"provider {provider!r}")
+        tenant = str(account_id or "").strip().lower()
+        if not _AZURE_TENANT_RE.fullmatch(tenant):
+            raise CloudFetchError("give the customer's Azure tenant id (a lowercase GUID)")
+        ref = str(role_ref or "").strip()
+        if not _AZURE_OBJECT_ID_RE.fullmatch(ref):
+            raise CloudFetchError("give the Object ID (a GUID) of VIGIL's enterprise application in your tenant")
+        ext, ctl = str(external_id or ""), str(control_external_id or "")
+        if (not _EXTERNAL_ID_RE.fullmatch(ext) or not _EXTERNAL_ID_RE.fullmatch(ctl)
+                or hmac.compare_digest(ext.encode("utf-8"), ctl.encode("utf-8"))):
+            raise CloudFetchError("the cloud check could not be made", detail="bad external id / control id")
+        # 1. the positive: a token against the CUSTOMER tenant proves a Global Admin admin-consented VIGIL's app
+        outcome, token = self._token(tenant)
+        if outcome != "ok":
+            raise CloudFetchError("VIGIL's app has not been admin-consented into this tenant — a Global Admin must "
+                                  "grant admin consent using the link shown, then verify again")
+        tid = self._verified_tid(token)
+        if not hmac.compare_digest(tid.encode("utf-8"), tenant.encode("utf-8")):
+            raise CloudFetchError("the cloud check could not be completed; try again shortly",
+                                  detail="token tenant did not match the tenant being connected")
+        # 2. the binding: read VIGIL's own service principal back and confirm the admin-set external-id tag
+        matched = self._binding_matched(token, ext)
+        # 3. the negative control: a token for a derived random control tenant MUST be explicitly denied
+        from ..governor.cloud_connect import azure_control_tenant
+        control_tenant = azure_control_tenant(ctl)
+        control_outcome, _ = self._token(control_tenant)
+        return {"tenant": tid, "external_id_matched": bool(matched), "external_id": ext,
+                "control_tenant": control_tenant, "control_denied": control_outcome == "denied"}

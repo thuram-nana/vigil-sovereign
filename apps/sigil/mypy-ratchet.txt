@@ -11,7 +11,7 @@
 #
 # `ceiling:` MUST equal the number of module lines below. It is the debt high-water mark; it goes
 # DOWN as modules are cleaned and can only go UP through an explicit, reviewable commit.
-ceiling: 15
+ceiling: 14
 sigil/cli.py
 sigil/gesture/session.py
 sigil/governor/accounts.py
@@ -25,5 +25,4 @@ sigil/spine/prune.py
 sigil/spine/schema_guard.py
 sigil/spine/tail.py
 sigil/spine/verify.py
-sigil/voice/components.py
 sigil/warden_key.py

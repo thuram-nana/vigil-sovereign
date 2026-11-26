@@ -107,6 +107,8 @@ def test_verdict_refuses_a_control_that_is_not_the_one_issued_or_is_the_real_id(
 
 def test_verdict_refuses_unverifiable_providers_and_bad_input():
     good = _observed("EXT", ACCT)
+    # every provider is verifiable now, but an AWS-shaped observation never satisfies the gcp / azure / cloudflare verdicts
+    assert cc.cloud_grant_proves("cloudflare", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("gcp", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("azure", "EXT", ACCT, good, control_external_id=CTL) is False
     assert cc.cloud_grant_proves("aws", "", ACCT, _observed("", ACCT), control_external_id=CTL) is False
@@ -182,14 +184,15 @@ def test_verify_refuses_a_superseded_external_id():
     assert _verify(r, "NEW", now=3.0).role_ref == ROLE
 
 
-def test_an_unverifiable_provider_is_refused_at_the_first_step_and_writes_nothing():
+def test_an_unknown_provider_is_refused_at_the_first_step_and_writes_nothing():
+    # every KNOWN provider (aws/gcp/azure/cloudflare) is now verifiable; an UNKNOWN one is refused up front, no dead-end
     s = _store()
     r = _reg(s)
     before = s.next_seq
-    for prov, acct in (("gcp", "proj-123"), ("azure", "sub-1")):
-        with pytest.raises(ValueError, match="only AWS"):
+    for prov, acct in (("digitalocean", "acct-1"),):
+        with pytest.raises(ValueError, match="provider must be one of"):
             r.issue_challenge("acme", prov, acct, issued_at=_t(), external_id="EXT1")
-        with pytest.raises(ValueError, match="only AWS"):
+        with pytest.raises(ValueError, match="provider must be one of"):
             r.verify_and_connect("acme", prov, acct, role_ref="vigil@proj.iam", observed=_observed("EXT1", acct),
                                  control_external_id=CTL, now=1.0)
     assert s.next_seq == before                                  # no dead-end challenge, no record of any kind
@@ -290,8 +293,8 @@ def test_open_challenge_resumes_the_outstanding_id_and_writes_nothing():
     r.disconnect("acme", "aws", ACCT)
     fresh, resumed = r.open_challenge("acme", "aws", ACCT, issued_at=_t())
     assert resumed is False and fresh.external_id != ch.external_id          # a reconnect starts clean
-    with pytest.raises(ValueError, match="only AWS"):
-        r.open_challenge("acme", "gcp", "proj-1", issued_at=_t())
+    with pytest.raises(ValueError, match="provider must be one of"):
+        r.open_challenge("acme", "digitalocean", "acct-1", issued_at=_t())   # every KNOWN provider is verifiable now
 
 
 def test_has_current_grant_respects_the_owner_signed_expiry():
@@ -484,3 +487,244 @@ def test_a_forged_below_k_grant_never_blocks_a_prune(tmp_path, owner_is_test_key
         s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})
     s.rotate()
     assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == []
+
+
+# ==============================================================================================================
+# GCP service-account IMPERSONATION (the second wired provider), NAME-bound. Same registry; a per-provider
+# observation + verdict. The proof is the challenge-named SA (no description, no negative control).
+# ==============================================================================================================
+GCP_PROJECT = "my-company-prod"
+
+
+def _gcp_sa(external_id: str, project: str = GCP_PROJECT) -> str:
+    return cc._gcp_expected_sa_email(project, external_id)
+
+
+def _gcp_observed(external_id: str = "GEXT", project: str = GCP_PROJECT, *, impersonated=True,
+                  expected_email=None) -> dict:
+    """What the trusted GCP fetcher reports: a 200 impersonation of the challenge-named SA, the email VIGIL computed,
+    and the project it built the email from."""
+    return {"impersonated": impersonated,
+            "expected_email": expected_email if expected_email is not None else _gcp_sa(external_id, project),
+            "project": project, "external_id": external_id}
+
+
+def _gcp_verify(r, ext="GEXT1", *, project=GCP_PROJECT, now=10.0, ttl=None, role=None, **obs):
+    kw = {} if ttl is None else {"ttl_seconds": ttl}
+    role_ref = role if role is not None else _gcp_sa(ext, project)
+    return r.verify_and_connect("acme", "gcp", project, role_ref=role_ref, observed=_gcp_observed(ext, project, **obs),
+                                control_external_id=CTL, now=now, **kw)
+
+
+# ---- the pure gcp verdict (name-binding) --------------------------------------------------------------------
+def test_gcp_verdict_holds_only_for_a_200_on_the_challenge_named_sa_in_the_claimed_project():
+    good = _gcp_observed("GEXT")
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, good, control_external_id=CTL) is True
+    assert cc.cloud_grant_refusal("gcp", "GEXT", GCP_PROJECT, good, control_external_id=CTL) is None
+
+
+def test_gcp_verdict_refuses_a_replayed_or_forged_sa_name():
+    # the observation's SA NAME must encode THIS challenge (recomputed from account_id + external_id); an observation
+    # from a prior challenge (a different-named SA) is refused, as is a forged expected_email
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, _gcp_observed("OTHER"), control_external_id=CTL) is False
+    forged = {**_gcp_observed("GEXT"), "expected_email": "vgl-deadbeef@my-company-prod.iam.gserviceaccount.com"}
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, forged, control_external_id=CTL) is False
+
+
+def test_gcp_verdict_refuses_a_wrong_project():
+    # a consistent observation in another project (the SA name lives in evil-project) -> the recomputed email differs
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, _gcp_observed("GEXT", "evil-project"),
+                                 control_external_id=CTL) is False
+    # a FORGED observation whose SA email matches THIS challenge but whose project field was tampered -> "not proven"
+    tampered = {"impersonated": True, "expected_email": _gcp_sa("GEXT"), "project": "evil-project",
+                "external_id": "GEXT"}
+    why = cc.cloud_grant_refusal("gcp", "GEXT", GCP_PROJECT, tampered, control_external_id=CTL)
+    assert why is not None and "not proven" in why
+
+
+def test_gcp_verdict_refuses_an_observation_that_did_not_impersonate():
+    for bad in (False, None, 1, "true", [True]):
+        obs = _gcp_observed("GEXT", impersonated=bad)
+        assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, obs, control_external_id=CTL) is False, bad
+
+
+def test_gcp_verdict_does_not_depend_on_the_control_id_the_vacuous_control_is_gone():
+    # GCP binds by the SA NAME; the control id is irrelevant to the gcp verdict (unlike AWS), so an empty / equal
+    # control id still PROVES on a good observation — the old (always-True in prod) negative control adds nothing
+    good = _gcp_observed("GEXT")
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, good, control_external_id="") is True
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, good, control_external_id="GEXT") is True
+
+
+def test_gcp_verdict_is_total_and_fails_closed_on_bad_input():
+    good = _gcp_observed("GEXT")
+    assert cc.cloud_grant_proves("gcp", "", GCP_PROJECT, _gcp_observed(""), control_external_id=CTL) is False
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, "not-a-dict", control_external_id=CTL) is False
+    for missing in ("impersonated", "expected_email", "project"):
+        obs = dict(good)
+        del obs[missing]
+        assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, obs, control_external_id=CTL) is False, missing
+    assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, {**good, "expected_email": 1, "project": 2},
+                                 control_external_id=CTL) is False
+    for bad in (None, 1, [], object()):
+        assert cc.cloud_grant_proves("gcp", "GEXT", GCP_PROJECT, bad, control_external_id=CTL) is False
+
+
+# ---- gcp challenge + verify + record ------------------------------------------------------------------------
+def test_gcp_challenge_then_verify_records_a_read_only_grant_carrying_its_external_id():
+    s = _store()
+    r = _reg(s)
+    ch = r.issue_challenge("acme", "gcp", GCP_PROJECT, issued_at=_t(), external_id="GEXT1")
+    assert ch.external_id == "GEXT1" and ch.provider == "gcp" and ch.account_id == GCP_PROJECT
+    sa = _gcp_sa("GEXT1")
+    g = _gcp_verify(r, now=100.0, ttl=1000.0)
+    assert g.role_ref == sa and g.access == "read-only" and g.expires_at == 1100.0 and g.external_id == "GEXT1"
+    cur = r.grant("acme", "gcp", GCP_PROJECT)
+    assert cur is not None and cur.role_ref == sa and cur.state == "active" and cur.external_id == "GEXT1"
+    assert "GEXT1" not in repr(cur)
+    assert r.has_current_grant("acme", "gcp", GCP_PROJECT, now=500.0) is True
+    t = r.assume_target("acme", "gcp", GCP_PROJECT, now=500.0)
+    assert t is not None and (t.role_ref, t.external_id) == (sa, "GEXT1")
+
+
+def test_gcp_verify_refuses_a_non_impersonating_observation_and_records_nothing():
+    s = _store()
+    r = _reg(s)
+    r.issue_challenge("acme", "gcp", GCP_PROJECT, issued_at=_t(), external_id="GEXT1")
+    with pytest.raises(ValueError, match="not completed"):
+        _gcp_verify(r, impersonated=False)
+    assert r.grant("acme", "gcp", GCP_PROJECT) is None
+
+
+def test_gcp_verify_refuses_a_tampered_project_and_records_nothing():
+    s = _store()
+    r = _reg(s)
+    r.issue_challenge("acme", "gcp", GCP_PROJECT, issued_at=_t(), external_id="GEXT1")
+    obs = {"impersonated": True, "expected_email": _gcp_sa("GEXT1"), "project": "evil-project",
+           "external_id": "GEXT1"}
+    with pytest.raises(ValueError, match="not proven"):
+        r.verify_and_connect("acme", "gcp", GCP_PROJECT, role_ref=_gcp_sa("GEXT1"), observed=obs,
+                             control_external_id=CTL, now=1.0)
+    assert r.grant("acme", "gcp", GCP_PROJECT) is None
+
+
+def test_gcp_bad_account_and_role_are_refused():
+    s = _store()
+    r = _reg(s)
+    for bad in ("BadProject", "ab"):                           # uppercase / too short for a GCP project id
+        with pytest.raises(ValueError, match="project id"):
+            r.issue_challenge("acme", "gcp", bad, issued_at=_t())
+    r.issue_challenge("acme", "gcp", GCP_PROJECT, issued_at=_t(), external_id="GEXT1")
+    with pytest.raises(ValueError, match="full email"):
+        _gcp_verify(r, role="vigil-connect")                   # not a full SA email
+    with pytest.raises(ValueError, match="different GCP project"):
+        _gcp_verify(r, role="vigil-connect@other-project.iam.gserviceaccount.com")
+    assert r.grant("acme", "gcp", GCP_PROJECT) is None
+
+
+def test_gcp_and_aws_grants_coexist_per_provider_in_one_org():
+    s = _store()
+    r = _reg(s)
+    r.issue_challenge("acme", "aws", ACCT, issued_at=_t(), external_id="AEXT")
+    _verify(r, "AEXT", now=10.0, ttl=1000.0)
+    r.issue_challenge("acme", "gcp", GCP_PROJECT, issued_at=_t(), external_id="GEXT")
+    _gcp_verify(r, "GEXT", now=10.0, ttl=1000.0)
+    assert sorted((g.provider, g.account_id) for g in r.grants_of_org("acme", now=100.0)) == [
+        ("aws", ACCT), ("gcp", GCP_PROJECT)]
+    assert {c["provider"]: c["status"] for c in r.cloud_overview("acme", now=100.0)} == {
+        "aws": "connected", "gcp": "connected"}
+
+
+# ---- gcp placement (name-binding) ---------------------------------------------------------------------------
+def test_gcp_placement_names_the_connector_sa_the_role_and_the_challenge_bound_sa_id():
+    connector = "vigil-connector@vigil-prod.iam.gserviceaccount.com"
+    pl = cc.gcp_placement(connector, GCP_PROJECT, "GEXT-1")
+    assert pl["connector_sa"] == connector
+    assert pl["token_creator_role"] == "roles/iam.serviceAccountTokenCreator"
+    assert pl["sa_id"] == cc._gcp_expected_sa_id("GEXT-1")
+    assert pl["sa_email"] == cc._gcp_expected_sa_email(GCP_PROJECT, "GEXT-1")
+    assert "description" not in pl and not any("--description" in c for c in pl["gcloud"])
+    assert any(f"create {pl['sa_id']}" in c for c in pl["gcloud"])
+    assert any("add-iam-policy-binding" in c and "serviceAccountTokenCreator" in c for c in pl["gcloud"])
+    assert cc.gcp_placement(connector, "p", "e") == cc.gcp_placement(connector, "p", "e")   # deterministic text
+
+
+# ---- backward-compat: token_sha256 JOINED the grant core AFTER grants were persisted (red-pen wyi72aiax) --------
+# A grant written before token_sha256 existed carries NO such key and was owner-signed over the narrower 10-field
+# core. The fold (and the prune high-water, which re-verifies the same core on ANY hard prune) must still accept it —
+# else a genesis re-verify silently disconnects every pre-existing AWS account and the prune stops protecting it.
+# Tampering with the field must still fail closed.
+_BIG = 9e9
+
+
+def _legacy_grant_payload(signer=OWNER, *, ext="EXT1", acct=ACCT, role=ROLE, v=3.0):
+    """A grant EXACTLY as base code (pre-token_sha256) persisted it: the 10-field core, NO token_sha256 key."""
+    return signed_payload({"signal": cc.GRANT_SIGNAL, "org_id": "acme", "provider": "aws", "account_id": acct,
+                           "role_ref": role, "external_id": ext, "verified_at": v, "expires_at": v + _BIG,
+                           "state": "active", "issued_at": v}, signer)
+
+
+def _current_grant_payload(signer=OWNER, *, ext="EXT1", acct=ACCT, role=ROLE, v=3.0, token_sha256=""):
+    """A grant as the current code signs it: the 11-field core WITH token_sha256 ('' for AWS, a sha for Cloudflare)."""
+    return signed_payload({"signal": cc.GRANT_SIGNAL, "org_id": "acme", "provider": "aws", "account_id": acct,
+                           "role_ref": role, "external_id": ext, "token_sha256": token_sha256, "verified_at": v,
+                           "expires_at": v + _BIG, "state": "active", "issued_at": v}, signer)
+
+
+def test_verify_cloud_active_accepts_a_legacy_grant_and_rejects_tampering():
+    legacy = _legacy_grant_payload()
+    assert cc._verify_cloud_active(legacy, cc._GRANT_CORE, OP) is True           # pre-token_sha256 grant still authentic
+    assert cc._verify_cloud_active(_current_grant_payload(), cc._GRANT_CORE, OP) is True              # new AWS ("")
+    assert cc._verify_cloud_active(_current_grant_payload(token_sha256="ab" * 32), cc._GRANT_CORE, OP) is True  # CF sha
+    # ADD the field to a legacy grant -> validated under the 11-field core -> the owner signature no longer matches
+    assert cc._verify_cloud_active({**legacy, "token_sha256": "deadbeef"}, cc._GRANT_CORE, OP) is False
+    # STRIP the field from a current grant -> compat path tries the 10-field core -> signature no longer matches
+    cur = _current_grant_payload(token_sha256="ab" * 32)
+    assert cc._verify_cloud_active({k: v for k, v in cur.items() if k != "token_sha256"}, cc._GRANT_CORE, OP) is False
+    # a NON-owner legacy grant is inert on either path (the compat path never weakens the signature requirement)
+    assert cc._verify_cloud_active(_legacy_grant_payload(ATTACKER), cc._GRANT_CORE, OP) is False
+    # the challenge core carries no token_sha256 -> the compat path is never taken for it
+    assert cc._verify_cloud_active(legacy, cc._CHALLENGE_CORE, OP) is False
+
+
+def test_a_legacy_grant_without_token_sha256_still_reads_active(tmp_path):
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN", payload=_legacy_grant_payload(v=3.0))
+    r = _reg(s)
+    g = r.grant("acme", "aws", ACCT)
+    assert g is not None and g.role_ref == ROLE and g.external_id == "EXT1" and g.token_sha256 == ""
+    assert r.has_current_grant("acme", "aws", ACCT, now=100.0) is True
+    tgt = r.assume_target("acme", "aws", ACCT, now=100.0)
+    assert tgt is not None and tgt.role_ref == ROLE and tgt.external_id == "EXT1"
+
+
+def test_a_token_sha256_added_to_a_legacy_record_post_sign_is_dropped_on_read(tmp_path):
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN",
+             payload={**_legacy_grant_payload(), "token_sha256": "deadbeef"})     # field added after signing -> forged
+    assert _reg(s).grant("acme", "aws", ACCT) is None
+
+
+def _segmented_legacy(tmp_path):
+    """Like _segmented, but the deciding grant (seq 0) is a LEGACY (pre-token_sha256) owner-signed record."""
+    s = SpineStore(str(tmp_path / "spine.jsonl"))
+    s.migrate()
+    s.append(kind="event", source="governor", actor="WARDEN", payload=_legacy_grant_payload(v=3.0))   # seq 0
+    while s.next_seq < 5:
+        s.append(kind="event", source="t", actor="u", payload={"i": "pad"})
+    s.rotate()                                                                    # seal [0..4]
+    for _ in range(5):
+        s.append(kind="event", source="t", actor="u", payload={"i": "seg1"})      # seq 5..9
+    s.rotate()                                                                     # seal [5..9]
+    return s
+
+
+def test_the_prune_tripwire_still_protects_a_legacy_grant(tmp_path, owner_is_test_key):
+    # the red-pen's exact failure mode: a pre-token_sha256 grant must still contribute the prune high-water, else a
+    # hard prune to K silently deletes its only authoritative copy. With the compat path it is seen and the prune refused.
+    s = _segmented_legacy(tmp_path)
+    assert prune.stranded_active_cloud_grants(s, _archived_below(s, 5), 5) == [f"aws:{ACCT}@acme"]
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(s, 5)

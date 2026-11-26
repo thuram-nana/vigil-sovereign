@@ -786,6 +786,12 @@ CLOUD_CONNECT_RATELIMIT_DIR = _customer / "cloud_connect_ratelimit"
 # request, never a URL — so the customer can never steer this egress anywhere.
 AWS_STS_EGRESS_ALLOWLIST = frozenset({"sts.amazonaws.com"})
 
+# The ONLY host the CLOUDFLARE cloud-connect fetcher (`ui.cloudflare_fetch`) may reach, enforced BEFORE any socket
+# opens (mirrors AWS_STS_EGRESS_ALLOWLIST). No endpoint override: the token-bearing egress can only ever reach the
+# Cloudflare API. A customer supplies only a bearer token (an Authorization HEADER, never a URL) and the account id;
+# the token id placed in a URL path is format-checked (32 hex) first, so the customer can never steer this egress.
+CLOUDFLARE_API_EGRESS_ALLOWLIST = frozenset({"api.cloudflare.com"})
+
 # VIGIL's connector principal (an IAM role or user in the aws partition) — the exact `Principal` a customer's
 # read-only role trusts. Validated so a malformed value can never be printed into a customer's trust policy.
 _AWS_PRINCIPAL_ARN_RE = re.compile(r"arn:aws:iam::[0-9]{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,512}")
@@ -814,6 +820,99 @@ def cloud_connect_fetcher():
         return None
     from .ui.cloud_fetch import AwsStsConnectFetcher
     return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
+
+
+# --- GCP OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) ---------------------------
+# The ONLY hosts the GCP cloud-connect fetcher (`ui.cloud_fetch.GcpImpersonationConnectFetcher`) may reach, enforced
+# per-endpoint BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): the OAuth2 token endpoint (the connector
+# SA assertion exchange) and IAM Credentials (generateAccessToken on the challenge-named SA). No endpoint override:
+# the credential-holding egress can only ever reach these two Google hosts. The target SA email is VIGIL-COMPUTED
+# from the project id + the issued external id (never customer-supplied as a URL), so the customer can never steer
+# this egress anywhere.
+GCP_EGRESS_ALLOWLIST = frozenset({"oauth2.googleapis.com", "iamcredentials.googleapis.com"})
+
+# VIGIL's connector SERVICE-ACCOUNT email — the member a customer grants roles/iam.serviceAccountTokenCreator on
+# their target SA (analog to the AWS connector principal). Validated so a malformed value is never shown to a customer.
+_GCP_CONNECTOR_SA_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
+
+
+def cloud_connect_gcp_connector_sa() -> str:
+    """VIGIL's GCP connector SA email (`VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA`), format-checked, or "" when
+    unset/malformed (the GCP leg then offers nothing — fail closed, never placement naming a bad connector SA)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA") or "").strip()
+    return raw if _GCP_CONNECTOR_SA_RE.fullmatch(raw) else ""
+
+
+def cloud_connect_gcp_fetcher():
+    """The live GCP cloud-connect fetcher (``ui.cloud_fetch.GcpImpersonationConnectFetcher``: sign the connector SA
+    assertion, impersonate the customer's target SA, bind its description to the external id, and run the same-shape
+    negative control) when the cloud leg is ON and the owner has provisioned VIGIL's connector SA email + its RSA
+    private key, else None (fail closed: the provisioner then offers and verifies nothing for GCP). The private key
+    PEM comes from `VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY` (the owner-provisioned secret, analog to the AWS secret key).
+    Lazily imports the fetcher so `config` stays import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_gcp_connector_sa():
+        return None
+    pem = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY") or "").strip()
+    if not pem:
+        return None
+    from .ui.cloud_fetch import GcpImpersonationConnectFetcher
+    return GcpImpersonationConnectFetcher(connector_email=cloud_connect_gcp_connector_sa(), private_key_pem=pem)
+
+
+# --- AZURE OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) -------------------------
+# The ONLY hosts the Azure cloud-connect fetcher (`ui.cloud_fetch.AzureConsentConnectFetcher`) may reach, enforced
+# BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): Microsoft Entra ID (the client-credentials token
+# endpoint) and Microsoft Graph (the admin-set external-id binding read). No endpoint override — the credential-
+# holding egress can only ever reach these two. A customer supplies only a tenant id + the enterprise-app Object ID
+# (PATH segments of host-pinned requests, never a host), so the customer can never steer this egress anywhere.
+AZURE_CLOUD_CONNECT_EGRESS_ALLOWLIST = frozenset({"login.microsoftonline.com", "graph.microsoft.com"})
+
+# VIGIL's multi-tenant Azure AD app-registration client id (a GUID) — the tenant-agnostic application a customer's
+# Global Admin admin-consents into their tenant (the Azure analog of the AWS connector principal). Validated so a
+# malformed value can never be printed into a customer's admin-consent URL.
+_AZURE_CLIENT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def cloud_connect_azure_client_id() -> str:
+    """VIGIL's Azure connector app (client) id (`VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID`), format-checked, or "" when
+    unset/malformed (the Azure cloud leg then offers nothing — fail closed, never an admin-consent URL naming a bad
+    client id)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID") or "").strip()
+    return raw if _AZURE_CLIENT_ID_RE.fullmatch(raw) else ""
+
+
+def azure_connect_fetcher():
+    """The live Azure cloud-connect fetcher (``ui.cloud_fetch.AzureConsentConnectFetcher``: a client-credentials
+    token against the customer's tenant proves admin consent, a Microsoft Graph read confirms the admin-set
+    external-id binding, and the same-shape negative control proves the result is tenant-specific) when the cloud leg
+    is ON and the owner has provisioned VIGIL's Azure app (client id + a client secret OR a client assertion/cert),
+    else None (fail closed: the provisioner then offers and verifies no Azure flow). Credentials:
+    `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET` OR `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION` — an app whose only
+    consented permission is a read-only Graph read. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_azure_client_id():
+        return None
+    secret = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET") or "").strip()
+    assertion = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION") or "").strip()
+    if not secret and not assertion:
+        return None
+    from .ui.cloud_fetch import AzureConsentConnectFetcher
+    return AzureConsentConnectFetcher(client_id=cloud_connect_azure_client_id(), client_secret=secret,
+                                      client_assertion=assertion)
+
+
+def cloud_connect_cloudflare_fetcher():
+    """The live Cloudflare cloud-connect fetcher (``ui.cloudflare_fetch.CloudflareTokenConnectFetcher``: verify the
+    customer's read-only API token, read its own definition to bind the challenge and confirm read-only +
+    single-account) when the cloud leg is ON, else None (fail closed: the provisioner then offers and verifies
+    nothing for Cloudflare). Unlike AWS, VIGIL holds NO Cloudflare credential of its own — the customer's token is
+    the only secret and it travels per-verify, read once and never stored — so this fetcher needs no owner-provisioned
+    connector identity, only the cloud leg's flag. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled():
+        return None
+    from .ui.cloudflare_fetch import CloudflareTokenConnectFetcher
+    return CloudflareTokenConnectFetcher()
 
 
 def customer_posture_enabled() -> bool:
