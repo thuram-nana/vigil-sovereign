@@ -3622,6 +3622,7 @@
         "LIMIT-dns-oob-token-cleartext-broadcast",
         "LIMIT-favicon-fingerprint-stub",
         "LIMIT-field-record-accrual",
+        "LIMIT-invgraph-s2-evidence-join-callsite-wiring",
         "LIMIT-llm-redteam-tools-deferred",
         "LIMIT-posture-no-structured-findings",
         "LIMIT-profile-packs-incremental",
@@ -3700,7 +3701,8 @@
       "residual_limitations": [
         "LIMIT-attest-tee-hardware",
         "LIMIT-capture-attestation-offense-plane",
-        "LIMIT-evidence-producer-refs-unique"
+        "LIMIT-evidence-producer-refs-unique",
+        "LIMIT-invgraph-s4-lifecycle-local-verify-path"
       ]
     },
     {
