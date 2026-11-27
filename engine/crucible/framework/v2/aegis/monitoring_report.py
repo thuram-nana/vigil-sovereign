@@ -30,7 +30,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-__all__ = ["REPORT_SCHEMA", "REPORT_DOMAIN", "domain_slug", "build_report", "seal_report", "SpoolReporter"]
+__all__ = ["REPORT_SCHEMA", "REPORT_DOMAIN", "domain_slug", "build_report", "seal_report",
+           "SpoolReporter", "atomic_spool_write"]
 
 REPORT_SCHEMA = "vigil.aegis.monitoring.v1"
 REPORT_DOMAIN = b"vigil.aegis.monitoring-report.v1\x00"
@@ -59,6 +60,39 @@ def domain_slug(org_id: str, host: str) -> str:
 
 def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def atomic_spool_write(incoming: Path, data: bytes) -> None:
+    """Atomically, APPEND-ONLY, spool ``data`` into ``incoming`` (0700) under a content-addressed name
+    (``sha256(data)[:32].json``), never overwriting an existing file. The write goes to a private 0600
+    temp (``O_CREAT|O_EXCL``), is fsync'd, then ``os.replace``'d into place — so a reader never sees a
+    partial file, and a re-spool of byte-identical content is idempotent (the final name already exists).
+    A fault unlinks the temp and re-raises, so the caller (the reporter) can count it and never emit raw.
+
+    Extracted from :class:`SpoolReporter` so the AS-3b v2 emission (:mod:`.monitoring_event_v2`) spools
+    through the SAME machinery — the write contract lives in one place."""
+    incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(incoming, 0o700)
+    except OSError:
+        pass
+    final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
+    if final.exists():
+        return
+    tmp = incoming / (".tmp-" + _secrets.token_hex(8))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, final)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _cert_digest(verdict: Any) -> str:
@@ -155,28 +189,7 @@ class SpoolReporter:
             self.errors += 1          # never raise into the gateway
 
     def _write(self, data: bytes) -> None:
-        self._incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self._incoming, 0o700)
-        except OSError:
-            pass
-        final = self._incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
-        if final.exists():
-            return
-        tmp = self._incoming / (".tmp-" + _secrets.token_hex(8))
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, final)
-        except BaseException:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+        atomic_spool_write(self._incoming, data)
 
 
 def compose_sinks(*sinks: Optional[Callable[[Any], None]]) -> Optional[Callable[[Any], None]]:
