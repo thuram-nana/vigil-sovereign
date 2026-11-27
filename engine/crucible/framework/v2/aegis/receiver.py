@@ -292,22 +292,45 @@ class IngestReceiver:
         attack_class = redact_text(str(data.get("attack_class", "")), max_chars=self._max_field_chars)
         provenance = redact_text(str(data.get("provenance_tier", "")), max_chars=self._max_field_chars)
         action = normalize_text(str(data.get("action", "observe") or "observe"), max_chars=self._max_field_chars)
+        # OPTIONAL per-record discriminator (AS-17b): a producer whose finding bodies are otherwise
+        # metadata-identical (e.g. two distinct CloudTrail records sharing eventTime + attack_class)
+        # supplies a STABLE ``record_id`` so the records mint DISTINCT report_ids and neither is silently
+        # deduped away. Only NORMALISED (not PII-redacted — redaction could collapse two distinct ids);
+        # it is an opaque identity, not free text. Absent/empty ⇒ '' ⇒ the report is byte-identical to a
+        # producer that supplies none (backward-compatible). A non-scalar is a counted REJECT.
+        rid_raw = data.get("record_id", "")
+        if rid_raw is None:
+            rid_raw = ""
+        if not isinstance(rid_raw, (str, int, float, bool)):
+            raise BoundaryError("finding record_id must be a scalar")
+        record_id = normalize_text(str(rid_raw), max_chars=self._max_field_chars)
         return {
             "org_id": org, "host": host, "ts": ts, "decision": decision,
             "attack_class": attack_class, "action": action,
             "confidence": round(confidence, 3), "provenance_tier": provenance,
             "certificate_sha256": normalize_text(cert, max_chars=self._max_field_chars),
+            "record_id": record_id,
         }
 
     def _build_report(self, fields: dict) -> dict:
         """Translate the parsed finding into the v1 monitoring report dict the drain accepts. The ``report_id``
         is a STABLE content digest of the record's own metadata (NOT an RNG token), so a re-POST of the same
         record mints the same id (drain dedup at-most-once) and the sealed envelope is a pure function of the
-        record (determinism)."""
+        record (determinism).
+
+        A producer-supplied ``record_id`` (AS-17b per-record discriminator) is folded into the report BEFORE
+        the digest, so it flows into ``report_id`` (and hence the content-addressed spool name + the drain's
+        ``(org_id, report_id)`` dedup): two otherwise metadata-identical records with distinct ``record_id``s
+        no longer collapse. It is carried as an extra body field the drain's ``_record`` ignores (it reads only
+        its fixed ``_FIELDS``), so the spined event is unchanged. Absent/empty ⇒ the report is byte-identical to
+        the pre-AS-17b shape (backward-compatible with every other producer)."""
         report: dict[str, Any] = {"schema": REPORT_SCHEMA, "org_id": fields["org_id"], "host": fields["host"],
                                   "ts": fields["ts"]}
         for k in _SPOOL_FIELDS:
             report[k] = fields[k]
+        record_id = fields.get("record_id") or ""
+        if record_id:
+            report["record_id"] = record_id
         report["report_id"] = sha256_hex(canonical_json(report))[:32]   # digest over every field but report_id
         return report
 

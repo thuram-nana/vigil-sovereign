@@ -1418,6 +1418,18 @@
       "rationale": "Phase 4. The gateway always streams verdicts to the UI/stderr; `aegis gateway --verdict-webhook URL [--verdict-sink webhook|slack]` (and console aegis_setup body verdict_webhook/verdict_sink) ADDITIONALLY POSTs each verdict to an operator SIEM/webhook/Slack via the bounded, redirects-disabled report.push.push_via_urllib. Off by default. Browser-safe body (no oracle-context), auth from AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env (not argv), fail-open (never perturbs the data plane); notification only — orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate. Claim PHASE4-1."
     },
     {
+      "id": "aegis.notify_connector",
+      "name": "AEGIS broker-sealed SIEM/notify connector (AS-20)",
+      "surface": "subsystem",
+      "status": "GATED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/notify.py",
+        "symbol": "ConnectorNotifier"
+      },
+      "check": "symbol-exists",
+      "rationale": "AS-20. The broker-sealed upgrade of the crude verdict-webhook: an on_verdict sink (`aegis gateway --notify-connector ID --notify-url URL [--notify-format webhook|slack]`, composed into on_verdict via serve_gateway(notify_notifier=...)) that pushes each confirmed/lead verdict to an operator SIEM/notification channel authenticated by a ROTATED, REGISTERED connector credential STAMPED via the AS-9a ConnectorSecretBroker (HMAC_SIGNATURE/BEARER/HEADER_KEY) — the secret never lands on argv/env. Metadata-only + AS-2e hygiene-clean body (reuses monitoring_event_v2.build_event_v2/is_hygiene_clean); bounded POST via report.push.push_via_urllib (redirects DISABLED, http(s) only, no SSRF), FAIL-OPEN on delivery. GATED behind an active MonitoringAuthorityV2 grant (tenant isolation + lease) and DEFAULT-OFF behind VIGIL_AEGIS_NOTIFY (+ the broker's own VIGIL_AEGIS_CONNECTOR_BROKER before any plaintext). Adds NO OracleKind and opens NO serve route; notification only, orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate."
+    },
+    {
       "id": "governor.eval-capability-grant",
       "name": "EvalCapabilityGrant \"eval button\" (sigil eval-grant arm|revoke|status)",
       "surface": "subsystem",
@@ -1491,6 +1503,18 @@
       },
       "check": "ui-screen",
       "rationale": "A top-level unified-UI screen (owner plane, manage_org): a real NAV entry AND a route() destination (renderTenantAssess) in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "aegis.cloudtrail_source",
+      "name": "AWS CloudTrail telemetry source (AS-17b)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/cloudtrail_source.py",
+        "symbol": "CloudTrailSource"
+      },
+      "check": "symbol-exists",
+      "rationale": "The AS-17b engine-leg AWS CloudTrail provider reader: normalizes a CloudTrail delivery (defender.logsource.parse_cloudtrail, additive + gated detect_format), optionally AS-17a Sigma-evaluates it, and pushes INERT metadata-only LEAD findings through the AS-9b IngestReceiver, tamper-evidencing each ingested record with AS-9c anchor-1. OPT-IN: the ACTIVE pull/receiver-push path is DEFAULT-OFF behind the strict VIGIL_AEGIS_CLOUDTRAIL flag (credential materialisation independently gated by VIGIL_AEGIS_CONNECTOR_BROKER); off => inert (pulls nothing, reads no credential, pushes nothing). The pure parse_cloudtrail normalizer + the new 'cloudtrail' --format choice on `defender sigma` are additive and byte-identical on the default path. Pushes through the existing framework.v2.aegis.receiver entrypoint, so no new Gate-5 customer route and no AS-28 closure entrypoint; reuses the LEAD-tier intel vocabulary, so no new IntelSourceKind."
     }
   ]
 }

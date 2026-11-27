@@ -21,9 +21,12 @@ with per-tool auth are a thin follow-up over the same gated ``send``.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import urllib.request
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -104,12 +107,83 @@ def build_push_payload(findings: Any, config: PushConfig, *, meta: ReportMeta | 
     return _payload_from_graded(grade_findings(list(findings or [])), config, meta)
 
 
-def push_via_urllib(url: str, headers: dict[str, str], body: dict, *, timeout: float = _PUSH_TIMEOUT) -> dict:
+def _ip_is_internal(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    """True iff an IP is non-public: loopback / link-local (incl. 169.254.169.254) / private / unique-local /
+    reserved / multicast / unspecified. These predicates already cover IPv4 10/8, 172.16/12, 192.168/16,
+    127/8, 169.254/16 and IPv6 ::1, fe80::/10, fc00::/7 — so an attacker-chosen metadata / loopback / RFC-1918
+    destination is rejected."""
+    return bool(ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
+def _ip_literal(host: str) -> "ipaddress.IPv4Address | ipaddress.IPv6Address | None":
+    """Return the IP object if ``host`` is an IP LITERAL (an IPv6 literal arrives already de-bracketed from
+    ``urlsplit().hostname``), else ``None`` (it is a DNS name)."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def url_host_is_internal_literal(url: str) -> bool:
+    """Is the URL's host an INTERNAL IP LITERAL? A DNS name returns ``False`` (resolving it is deferred to the
+    send-time :func:`assert_external_destination` guard — no DNS at this static check). Used for a fail-closed
+    construction check on a statically-configured sink (a literal ``http://169.254.169.254/`` /
+    ``http://127.0.0.1:<port>/`` never arms)."""
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    ip = _ip_literal(host)
+    return ip is not None and _ip_is_internal(ip)
+
+
+def assert_external_destination(url: str) -> None:
+    """Fail-closed SSRF host guard: raise ``ValueError`` when the URL's host is an internal IP literal, OR a
+    DNS name that resolves (via :func:`socket.getaddrinfo`) to ANY internal address (reject if the IP-literal
+    host OR any resolved address is internal). A name that does not resolve is also refused (fail-closed).
+    The residual sub-second DNS-rebind TOCTOU between this resolve and the socket connect is accepted by the
+    one tenant caller (blind, POST-only; see :mod:`framework.v2.aegis.notify`)."""
+    host = urlsplit(url).hostname
+    if not host:
+        raise ValueError("push URL has no host (SSRF guard, fail-closed)")
+    literal = _ip_literal(host)
+    if literal is not None:
+        if _ip_is_internal(literal):
+            raise ValueError(f"push URL host {host!r} is an internal address (SSRF guard)")
+        return
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"push URL host {host!r} did not resolve (SSRF guard, fail-closed)") from exc
+    for info in infos:
+        addr = str(info[4][0]).split("%", 1)[0]          # drop any IPv6 scope-id before parsing
+        try:
+            resolved = ipaddress.ip_address(addr)
+        except ValueError as exc:
+            raise ValueError(
+                f"push URL host {host!r} resolved to an unparseable address (SSRF guard)") from exc
+        if _ip_is_internal(resolved):
+            raise ValueError(
+                f"push URL host {host!r} resolves to internal address {addr} (SSRF guard)")
+
+
+def push_via_urllib(url: str, headers: dict[str, str], body: dict, *, timeout: float = _PUSH_TIMEOUT,
+                    block_internal: bool = False) -> dict:
     """The production gated sender: a bounded JSON POST to EXACTLY ``url`` — redirects DISABLED (no
     redirect-to-internal SSRF), a hard timeout, and only http(s). Returns ``{"status": int}``. The
-    operator-configured ``url`` is the sole permitted egress; nothing else is contacted."""
+    operator-configured ``url`` is the sole permitted egress; nothing else is contacted.
+
+    ``block_internal`` (DEFAULT ``False`` — the operator-trusted report-push path is UNCHANGED) additionally
+    runs :func:`assert_external_destination` BEFORE building/sending the request, refusing an internal /
+    loopback / cloud-metadata destination. The tenant egress (``aegis.notify``) binds it ``True`` so a
+    tenant-configured notify-url cannot be turned into a blind-SSRF probe of the shared gateway's internals."""
     if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
         raise ValueError("push URL must be http(s)")
+    if block_internal:
+        assert_external_destination(url)                 # fail-closed BEFORE any request is built or sent
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")

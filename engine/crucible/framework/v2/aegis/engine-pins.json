@@ -4,6 +4,7 @@
   "note": "use_mode tags how each artefact reaches the user. An advisory entry is tracked but never blocks the gate (tracked pending licence review / dev-only). This ledger must be complete, consistent and policy-clean before the first third-party deploy.",
   "records": [
     {"artefact": "vigil-aegis-gateway", "component_kind": "engine", "license": "PolyForm-Noncommercial-1.0.0", "use_mode": "service", "notes": "first-party AEGIS gateway; commercial terms under D10"},
+    {"artefact": "aegis-siem-notify-connector", "component_kind": "engine", "license": "PolyForm-Noncommercial-1.0.0", "use_mode": "service", "notes": "AS-20 first-party OUTBOUND SIEM/notify emitter (broker-sealed credential, AS-9a); service-use only, commercial terms under D10"},
     {"artefact": "coraza-v3", "component_kind": "engine", "license": "Apache-2.0", "use_mode": "service", "notes": "front WAF engine (DetectionOnly)"},
     {"artefact": "caddy", "component_kind": "engine", "license": "Apache-2.0", "use_mode": "service", "notes": "front reverse proxy (pin [U])"},
     {"artefact": "coreruleset-crs-4x", "component_kind": "rule", "license": "Apache-2.0", "use_mode": "service", "notes": "CRS 4.x rule corpus, gated for tenants"},
