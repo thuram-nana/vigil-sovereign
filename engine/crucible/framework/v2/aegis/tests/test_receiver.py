@@ -195,6 +195,23 @@ def test_spool_io_fault_is_retryable_server_fault_not_malformed(monkeypatch):
     assert rcv.spool_faults == 1 and rcv.rejected_malformed == 0 and rcv.spooled == 0
 
 
+def test_non_scalar_ts_is_malformed_not_a_server_fault():
+    # A null/missing/non-scalar ``ts`` is MALFORMED CLIENT INPUT (400), not a retryable server SPOOL_FAULT (503):
+    # ``_coerce_ts`` does ``float(value)``, which raises TypeError (not ValueError) on None/list/dict, so it must
+    # be mapped to REJECTED_MALFORMED and must NOT inflate the ``spool_faults`` health signal (reserved for real
+    # disk/seal I/O faults). Without the ts-parse guard these fell through to the 503 server-fault path.
+    rcv = _rcv(require_auth=False)
+    for bad_ts in (None, [1, 2], {"a": 1}, "notnum", float("nan")):
+        f = _finding()
+        f["ts"] = bad_ts
+        res = rcv.ingest(_body(f))
+        assert res.outcome == R.IngestOutcome.REJECTED_MALFORMED and res.http_status == 400, bad_ts
+    f = _finding()
+    del f["ts"]                                                   # ts omitted entirely
+    assert rcv.ingest(_body(f)).outcome == R.IngestOutcome.REJECTED_MALFORMED
+    assert rcv.spool_faults == 0 and rcv.spooled == 0            # a bad ts never looks like a server fault
+
+
 # --- SPOOL SHAPE (drain-verifiable) --------------------------------------------------------------
 def test_landed_envelope_is_drain_shaped_and_mac_verifies():
     spool = tempfile.mkdtemp()

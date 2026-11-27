@@ -273,7 +273,10 @@ class IngestReceiver:
         decision = data.get("decision")
         if decision not in _REPORTED_DECISIONS:
             raise BoundaryError("finding decision is not reportable (want confirmed|lead)")
-        ts = _coerce_ts(data.get("ts"))
+        try:
+            ts = _coerce_ts(data.get("ts"))   # float(None|list|dict) raises TypeError, not ValueError
+        except (TypeError, ValueError):
+            raise BoundaryError("finding ts is missing or not a number") from None
         try:
             confidence = float(data.get("confidence", 0.0) or 0.0)
         except (TypeError, ValueError):
