@@ -79,6 +79,11 @@ from .authority_v2 import (
     sign_monitoring_revocation_v2, verify_enforce_release, verify_epoch_statement,
     verify_monitoring_authority_v2, verify_monitoring_revocation_v2,
 )
+from .aegis_origin_binding import (
+    AegisOriginBinding, SignedAegisOriginBinding, aegis_origin_binding_signing_bytes,
+    grant_binds_origin, origin_binding_digest, origin_binding_publish_path,
+    sign_aegis_origin_binding, verify_aegis_origin_binding,
+)
 from .aegis_schemas import (
     ALL_OUTCOME_CLASSES, BASELINE_REACHABLE_OUTCOMES, EVENT_V2_SCHEMA, HEALTH_V1_SCHEMA,
     RESPONSE_MANIFEST_SCHEMA, AdapterCapability, AegisEventV2, AssetRef, CanonicalModel, Criticality,
@@ -168,6 +173,9 @@ __all__ = [
     "sign_enforce_release", "sign_epoch_statement", "sign_monitoring_authority_v2",
     "sign_monitoring_revocation_v2", "verify_enforce_release", "verify_epoch_statement",
     "verify_monitoring_authority_v2", "verify_monitoring_revocation_v2",
+    "AegisOriginBinding", "SignedAegisOriginBinding", "aegis_origin_binding_signing_bytes",
+    "grant_binds_origin", "origin_binding_digest", "origin_binding_publish_path",
+    "sign_aegis_origin_binding", "verify_aegis_origin_binding",
     "REDPEN_ACTION_SEAM_SUBDIR", "REDPEN_FIX_ACTION", "REDPEN_RETEST_ACTION", "redpen_action_marker",
     "RETEST_REPROOF_SEAM_SUBDIR", "RETEST_OUTCOME_SEAM_SUBDIR",
     "retest_reproof_ticket", "retest_reproof_outcome", "ticket_identity",
