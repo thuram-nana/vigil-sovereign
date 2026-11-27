@@ -797,6 +797,22 @@
    "w16_issue": null
   },
   {
+   "id": "AS1B-live-fire-tt-stg",
+   "title": "AEGIS AS-1b TT-STG run-record orchestration is covered offline in full; the live staging run and the record signed under the provisioned staging key are a deploy-gated residual",
+   "summary": "AS-1b (engine/crucible/framework/v2/evidence/aegis_tt_run.py) is the staging-run counterpart to AS-1a's TT-CI rig: it takes a test-tenant acceptance run (TT-A under attack, TT-B the cross-tenant control), fail-closed GATES it, DERIVES the AS-25 record's world from the run (the IaC topology digest over the real AS-26 CloudFormation templates, the subject digest, and the six required case-class counts re-derived from the bound JUnit, never asserted), and assembles + self-verifies the AS-25 signed binding (reusing evidence.aegis_tt build/sign/verify verbatim). Every deterministic layer is covered offline in full by evidence/tests/test_aegis_tt_run.py: the gate's fail-closed negative controls (failed acceptance, in-process rather than distinct-uid mode, a false check, a skipped no-skip term, a dirty/failing manifest, a missing case class, non-VALID artifacts, a production root, an off-census UI route, a wrong signer each yield NO record), the deterministic/order-independent/change-sensitive digests, and the sign+offline-self-verify round-trip under an ephemeral provisioning trust root. What is DEPLOYED-GATED is the LIVE half: standing up TT-STG in a real AWS staging account (the AS-26 stack applied, the GitHub-OIDC staging deploy role wired, MFA console sign-in), executing the e2e deploy + acceptance against it, and SIGNING the binding with the provisioned staging TT-evidence key. The committed trust root docs/evidence/aegis-tt/trust-root.json is honestly 'unprovisioned' (empty authorisers; load_trust_root_doc returns trust_root=None and the verifier fails closed), and the real key is KMS-wrapped in the staging control plane and is NEVER a CI runner key (plan 13.3), so no live record can be produced or verified under the real root in CI. Fail-closed meanwhile: with no provisioned root, no record reads 'implemented_and_demonstrated' (the AS-25 status projection stays 'implemented_not_validated').",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/evidence/aegis_tt_run.py",
+    "symbol": "record_tt_stg_run"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/framework/v2/evidence/aegis_tt_run.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "LIMIT-cloud-connect-azure-live-fire",
    "title": "Azure customer cloud-connect is proven offline in full; the live Entra/Graph round-trip is an owner-provisioned residual",
    "summary": "The Azure cloud-connect proof (ui/cloud_fetch.py::AzureConsentConnectFetcher: a client-credentials token against the customer tenant proving admin consent, the token tid decode, the Microsoft Graph service-principal binding read, and the same-shape negative control against a derived control tenant) and its deterministic verdict (governor/cloud_connect.py::cloud_grant_refusal azure branch) are covered OFFLINE in full by apps/sigil/tests/test_cloud_fetch_azure.py / test_cloud_connect_azure.py / test_connect_provision_azure.py, with a fake Entra+Graph transport that routes by tenant and answers the binding read through the same egress guard. What stays a residual: the real round-trip to live Microsoft Entra ID and Graph is a deploy-gated live-fire, exercised only once the owner provisions VIGIL's multi-tenant Azure app (client id + secret/cert) and a customer's Global Admin admin-consents it and sets the external-id tag - there is no live AAD in CI, and (unlike the AWS SigV4 signer) no in-repo reference implementation to pin the live protocol against. Default-OFF behind VIGIL_CUSTOMER_CLOUD_CONNECT: byte-identical when off, a grant authorizes no offense.",
