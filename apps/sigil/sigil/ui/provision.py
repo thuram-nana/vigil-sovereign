@@ -3444,12 +3444,22 @@ class Provisioner:
 
     def monitor_authorize_v2(self, requester: str, requester_org_id: str, host: str, *, capabilities=None,
                              window_s=None, instance_id: str = "default", replica_index: int = 0, ip: str = "",
-                             mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+                             mfa_at=0.0, now: "Optional[float]" = None, origin_host: str = "",
+                             origin_port: int = 443, edge_chain: str = "shared_actor",
+                             origin_secret_sha256: str = "") -> dict:
         """Owner-sign + publish a v2 DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag(v2) →
         ``admit_customer(manage_monitoring)`` (org_admin; cross-tenant => ProvisionDenied => 403) → STEP-UP (for
         an enforcing capability or any capability change) → plan gate → seed the issued high-water → INTENT ROW
         FIRST → registry grant (monotone epoch read back from the spine, clamped to the ownership proof) →
-        publish → EpochStatement → READ-BACK verify → audited activity line. NO tenant origin (AS-2g seam)."""
+        publish → EpochStatement → READ-BACK verify → audited activity line.
+
+        AS-2g binding+publish: when ``origin_host`` is given, the grant is BOUND — the sovereign owner-signs and
+        publishes a :class:`vigil_core.aegis_origin_binding.AegisOriginBinding` (origin tuple + edge_chain + a
+        sha256 COMMITMENT to the SEALED origin-lock secret; NO plaintext), mints the grant carrying that binding's
+        sha256, and reads BOTH artifacts back — the whole step fails closed with a full revert. A bind requires
+        ``origin_secret_sha256`` (the AS-2h sealed-secret commitment the custody layer computed); absent => refused
+        (no binding without the sealed origin-lock, the fail-closed direction). With no ``origin_host`` the grant
+        is UNBOUND, byte-identical to the AS-2f path (the published grant carries origin=None)."""
         t = self._now() if now is None else float(now)
         from .. import config
         from vigil_core.authority_v2 import ENFORCING_CAPABILITIES
@@ -3485,6 +3495,44 @@ class Provisioner:
             # INTENT ROW FIRST — the explicit, human-authorized decision precedes the owner-signed mint.
             reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
                               now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0))
+            # AS-2g — the BOUND path: owner-sign + publish the origin binding, mint the grant carrying it, read
+            # both back (fail-closed revert). Requires the sealed origin-lock commitment (no binding without it).
+            if str(origin_host or "").strip():
+                if not str(origin_secret_sha256 or "").strip():
+                    self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                                outcome="refused", reason="origin binding requires the sealed origin-lock commitment")
+                    raise ProvisionDenied("binding a monitoring origin requires the sealed origin-lock secret "
+                                          "commitment (origin_secret_sha256)")
+                from ..governor import monitoring_binding as _mb
+                try:
+                    res = _mb.bind_and_publish(
+                        reg, requester_org_id, host, origin_host=str(origin_host).strip(),
+                        origin_port=origin_port, edge_chain=str(edge_chain or "shared_actor"),
+                        origin_secret_sha256=str(origin_secret_sha256).strip(), capabilities=caps,
+                        not_before=t, not_after=not_after, lease_not_before=t,
+                        lease_not_after=min(t + lease_window, not_after), instance_id=instance_id, now=t,
+                        issued_at=issued, binding_issued_at=self._next_issued(),
+                        trust_root=self._owner_root_single(reg.trusted_pubkey), replica_index=replica_index,
+                        requested_by=requester)
+                except ValueError as e:
+                    # bind_and_publish is fail-closed: a grant refusal published NOTHING; a publish/read-back fault
+                    # already reverted (revoke + unpublish both). Translate by which half failed.
+                    published_fault = "could not publish/verify" in str(e)
+                    self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                                outcome="publish_failed" if published_fault else "refused", critical=published_fault)
+                    if published_fault:
+                        raise ProvisionError(str(e)) from None
+                    raise ProvisionDenied(str(e)) from None
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome=f"granted_bound_{'+'.join(sorted(requested))}", critical=True)
+                return {"org_id": requester_org_id, "host": host, "capabilities": res["capabilities"],
+                        "epoch": res["epoch"], "not_before": res["not_before"], "not_after": res["not_after"],
+                        "lease_not_before": res["lease_not_before"], "lease_not_after": res["lease_not_after"],
+                        "instance_id": res["instance_id"], "replica_index": res["replica_index"],
+                        "published": res["grant_published"], "bound": True, "origin_host": res["origin_host"],
+                        "origin_port": res["origin_port"], "edge_chain": res["edge_chain"],
+                        "binding_published": res["binding_published"],
+                        "binding_sha256_prefix": str(res["binding_sha256"])[:12], "authority": res["authority"]}
             try:
                 view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
                                          not_after=not_after, lease_not_before=t,
@@ -3651,6 +3699,16 @@ class Provisioner:
             out: dict = {"org_id": requester_org_id, "grants": rows, "can_manage": can_manage}
             if can_manage:
                 out["hosts"], out["plan"] = self._monitor_setup(requester_org_id, t)
+            # AS-2g — the v2 origin-binding status, surfaced on the SAME Monitoring screen. Present only when the
+            # sovereign-v2 surface is on (else absent: the page renders no binding section, byte-identical to
+            # before). Verify-only, derived from the PUBLISHED artifacts the data plane cross-checks.
+            from .. import config
+            if config.aegis_sovereign_v2_enabled():
+                from ..governor import monitoring_binding as mb
+                from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+                v2reg = MonitoringAuthorityV2Registry(self.store, owner_key=None)
+                root = self._owner_root_single(v2reg.trusted_pubkey)
+                out["bindings"] = mb.bindings_overview(v2reg, requester_org_id, now=t, trust_root=root)
         return out
 
     def _monitor_setup(self, org_id: str, now: float) -> "tuple[list[dict], Optional[dict]]":
@@ -3674,6 +3732,26 @@ class Provisioner:
         with self._lock:
             self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
         return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
+    def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                             now: "Optional[float]" = None) -> dict:
+        """AS-2g — the SESSION org's v2 origin-binding status (org-scoped, read-only). For each ACTIVE v2 grant:
+        whether its PUBLISHED origin binding cross-checks against the published grant (``bound`` — the same check
+        the keyless data plane runs), the origin host/port, the edge_chain and a short binding-sha256 PREFIX
+        (never a secret). Verify-only (no owner key); fail-closed per host. Flag-gated: with the v2 surface off
+        the read returns ``enabled: False`` and no rows (so the page renders no binding section)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from ..governor import monitoring_binding as mb
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            return {"org_id": requester_org_id, "bindings": [], "enabled": False}
+        with self._lock:
+            self._monitor_admit("monitor_binding_list", requester, requester_org_id, "", "read")
+            reg = MonitoringAuthorityV2Registry(self.store, owner_key=None)
+            root = self._owner_root_single(reg.trusted_pubkey)
+            rows = mb.bindings_overview(reg, requester_org_id, now=t, trust_root=root)
+        return {"org_id": requester_org_id, "bindings": rows, "enabled": True}
 
     # -- C6: the customer Code (Red-Pen) screen — connected GitHub repositories (own-a-repo != own-a-host) ----------
     # Every action is behind the master flag VIGIL_REDPEN_ENABLED (off ⇒ the dispatch never reaches here: 404) AND

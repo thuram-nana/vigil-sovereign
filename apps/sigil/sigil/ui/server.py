@@ -1820,16 +1820,27 @@ class Handler(BaseHTTPRequestHandler):
         # AEGIS AS-2f — SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a contracts). Absent (unknown
         # action -> 404) unless BOTH the monitoring master flag AND the strict v2 flag are ON; requester is the
         # hop principal, org from the edge SESSION (never a free body field), step-up stamp from the session.
-        if action in ("monitor_authorize_v2", "monitor_revoke_v2", "monitor_renew"):
+        if action in ("monitor_authorize_v2", "monitor_revoke_v2", "monitor_renew", "monitor_binding_list"):
             from .. import config as _config
             if not (_config.customer_monitoring_enabled() and _config.aegis_sovereign_v2_enabled()):
                 return None
             org = str(body.get("org_id", ""))
             host = str(body.get("host", ""))
+            if action == "monitor_binding_list":
+                return p.monitor_binding_list(requester, org, ip=ip)
             if action == "monitor_authorize_v2":
+                # AS-2g binding seam: when origin_host is given, the sovereign owner-signs + publishes the origin
+                # binding and mints the grant BOUND to it. origin_secret_sha256 is the AS-2h sealed-secret
+                # commitment the custody layer computed (never a plaintext secret). All default-empty => unbound.
+                _port = body.get("origin_port", 443)                    # a JSON number; anything else => default 443
                 return p.monitor_authorize_v2(requester, org, host, capabilities=body.get("capabilities"),
                                               window_s=body.get("window_s"),
                                               instance_id=str(body.get("instance_id", "default")),
+                                              origin_host=str(body.get("origin_host", "")),
+                                              origin_port=_port if isinstance(_port, int) and not isinstance(
+                                                  _port, bool) else 443,
+                                              edge_chain=str(body.get("edge_chain", "shared_actor")),
+                                              origin_secret_sha256=str(body.get("origin_secret_sha256", "")),
                                               ip=ip, mfa_at=body.get("mfa_at"))
             if action == "monitor_renew":
                 return p.monitor_renew(requester, org, host,
