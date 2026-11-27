@@ -82,6 +82,9 @@ __all__ = [
     "ConnectorReceipt",
     "ConnectorSecretBroker",
     "connector_secret_ref",
+    # AS-9b — the INBOUND verify peer (net-new; see InboundConnectorVerifier).
+    "InboundVerifyReceipt",
+    "InboundConnectorVerifier",
 ]
 
 _log = get_logger("aegis.connector_secrets")
@@ -538,3 +541,129 @@ class ConnectorSecretBroker:
         if scheme is ConnectorScheme.BEARER:
             return "Bearer " + value
         return value  # HEADER_KEY — the key verbatim in its configured header
+
+
+# ==================================================================================================
+# AS-9b — the INBOUND verify peer (NET-NEW). connector_secrets ships only the OUTBOUND ``stamp``
+# (materialise an outbound credential + apply it to a request we SEND); the AS-9b ingest RECEIVER needs
+# the DUAL: VERIFY a signature on a request we RECEIVE. This verifier opens the sealed INGEST secret via
+# the SAME AS-2h custody (:func:`open_secret` + :func:`connector_aad`) the broker uses, computes the
+# expected ``v1=<hmac-sha256 over body>`` tag, zeroises the plaintext, and constant-time compares — the
+# receiver thus holds no plaintext and derives no OUTBOUND material. mTLS verification mirrors the
+# transport-layer shape in ``broker.origin_lock_verify`` (``LockMethod.MTLS``): the TLS terminator must
+# have presented+verified the client certificate; the app layer trusts only that flag.
+# ==================================================================================================
+@dataclass(frozen=True)
+class InboundVerifyReceipt:
+    """The value-free result of one inbound verification — proof the peer DID / DID NOT authenticate, safe
+    for logs/spine. Names the connector/scheme/epoch/``secret_ref`` and the method, never any secret bytes
+    and never the request body."""
+
+    org: str
+    connector_id: str
+    scheme: ConnectorScheme
+    epoch: int
+    secret_ref: str
+    method: str          # "hmac" | "mtls"
+    ok: bool
+
+
+class InboundConnectorVerifier:
+    """Verify an INBOUND connector request (AS-9b ingest). The dual of :class:`ConnectorSecretBroker`'s
+    outbound ``stamp``: it never derives material to SEND and never returns a credential value — it answers
+    one question, ``did this inbound request authenticate?``, as a value-free :class:`InboundVerifyReceipt`.
+
+    HMAC verification opens the CURRENT sealed ingest secret transiently under the org's KEK, computes the
+    expected ``v1=<hmac-sha256(secret, body)>`` tag (byte-for-byte the shape
+    :meth:`ConnectorSecretBroker._derive_material` emits for ``HMAC_SIGNATURE``), ZEROISES the plaintext,
+    and constant-time compares it with the presented tag. DEFAULT-OFF + fail-closed like the broker's
+    materialisation plane: with the verifier un-armed it refuses BEFORE opening any plaintext (a down
+    receiver never touches a secret), and an unregistered/ wrong-scheme connector, a missing sealed secret,
+    a tamper/wrong-KEK open, or a malformed/mismatched tag all return ``ok=False`` (HMAC) or raise a
+    fail-closed refusal — never a silent accept. DETERMINISTIC: a pure function of its inputs (HMAC-SHA256;
+    no wall-clock, no RNG)."""
+
+    __slots__ = ("_registry", "_store", "_kek", "_enabled")
+
+    def __init__(self, registry: ConsumerRegistry, store: SealedConnectorStore, kek_source: KekSource,
+                 *, enabled: Optional[bool] = None) -> None:
+        if not isinstance(registry, ConsumerRegistry):
+            raise ConnectorBrokerRefused("registry must be a ConsumerRegistry")
+        if not isinstance(store, SealedConnectorStore):
+            raise ConnectorBrokerRefused("store must be a SealedConnectorStore")
+        if not isinstance(kek_source, KekSource):
+            raise ConnectorBrokerRefused("kek_source must implement the KekSource protocol")
+        self._registry = registry
+        self._store = store
+        self._kek = kek_source
+        # Default-OFF, read once at construction unless pinned (tests pin). Reuses the broker's materialisation
+        # gate (``VIGIL_AEGIS_CONNECTOR_BROKER``): opening a sealed secret to VERIFY is the same plaintext-
+        # touching act the broker gates, so the same switch arms it. The receiver injects its own armed state.
+        self._enabled = connector_broker_enabled() if enabled is None else bool(enabled)
+
+    def verify_hmac(self, *, org: str, connector_id: str, body: bytes, presented: str) -> InboundVerifyReceipt:
+        """Verify an inbound HMAC body signature against the current sealed ingest secret. ``presented`` is the
+        ``v1=<hex>`` tag the pusher supplied over ``body``. Returns a value-free receipt whose ``ok`` is True iff
+        the tag matches. Fail-closed:
+
+          * REFUSE before opening anything if the verifier is not armed (``ConnectorBrokerDisabled``).
+          * the connector must be a REGISTERED consumer for ``org`` with the ``HMAC_SIGNATURE`` scheme.
+          * a sealed ingest secret must exist (its CURRENT epoch is used).
+          * open transiently under the org KEK, derive the expected tag, ZEROISE, constant-time compare. A
+            SealError (tamper / wrong-KEK / AAD mismatch) becomes a fail-closed refusal naming no secret bytes.
+
+        A malformed / non-``v1=`` / mismatched tag returns ``ok=False`` (never raises) so the receiver can
+        drop-and-count without a stack unwind on the hot path."""
+        if not isinstance(body, (bytes, bytearray)):
+            raise ConnectorBrokerRefused("inbound HMAC body must be bytes")
+        if not self._enabled:
+            raise ConnectorBrokerDisabled(
+                f"inbound verifier is DEFAULT-OFF ({CONNECTOR_BROKER_ENV} unset): refusing to open the ingest "
+                f"secret for {connector_id!r} (no plaintext touched)")
+        consumer = self._registry.require(org, connector_id)
+        if consumer.scheme is not ConnectorScheme.HMAC_SIGNATURE:
+            raise ConnectorBrokerRefused(
+                f"inbound HMAC verify needs an {ConnectorScheme.HMAC_SIGNATURE.value!r} connector, "
+                f"{connector_id!r} is {consumer.scheme.value!r} (fail-closed)")
+        sealed = self._store.current(org, connector_id)
+        secret_ref = connector_secret_ref(org, connector_id, sealed.epoch)
+        kek = self._kek.kek_for(org)
+        plain = bytearray()
+        try:
+            try:
+                plain += open_secret(kek, sealed)
+            except SealError as exc:
+                raise ConnectorBrokerRefused(
+                    f"sealed ingest secret for connector {connector_id!r} (secret_ref {secret_ref}) failed to "
+                    "open (fail-closed)") from exc
+            expected = "v1=" + hmac.new(bytes(plain), bytes(body), hashlib.sha256).hexdigest()
+        finally:
+            for i in range(len(plain)):
+                plain[i] = 0
+            del plain
+        # Compare constant-time as ASCII BYTES. ``hmac.compare_digest`` on two ``str`` RAISES ``TypeError`` if
+        # either holds a non-ASCII char, so a hostile ``presented="v1=café…"`` tag would unwind the stack —
+        # breaking this method's documented "malformed tag → ok=False (never raises)" contract. ``expected`` is
+        # always ASCII ("v1=" + hexdigest); a non-ASCII (hence un-encodable, hence non-matching) ``presented``
+        # fails closed as a mismatch.
+        ok = False
+        if isinstance(presented, str) and presented.startswith("v1="):
+            try:
+                ok = hmac.compare_digest(presented.encode("ascii"), expected.encode("ascii"))
+            except UnicodeEncodeError:
+                ok = False
+        return InboundVerifyReceipt(org=org, connector_id=connector_id, scheme=consumer.scheme,
+                                    epoch=sealed.epoch, secret_ref=secret_ref, method="hmac", ok=bool(ok))
+
+    def verify_mtls(self, *, org: str, connector_id: str, mtls_client_verified: bool) -> InboundVerifyReceipt:
+        """Verify an inbound mTLS client (AS-9b). Mirrors ``broker.origin_lock_verify``'s ``LockMethod.MTLS``
+        leg: the credential is presented+verified at the TLS layer, so the app layer trusts ONLY the
+        transport's ``mtls_client_verified`` flag (fail-closed — an unverified/absent client cert is ``ok=False``).
+        Opens no plaintext (so it consults no arm flag) and is a pure function of its input. The connector must be
+        a registered consumer for ``org`` so an unknown connector id cannot mint a receipt."""
+        consumer = self._registry.require(org, connector_id)
+        epoch = self._store.current(org, connector_id).epoch
+        return InboundVerifyReceipt(
+            org=org, connector_id=connector_id, scheme=consumer.scheme, epoch=epoch,
+            secret_ref=connector_secret_ref(org, connector_id, epoch), method="mtls",
+            ok=bool(mtls_client_verified))

@@ -90,6 +90,11 @@ from .aegis_schemas import (
     EffectVerification, EngineHealth, EngineHealthState, OutcomeClass, PlacementState,
     ResponseDeadlines, ResponseManifest, baseline_response_manifest, clean_token as clean_aegis_token,
 )
+from .aegis_anchors import (
+    ANCHOR1_SCHEME, AegisAnchorError, AnchorVerification, ProducerAnchor, connector_secret_ref,
+    open_and_verify_producer_anchor, produce_producer_anchor, record_cert_digest, require_trustworthy,
+    verify_anchored_record, verify_anchored_record_sealed, verify_owner_anchor, verify_producer_anchor,
+)
 from .protection_contract import (
     BASELINE_SIGIL_PROVIDER, PROTECTION_CONTRACT_SCHEMA, PROVIDER_REGISTRY_SCHEMA, AuthorizedActions,
     BindingState, Budgets, CertState, CustomerPrerequisites, Dimensions, DuplicateProviderError,
@@ -213,6 +218,10 @@ __all__ = [
     "OutcomeClass", "EffectVerification", "EngineHealthState", "PlacementState", "Criticality",
     "AssetRef", "AdapterCapability", "EngineHealth", "ResponseDeadlines", "ResponseManifest",
     "baseline_response_manifest", "AegisEventV2",
+    # AS-9c — two-anchor tamper-evidence contract (aegis_anchors.py):
+    "ANCHOR1_SCHEME", "AegisAnchorError", "AnchorVerification", "ProducerAnchor", "connector_secret_ref",
+    "open_and_verify_producer_anchor", "produce_producer_anchor", "record_cert_digest", "require_trustworthy",
+    "verify_anchored_record", "verify_anchored_record_sealed", "verify_owner_anchor", "verify_producer_anchor",
     # AS-2b — protection contract + provider registry (protection_contract.py):
     "PROTECTION_CONTRACT_SCHEMA", "PROVIDER_REGISTRY_SCHEMA",
     "Headline", "PostureDimension", "LicensingMode", "BindingState", "LockState", "CertState",
