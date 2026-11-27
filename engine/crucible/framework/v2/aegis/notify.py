@@ -51,6 +51,7 @@ sibling AEGIS modules), the stdlib, and sibling ``framework.v2`` packages (``.co
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import os
@@ -210,12 +211,25 @@ class ConnectorNotifier:
         self._enabled = notify_enabled() if enabled is None else bool(enabled)
         # Lazy-bind the egress so importing notify.py does not eagerly pull the report stack, and so the FATAL-2
         # AST leg sees only sibling/relative imports. push_via_urllib is the bounded, redirects-disabled, http(s)
-        # -only sender — the SSRF/redirect guard lives there (single source of truth).
+        # -only sender — the SSRF/redirect/internal-destination guard lives there (single source of truth).
         if send is not None:
-            self._send = send
+            self._send = send                            # injected test/custom sender — left as-is
         else:
             from ..report.push import push_via_urllib
-            self._send = push_via_urllib
+            # block_internal=True ARMS the fail-closed internal-destination guard for the TENANT egress: a
+            # tenant-configured notify-url that points at the shared gateway's own loopback / RFC-1918 / cloud
+            # metadata (169.254.169.254) is refused before any POST. The operator report-push path keeps the
+            # default (block_internal=False) so it is UNCHANGED.
+            self._send = functools.partial(push_via_urllib, block_internal=True)
+        # FAIL-CLOSED at construction: a statically-configured sink whose host is an INTERNAL IP LITERAL never
+        # arms (a blind-SSRF notify-url like http://169.254.169.254/ or http://127.0.0.1:<port>/ stays inert,
+        # it is not even reached). The residual sub-second DNS-REBIND TOCTOU for a *hostname* sink is accepted:
+        # the egress guard re-resolves at send, the notify is blind + POST-only, and the HTTP status is counted
+        # internally and never reflected to the tenant, so a rebind wins nothing observable.
+        if self._enabled:
+            from ..report.push import url_host_is_internal_literal
+            if url_host_is_internal_literal(self._url):
+                self._enabled = False
         self._seq = itertools.count(int(start_seq))
         self._handle: Optional[ConnectorHandle] = None
         self._lock = threading.Lock()
@@ -238,6 +252,15 @@ class ConnectorNotifier:
                 return False
             self._window = (b, n + 1)
             return True
+
+    # --- atomic fan-out counters -----------------------------------------------------------------
+    def _bump(self, field: str) -> None:
+        """Atomically increment one fan-out counter. ``serve_gateway`` fans this sink across threads, so a
+        bare ``self.<counter> += 1`` (read-add-write) can lose updates under concurrency. The critical section
+        is BRIEF — a single increment — and is NEVER held across the network POST (``self._send``), which would
+        serialise the gateway's sink fan-out."""
+        with self._lock:
+            setattr(self, field, getattr(self, field) + 1)
 
     # --- value-free handle custody ---------------------------------------------------------------
     def _ensure_handle(self, now: datetime) -> ConnectorHandle:
@@ -278,12 +301,13 @@ class ConnectorNotifier:
             # FAIL-CLOSED hygiene gate — DROP (never emit) a body that still carries a raw IP / secret literal.
             # Runs BEFORE any secret is opened, so a leaking payload never touches a sealed credential.
             if not is_hygiene_clean(body.decode("utf-8", "replace"), redact_literals=self._redact):
-                self.leaked_dropped += 1
-                self.errors += 1
+                with self._lock:                         # atomic pair-bump (brief; never across the POST)
+                    self.leaked_dropped += 1
+                    self.errors += 1
                 return
             # FAIL-CLOSED 16 KiB envelope cap — a runaway payload is dropped, not sent (also pre-secret).
             if len(body) > self._max_bytes:
-                self.errors += 1
+                self._bump("errors")
                 return
             # AUTH — stamp a broker-sealed credential onto the outbound headers (the ONLY place a secret is
             # opened; DEFAULT-OFF via VIGIL_AEGIS_CONNECTOR_BROKER refuses before plaintext when unarmed). A
@@ -295,14 +319,14 @@ class ConnectorNotifier:
                 self._broker.stamp(handle, headers, now=self._now(), body=body)
             except ConnectorBrokerRefused:
                 self._handle = None                      # drop a stale/expired/disabled handle -> re-issue next
-                self.errors += 1
+                self._bump("errors")
                 return
             # EGRESS — the sole egress: a bounded, redirects-disabled, http(s)-only POST to EXACTLY self._url.
             res = self._send(self._url, dict(headers), payload)
             status = int(res.get("status", 0)) if isinstance(res, dict) else 0
             if 200 <= status < 300:
-                self.written += 1
+                self._bump("written")
             else:
-                self.errors += 1                         # 4xx/5xx — FAIL-OPEN (data plane untouched), counted
+                self._bump("errors")                     # 4xx/5xx — FAIL-OPEN (data plane untouched), counted
         except Exception:                                # noqa: BLE001 — TOTAL: never raise into the data plane
-            self.errors += 1
+            self._bump("errors")

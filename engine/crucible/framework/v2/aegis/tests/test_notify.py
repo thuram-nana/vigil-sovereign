@@ -146,6 +146,17 @@ def _notifier(scheme, header, *, fmt="webhook", credential=None, enabled=True, b
     return n, send, credential, store, kek
 
 
+def _is_guarded_push(send) -> bool:
+    """The default TENANT egress is ``push_via_urllib`` bound with ``block_internal=True`` (the fail-closed
+    internal-destination SSRF host guard armed) — a ``functools.partial`` over the real sender, not the bare
+    function."""
+    import functools
+
+    from framework.v2.report.push import push_via_urllib
+    return (isinstance(send, functools.partial) and send.func is push_via_urllib
+            and send.keywords.get("block_internal") is True)
+
+
 # ==================================================================================================
 # (1) e2e behavioral — one sealed, broker-stamped POST per confirmed/lead; the correct header per scheme;
 #     metadata-only + hygiene-clean. Plus the negative-emission control (a "clear" emits NOTHING).
@@ -256,8 +267,8 @@ def test_notify_imports_only_its_allowed_plane():
     assert "governor" not in roots, "notify must never import the governor plane (FATAL-2)"
     assert "strix" not in roots, "notify must never import strix"
     # every ABSOLUTE root is either the shared integrity core or the stdlib — no stray third-party/engine import.
-    allowed = {"vigil_core", "__future__", "itertools", "json", "os", "threading", "time", "datetime",
-               "enum", "typing"}
+    allowed = {"vigil_core", "__future__", "functools", "itertools", "json", "os", "threading", "time",
+               "datetime", "enum", "typing"}
     assert roots <= allowed, f"unexpected absolute import roots in notify.py: {sorted(roots - allowed)}"
 
 
@@ -339,11 +350,12 @@ def test_crlf_credential_is_refused_header_injection_guard():
 
 def test_non_http_url_is_refused_ssrf_guard():
     # routed through the REAL push_via_urllib, a non-http(s) URL raises before any network -> no POST, counted.
+    # (a PUBLIC host so the scheme refusal is the control under test; an internal-literal host would instead be
+    # disarmed at construction — that fail-closed leg is test_internal_ip_literal_sink_url_never_arms.)
     broker, _cred, _store, _kek = _broker(ConnectorScheme.BEARER, header="Authorization")
     n = ConnectorNotifier(broker, _grant(), org=ORG_A, connector_id=CONN, host=HOST_A,
-                          url="ftp://127.0.0.1/x", now_fn=lambda: NOW, enabled=True)
-    from framework.v2.report.push import push_via_urllib
-    assert n._send is push_via_urllib, "egress must route through push_via_urllib (the SSRF/redirect guard)"
+                          url="ftp://siem.example/x", now_fn=lambda: NOW, enabled=True)
+    assert _is_guarded_push(n._send), "egress must route through push_via_urllib (the SSRF/redirect guard)"
     n(_verdict())                                       # must not raise
     assert n.written == 0 and n.errors == 1
 
@@ -360,6 +372,175 @@ def test_push_exception_is_fail_open_never_raised():
     n, _send, *_ = _notifier(ConnectorScheme.BEARER, "Authorization", send=_boom)
     n(_verdict())                                       # the exception must be swallowed, counted
     assert n.written == 0 and n.errors == 1
+
+
+# ==================================================================================================
+# (5b) SSRF internal-destination guard — the tenant egress REFUSES a loopback / link-local / RFC-1918 /
+#      cloud-metadata sink (the host guard in report.push.push_via_urllib, armed via block_internal=True),
+#      and a statically-internal IP-literal sink never even arms. These reds on the pre-fix code (which
+#      validated only the URL *scheme* and never the destination host).
+# ==================================================================================================
+import framework.v2.report.push as PUSH  # noqa: E402
+
+
+class _FakeResp:
+    status = 202
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self) -> None:
+        self.opened: list[str] = []
+
+    def open(self, req, timeout=None):
+        self.opened.append(req.full_url)
+        return _FakeResp()
+
+
+@pytest.mark.parametrize("bad_url", [
+    "http://169.254.169.254/latest/meta-data/",          # cloud metadata (link-local)
+    "http://127.0.0.1:8200/notify",                      # loopback + port
+    "http://10.0.0.5/hook",                              # RFC-1918
+    "http://[::1]:9200/x",                               # IPv6 loopback literal
+])
+def test_push_block_internal_refuses_internal_ip_literals(bad_url, monkeypatch):
+    opened: list = []
+    monkeypatch.setattr(PUSH.urllib.request, "build_opener",
+                        lambda *a, **k: opened.append(a) or _FakeOpener())
+    with pytest.raises(ValueError):                      # refused: the destination host, not just the scheme
+        PUSH.push_via_urllib(bad_url, {}, {"x": 1}, block_internal=True)
+    assert opened == []                                  # raised BEFORE any request was built or sent
+
+
+def test_push_block_internal_refuses_hostname_resolving_to_loopback(monkeypatch):
+    # a PUBLIC-looking name whose DNS resolves to loopback (classic DNS-rebind / SSRF) -> refused, no send.
+    monkeypatch.setattr(PUSH.socket, "getaddrinfo",
+                        lambda host, *a, **k: [(PUSH.socket.AF_INET, PUSH.socket.SOCK_STREAM, 6, "",
+                                                ("127.0.0.1", 0))])
+    opened: list = []
+    monkeypatch.setattr(PUSH.urllib.request, "build_opener",
+                        lambda *a, **k: opened.append(a) or _FakeOpener())
+    with pytest.raises(ValueError):
+        PUSH.push_via_urllib("http://notify.rebind.example/hook", {}, {"x": 1}, block_internal=True)
+    assert opened == []
+
+
+def test_push_default_block_internal_false_leaves_operator_path_unchanged(monkeypatch):
+    # DEFAULT (block_internal=False): the operator-trusted report-push sink is UNCHANGED — the host guard is
+    # NOT consulted even for an internal literal, and the POST proceeds (push_report / the report sink path).
+    consulted: list = []
+    monkeypatch.setattr(PUSH, "assert_external_destination", lambda url: consulted.append(url))
+    opener = _FakeOpener()
+    monkeypatch.setattr(PUSH.urllib.request, "build_opener", lambda *a, **k: opener)
+    res = PUSH.push_via_urllib("http://127.0.0.1:9000/x", {}, {"a": 1})   # no block_internal
+    assert res == {"status": 202}
+    assert consulted == []                               # internal-host guard NOT applied on the default path
+    assert opener.opened == ["http://127.0.0.1:9000/x"]
+
+
+def test_push_block_internal_allows_a_public_destination(monkeypatch):
+    # the guard is a *gate*, not a blanket block: a genuinely public host passes through and is delivered.
+    monkeypatch.setattr(PUSH.socket, "getaddrinfo",
+                        lambda host, *a, **k: [(PUSH.socket.AF_INET, PUSH.socket.SOCK_STREAM, 6, "",
+                                                ("8.8.8.8", 0))])
+    opener = _FakeOpener()
+    monkeypatch.setattr(PUSH.urllib.request, "build_opener", lambda *a, **k: opener)
+    res = PUSH.push_via_urllib("http://siem.example/hook", {}, {"a": 1}, block_internal=True)
+    assert res == {"status": 202} and opener.opened == ["http://siem.example/hook"]
+
+
+@pytest.mark.parametrize("bad_url", [
+    "http://169.254.169.254/latest/meta-data/",
+    "http://127.0.0.1:9200/",
+    "http://10.0.0.5/hook",
+    "http://[::1]:8080/x",
+])
+def test_internal_ip_literal_sink_url_never_arms_fail_closed(bad_url):
+    # fail-closed at CONSTRUCTION: a statically-internal IP-literal sink is inert for life — even pinned on.
+    broker, *_ = _broker(ConnectorScheme.BEARER, header="Authorization")
+    send = _Capture()
+    n = ConnectorNotifier(broker, _grant(), org=ORG_A, connector_id=CONN, host=HOST_A, url=bad_url,
+                          send=send, now_fn=lambda: NOW, enabled=True)
+    assert n._enabled is False                           # the internal-literal sink disarmed the notifier
+    n(_verdict())
+    assert send.calls == [] and n.written == 0 and n.errors == 0   # inert: no build, no secret, no POST
+
+
+def test_notifier_egress_refuses_hostname_resolving_to_internal(monkeypatch):
+    # a PUBLIC-looking sink host (construction does NOT disarm — it is not a literal): the egress guard
+    # re-resolves at send and refuses the loopback -> no POST, counted (fail-open on the data plane).
+    monkeypatch.setattr(PUSH.socket, "getaddrinfo",
+                        lambda host, *a, **k: [(PUSH.socket.AF_INET, PUSH.socket.SOCK_STREAM, 6, "",
+                                                ("127.0.0.1", 0))])
+    broker, *_ = _broker(ConnectorScheme.BEARER, header="Authorization")
+    n = ConnectorNotifier(broker, _grant(), org=ORG_A, connector_id=CONN, host=HOST_A,
+                          url="http://notify.rebind.example/hook", now_fn=lambda: NOW, enabled=True)
+    assert n._enabled is True and _is_guarded_push(n._send)
+    n(_verdict())
+    assert n.written == 0 and n.errors == 1
+
+
+# ==================================================================================================
+# (5c) added coverage — the rate-cap drop path, the lease-EXPIRY handle re-issue (distinct from epoch
+#      rotation), the epoch_fn-raising fallback, and the atomic fan-out counters under thread fan-out.
+# ==================================================================================================
+def test_rate_cap_drop_path_counts_dropped_and_sends_nothing_extra():
+    # over the per-minute cap: the surplus is DROPPED (self.dropped++), no POST, not an error. Fixed monotonic
+    # clock pins the minute bucket so the count is deterministic.
+    n, send, *_ = _notifier(ConnectorScheme.BEARER, "Authorization",
+                            max_per_minute=2, monotonic_fn=lambda: 100.0)
+    for _ in range(5):
+        n(_verdict())
+    assert len(send.calls) == 2 and n.written == 2 and n.dropped == 3 and n.errors == 0
+
+
+def test_cached_handle_lease_expiry_reissues_distinct_from_rotation():
+    # the TIME-expiry leg of _ensure_handle: when the cached handle's lease has lapsed (no rotation — the store
+    # stays at epoch 1), a FRESH handle is issued and the emit succeeds. Remove the lease_live() re-issue and
+    # the stale handle would reach the broker and be refused for an expired lease -> written stays 1.
+    clock = {"t": NOW}
+    broker, _credential, _store, _kek = _broker(ConnectorScheme.BEARER, header="Authorization")
+    send = _Capture()
+    n = ConnectorNotifier(broker, _grant(), org=ORG_A, connector_id=CONN, host=HOST_A, url=URL,
+                          send=send, now_fn=lambda: clock["t"], enabled=True, lease_seconds=100.0)
+    n(_verdict())                                        # issues a handle leased until NOW+100s
+    first = n._handle
+    assert n.written == 1 and first is not None and len(send.calls) == 1
+    clock["t"] = _dt(500.0)                              # advance PAST the lease (pure time-expiry)
+    n(_verdict())
+    assert n.written == 2 and len(send.calls) == 2       # a fresh handle was re-issued and the emit succeeded
+    assert n._handle is not first and n._handle.epoch == 1 and n.errors == 0  # same epoch => NOT a rotation
+
+
+def test_epoch_fn_raising_falls_back_to_epoch_zero_and_still_emits():
+    def _boom_epoch() -> int:
+        raise RuntimeError("epoch source down")
+    n, send, *_ = _notifier(ConnectorScheme.BEARER, "Authorization", epoch_fn=_boom_epoch)
+    n(_verdict())                                        # a bad epoch_fn must NOT sink the notify
+    assert n.written == 1 and len(send.calls) == 1 and n.errors == 0
+    assert send.calls[0]["body"]["event"]["epoch"] == 0  # the emitted event carries the epoch=0 fallback
+
+
+def test_fanout_counters_are_atomic_under_thread_fanout():
+    # serve_gateway fans this sink across threads; a bare `self.written += 1` can lose updates. With the bumps
+    # taken under self._lock the totals are EXACT. (On the pre-fix read-add-write this can under-count.)
+    import threading as _threading
+
+    n, send, *_ = _notifier(ConnectorScheme.BEARER, "Authorization",
+                            max_per_minute=10_000, monotonic_fn=lambda: 0.0)
+    total = 2000
+    threads = [_threading.Thread(target=lambda: n(_verdict())) for _ in range(total)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(send.calls) == total                      # every admitted verdict POSTed (under the cap)
+    assert n.written == total and n.errors == 0 and n.dropped == 0
 
 
 # ==================================================================================================
@@ -396,8 +577,7 @@ def test_negative_control_stale_rotated_handle_is_refused():
 def test_negative_control_default_send_is_push_via_urllib():
     broker, *_ = _broker(ConnectorScheme.BEARER, header="Authorization")
     n = ConnectorNotifier(broker, _grant(), org=ORG_A, connector_id=CONN, host=HOST_A, url=URL)
-    from framework.v2.report.push import push_via_urllib
-    assert n._send is push_via_urllib
+    assert _is_guarded_push(n._send)                     # push_via_urllib bound with block_internal=True
 
 
 def test_cross_tenant_grant_is_refused_through_the_notifier():
