@@ -662,6 +662,7 @@ class _P:
 
     customer_assistant_ask = Provisioner.customer_assistant_ask
     _assistant_ask_accounted = Provisioner._assistant_ask_accounted
+    _assistant_knowledge_documents = Provisioner._assistant_knowledge_documents   # PR-K: findings-only unless enabled
     _mint_assistant_grant = Provisioner._mint_assistant_grant
     _audit = Provisioner._audit
 
