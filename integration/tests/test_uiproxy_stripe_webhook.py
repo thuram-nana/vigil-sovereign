@@ -84,8 +84,13 @@ def test_a_signed_delivery_spools_the_body_signature_and_receive_time(monkeypatc
     lambda t: "",                                                # missing
     lambda t: _sig(_BODY, t, "whsec_" + "other"),                # wrong secret
     lambda t: _sig(_BODY + b"x", t),                             # signed a different body
-    lambda t: _sig(_BODY, t - 301),                              # stale
-    lambda t: _sig(_BODY, t + 301),                              # future
+    # stale / future: comfortably OUTSIDE the 300s tolerance. The offset is 360 (not 301): the handler
+    # re-reads its OWN time.time() when the request arrives, so a knife-edge ±301 (a 1s margin) races that
+    # clock — under CI load the sub-second gap between this int(time.time()) and the handler's read pushes a
+    # +301 "future" stamp back INSIDE the window (observed 202, flaky). 360 stays outside for any delay below
+    # the 5s urllib timeout, while still proving an out-of-window timestamp is rejected.
+    lambda t: _sig(_BODY, t - 360),                              # stale
+    lambda t: _sig(_BODY, t + 360),                              # future
     lambda t: _sig(_BODY, t).replace("t=", "t=+"),               # not plain digits
     lambda t: f"t={t}",                                          # no v1
     lambda t: _sig(_BODY, t) + ",v1=" + "a" * 2100,              # over the header cap
