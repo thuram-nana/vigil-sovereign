@@ -100,6 +100,12 @@ def run_cloud_posture_live(
     if provider == "gcp":
         from framework.v2.sensors.gcp_live import GcpLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
         sensor: Any = GcpLiveSensor(credentials=session_data, require_injected_credentials=True)
+    elif provider in ("azure", "az"):
+        from framework.v2.sensors.azure_live import AzureLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
+        sensor = AzureLiveSensor(credentials=session_data, require_injected_credentials=True)
+    elif provider == "cloudflare":
+        from framework.v2.sensors.cloudflare_live import CloudflareLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
+        sensor = CloudflareLiveSensor(credentials=session_data, require_injected_credentials=True)
     else:
         from framework.v2.sensors.cloud_live import CloudLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
         sensor = CloudLiveSensor(credentials=session_data, require_injected_credentials=True)
