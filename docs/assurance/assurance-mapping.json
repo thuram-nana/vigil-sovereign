@@ -3613,6 +3613,7 @@
       "label": "Finding soundness (oracle sole authority)",
       "objective": "A FACT is minted only by a deterministic oracle re-executing over retained evidence; an AI judgement, a tool's bytes, or an unproven lead can never be laundered into a FACT.",
       "residual_limitations": [
+        "AS1B-live-fire-tt-stg",
         "LIMIT-aegis-staging-stack-not-applied",
         "LIMIT-audit-package-reproduction",
         "LIMIT-cloud-exploit-fixture-proven",
@@ -3781,6 +3782,7 @@
       "residual_limitations": [
         "AS2D-live-broker-transport",
         "LIMIT-a11y-capture-unwired",
+        "LIMIT-aegis-edge-automation-deploy-gated",
         "LIMIT-aegis-sealing-delivery-deferred",
         "LIMIT-aegis-staging-cd-inert",
         "LIMIT-agent-body-scaffold",

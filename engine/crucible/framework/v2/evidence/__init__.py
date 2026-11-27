@@ -64,6 +64,18 @@ from .aegis_tt import (
     sign_demonstration,
     verify_demonstration,
 )
+from .aegis_tt_run import (
+    TtStgGate,
+    TtStgRecord,
+    TtStgRunResult,
+    build_tt_stg_demonstration,
+    derive_required_cases,
+    gate_tt_stg_run,
+    iac_topology_digest,
+    junit_passed_case_nodes,
+    record_tt_stg_run,
+    subject_digest,
+)
 
 __all__ = [
     "build_audit_package", "write_package",
@@ -83,4 +95,8 @@ __all__ = [
     "build_demonstration", "sign_demonstration", "verify_demonstration",
     "manifest_digest", "load_trust_root_doc", "load_trust_root_doc_file",
     "project_state", "CAPABILITY_STATES",
+    # AEGIS TT-STG run orchestration (AS-1b)
+    "TtStgGate", "TtStgRunResult", "TtStgRecord",
+    "gate_tt_stg_run", "build_tt_stg_demonstration", "record_tt_stg_run",
+    "derive_required_cases", "iac_topology_digest", "subject_digest", "junit_passed_case_nodes",
 ]

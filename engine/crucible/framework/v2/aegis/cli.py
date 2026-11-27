@@ -351,6 +351,11 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         saas_kw = {k: v for k, v in (("saas_tenant", saas_tenant), ("saas_host", saas_host),
                                      ("monitoring_spool", monitoring_spool),
                                      ("monitoring_secret", monitoring_secret)) if v is not None}
+        # AS-3b (opt-in, DEFAULT-OFF): additionally emit AS-2b aegis_event v2 records. Env or flag. Only passed
+        # when ENABLED, so a deployment that does not opt in calls serve_gateway byte-identically to before.
+        if (os.environ.get("AEGIS_GW_EMIT_V2", "").strip() not in ("", "0", "false", "False")
+                or bool(getattr(args, "emit_v2", False))):
+            saas_kw["emit_v2"] = True
         httpd = serve_gateway(upstream, config=config, host=host, port=port,
                               slug=slug, on_verdict=on_verdict, **saas_kw)
     except ValueError as e:
@@ -530,6 +535,10 @@ def main(argv: list[str] | None = None) -> int:
                         "--monitoring-secret-file and --saas-tenant)")
     g.add_argument("--monitoring-secret-file", default=None, metavar="PATH",
                    help="AEGIS-SaaS: 0600 file holding the per-(tenant, host) report secret (never on argv)")
+    g.add_argument("--emit-v2", action="store_true",
+                   help="AEGIS-SaaS (AS-3b): ADDITIONALLY emit each verdict as an AS-2b aegis_event v2 record "
+                        "into a distinct incoming_v2/ subtree of --monitoring-spool (hygiene-clean, "
+                        "deterministic). Default-OFF. Also settable via AEGIS_GW_EMIT_V2=1.")
     g.add_argument("--deployment-secret-file", default=None, metavar="PATH",
                    help="AEGIS-SaaS (AS-2j N-A fix): read the deployment (pseudonymization) secret from a "
                         "0600 FILE / systemd credential instead of AEGIS_GW_SECRET in the environment, so it "
