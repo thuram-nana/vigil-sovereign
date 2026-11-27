@@ -135,6 +135,35 @@ def test_reclaim_does_not_double_spine_a_report_spined_before_the_crash():
     assert len(_raw_events(s)) == 1                             # STILL exactly one RAW spine event — no double-spine
 
 
+def test_reclaimed_report_dedup_follows_the_file_across_passes(monkeypatch):
+    # Finding 1 (cross-pass double-spine) regression. Recreate the crash window (spined, marker gone, in working/),
+    # then force the RECLAIM pass to DEFER by making the first spine-baseline load fail (compaction churn). The
+    # reclaimed file keeps its reclaim-marker prefix, so a LATER pass (reclaimed==0) still dedups it against the
+    # spine — the dedup follows the FILE, not the pass — and it is never double-spined.
+    s, w = _rig()
+    rep = _report(org="org_a", host="apme.cm")
+    env = _seal(rep)
+    _drop_in_domain(w, env, "org_a", "apme.cm")
+    w.drain()                                                   # spined once
+    assert len(_raw_events(s)) == 1
+    (w.processed / (hashlib.sha256(env.encode()).hexdigest() + ".json")).unlink()
+    _strand_in_working(w, env, "org_a", "apme.cm")              # the dangerous (spined, unmarked) file
+    real = w._load_seen_rids
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("spine compaction churn")             # the reclaim pass cannot build the baseline...
+        return real()
+
+    monkeypatch.setattr(w, "_load_seen_rids", _flaky)
+    w.drain()                                                   # pass A: reclaim, then defer (baseline load raised)
+    w.drain()                                                   # pass B: reclaimed==0, but the prefix drives the dedup
+    assert rep["report_id"] in {e["report_id"] for e in _raw_events(s)}
+    assert len(_raw_events(s)) == 1                             # STILL exactly one raw spine event — no double-spine
+
+
 def test_reclaimed_file_with_existing_marker_is_deduped_not_respined():
     s, w = _rig()
     env = _seal(_report(org="org_a", host="apme.cm"))
@@ -150,7 +179,7 @@ def test_flat_working_claim_is_reclaimed_out_and_accounted_not_lost():
     (w.working / "stray.json").write_text(_seal(_report(org="org_a", host="apme.cm")))
     r = w.drain()
     assert not (w.working / "stray.json").exists()             # reclaimed OUT of working/ (not stranded, not destroyed)
-    assert (w.rejected / "stray.json").exists() and r["off_domain"] >= 1   # accounted for by location
+    assert (w.rejected / (ms._RECLAIM_PREFIX + "stray.json")).exists() and r["off_domain"] >= 1  # accounted by location
 
 
 def test_reclaim_never_destroys_an_unmovable_report(monkeypatch):
