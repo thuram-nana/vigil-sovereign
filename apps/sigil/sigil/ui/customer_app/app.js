@@ -2645,11 +2645,13 @@
   //     hidden. A proof started earlier — on any device — is listed with "Continue": the challenge lives on the server,
   //     so a reload resumes exactly where it stopped.
   //   * CODE REPOSITORY — Connect GitHub (the Code screen's own install flow, codeConnect) and the connected repositories.
-  //   * CLOUD ACCOUNT (AWS) — the account id, then the exact trust policy to paste (VIGIL's principal + the external id),
-  //     AWS's read-only SecurityAudit policy, the role's ARN, Verify. VIGIL records a READ-ONLY connection only when the
-  //     role lands in that account AND refuses any other external id; nothing here runs a test. A connection started
-  //     earlier is listed as "Not finished" with Continue (the server hands back the SAME external id, so a role already
-  //     created keeps working) and Cancel; an expired one offers Connect again.
+  //   * CLOUD ACCOUNT (AWS / GCP / Azure / Cloudflare) — pick a provider, give the account id (validated with the SAME
+  //     rule the backend enforces), then the provider's own placement: AWS a trust policy + the role ARN; GCP a
+  //     service-account id to create + the SA email; Azure an admin-consent link + binding tag + the enterprise-app
+  //     Object ID; Cloudflare a read-only token to create + the token pasted ONCE (a secret, never shown back). VIGIL
+  //     records a READ-ONLY connection only when the provider's proof holds; nothing here runs a test. A connection
+  //     started earlier is listed as "Not finished" with Continue (the server hands back the SAME challenge, so access
+  //     already created keeps working) and Cancel; an expired one offers Connect again.
   // Nothing here shows a price, an estimate or a model name. A sensitive request goes through the step-up when this
   // build has it (withStepUp).
   var CONNECT_ON = pageFlag("connect");
@@ -2927,27 +2929,85 @@
     return h("div.card.cust-connect-tile", {}, body);
   }
 
-  // ---- the Cloud account tile (AWS) ----
+  // ---- the Cloud account tile (AWS / GCP / Azure / Cloudflare) ----
+  // Provider-driven: one picker, then the chosen provider's account-id input (pre-validated with the SAME rule the
+  // backend enforces), challenge steps that render exactly the fields THAT provider's challenge returns, and the
+  // reference the customer pastes — an AWS role ARN, a GCP service-account email, an Azure enterprise-app Object ID, or,
+  // for Cloudflare, the read-only API TOKEN itself (pasted once, treated as a secret: a password input, submitted
+  // through the existing connect POST, never shown back and never logged). AWS behaviour is unchanged.
+  var CLOUD_PROVIDERS = ["aws", "gcp", "azure", "cloudflare"];
+  var CLOUD_PROVIDER = {
+    aws: { name: "AWS", acctLabel: "AWS account ID (12 digits)", acctPlaceholder: "123456789012", inputmode: "numeric",
+           clean: function (s) { return String(s || "").replace(/[\s-]/g, ""); },
+           valid: function (a) { return /^[0-9]{12}$/.test(a); },
+           acctBad: "An AWS account ID is 12 digits.", refEmpty: "Paste the role's ARN." },
+    gcp: { name: "GCP", acctLabel: "GCP project ID", acctPlaceholder: "my-company-prod",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(a); },
+           acctBad: "A GCP project ID is 6 to 30 characters: a lowercase letter, then lowercase letters, digits or "
+             + "hyphens, with no trailing hyphen.", refEmpty: "Paste the service account's email." },
+    azure: { name: "Azure", acctLabel: "Azure tenant ID (a GUID)",
+           acctPlaceholder: "00000000-0000-0000-0000-000000000000",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(a); },
+           acctBad: "An Azure tenant ID is a lowercase GUID, for example 00000000-0000-0000-0000-000000000000.",
+           refEmpty: "Paste the enterprise application's Object ID." },
+    cloudflare: { name: "Cloudflare", acctLabel: "Cloudflare account ID (32 hex characters)",
+           acctPlaceholder: "0123456789abcdef0123456789abcdef",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[0-9a-f]{32}$/.test(a); },
+           acctBad: "A Cloudflare account ID is 32 lowercase hexadecimal characters.",
+           refEmpty: "Paste the API token." },
+  };
+  function cloudProvider(p) { return CLOUD_PROVIDER[String(p || "").toLowerCase()] || CLOUD_PROVIDER.aws; }
+  function cloudProviderName(p) {
+    var c = CLOUD_PROVIDER[String(p || "").toLowerCase()];
+    return c ? c.name : String(p || "").toUpperCase();
+  }
+  // Which providers the picker offers: those the server marks ready in available.cloud_providers, or — when the server
+  // sent no per-provider map — all four (the server refuses an unprovisioned provider anyway, so the picker is never a
+  // dead end). Never an empty picker.
+  function cloudProvidersOffered(av) {
+    var map = av && av.cloud_providers;
+    var ok = CLOUD_PROVIDERS.filter(function (p) {
+      return (map && typeof map === "object") ? !!map[p] : true;
+    });
+    return ok.length ? ok : CLOUD_PROVIDERS.slice();
+  }
+  // The server's own step strings, rendered verbatim as list items (never re-worded).
+  function cloudStepItems(steps) {
+    return (Array.isArray(steps) ? steps : []).map(function (s) { return h("li", {}, h("p", { text: String(s) })); });
+  }
+  // An https link to open (an external console page); anything not https falls back to plain copyable text.
+  function cloudLink(url, label) {
+    var u = String(url || "");
+    return /^https:\/\//.test(u)
+      ? h("a.cust-connect-link", { href: u, text: label, rel: "noopener noreferrer", target: "_blank" })
+      : connectCode(u);
+  }
   function connectCloudTile(d, av) {
     var accts = (Array.isArray(d.cloud) ? d.cloud : []).filter(function (c) { return c && c.account_id; });
     var body = [h("h3", { text: "Cloud account" }),
-      h("p.cust-muted", { text: "Give VIGIL read-only access to an AWS account through a role you create. VIGIL never "
-        + "changes anything in your account." })];
+      h("p.cust-muted", { text: "Give VIGIL read-only access to a cloud account — AWS, Google Cloud, Azure or "
+        + "Cloudflare — through access you create. VIGIL never changes anything in your account." })];
     if (accts.length) {
       body.push(h("div.cust-connect-list", {}, accts.map(function (c) { return connectCloudRow(c, av); })));
     } else {
       body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
     }
     body.push(av.cloud_connect
-      ? h("div.cust-mon-actions", {}, connectButton("Connect an AWS account", connectCloudFlow, "primary"))
+      ? h("div.cust-mon-actions", {}, connectButton("Connect a cloud account", function () { connectCloudFlow(av); },
+          "primary"))
       : h("p.cust-muted", { text: "Connecting a cloud account is not available on this deployment yet. Contact VIGIL." }));
     return h("div.card.cust-connect-tile", {}, body);
   }
-  // One account: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a connection started earlier
-  // and not finished (Continue + Cancel). Continue / Connect again ask the server for the connection's steps: it hands
-  // back the SAME external ID while the connection is outstanding, so a role already created keeps working.
+  // One account, labelled by its provider: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a
+  // connection started earlier and not finished (Continue + Cancel). Continue / Connect again ask the server for the
+  // connection's steps: it hands back the SAME challenge while the connection is outstanding, so access already created
+  // keeps working.
   function connectCloudRow(c, av) {
     var st = c.status === "connected" || c.status === "expired" ? c.status : "pending";
+    var name = cloudProviderName(c.provider);
     var foot = h("div.cust-mon-actions", {});
     function idle() {
       var acts = [];
@@ -2962,31 +3022,41 @@
     idle();
     var badge = { connected: ["verified", "✓ Connected (read-only)"], expired: ["expired", "⚠ Expired — connect again"],
       pending: ["pending", "… Not finished"] }[st];
-    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
+    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: name + " " + String(c.account_id) }),
       h("span.cust-badge.cust-badge-" + badge[0], { text: badge[1] })])];
     if (st === "pending") {
       rows.push(h("p.cust-muted", { text: "You started connecting this account. Continue to see the same steps again." }));
     } else {
-      rows.push(kv("Role", c.role_ref), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
+      rows.push(cloudReference(c), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
     }
     rows.push(foot);
     return h("div.cust-connect-acct", {}, rows);
   }
+  // The reference line a connected / lapsed account shows, labelled by provider (what the grant RECORDS — never a
+  // secret): an AWS role ARN, a GCP service-account email, an Azure enterprise-app Object ID, or — for Cloudflare — the
+  // API token's PUBLIC id (the token itself is never stored, shown or returned).
+  function cloudReference(c) {
+    var p = String(c.provider || "").toLowerCase();
+    var label = p === "gcp" ? "Service account" : p === "azure" ? "Enterprise app (Object ID)"
+      : p === "cloudflare" ? "API token ID" : "Role";
+    return kv(label, c.role_ref);
+  }
   function connectCloudConfirm(c, foot, st, idle) {
     var pending = st === "pending";
+    var name = cloudProviderName(c.provider);
     VUI.mount(foot, [h("span.cust-muted", { text: pending
-        ? "Cancel connecting AWS " + c.account_id + "? The external ID VIGIL gave you stops working; starting again "
-          + "gives you a new one."
-        : "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; delete the role in AWS to remove the "
-          + "access entirely." }),
+        ? "Cancel connecting " + name + " " + c.account_id + "? The external ID VIGIL gave you stops working; starting "
+          + "again gives you a new one."
+        : "Disconnect " + name + " " + c.account_id + "? VIGIL stops using the access you created; remove it in " + name
+          + " to revoke it entirely." }),
       connectButton(pending ? "Cancel connection" : "Disconnect", async function (b) {
         b.disabled = true;
         try {
-          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || "aws"),
+          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || ""),
             account_id: String(c.account_id) }, foot);
         } catch (e) { b.disabled = false; return connectFailed(e, pending ? "The connection was not cancelled"
           : "The account was not disconnected"); }
-        VUI.toast("AWS account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
+        VUI.toast(name + " account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
         if (here() === "#/connect") render();
       }, "danger"),
       connectButton("Keep it", idle)]);
@@ -2997,7 +3067,7 @@
     btn.disabled = true;
     var r;
     try {
-      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || "aws"),
+      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || ""),
         account_id: String(c.account_id) }, btn.parentNode);
     } catch (e) { btn.disabled = false; return connectFailed(e, "The connection could not be continued"); }
     btn.disabled = false;
@@ -3005,29 +3075,53 @@
     if (!box || here() !== "#/connect") return;
     VUI.mount(box, connectCloudSteps(r || {}));
   }
-  function connectCloudFlow() {
+  function connectCloudFlow(av) {
     stopConnectPoll();
     var box = connectFlowBox();
     if (!box) return;
-    var acct = h("input#connect-aws-account", { type: "text", inputmode: "numeric", autocomplete: "off",
-      placeholder: "123456789012" });
-    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect an AWS account" }),
-      h("label", { for: "connect-aws-account", text: "AWS account ID (12 digits)" }), acct,
-      h("div.cust-mon-actions", {}, connectButton("Continue", function (b) { connectCloudStart(b, acct); }, "primary"))]));
+    var offered = cloudProvidersOffered(av || {});
+    var sel = h("select#connect-cloud-provider", { "aria-label": "Cloud provider" });
+    offered.forEach(function (p) { sel.appendChild(h("option", { value: p, text: cloudProviderName(p) })); });
+    var acctLabel = h("label", { for: "connect-cloud-account" });
+    var acct = h("input#connect-cloud-account", { type: "text", autocomplete: "off", spellcheck: "false" });
+    function apply() {
+      var cfg = cloudProvider(sel.value);
+      acctLabel.textContent = cfg.acctLabel;
+      acct.setAttribute("placeholder", cfg.acctPlaceholder);
+      if (cfg.inputmode) acct.setAttribute("inputmode", cfg.inputmode); else acct.removeAttribute("inputmode");
+    }
+    sel.addEventListener("change", apply);
+    apply();
+    var card = [h("h3", { text: "Connect a cloud account" })];
+    if (offered.length > 1) { card.push(h("label", { for: "connect-cloud-provider", text: "Cloud provider" }), sel); }
+    card.push(acctLabel, acct, h("div.cust-mon-actions", {},
+      connectButton("Continue", function (b) { connectCloudStart(b, sel, acct); }, "primary")));
+    VUI.mount(box, h("div.card", {}, card));
   }
-  async function connectCloudStart(btn, input) {
+  async function connectCloudStart(btn, sel, input) {
     clearErr();
-    var account = String(input.value || "").replace(/[\s-]/g, "");
-    if (!/^[0-9]{12}$/.test(account)) return err("An AWS account ID is 12 digits.");
+    var provider = String(sel.value);
+    var cfg = cloudProvider(provider);
+    var account = cfg.clean(input.value);
+    if (!cfg.valid(account)) return err(cfg.acctBad);
     btn.disabled = true;
     var r;
-    try { r = await connectPost("/connect/cloud/challenge", { provider: "aws", account_id: account }, btn.parentNode); }
+    try { r = await connectPost("/connect/cloud/challenge", { provider: provider, account_id: account }, btn.parentNode); }
     catch (e) { btn.disabled = false; return connectFailed(e, "The connection was not started"); }
     var box = connectFlowBox();
     if (!box || here() !== "#/connect") return;
     VUI.mount(box, connectCloudSteps(r || {}));
   }
+  // The challenge steps for the challenge's provider: AWS as it always was; GCP / Azure / Cloudflare each render exactly
+  // the fields their challenge returns.
   function connectCloudSteps(r) {
+    var p = String(r.provider || "").toLowerCase();
+    if (p === "gcp") return connectCloudStepsGcp(r);
+    if (p === "azure") return connectCloudStepsAzure(r);
+    if (p === "cloudflare") return connectCloudStepsCloudflare(r);
+    return connectCloudStepsAws(r);
+  }
+  function connectCloudStepsAws(r) {
     var hint = String(r.role_name_hint || "VigilSecurityAudit");
     var role = h("input#connect-aws-role", { type: "text", autocomplete: "off", spellcheck: "false",
       placeholder: "arn:aws:iam::" + String(r.account_id || "") + ":role/" + hint });
@@ -3051,16 +3145,86 @@
         + " and refuses any other external ID — to check that, it makes one attempt with a random external ID, which "
         + "your CloudTrail shows as denied. The connection is read-only and never runs a test by itself." })]));
   }
+  // GCP: service-account impersonation. The customer creates an SA whose id (sa_id) encodes the challenge, grants
+  // VIGIL's connector SA the token-creator role on it, and pastes the SA's email (sa_email) as the reference.
+  function connectCloudStepsGcp(r) {
+    var role = h("input#connect-cloud-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: String(r.sa_email || "") });
+    var lead = [h("h3", { text: "Connect Google Cloud project " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the service-account id and external "
+        + "ID are unchanged. If you already created the service account, just paste its email below." }));
+    }
+    var values = [connectCopyRow("Service account id", r.sa_id), connectCopyRow("Service account email", r.sa_email),
+      connectCopyRow("Connector", r.connector_sa), connectCopyRow("Role", r.token_creator_role)];
+    (Array.isArray(r.gcloud) ? r.gcloud : []).forEach(function (g) { values.push(connectCopyRow("gcloud", g)); });
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role", text: "Paste the service account's email, then verify:" }),
+        role, h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL connects the project only by impersonating exactly that service account with the "
+        + "external ID its name encodes. The connection is read-only and never runs a test by itself." })]));
+  }
+  // Azure: multi-tenant app-registration consent. A Global Admin admin-consents VIGIL's app and sets the binding tag
+  // (the external ID) on its enterprise application; the reference is that application's Object ID (a GUID).
+  function connectCloudStepsAzure(r) {
+    var role = h("input#connect-cloud-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "00000000-0000-0000-0000-000000000000" });
+    var lead = [h("h3", { text: "Connect Azure tenant " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the admin-consent URL and the "
+        + "binding tag (your external ID) are unchanged." }));
+    }
+    var values = [h("div.cust-connect-copy", {}, [h("span.k", { text: "Admin consent" }),
+        cloudLink(r.admin_consent_url, "Open the admin-consent page")]),
+      connectCopyRow("Binding tag", r.binding_tag),
+      connectCopyRow("Application (client) ID", r.client_id),
+      connectCopyRow("VIGIL reads", r.graph_read)];
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role",
+          text: "Paste the Object ID of VIGIL's enterprise application in your tenant, then verify:" }),
+        role, h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL confirms the admin consent and reads back its own service principal to check the "
+        + "binding tag equals your external ID. The connection is read-only and never runs a test by itself." })]));
+  }
+  // Cloudflare: a read-only, single-account API token. The reference IS the SECRET token, pasted once — a password
+  // input, submitted through the existing connect POST, never shown back and never logged. VIGIL records only the
+  // token's public id and a sha256; it does NOT store the token.
+  function connectCloudStepsCloudflare(r) {
+    var role = h("input#connect-cloud-role", { type: "password", autocomplete: "off", spellcheck: "false" });
+    var lead = [h("h3", { text: "Connect Cloudflare account " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the token name and account scope are "
+        + "unchanged. Create the token and paste it below." }));
+    }
+    var values = [connectCopyRow("Token name", r.token_name), connectCopyRow("Account", r.account_scope),
+      kv("Permissions (read-only)", (Array.isArray(r.permission_groups) ? r.permission_groups : []).join(", "))];
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role", text: "Paste the API token once, then verify:" }), role,
+        h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL verifies the token is read-only and scoped to this one account, records only its "
+        + "public id, and does NOT store the token. The connection is read-only and never runs a test by itself." })]));
+  }
   async function connectCloudVerify(btn, r, input) {
     clearErr();
-    var arn = String(input.value || "").trim();
-    if (!arn) return err("Paste the role's ARN.");
+    var p = String(r.provider || "").toLowerCase();
+    var cfg = cloudProvider(p);
+    var ref = String(input.value || "").trim();
+    if (!ref) return err(cfg.refEmpty);
     btn.disabled = true;
     try {
-      await connectPost("/connect/cloud/verify", { provider: "aws", account_id: String(r.account_id || ""),
-        role_ref: arn }, btn.parentNode);
+      await connectPost("/connect/cloud/verify", { provider: p, account_id: String(r.account_id || ""),
+        role_ref: ref }, btn.parentNode);
     } catch (e) { btn.disabled = false; return connectFailed(e, "The account was not connected"); }
-    VUI.toast("AWS account " + r.account_id + " connected (read-only)");
+    VUI.toast(cfg.name + " account " + String(r.account_id || "") + " connected (read-only)");
     if (here() === "#/connect") render();
   }
 

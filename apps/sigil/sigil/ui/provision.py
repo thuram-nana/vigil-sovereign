@@ -4565,6 +4565,7 @@ class Provisioner:
             username=requester, org_id=requester_org_id, permission="manage_code"))
         cloud_on = config.customer_cloud_connect_enabled()
         site_check = self.target_fetcher is not None
+        from ..governor.cloud_connect import (PROVIDER_AWS, PROVIDER_AZURE, PROVIDER_CLOUDFLARE, PROVIDER_GCP)
         available = {
             "site_check": site_check,
             "site_auto_recheck": bool(site_check and self.connect_check_limiter is not None
@@ -4572,6 +4573,12 @@ class Provisioner:
             "repos": repos_ok,
             "repo_connect": bool(repos_ok and config.github_app_slug()),
             "cloud_connect": self._cloud_ready() or self._cloud_ready("cloudflare"),
+            # Per-provider readiness, so the connect screen's provider picker offers only the providers this deployment
+            # can actually finish (read-only; the server still refuses an unprovisioned provider with its own error).
+            "cloud_providers": {PROVIDER_AWS: self._cloud_ready(PROVIDER_AWS),
+                                PROVIDER_GCP: self._cloud_ready(PROVIDER_GCP),
+                                PROVIDER_AZURE: self._cloud_ready(PROVIDER_AZURE),
+                                PROVIDER_CLOUDFLARE: self._cloud_ready(PROVIDER_CLOUDFLARE)},
         }
 
         def _proj(s, o):
