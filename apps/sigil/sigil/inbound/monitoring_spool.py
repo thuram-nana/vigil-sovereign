@@ -27,6 +27,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import stat
 import time
@@ -92,7 +93,12 @@ class MonitoringSpoolWatcher:
                  future_skew_s: float = 300.0,
                  domains: "Optional[Iterable[tuple[str, str]]]" = None,
                  per_domain_limit: Optional[int] = None,
-                 off_domain_limit: int = _OFF_DOMAIN_SWEEP_CAP) -> None:
+                 off_domain_limit: int = _OFF_DOMAIN_SWEEP_CAP,
+                 heartbeat: "Optional[tuple[str, str]]" = None,
+                 append_ceiling_per_s: Optional[float] = None,
+                 pass_window_s: float = 1.0,
+                 drr_quantum: Optional[int] = None,
+                 heartbeat_reserve: Optional[int] = None) -> None:
         if not callable(secret_for):
             raise ValueError("secret_for (the per-(tenant, host) report-secret resolver) is required")
         if authority is None or not hasattr(authority, "active_at"):
@@ -116,6 +122,75 @@ class MonitoringSpoolWatcher:
             None if domains is None else {domain_slug(str(o), str(h)): (str(o), str(h)) for o, h in domains})
         self.per_domain_limit = (_PER_DOMAIN_DRAIN_CAP if per_domain_limit is None else max(0, int(per_domain_limit)))
         self.off_domain_limit = max(0, int(off_domain_limit))
+        # ------------------------------------------------------------------------------------------------
+        # AS-3c part 2 — FLOOD ISOLATION (deficit round-robin + a reserved-heartbeat APPEND-RATE budget).
+        # All DEFAULT-OFF: a strict drain that declares none of these is byte-for-byte the AS-3a strict drain
+        # (and the global drain, domains=None, is never touched by this layer). The flood-isolation layer only
+        # applies to the per-domain subtree drain, so it is refused in global mode (fail-closed, not silent).
+        if append_ceiling_per_s is not None and self._domains is None:
+            raise ValueError("the append-rate budget applies to strict-domain mode (pass domains=...)")
+        # APPEND-RATE budget: cap the spine ``_record`` writes one pass makes, keyed off the REAL append-rate
+        # ceiling — ``sigil.spine.append_rate``'s ``ceiling`` (appends/s). That module builds in NO target
+        # ("NO TARGET LIVES HERE"): the ceiling is the write rate the OPERATOR measured for their deployment
+        # with ``sigil spine append-rate``, so there is no hardcoded number here either — it is injected. The
+        # per-pass budget is that ceiling over the seconds one pass is allotted (``pass_window_s``), so the
+        # drain's own long-run append rate stays under the ceiling. Nothing dropped over budget is lost: it
+        # stays in ``incoming/<slug>/`` and drains next pass (the exactly-once reclaim of part 1 still holds).
+        self.append_budget: Optional[int] = None
+        if append_ceiling_per_s is not None:
+            if not (math.isfinite(float(append_ceiling_per_s)) and float(append_ceiling_per_s) > 0):
+                raise ValueError("append_ceiling_per_s must be a finite number > 0 (appends/s — the write "
+                                 "ceiling MEASURED with `sigil spine append-rate`)")
+            if not (math.isfinite(float(pass_window_s)) and float(pass_window_s) > 0):
+                raise ValueError("pass_window_s must be a finite number > 0 (seconds of spine-write time one "
+                                 "drain pass is budgeted for)")
+            budget = math.floor(float(append_ceiling_per_s) * float(pass_window_s))
+            if budget < 1:
+                raise ValueError("the append-rate budget (append_ceiling_per_s * pass_window_s) rounds to 0 "
+                                 "writes/pass — widen pass_window_s or raise the ceiling")
+            self.append_budget = budget
+        self.append_ceiling_per_s = (None if append_ceiling_per_s is None else float(append_ceiling_per_s))
+        self.pass_window_s = float(pass_window_s)
+        # DRR quantum: the reports one domain is served per ROUND (the interleaving granularity). Default = the
+        # per-pass per-domain cap, so with NO append budget the round-robin drains each declared domain's whole
+        # per-pass share in signed-slug order — identical to the AS-3a strict drain. A smaller quantum (set
+        # when an append budget is in force) interleaves the domains finely, so a flooded domain cannot spend
+        # the whole budget before the others are served (it gets its fair share per round and no more).
+        self.drr_quantum = self.per_domain_limit if drr_quantum is None else max(1, int(drr_quantum))
+        # The HEARTBEAT domain (strict mode only): one declared (org, host) whose reports are the liveness
+        # signal that must ALWAYS get through. It is served FIRST every round and holds a RESERVED slice of the
+        # append budget that only it may spend, so a flood of another domain can neither delay it past the DRR
+        # quantum nor consume the budget before it is served.
+        self._heartbeat_slug: Optional[str] = None
+        if heartbeat is not None:
+            if self._domains is None:
+                raise ValueError("heartbeat requires strict-domain mode (pass domains=...)")
+            ho, hh = heartbeat
+            hslug = domain_slug(str(ho), str(hh))
+            if hslug not in self._domains:
+                raise ValueError("the heartbeat (org, host) must be one of the declared domains")
+            self._heartbeat_slug = hslug
+        # RESERVED heartbeat budget: writes of the append budget only the heartbeat may spend. Default = the
+        # heartbeat's own EQUAL share of the budget (budget // #declared-domains, at least 1), reserved; the
+        # remainder is the SHARED pool any domain draws. An explicit value is clamped into [0, budget]. Only
+        # meaningful with BOTH a finite append budget and a declared heartbeat.
+        if heartbeat_reserve is None:
+            if self._heartbeat_slug is not None and self.append_budget is not None:
+                n = max(1, len(self._domains))
+                self.heartbeat_reserve = min(self.append_budget, max(1, self.append_budget // n))
+            else:
+                self.heartbeat_reserve = 0
+        else:
+            hr = max(0, int(heartbeat_reserve))
+            self.heartbeat_reserve = hr if self.append_budget is None else min(self.append_budget, hr)
+        # DRR cross-pass rotation. The round-robin starts at a persisted integer cursor into this STABLE sorted
+        # list of all declared NON-heartbeat domains (the heartbeat is always served first, so it is excluded).
+        # A STABLE base (it never shrinks as domains empty within a pass) is what makes the rotation cycle every
+        # declared domain to the front over successive passes, so a sustained tight budget starves none of them.
+        self._drr_rotation = ([] if self._domains is None
+                              else sorted(s for s in self._domains if s != self._heartbeat_slug))
+        self._drr_cursor = 0   # DRR rotation pointer across passes (deterministic; advances only under budget)
+        # ------------------------------------------------------------------------------------------------
         self._pass_seen: "Optional[set]" = None   # AS-3c: the (org, report_id) spine baseline during a recovery pass
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
@@ -347,12 +422,12 @@ class MonitoringSpoolWatcher:
     def drain(self, *, wait_s: float = 0.0) -> dict:
         """Drain the spool once. DEFAULT (``domains=None``): the unchanged GLOBAL drain — process every file in
         ``incoming/`` in one pass (byte-identical; no lock, no reclaim, no DRR). STRICT (AS-3a, ``domains``
-        declared): under the single-drainer lock, reclaim any crash-stranded ``working/`` files (AS-3c), then
-        process ONLY each declared domain's own ``incoming/<slug>/`` subtree, quarantine everything else
-        OFF-DOMAIN by location, and fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped,
-        seqs}`` and, in strict mode, also ``{off_domain, in_domain_foreign, alert_seq}`` (and ``busy`` when
-        another drainer holds the lock). ``wait_s`` bounds the wait for the lock (default 0: try once). Never
-        raises on one bad file."""
+        declared): under the single-drainer lock, reclaim any crash-stranded ``working/`` files (AS-3c part 1),
+        then DRR-drain each declared domain's own ``incoming/<slug>/`` subtree under the reserved-heartbeat
+        append-rate budget (AS-3c part 2 — flood isolation), quarantine everything else OFF-DOMAIN by location,
+        and fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped, seqs}`` and, in strict
+        mode, also ``{off_domain, in_domain_foreign, alert_seq}`` (and ``busy`` when another drainer holds the
+        lock). ``wait_s`` bounds the wait for the lock (default 0: try once). Never raises on one bad file."""
         if self._domains is None:
             return self._drain_global()
         # STRICT (AS-3c): the whole pass — reclaim + every claim — runs under an exclusive flock on
@@ -406,41 +481,39 @@ class MonitoringSpoolWatcher:
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs}
 
     def _drain_strict(self) -> dict:
-        """STRICT-DOMAIN drain (AS-3a). Process each DECLARED domain's own ``incoming/<slug>/`` subtree in
-        isolation — so a given tenant's cost depends ONLY on its own subtree, never on another tenant's volume
-        or poison (TT-A's p95 holds while TT-B is flooded). Then a BOUNDED off-domain sweep quarantines, by
-        LOCATION alone (no content read, no MAC/authority check — i.e. NO GLOBAL SCAN), anything that is not
-        under a declared domain: flat files in ``incoming/`` and whole undeclared ``incoming/<x>/`` subtrees.
-        One coalesced alert per pass fires when any strictness quarantine happened.
+        """STRICT-DOMAIN drain (AS-3a) with AS-3c part-2 FLOOD ISOLATION layered on. Process each DECLARED
+        domain's own ``incoming/<slug>/`` subtree in isolation — so a given tenant's cost depends ONLY on its
+        own subtree, never on another tenant's volume or poison (TT-A's p95 holds while TT-B is flooded). Then
+        a BOUNDED off-domain sweep quarantines, by LOCATION alone (no content read, no MAC/authority check —
+        i.e. NO GLOBAL SCAN), anything that is not under a declared domain. One coalesced alert per pass fires
+        when any strictness quarantine happened.
 
-        THREE red-pen bounds hold every pass (AS-3a follow-up): (1) the ENUMERATION itself is bounded — each
-        declared subtree and the off-domain sweep read via ``os.scandir`` and EARLY-STOP at their caps, so a
-        sustained flood is read only up to the cap, never materialized/sorted in full; (2) every subtree entry
-        that is NOT a flat ``*.json`` report (a non-``.json`` file, a nested path) is swept BY LOCATION into
-        ``rejected/`` — never scanned as input and never silently retained; (3) ``per_domain_limit`` carries a
-        BOUNDED SAFE DEFAULT, so a flooded tenant drains at most that many reports per pass and the next declared
-        tenant is always served in the SAME pass (no starvation)."""
+        THREE AS-3a red-pen bounds hold every pass: (1) the ENUMERATION itself is bounded — each declared
+        subtree and the off-domain sweep read via ``os.scandir`` and EARLY-STOP at their caps; (2) every
+        subtree entry that is NOT a flat ``*.json`` report is swept BY LOCATION into ``rejected/``; (3)
+        ``per_domain_limit`` is a BOUNDED SAFE DEFAULT, so a flooded tenant drains at most that many reports
+        per pass.
+
+        AS-3c part 2 adds FLOOD ISOLATION over the report drain: the picked reports are NOT drained front-to-
+        back per domain but handed to a DEFICIT ROUND-ROBIN scheduler (:meth:`_drr_drain`) under a reserved-
+        heartbeat APPEND-RATE budget — so one domain flooding the spool can neither spend the whole per-pass
+        spine-write budget before the other domains are served (fair share per round) nor starve the heartbeat
+        domain (its reserved slice). Everything left unserved stays in ``incoming/<slug>/`` and carries to the
+        next pass. When no append budget / heartbeat is declared the scheduler degrades to the AS-3a order."""
         declared = self._domains or {}
-        recorded, rejected, deduped = 0, 0, 0
         in_domain_foreign = 0
-        seqs: "list[int]" = []
-        # 1) DECLARED domains first (so a declared tenant is always served before any off-domain work). Each is
-        #    read from its OWN subtree via a SINGLE bounded scandir pass: up to per_domain_limit flat *.json to
-        #    drain + up to off_domain_limit OTHER entries (non-.json, nested dirs) to quarantine by location.
+        # 1) Scan each DECLARED subtree ONCE (a SINGLE bounded scandir pass) into its per-pass backlog of report
+        #    names, and sweep its in-domain-foreign entries BY LOCATION (unchanged from AS-3a). The reports are
+        #    NOT drained here — they are collected for the DRR scheduler so the append budget is shared fairly
+        #    across domains instead of being drained front-to-back (which would let a flood starve the rest).
+        picks: "dict[str, list[str]]" = {}
         for slug in sorted(declared):
             ddir = self.incoming / slug
             if not ddir.is_dir():
                 continue
             picked, foreign = self._scan_declared_subtree(ddir, self.per_domain_limit, self.off_domain_limit)
-            for name in sorted(picked):                # determinism over the BOUNDED slice (signed-path order)
-                status, seq = self._process_one(ddir / name, slug)   # AS-3c: claim into working/<slug>/ (reclaimable)
-                if status == "recorded":
-                    recorded += 1
-                    seqs.append(seq)
-                elif status == "deduped":
-                    deduped += 1
-                elif status == "rejected":
-                    rejected += 1
+            if picked:
+                picks[slug] = sorted(picked)           # determinism over the BOUNDED slice (signed-path order)
             swept_foreign = 0                          # per-subtree AGGREGATE: bound the TOTAL in-domain-foreign
             for entry in foreign:                      # sweep by off_domain_limit (not off_domain_limit PER entry).
                 if swept_foreign >= self.off_domain_limit:  # `foreign` can hold up to off_domain_limit DIRECTORY
@@ -450,9 +523,11 @@ class MonitoringSpoolWatcher:
                     self.off_domain_limit - swept_foreign)  # off_domain_limit**2 moves. A DECREMENTING budget, exactly
                 swept_foreign += got                   # like _sweep_off_domain, caps the whole subtree's foreign
                 in_domain_foreign += got               # work at off_domain_limit and keeps the reported count honest.
-        # 2) BOUNDED off-domain sweep — quarantine by location, never scanning content.
+        # 2) DRR-drain the declared backlogs under the reserved-heartbeat append budget (AS-3c part 2).
+        recorded, deduped, rejected, seqs = self._drr_drain(picks)
+        # 3) BOUNDED off-domain sweep — quarantine by location, never scanning content.
         off_domain = self._sweep_off_domain(set(declared))
-        # 3) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
+        # 4) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
         #    entry, OR a poisoned in-domain report). Bounded to one spine event per drain so a flood can never
         #    amplify onto the spine.
         alert_seq = -1
@@ -461,6 +536,95 @@ class MonitoringSpoolWatcher:
                                          in_domain_foreign=in_domain_foreign)
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs,
                 "off_domain": off_domain, "in_domain_foreign": in_domain_foreign, "alert_seq": alert_seq}
+
+    def _drr_drain(self, picks: "dict[str, list[str]]") -> "tuple[int, int, int, list[int]]":
+        """DEFICIT ROUND-ROBIN across the declared domains' per-pass backlogs, under a RESERVED-heartbeat
+        APPEND-RATE budget (AS-3c part 2 — FLOOD ISOLATION). ``picks[slug]`` is that domain's bounded, sorted
+        report names this pass (already capped at ``per_domain_limit`` by the scan — never re-read here).
+
+        FAIRNESS. Domains are served round-robin, ``drr_quantum`` reports at a time: a flooded domain gets its
+        quantum per round and NO more before the next domain is served, so it can never drain front-to-back and
+        delay another domain's reports beyond the quantum. The HEARTBEAT domain is served FIRST every round and
+        draws from a RESERVED slice of the append budget that only it may spend, so a flood can neither consume
+        the budget before the heartbeat is served nor starve it. Under a sustained tight budget the non-
+        heartbeat order ROTATES by a persisted integer cursor across passes, so no late-sorting domain starves.
+
+        APPEND-RATE BUDGET. ``append_budget`` caps the spine ``_record`` writes this pass (derived from the real
+        ``sigil spine append-rate`` ceiling; see ``__init__``). Only a ``recorded`` outcome spends budget — a
+        dedup/reject writes nothing to the spine. When the budget is spent the pass STOPS fairly: the unserved
+        reports are still in ``incoming/<slug>/`` (they were never claimed) and drain next pass, nothing lost.
+
+        Returns ``(recorded, deduped, rejected, seqs)``. DETERMINISTIC: the budget derives from injected
+        constants and the schedule from a persisted integer cursor — no wall-clock, no RNG in the fairness
+        math. FATAL-2: sovereign-only (no framework/strix import). Never raises on one bad file (``_process_one``
+        is fail-closed)."""
+        recorded = deduped = rejected = 0
+        seqs: "list[int]" = []
+        if not picks:
+            return recorded, deduped, rejected, seqs
+        hb = self._heartbeat_slug if self._heartbeat_slug in picks else None
+        # Budget: None => UNBOUNDED (the per_domain_limit scan still bounds the work). A finite budget splits
+        # into a RESERVED heartbeat pool (only the heartbeat may draw it) and a SHARED pool (any domain draws).
+        unbounded = self.append_budget is None
+        reserved = min(self.heartbeat_reserve, self.append_budget) if (hb is not None and not unbounded) else 0
+        shared = None if unbounded else (self.append_budget - reserved)
+        q = self.drr_quantum
+        # Service order: the HEARTBEAT domain FIRST every round (never rotated — its reserved share is served
+        # before a flood can touch the shared pool), then the other declared domains. Their base order is the
+        # STABLE declared signed-slug order, ROTATED by the persisted cursor (only under a budget) and filtered
+        # to the domains that actually have reports this pass — so the rotation cycles every declared domain to
+        # the front over passes even as domains empty out (no cross-pass starvation under a tight budget). With
+        # NO budget the base is unrotated, so the order is exactly the AS-3a signed-slug order.
+        rotation = self._drr_rotation
+        if rotation and not unbounded:
+            k = self._drr_cursor % len(rotation)
+            rotation = rotation[k:] + rotation[:k]
+        others = [s for s in rotation if s in picks and s != hb]
+        order = ([hb] if hb is not None else []) + others
+        pos = {s: 0 for s in order}
+        deficit = {s: 0 for s in order}
+
+        def _can_spend(slug: str) -> bool:
+            if unbounded:
+                return True
+            if slug == hb and reserved > 0:
+                return True
+            return shared > 0
+
+        served_any = True
+        while served_any:
+            served_any = False
+            for slug in order:
+                names = picks[slug]
+                if pos[slug] >= len(names):
+                    continue
+                deficit[slug] += q
+                while deficit[slug] > 0 and pos[slug] < len(names):
+                    if not _can_spend(slug):
+                        break                          # no budget left to possibly record — carry the rest over
+                    name = names[pos[slug]]
+                    pos[slug] += 1
+                    deficit[slug] -= 1
+                    served_any = True
+                    status, seq = self._process_one(self.incoming / slug / name, slug)   # claims into working/<slug>/
+                    if status == "recorded":
+                        recorded += 1
+                        seqs.append(seq)
+                        if not unbounded:              # charge the write: the heartbeat's reserved pool first
+                            if slug == hb and reserved > 0:
+                                reserved -= 1
+                            else:
+                                shared -= 1
+                    elif status == "deduped":
+                        deduped += 1
+                    elif status == "rejected":
+                        rejected += 1
+                    # "gone" (raced away) -> nothing
+            if not unbounded and reserved <= 0 and shared <= 0:
+                break                                  # the whole append budget is spent — stop the pass fairly
+        if not unbounded:
+            self._drr_cursor += 1                      # advance the rotation for the next budgeted pass
+        return recorded, deduped, rejected, seqs
 
     def _scan_declared_subtree(self, ddir: Path, json_budget: int,
                                foreign_budget: int) -> "tuple[list[str], list[os.DirEntry[str]]]":
