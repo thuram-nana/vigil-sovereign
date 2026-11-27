@@ -291,7 +291,7 @@ class CloudTrailSource:
         for idx, ev in enumerate(events):
             techniques = tech_by_index.get(idx, ())
             attack_class, confidence = self._classify(techniques, matched=idx in tech_by_index)
-            finding = self._build_finding(ev, attack_class, confidence)
+            finding = self._build_finding(ev, attack_class, confidence, idx)
             body = json.dumps(finding, sort_keys=True, separators=(",", ":")).encode("utf-8")
             hmac_header = ""
             if self._ingest_hmac_secret is not None:
@@ -340,10 +340,25 @@ class CloudTrailSource:
             return "cloudtrail-sigma", _SIGMA_CONFIDENCE
         return "cloudtrail", _BASE_CONFIDENCE
 
-    def _build_finding(self, ev: LogEvent, attack_class: str, confidence: float) -> dict:
+    @staticmethod
+    def _record_identity(ev: LogEvent, seq: int) -> str:
+        """A STABLE per-record discriminator so two DISTINCT CloudTrail records never collapse to one spool
+        record. Without it the finding body is metadata-only, so two records sharing ``eventTime`` + class
+        mint the SAME receiver ``report_id`` (content digest) and the second is silently DEDUP_NOOP'd — and
+        records with no parseable ``eventTime`` all carry ``ts=0.0``, so EVERY baseline-class record in a file
+        collapses to one. The identity is the record's unique ``eventID`` (when present) PLUS the monotonic
+        delivery index as a tiebreaker: the index alone already distinguishes two records (covering a missing
+        ``eventID`` AND the ``ts=0.0`` case), while ``eventID`` keeps the id meaningful. PURE/DETERMINISTIC:
+        a function of the record's own bytes + its position — the SAME delivery bytes yield the SAME identity,
+        so an idempotent re-delivery STILL dedups. ``_safe_token`` bounds it to a clean metadata token."""
+        return f"{seq}:{_safe_token(ev.get('eventID'))}"
+
+    def _build_finding(self, ev: LogEvent, attack_class: str, confidence: float, seq: int) -> dict:
         """One INERT, metadata-only LEAD finding in the receiver ``INGEST_FINDING_SCHEMA`` wire shape. PRIVACY
         BY CONSTRUCTION: verdict metadata only — never a record body, path, header, or raw identifier (the
-        receiver additionally redacts the free-text fields). ``ts`` is derived from the record (determinism)."""
+        receiver additionally redacts the free-text fields). ``ts`` is derived from the record (determinism).
+        ``record_id`` is the stable per-record discriminator (see :meth:`_record_identity`) the receiver folds
+        into ``report_id`` so distinct records produce distinct spool records (no dedup collapse)."""
         return {
             "schema": INGEST_FINDING_SCHEMA,
             "org_id": self.org_id,
@@ -355,6 +370,7 @@ class CloudTrailSource:
             "confidence": round(float(confidence), 3),
             "provenance_tier": _PROVENANCE_TIER,
             "certificate_sha256": "",
+            "record_id": self._record_identity(ev, seq),
         }
 
     def _anchor_wanted(self) -> bool:

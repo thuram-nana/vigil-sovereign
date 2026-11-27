@@ -162,6 +162,51 @@ def test_determinism_same_bytes_dedup_and_stable_report_id():
     assert len(list((Path(spool) / "incoming" / domain_slug(ORG, HOST)).glob("*.json"))) == 1
 
 
+# --- DEDUP-COLLAPSE regression (HIGH): a per-record discriminator keeps distinct records distinct ---
+def test_two_distinct_records_sharing_eventtime_and_class_both_spool():
+    # The LEAD body is metadata-only; two DISTINCT CloudTrail records that share eventTime + attack_class
+    # (no ruleset ⇒ both baseline 'cloudtrail') would, WITHOUT a per-record discriminator, mint the SAME
+    # content-addressed report_id and the second be silently DEDUP_NOOP'd (one record lost). The stable
+    # ``eventID`` + delivery-index discriminator must make them DISTINCT ⇒ both spool. (Remove the
+    # ``record_id`` from the finding/report and this reds: spooled drops to 1, deduped to 1.)
+    spool = tempfile.mkdtemp()
+    src = CT.CloudTrailSource(_receiver(spool), enabled=True)
+    rec_a = _record(eventID="11111111-1111-1111-1111-111111111111", eventName="GetObject",
+                    sourceIPAddress="203.0.113.1")
+    rec_b = _record(eventID="22222222-2222-2222-2222-222222222222", eventName="PutObject",
+                    sourceIPAddress="203.0.113.2")       # SAME eventTime (from _record) + same baseline class
+    res = src.ingest_text(_delivery(rec_a, rec_b))
+    assert res.normalized == 2 and res.spooled == 2 and res.deduped == 0
+    assert res.leads[0].report_id != res.leads[1].report_id
+    assert len(list((Path(spool) / "incoming" / domain_slug(ORG, HOST)).glob("*.json"))) == 2
+
+
+def test_records_with_absent_eventtime_both_land_via_index():
+    # Records with no parseable eventTime all derive ts=0.0; the index tiebreaker (covering BOTH the
+    # missing-eventID and the ts=0.0 case) must still keep two such baseline records distinct ⇒ both land.
+    spool = tempfile.mkdtemp()
+    src = CT.CloudTrailSource(_receiver(spool), enabled=True)
+    a = {"eventSource": "s3.amazonaws.com", "eventName": "GetObject"}      # no eventTime, no eventID
+    b = {"eventSource": "s3.amazonaws.com", "eventName": "ListBucket"}     # no eventTime, no eventID
+    res = src.ingest_text(_delivery(a, b))
+    assert res.normalized == 2 and res.spooled == 2 and res.deduped == 0
+    assert res.leads[0].report_id != res.leads[1].report_id
+
+
+def test_idempotent_redelivery_same_bytes_still_dedups():
+    # Determinism holds WITH the discriminator: re-delivering the SAME bytes (same eventID + same index)
+    # mints the SAME report_ids ⇒ the whole delivery dedups at-most-once (nothing double-spools).
+    spool = tempfile.mkdtemp()
+    src = CT.CloudTrailSource(_receiver(spool), enabled=True)
+    rec_a = _record(eventID="aaaaaaaa-0000-0000-0000-000000000001", eventName="GetObject")
+    rec_b = _record(eventID="bbbbbbbb-0000-0000-0000-000000000002", eventName="PutObject")
+    first = src.ingest_text(_delivery(rec_a, rec_b))
+    second = src.ingest_text(_delivery(rec_a, rec_b))
+    assert first.spooled == 2 and second.spooled == 0 and second.deduped == 2
+    assert [ld.report_id for ld in first.leads] == [ld.report_id for ld in second.leads]
+    assert len(list((Path(spool) / "incoming" / domain_slug(ORG, HOST)).glob("*.json"))) == 2
+
+
 # --- AS-9c anchors (tamper-evidence) + mutation-sensitive negative control -------------------------
 def test_anchor_minted_and_reverifies():
     store, kek, secret = _anchor_wiring()

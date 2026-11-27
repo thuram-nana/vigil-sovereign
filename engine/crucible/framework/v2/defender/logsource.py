@@ -90,9 +90,17 @@ def _clip(text: str, limit: int = _MAX_VALUE) -> str:
 
 def _coerce(value: str) -> "str | int":
     """A bare integer literal becomes an int (so numeric Sigma comparisons and int
-    equality work); everything else stays a (clipped) string. Deterministic and total."""
+    equality work); everything else stays a (clipped) string. Deterministic and total.
+
+    LEADING-ZERO PRESERVATION: a numeric string whose significant part has a leading zero and is
+    longer than one digit stays a STRING — only a genuine integer with no leading zero is coerced.
+    A 12-digit AWS account id like ``"012345678901"`` is an identifier, not an arithmetic integer:
+    coercing it to ``12345678901`` would drop the leading zero and a Sigma rule matching
+    ``recipientAccountId: "012345678901"`` would never fire. ``"0"`` (and ``"-0"``) is a genuine
+    integer and still coerces; ``"012"`` / ``"-012"`` / ``"00"`` stay strings."""
     v = value.strip()
-    if v and (v.isdigit() or (v[0] == "-" and v[1:].isdigit())):
+    digits = v[1:] if v[:1] == "-" else v
+    if digits.isdigit() and (len(digits) == 1 or digits[0] != "0"):
         try:
             return int(v)
         except ValueError:
@@ -517,10 +525,15 @@ _PARSERS = {"syslog": parse_syslog, "cef": parse_cef, "evtx_json": parse_evtx_js
 
 def _looks_like_cloudtrail(text: str) -> bool:
     """A POSITIVE CloudTrail marker, used to GATE the ``detect_format`` sniff (AS-17b): a top-level
-    ``Records`` LIST whose first item is a dict carrying ``eventSource`` or ``eventVersion`` — the
-    distinctive AWS CloudTrail delivery shape. Total; never raises. Deliberately STRICT so that every
-    JSON input that is NOT a CloudTrail delivery (incl. a non-CloudTrail ``{"Records":[...]}`` wrapper,
-    which the existing ``evtx_json`` path already accepts) sniffs byte-identically to before."""
+    ``Records`` LIST whose first item is a dict carrying ALL THREE CloudTrail-specific fields —
+    ``eventTime`` AND ``eventID`` AND an ``eventSource`` ending in ``.amazonaws.com`` (every genuine
+    CloudTrail record has them). Total; never raises. Deliberately STRICT: a top-level ``Records``
+    list is ALSO the shape of an S3 event-notification, an SNS/SQS Lambda envelope and a DynamoDB
+    stream batch — those notification envelopes use an ``eventSource`` like ``"aws:s3"`` /
+    ``"aws:sqs"`` / ``"aws:dynamodb"`` (not ``*.amazonaws.com``) and lack a top-level
+    ``eventTime``+``eventID`` pair, so they are REJECTED here and keep their byte-for-byte v1
+    ``evtx_json`` sniff. Requiring these three fields (not just ``eventSource``/``eventVersion``)
+    restores that additive-path discipline for every non-CloudTrail ``{"Records":[...]}`` envelope."""
     stripped = text.strip()
     if stripped[:1] != "{":
         return False
@@ -534,7 +547,15 @@ def _looks_like_cloudtrail(text: str) -> bool:
     if not isinstance(recs, list) or not recs:
         return False
     first = recs[0]
-    return isinstance(first, dict) and ("eventSource" in first or "eventVersion" in first)
+    if not isinstance(first, dict):
+        return False
+    source = first.get("eventSource")
+    return (
+        "eventTime" in first
+        and "eventID" in first
+        and isinstance(source, str)
+        and source.endswith(".amazonaws.com")
+    )
 
 
 def detect_format(text: str) -> str:
