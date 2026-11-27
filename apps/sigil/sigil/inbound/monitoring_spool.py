@@ -112,6 +112,7 @@ class MonitoringSpoolWatcher:
             None if domains is None else {domain_slug(str(o), str(h)): (str(o), str(h)) for o, h in domains})
         self.per_domain_limit = (_PER_DOMAIN_DRAIN_CAP if per_domain_limit is None else max(0, int(per_domain_limit)))
         self.off_domain_limit = max(0, int(off_domain_limit))
+        self._pass_seen: "Optional[set]" = None   # AS-3c: the (org, report_id) spine baseline during a recovery pass
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
         self.working = self.spool / "working"
@@ -236,7 +237,21 @@ class MonitoringSpoolWatcher:
             return ("deduped", -1)
         try:
             rep = self._verify(text)
+            if self._pass_seen is not None:
+                # AS-3c exactly-once (post-crash recovery pass ONLY): the DURABLE spine is the source of truth. A
+                # report whose (org, report_id) is already on the spine was recorded before a crash and must NOT be
+                # re-appended — the processed/<sha256> marker cannot catch this, because a crash BETWEEN _record
+                # and the marker write below leaves the event SPINED but the marker unwritten. A report with no
+                # stable report_id cannot be safely deduped during recovery, so it is refused, never double-spined.
+                rid = str(rep.get("report_id") or "")
+                if not rid:
+                    raise MonitoringSpoolError("report has no report_id — cannot dedup during crash recovery")
+                if (str(rep.get("org_id") or ""), rid) in self._pass_seen:
+                    os.replace(claimed, marker)
+                    return ("deduped", -1)
             seq = self._record(rep)
+            if self._pass_seen is not None:
+                self._pass_seen.add((str(rep.get("org_id") or ""), str(rep.get("report_id") or "")))
             os.replace(claimed, marker)
             return ("recorded", seq)
         except Exception as exc:  # noqa: BLE001 — any failure is a refusal; nothing appended
@@ -244,37 +259,73 @@ class MonitoringSpoolWatcher:
             return ("rejected", -1)
 
     # -- AS-3c crash durability: reclaim + single-drainer lock (ported from billing_spool) ----------------
-    def _reclaim_working(self) -> None:
+    def _reclaim_working(self) -> int:
         """Crash recovery — "killed drain loses nothing". ``_process_one`` CLAIMS a file into ``working/`` (atomic
         rename out of ``incoming/``) BEFORE it verifies/records; if the drainer dies between that claim and the
         archive to ``processed/``, the file is STRANDED in ``working/`` — out of ``incoming/`` so no later drain
-        sees it, and not in ``processed/`` so it was never spined. The authenticated gateway report is then
-        silently lost. At the START of each strict pass, move every stranded file back to its ``incoming/`` origin
-        so the next pass re-drains it. Re-drain is idempotent via the ``processed/<sha256>`` dedup marker, so a
-        file reclaimed AFTER it already spined is deduped, never double-recorded. Strict claims live in
-        ``working/<slug>/`` (restored to ``incoming/<slug>/``); any flat ``working/*.json`` (a global-mode claim)
-        restores to ``incoming/``. NEVER unlink on a failed move: a report that cannot be reclaimed stays in
-        ``working/`` for the next sweep rather than being destroyed (losing an authenticated detection is not
-        recoverable; re-draining one is). Skips the ``.drain.lock`` (not a ``*.json``) and producer ``.tmp-``."""
+        sees it. At the START of each strict pass, move every stranded file back to its ``incoming/`` origin so the
+        next pass re-drains it, and RETURN how many were reclaimed (the caller builds the exactly-once dedup
+        baseline only when a reclaim actually happened — see ``_load_seen_rids``). Strict claims live in
+        ``working/<slug>/`` (restored to ``incoming/<slug>/``); any flat ``working/*.json`` restores to
+        ``incoming/``. NEVER unlink on a failed move, and NEVER overwrite a file already at the destination (a fresh
+        incoming report of the same producer name): the reclaimed file is left in ``working/`` and retried once the
+        destination frees — so neither the stranded nor the fresh report is destroyed. Skips ``.drain.lock`` and
+        producer ``.tmp-``.
+
+        NOTE: re-drain is NOT made exactly-once by the ``processed/<sha256>`` marker alone — a crash BETWEEN the
+        spine ``_record`` and the marker write leaves the event SPINED but the marker unwritten, so the reclaimed
+        file would re-``_record`` and DOUBLE-SPINE. ``_load_seen_rids`` + the (org, report_id) dedup in
+        ``_process_one`` close that: the durable spine is the source of truth for exactly-once."""
+        reclaimed = 0
+
         def _restore(files: "Iterable[Path]", dest_dir: Path) -> None:
+            nonlocal reclaimed
             for f in files:
                 if f.name.startswith(".tmp-"):
                     continue
+                dest = dest_dir / f.name
+                if dest.exists():
+                    # a FRESH report of the same producer name already holds this slot. Leaving the stranded file
+                    # in working/ is NOT safe — the fresh report's own claim (into working/<slug>/<name>) would
+                    # then overwrite it. Reclaim under a content-derived name instead, so NEITHER report is
+                    # destroyed; re-drain dedups it (the content marker + the (org, report_id) spine baseline).
+                    try:
+                        with open(f, "rb") as fh:
+                            data = fh.read(_MAX_BYTES + 1)
+                    except OSError:
+                        continue   # cannot read it to rename safely — leave it rather than risk clobbering a report
+                    dest = dest_dir / (hashlib.sha256(data).hexdigest()[:16] + "." + f.name)
+                    if dest.exists():
+                        continue   # already reclaimed under its content name — accounted for
                 try:
                     dest_dir.mkdir(parents=True, exist_ok=True)
-                    os.replace(f, dest_dir / f.name)
+                    os.replace(f, dest)
+                    reclaimed += 1
                 except OSError:
-                    pass   # leave it in working/ for a later sweep — never destroy an authenticated report
+                    pass       # leave it in working/ for a later sweep — never destroy an authenticated report
         try:
             _restore(self.working.glob("*.json"), self.incoming)   # flat (global-mode) claims
             subdirs = [d for d in self.working.iterdir() if d.is_dir()]
         except OSError:
-            return
+            return reclaimed
         for sub in subdirs:                                        # per-slug (strict-mode) claims
             try:
                 _restore(sub.glob("*.json"), self.incoming / sub.name)
             except OSError:
                 pass
+        return reclaimed
+
+    def _load_seen_rids(self) -> "set[tuple[Any, Any]]":
+        """The (org_id, report_id) pairs already DURABLY on the spine — the source of truth for exactly-once across
+        a crash. Built ONLY when a reclaim recovered files this pass (the normal no-crash pass pays no scan), so a
+        report that spined before a crash but lost its marker write is DEDUPED on reclaim, not re-appended. Raises
+        on an unreadable spine so the caller can defer the pass (fail-closed) rather than re-record blind."""
+        seen: "set[tuple[Any, Any]]" = set()
+        for r in self.store.iter_records():
+            p = getattr(r, "payload", None)
+            if isinstance(p, dict) and p.get("signal") == EVENT_SIGNAL:
+                seen.add((p.get("org_id"), p.get("report_id")))
+        return seen
 
     def drain(self, *, wait_s: float = 0.0) -> dict:
         """Drain the spool once. DEFAULT (``domains=None``): the unchanged GLOBAL drain — process every file in
@@ -305,8 +356,24 @@ class MonitoringSpoolWatcher:
                     if time.monotonic() >= deadline:
                         return dict(_STRICT_BUSY, seqs=[])
                     time.sleep(0.05)
-            self._reclaim_working()      # crash recovery under the lock: re-admit working/ files a dead drainer left
-            return self._drain_strict()
+            reclaimed = self._reclaim_working()   # crash recovery under the lock: re-admit working/ files a dead drainer left
+            # Exactly-once across a crash: ONLY when a reclaim actually recovered files do we load the durable
+            # (org, report_id) spine baseline, so a report that spined before a crash but lost its marker write is
+            # DEDUPED on reclaim instead of double-spined. The common no-crash pass loads nothing (no scan cost). A
+            # spine that cannot be read to build the baseline fails CLOSED — defer this pass rather than re-record
+            # blind and risk a double-spine.
+            if reclaimed:
+                try:
+                    self._pass_seen = self._load_seen_rids()
+                except Exception:   # noqa: BLE001 — unreadable spine: do not drain this pass
+                    self._pass_seen = None
+                    return dict(_STRICT_BUSY, seqs=[])
+            else:
+                self._pass_seen = None
+            try:
+                return self._drain_strict()
+            finally:
+                self._pass_seen = None
         finally:
             try:
                 os.close(fd)
