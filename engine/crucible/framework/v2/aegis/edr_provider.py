@@ -69,6 +69,7 @@ from .boundary import BoundaryError, _check_depth, redact_text
 from .connector_secrets import (
     CONNECTOR_BROKER_ENV,
     ConnectorBrokerDisabled,
+    ConnectorBrokerRefused,
     ConnectorConsumer,
     ConnectorHandle,
     ConnectorScheme,
@@ -585,13 +586,18 @@ class EdrPollConfig:
 class EdrPollResult:
     """The accumulated outcome of one poll run — value-free w.r.t. secrets. ``pushed`` is the mapped+anchored+
     delivered detections; ``skipped`` counts benign/heartbeat events that produced no finding; ``dropped``
-    counts hostile/oversize alerts the boundary parse rejected."""
+    counts drop-class records (hostile/oversize input the boundary parse rejected, OR a reportable alert that
+    carries no coercible timestamp / sanitisable label — a data fault the map path refuses to stamp); ``errors``
+    counts genuine per-record faults that were contained so the batch continued (never a systemic fault, which
+    fails the whole job). ``dropped``/``errors`` are the batch-resilience counters: a single bad record is
+    counted here and the loop moves on — it is NEVER allowed to abort the batch."""
 
     tenant: str
     enabled: bool = True
     pushed: list[EdrPush] = field(default_factory=list)
     skipped: int = 0
     dropped: int = 0
+    errors: int = 0
 
     @property
     def push_count(self) -> int:
@@ -603,10 +609,16 @@ class EdrPollJob:
     parses each through the boundary (drop-and-count hostile input), maps genuine detections to findings (skip
     benign/heartbeat), builds the canonical record, mints anchor-1, and pushes to the receiver.
 
+    BATCH-RESILIENT: every record is processed under a per-record guard — a single malformed / un-stampable /
+    faulting alert is dropped-or-errored-and-counted and the loop CONTINUES, so one bad record never loses the
+    genuine detections ordered after it in the same batch (the map-path guarantee "a single bad alert never
+    raises into the runner's hot path" holds end-to-end, not just at the parse boundary).
+
     DEFAULT-OFF: with the provider flag off the job is INERT — :meth:`execute` fetches nothing, pushes nothing,
-    and opens no connector secret (the vendor fetch and the anchor minter are never touched). A vendor-API
-    fault PROPAGATES to the runner, which CONTAINS it (that tenant's job goes FAILED, degrading no other
-    tenant) — the poll never has to catch it itself."""
+    and opens no connector secret (the vendor fetch and the anchor minter are never touched). A SYSTEMIC fault
+    (the vendor fetch, or a down broker / ingest transport that fails every record this cycle) PROPAGATES to the
+    runner, which CONTAINS it (that tenant's job goes FAILED, degrading no other tenant) — the poll never has to
+    catch it itself."""
 
     __slots__ = ("_fetch", "_push", "_minter", "_cfg", "_enabled", "_result")
 
@@ -626,8 +638,11 @@ class EdrPollJob:
 
     def execute(self, job: Job) -> EdrPollResult:  # noqa: ARG002 — the runner passes the Job; the poll is tenant-driven
         """The ``execute`` callable :meth:`PerTenantRunner.run_job` drives. INERT when the provider flag is off
-        (no fetch, no push, no secret open). Accumulates results on :attr:`result`. May raise a vendor-API
-        fault, which the runner contains (degrading ONLY this tenant)."""
+        (no fetch, no push, no secret open). Accumulates results on :attr:`result`. Per-record RESILIENT: a
+        single malformed / un-stampable / faulting alert is dropped-or-errored-and-counted and the batch goes
+        on — one bad record NEVER aborts the others. May raise a SYSTEMIC fault (the vendor fetch, or a down
+        broker / ingest transport that fails every record), which the runner contains (degrading ONLY this
+        tenant); a single record's DATA fault is never allowed to raise into that hot path."""
         res = EdrPollResult(tenant=self._cfg.org, enabled=self._enabled)
         self._result = res
         if not self._enabled:
@@ -639,13 +654,27 @@ class EdrPollJob:
             except BoundaryError:
                 res.dropped += 1                         # hostile/oversize alert — drop-and-count, never raise
                 continue
-            finding = map_edr_alert(alert, org=self._cfg.org, host=self._cfg.host)
-            if finding is None:
-                res.skipped += 1                         # benign / heartbeat / info — NO finding, NO push
+            # Per-record processing is RESILIENT: the map / build / mint / push of ONE record is guarded so a
+            # single malformed or un-stampable alert is dropped-or-errored-and-counted and the loop CONTINUES —
+            # a single record's data fault NEVER aborts the batch (honours the map-path guarantee "a single bad
+            # alert never raises into the runner's hot path"). Only a SYSTEMIC fault (broker/custody or ingest
+            # transport down — the same for every record this cycle) propagates, failing ONLY this tenant's job.
+            try:
+                finding = map_edr_alert(alert, org=self._cfg.org, host=self._cfg.host)
+                if finding is None:
+                    res.skipped += 1                     # benign / heartbeat / info — NO finding, NO push
+                    continue
+                record = build_canonical_record(finding, instance_id=self._cfg.instance_id, epoch=epoch)
+                anchor = self._minter.mint(record, org=self._cfg.org, connector_id=self._cfg.anchor_connector_id)
+                result = self._push.push(finding)
+            except BoundaryError:
+                res.dropped += 1                         # reportable but un-stampable (no coercible ts) / un-sanitisable label — DROP, never abort
                 continue
-            record = build_canonical_record(finding, instance_id=self._cfg.instance_id, epoch=epoch)
-            anchor = self._minter.mint(record, org=self._cfg.org, connector_id=self._cfg.anchor_connector_id)
-            result = self._push.push(finding)
+            except (ConnectorBrokerRefused, OSError):
+                raise                                    # SYSTEMIC (broker/custody or ingest transport down) — fail THIS tenant's job, don't mask per-record
+            except Exception:  # noqa: BLE001 — a single record's data fault must NEVER raise into the runner's hot path
+                res.errors += 1                          # genuine per-record fault — count and CONTINUE to the next record
+                continue
             res.pushed.append(EdrPush(finding=finding, record=record, anchor=anchor, result=result))
         return res
 
