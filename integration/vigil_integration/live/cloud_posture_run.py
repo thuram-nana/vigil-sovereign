@@ -32,6 +32,7 @@ imports are stdlib + the sovereign ``cloud_live_posture`` sibling (itself framew
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from .cloud_live_posture import CloudLivePostureResult, cloud_live_verify
@@ -248,3 +249,245 @@ def render_cloud_posture_report(
     ]
     meta = ReportMeta(target=target or f"{result.provider}:{result.account}")
     return render_executive(graded, meta) if executive else render_technical(graded, meta)
+
+
+# ===========================================================================================================
+# UNIFIED cross-provider layer (Wave B.4): one entry point that assesses a customer across ALL providers and
+# produces ONE consolidated posture report. PURE GLUE over the per-provider single-provider path above — no
+# new oracle / mint / evidence / report logic; it iterates the minted per-provider sessions, runs the EXISTING
+# ``run_cloud_posture_live`` once per session, and AGGREGATES the per-provider ``CloudLivePostureResult``s as
+# DATA. FATAL-2: this layer makes NO ``framework`` import of its own (module- or function-scope) — every
+# framework touch is DEFERRED to ``run_cloud_posture_live`` / ``render_cloud_posture_report``, which import
+# function-locally. Determinism: input order is preserved end to end (no wall-clock, no RNG). Fail-closed: one
+# provider's refusal / inconclusive / crash never masks another's FACTs and never reads as CLEAN.
+# ===========================================================================================================
+
+
+@dataclass
+class MultiCloudPostureResult:
+    """The consolidated outcome of ONE unified multi-provider posture pass — pure AGGREGATION over the
+    per-provider :class:`CloudLivePostureResult`s, computed as DATA.
+
+    ``results`` keys each per-provider result by its provider token, in the INPUT order of the sessions (a
+    plain ``dict`` preserves insertion order, so iteration is deterministic). A provider-key collision (two
+    sessions for the SAME provider — e.g. two AWS accounts) is disambiguated deterministically
+    (``provider#account`` then ``provider#<index>``) so that NO per-provider result is ever dropped: a dropped
+    result could mask one tenant's FACTs or launder a refusal into silence (a MEDIUM+ fail-closed blocker).
+
+    ``notes`` carries ORCHESTRATION-level detail — in particular an isolated per-provider error (a raised run
+    that was captured so the others still assessed). It is surfaced in the report, never swallowed.
+
+    Every aggregate is DERIVED (a property / method over ``results``), never a stored count that could drift
+    from the per-provider results it summarises. The combined verdict is only ever ``FACT`` or ``INCONCLUSIVE``
+    — NEVER ``CLEAN``: each per-provider ``family_verdict`` is itself FACT|INCONCLUSIVE (a scoped partial live
+    capture cannot prove absence), so the aggregate inherits that, and a refused/inconclusive provider can
+    never be reported as a clean tenant."""
+
+    results: "dict[str, CloudLivePostureResult]" = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+
+    @property
+    def providers_assessed(self) -> "list[str]":
+        """The provider keys that produced a result, in input order (one entry per session)."""
+        return list(self.results.keys())
+
+    @property
+    def total_facts(self) -> int:
+        """Total PROVEN (oracle-confirmed) FACTs across every provider — the sum of the per-provider
+        ``n_facts``. Each is a signed FACT the oracle re-fired; nothing here is fabricated."""
+        return sum(r.n_facts for r in self.results.values())
+
+    def facts_by_provider(self) -> "dict[str, int]":
+        """Per-provider confirmed-FACT count, in input order."""
+        return {k: r.n_facts for k, r in self.results.items()}
+
+    @property
+    def providers_with_facts(self) -> "list[str]":
+        """Providers that confirmed at least one FACT."""
+        return [k for k, r in self.results.items() if r.n_facts > 0]
+
+    @property
+    def providers_refused(self) -> "list[str]":
+        """Providers whose D5 scope gate / pre-flight REFUSED — nothing was adjudicated. Surfaced distinctly;
+        NEVER folded into a clean result."""
+        return [k for k, r in self.results.items() if getattr(r, "refused", False)]
+
+    @property
+    def providers_inconclusive(self) -> "list[str]":
+        """Providers that were assessed (not a hard scope refusal) but confirmed NO FACT — a partial, empty,
+        or failed/ isolated-error capture. INCONCLUSIVE, never CLEAN: surfaced distinctly so an empty provider
+        is never read as a clean bill of health. Disjoint from both ``providers_with_facts`` (n_facts>0) and
+        ``providers_refused`` (refused=True), so the three sets partition the assessed providers."""
+        return [k for k, r in self.results.items()
+                if not getattr(r, "refused", False) and r.n_facts == 0]
+
+    def family_verdict(self) -> str:
+        """The COMBINED cross-provider verdict. ``FACT`` iff ANY provider confirmed a FACT; otherwise
+        ``INCONCLUSIVE``. NEVER ``CLEAN`` — a refused / inconclusive provider can never launder the tenant
+        into a clean verdict (a scoped live capture cannot prove absence)."""
+        return "FACT" if self.total_facts > 0 else "INCONCLUSIVE"
+
+
+def _provider_key(result: CloudLivePostureResult, index: int, existing: "dict[str, Any]") -> str:
+    """A deterministic, COLLISION-FREE key for ``result`` within ``existing`` (the results accumulated so far).
+    Prefers the bare provider token; on a collision falls back to ``provider#account`` then ``provider#<index>``
+    (``index`` is unique per session, so a key is always found). Dropping a colliding result is NOT an option —
+    that would mask a tenant's FACTs; disambiguation keeps every result addressable and counted."""
+    base = (str(getattr(result, "provider", "") or "").strip()) or f"provider-{index}"
+    if base not in existing:
+        return base
+    account = str(getattr(result, "account", "") or "").strip()
+    cand = f"{base}#{account}" if account else f"{base}#{index}"
+    if cand not in existing:
+        return cand
+    return f"{base}#{index}"  # index is unique within one run -> guaranteed unique, deterministic
+
+
+def run_multicloud_posture(
+    sessions: Any,
+    *,
+    scope_gate,
+    engagement_slug: str,
+    signers: "list[tuple[str, str]]",
+    capture_time_epoch: "int | None" = None,
+    tool_context: Any = None,
+    sink: Any = None,
+) -> MultiCloudPostureResult:
+    """Assess a customer across ALL provided per-provider minted sessions and aggregate the results.
+
+    ``sessions`` is a list of per-provider minted read-only sessions (each the duck-typed DATA shape
+    :func:`run_cloud_posture_live` consumes — ``provider`` / ``account_id`` + the provider's credential parts).
+    For EACH session, in INPUT ORDER, this runs the EXISTING :func:`run_cloud_posture_live` once (which
+    dispatches to the right collector, gates the live read through the W1.4 fail-closed chain, and mints signed
+    FACTs over the retained capture), then keys the returned :class:`CloudLivePostureResult` into a
+    :class:`MultiCloudPostureResult`.
+
+    PURE GLUE / FATAL-2: this function makes NO ``framework`` import (the per-provider call owns every framework
+    touch, function-locally). DETERMINISM: sessions are iterated in input order, the results dict preserves that
+    order, and nothing reads a wall-clock or RNG.
+
+    FAIL-CLOSED ISOLATION: a per-provider run that RAISES is captured as THAT provider's no-FACT, never-CLEAN
+    result carrying the error detail (type + message) in its notes AND in the multi-result ``notes`` — the
+    others are still assessed, the whole run never crashes, and the error is SURFACED, never silently swallowed.
+    A provider's refusal / inconclusive never suppresses another provider's FACTs (each result is counted
+    independently) and the combined verdict is never CLEAN. ``scope_gate`` / ``signers`` / ``engagement_slug`` /
+    ``capture_time_epoch`` / ``tool_context`` / ``sink`` are passed through UNCHANGED to every per-provider run."""
+    results: "dict[str, CloudLivePostureResult]" = {}
+    notes: list = []
+    for index, session_data in enumerate(sessions):
+        provider = str(getattr(session_data, "provider", "") or "")
+        account = str(getattr(session_data, "account_id", "") or "")
+        try:
+            res = run_cloud_posture_live(
+                session_data,
+                scope_gate=scope_gate,
+                engagement_slug=engagement_slug,
+                signers=signers,
+                capture_time_epoch=capture_time_epoch,
+                tool_context=tool_context,
+                sink=sink,
+            )
+        except Exception as exc:  # noqa: BLE001 — per-provider ISOLATION: one provider's crash must not
+            # crash the whole multi-run nor mask the other providers. The error is NOT swallowed silently:
+            # the exception type + message are recorded in BOTH this provider's result notes and the
+            # multi-result notes (surfaced in the report), and the result stays a no-FACT, never-CLEAN
+            # INCONCLUSIVE. A signer / scope misconfiguration therefore surfaces loudly on every provider it
+            # breaks and can never be laundered into a clean tenant verdict.
+            res = CloudLivePostureResult(provider=provider, account=account)
+            detail = f"{type(exc).__name__}: {exc}"
+            res.notes.append(
+                "multicloud: the per-provider live posture run RAISED (isolated — nothing captured, NOT a "
+                "clean negative): " + detail)
+            notes.append(f"provider {provider or '(unknown)'} [session #{index}] raised (isolated): {detail}")
+        key = _provider_key(res, index, results)
+        results[key] = res
+    return MultiCloudPostureResult(results=results, notes=notes)
+
+
+def render_multicloud_posture_report(
+    multi_result: MultiCloudPostureResult,
+    *,
+    target: "str | None" = None,
+    executive: bool = False,
+) -> str:
+    """Render ONE consolidated Markdown report across every assessed provider.
+
+    A top-line aggregate summary (providers assessed, total confirmed FACTs, per-provider FACT counts, and —
+    surfaced DISTINCTLY — any refused / inconclusive providers and the combined verdict) is followed by each
+    provider's section, rendered by the EXISTING single-provider :func:`render_cloud_posture_report` (REUSED,
+    not reinvented) so every PROVEN FACT keeps its re-runnable ``sha256:`` certificate reference. The executive
+    variant additionally surfaces the aggregate (total oracle-confirmed fact(s) across the providers) and
+    renders each section in its executive form.
+
+    EMPTY-SAFE: a provider that refused or minted nothing renders through the single-provider renderer WITHOUT
+    a PROVEN FACT line (a refusal is never dressed up as a finding), and the aggregate header never prints the
+    literal ``PROVEN FACT`` marker — so an all-refused multi-run contains no PROVEN FACT and a never-CLEAN
+    aggregate. FATAL-2: no ``framework`` import here; the reused renderer owns its framework touch
+    function-locally."""
+    assessed = multi_result.providers_assessed
+    by_provider = multi_result.facts_by_provider()
+    refused = multi_result.providers_refused
+    inconclusive = multi_result.providers_inconclusive
+    with_facts = multi_result.providers_with_facts
+    verdict = multi_result.family_verdict()
+    hdr_target = target or "multi-cloud"
+
+    lines: "list[str]" = [f"# Unified Cloud Posture Report — `{hdr_target}`", ""]
+    lines.append(
+        f"**Providers assessed:** {len(assessed)}"
+        + (f" ({', '.join(assessed)})" if assessed else "")
+    )
+    # NB: the literal string "PROVEN FACT" is deliberately NOT used in this aggregate header — it would make an
+    # all-refused (zero-FACT) report contain the marker and read as if it held a proven finding. The per-FACT
+    # "PROVEN FACT" marker comes ONLY from the per-provider sections below, for providers that truly have FACTs.
+    lines.append(f"**Total confirmed FACTs:** {multi_result.total_facts}")
+    if by_provider:
+        lines.append(
+            "**Confirmed FACTs per provider:** "
+            + ", ".join(f"{k}={v}" for k, v in by_provider.items())
+        )
+    # Refused / inconclusive providers are surfaced DISTINCTLY so an empty provider is never read as clean.
+    if refused:
+        lines.append(
+            "**Providers refused (out of scope / gated — nothing adjudicated):** "
+            f"{len(refused)} ({', '.join(refused)})"
+        )
+    if inconclusive:
+        lines.append(
+            "**Providers inconclusive (assessed, no confirmed FACT — NOT clean):** "
+            f"{len(inconclusive)} ({', '.join(inconclusive)})"
+        )
+    lines.append(f"**Combined verdict:** {verdict}")
+    lines += [
+        "",
+        ("> A provider with no confirmed FACT is INCONCLUSIVE, never CLEAN: a scoped live capture cannot prove "
+         "absence. A refused or inconclusive provider is surfaced above and is NOT a clean bill of health."),
+        "",
+    ]
+    if executive:
+        # Executive surface of the AGGREGATE: the confirmed-fact total across the assessed providers.
+        lines += [
+            (f"**{multi_result.total_facts}** oracle-confirmed fact(s) across "
+             f"{len(with_facts)} of {len(assessed)} provider(s) assessed."),
+            "",
+        ]
+
+    # Per-provider sections — rendered by the EXISTING single-provider renderer (reused, empty-safe).
+    for key, res in multi_result.results.items():
+        section_target = f"{res.provider or key}:{res.account}" if res.account else (res.provider or key)
+        lines += [
+            "---",
+            "",
+            f"## {key} — `{section_target}`",
+            "",
+            render_cloud_posture_report(res, target=section_target, executive=executive),
+            "",
+        ]
+
+    # Orchestration notes (e.g. an isolated per-provider error) are surfaced, never hidden.
+    if multi_result.notes:
+        lines += ["---", "", "### Orchestration notes", ""]
+        lines += [f"- {n}" for n in multi_result.notes]
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
