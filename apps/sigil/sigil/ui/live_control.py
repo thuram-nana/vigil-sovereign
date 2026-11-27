@@ -42,7 +42,16 @@ _IDEM_KEY_MAX = 128
 def _proven_slug(store: Any, org_id: str, host: str) -> Optional[str]:
     """The engagement slug for (org, host) IFF the org has ownership-proven ``host`` — else None (fail-closed).
     ``_customer_slug`` is a domain-separated hash the browser cannot forge, and it is resolved ONLY for a host
-    the org actually proved, so another tenant's engagement is structurally unreachable."""
+    the org actually proved, so another tenant's engagement is structurally unreachable.
+
+    EVER-proven, by design — the same tier as the other customer READS of an engagement a host once started
+    (``customer_launches``, the findings/posture reads): you can watch and advise a run you legitimately launched
+    even if the host's proof has since lapsed, exactly as you can still read that run's findings. This is
+    deliberately NOT the ``has_current_proof`` LINCHPIN, which gates STARTING a run (``launch_reserve`` /
+    ``monitoring_authority``): Live Control mints no execution authority — the activity read is a pure projection
+    and steering is advisory-only — and a FUTURE run still cannot start on a lapsed host without re-proving, so
+    the current-proof gate that governs any actual tool-fire is not weakened. Org-namespaced, so a new owner of
+    the host gets a different slug and can never reach this org's trail."""
     from ..governor.asset_ownership import AssetOwnershipRegistry
     from .target_authorization import _customer_slug
     h = str(host or "").strip()

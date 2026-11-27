@@ -1953,12 +1953,17 @@
   async function loadLiveActivity() {
     if (!live.host || live.loading) return;                   // one fetch at a time: no double-append on the cursor
     live.loading = true;
-    var gen = live.gen, d = null;
+    var gen = live.gen, d = null, status = 0;
     try {
       d = await VUI.getJSON(API + "/live/activity?host=" + encodeURIComponent(live.host) + "&since=" + live.cursor);
-    } catch (e) { d = null; }
+    } catch (e) { d = null; status = (e && e.status) || 0; }
     live.loading = false;
     if (gen !== live.gen || here() !== "#/live") return;      // navigated away / host switched: drop this answer
+    if (status === 401 || status === 404) {                   // session gone, or the screen was switched off: STOP
+      stopLivePoll();                                         // do not hammer the edge with a doomed poll forever
+      if (status === 401) { await refreshWho(); nav("#/login"); }
+      return;
+    }
     if (d && d.rows && d.rows.length) {
       live.rows = live.rows.concat(d.rows);
       if (typeof d.cursor === "number") live.cursor = d.cursor;
@@ -1970,7 +1975,11 @@
     if (live.timer || here() !== "#/live" || document.hidden || !live.host) return;
     live.timer = setTimeout(function () { live.timer = null; loadLiveActivity(); }, LIVE_POLL_MS);
   }
+  // Two ways to halt the loop. stopLivePoll ENDS it (leaving #/live, a host switch, a 401/404): it bumps `gen` so
+  // any in-flight answer is dropped. pauseLivePoll only HOLDS it (the tab hidden): it keeps `gen`, so an in-flight
+  // fetch still lands and reschedules when the tab is shown again — a pause must not strand the feed.
   function stopLivePoll() { if (live.timer) { clearTimeout(live.timer); live.timer = null; } live.gen++; }
+  function pauseLivePoll() { if (live.timer) { clearTimeout(live.timer); live.timer = null; } }
   async function sendInstruction(ta, note) {
     var t = (ta && ta.value ? ta.value : "").trim();
     if (live.sending || !live.host || !t) return;
@@ -2060,7 +2069,7 @@
   }
   function onLiveRoute() { if (here() !== "#/live") stopLivePoll(); }
   function onLiveVisibility() {
-    if (document.hidden) stopLivePoll();
+    if (document.hidden) pauseLivePoll();                     // hold, don't end: an in-flight answer still lands
     else if (here() === "#/live" && live.host) loadLiveActivity();
   }
 

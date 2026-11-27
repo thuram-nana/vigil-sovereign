@@ -8,8 +8,8 @@ its path, and — crucially — its CUSTOMER-SAFE PROJECTION. Data crosses the p
 JSONL file under the shared seam base.
 
 CUSTOMER-SAFE BY CONSTRUCTION. A row is EXACTLY ``{seq, ts, phase, status}`` where ``phase`` is one of a FIXED
-allowlist of high-level engagement STAGE names (preflight / scan / reasoning_pass / report / …) and ``status``
-one of a fixed set (started / completed / skipped / failed / halted). There is NO free text, NO target detail,
+allowlist of high-level engagement STAGE names (preflight / scan / assess_grounding / reasoning_pass / …) and
+``status`` one of a fixed set (started / completed / skipped / failed / halted). There is NO free text, NO target detail,
 NO IP, NO secret, NO internal path — the emitter writes only these fields and the reader drops anything whose
 phase/status is not on the allowlist. So a leak is impossible even if the caller passes extra data.
 
@@ -25,21 +25,23 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-# The FIXED allowlist of engagement stage names (mirrors framework.v2.phase_ledger.ORDERED_PHASES — kept here as
-# a literal so vigil_core imports no framework). A phase not on this list is DROPPED by the reader.
+# The FIXED allowlist of engagement stage names. The KEYS MUST be byte-for-byte the real engine phase constants
+# (framework.v2.phase_ledger.ORDERED_PHASES) — kept here as a literal so vigil_core imports no framework. A phase
+# whose key does NOT match is DROPPED at emit AND read, so a drift here silently hides stages from the customer
+# feed; framework/v2/tests/test_phase_ledger_activity.py::test_the_customer_allowlist_covers_every_engine_phase
+# guards this mirror against exactly that drift. The VALUES are the customer-facing labels (free of target detail).
 _PHASES: "dict[str, str]" = {
     "preflight": "Preparing the authorized assessment",
     "intel_recon": "Reviewing reachable services",
-    "transfer": "Loading the engagement scope",
+    "transfer_priors": "Loading the engagement scope",
     "scan": "Running authorized checks",
     "intel_finalize": "Correlating reconnaissance",
     "assess_findings": "Evaluating observations",
     "chaining": "Chaining attack paths",
-    "grounding": "Confirming evidence with the oracle",
+    "assess_grounding": "Confirming evidence with the oracle",
     "fusion": "Fusing corroborated findings",
-    "defender": "Deriving defensive guidance",
+    "defender_pass": "Deriving defensive guidance",
     "reasoning_pass": "Recording the assessment evidence",
-    "report": "Preparing the final dossier",
 }
 _STATUSES = frozenset({"started", "completed", "skipped", "failed", "halted"})
 _MAX_READ = 500            # bound a single read (an engagement emits ~dozens of transitions)
@@ -77,12 +79,29 @@ def emit(base: Any, slug: str, phase: str, status: str, *, ts: float) -> None:
         return
 
 
+def reset(base: Any, slug: str) -> None:
+    """Begin a FRESH activity trail for ``slug`` — the engine calls this when a new run attempt starts (preflight),
+    so the customer feed shows the CURRENT run, not the concatenation of every past run on the same host (the slug
+    is per (org, host), reused across launches). Best-effort: NEVER raises. After a reset, a reader whose cursor is
+    now beyond the (shorter) file auto-recovers to the start — see :func:`read`."""
+    p = _path(base, slug)
+    if p is None:
+        return
+    try:
+        p.unlink()
+    except OSError:
+        return
+
+
 def read(base: Any, slug: str, *, since: int = -1, limit: int = 200) -> "list[dict]":
     """The customer-safe activity rows for ``slug`` with line-index ``seq`` > ``since`` (the cursor is an
     EXCLUSIVE last-seen seq; the default -1 returns from the first row), newest at the end, each
     ``{seq, ts, phase, label, status}`` with a friendly ``label``. Pure-stdlib, bounded, fail-closed: a
     missing/corrupt/oversized file reads as ``[]``; a row whose phase/status is off the allowlist is DROPPED
-    (never shown). Called by the sovereign Live Control adapter."""
+    (never shown). Called by the sovereign Live Control adapter.
+
+    If ``since`` is at or beyond the file's current length, the trail was RESET under the cursor (a new run began
+    via :func:`reset`): the cursor is stale, so read restarts from the first row rather than returning nothing."""
     p = _path(base, slug)
     if p is None:
         return []
@@ -94,6 +113,8 @@ def read(base: Any, slug: str, *, since: int = -1, limit: int = 200) -> "list[di
     out: "list[dict]" = []
     lim = max(1, min(int(limit or 200), _MAX_READ))
     start = int(since if since is not None else -1)
+    if start >= len(lines):        # cursor beyond the file -> the trail was reset under us; resync from the start
+        start = -1
     for seq, line in enumerate(lines):
         if seq <= start or len(line) > _MAX_LINE:
             continue

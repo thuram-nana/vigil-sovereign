@@ -19,9 +19,11 @@ def test_emit_then_read_round_trips_with_labels_and_cursor():
     assert [(r["seq"], r["phase"], r["status"]) for r in rows] == [
         (0, "preflight", "started"), (1, "scan", "completed"), (2, "reasoning_pass", "completed")]
     assert rows[1]["label"] == "Running authorized checks"          # friendly, customer-facing
-    # the cursor: only rows AFTER `since` come back (incremental delivery)
+    # the cursor: only rows AFTER `since` come back (incremental delivery). The real cursor is the LAST seq (2);
+    # polling again with it returns nothing new. (A since BEYOND the file means the trail was reset under the
+    # cursor and resyncs from the start — covered by test_a_cursor_beyond_the_reset_file_resyncs_from_the_start.)
     assert [r["seq"] for r in la.read(base, "eng1", since=1)] == [2]
-    assert la.read(base, "eng1", since=3) == []
+    assert la.read(base, "eng1", since=2) == []
 
 
 def test_off_allowlist_rows_are_never_written_or_shown():
@@ -40,6 +42,34 @@ def test_off_allowlist_rows_are_never_written_or_shown():
     # the reader projects ONLY {seq, ts, phase, label, status} — the injected 'secret' key never surfaces
     assert all(set(r.keys()) == {"seq", "ts", "phase", "label", "status"} for r in rows)
     assert not any("secret" in r for r in rows)
+
+
+def test_reset_starts_a_fresh_trail_so_the_feed_is_the_current_run():
+    # the slug is per (org, host) and reused by every launch of the same host; without a reset at run start the
+    # feed would show the concatenation of every past run. reset() clears the trail so the feed is the CURRENT run.
+    base = tempfile.mkdtemp()
+    la.emit(base, "eng1", "scan", "completed", ts=1.0)             # a previous run on this host
+    la.emit(base, "eng1", "reasoning_pass", "completed", ts=2.0)
+    la.reset(base, "eng1")                                         # a new run attempt begins (preflight)
+    la.emit(base, "eng1", "preflight", "started", ts=3.0)
+    la.emit(base, "eng1", "scan", "started", ts=4.0)
+    rows = la.read(base, "eng1")
+    assert [(r["seq"], r["phase"]) for r in rows] == [(0, "preflight"), (1, "scan")]   # only the current run
+    la.reset(base, "never-emitted")                               # reset of a missing trail is a no-op, never raises
+
+
+def test_a_cursor_beyond_the_reset_file_resyncs_from_the_start():
+    # a customer polling with since=<old cursor> when the trail was reset under them (a re-assessment of the same
+    # host) must resync to the new run's rows, not silently return nothing because the cursor is now out of range.
+    base = tempfile.mkdtemp()
+    for i, ph in enumerate(("preflight", "scan", "reasoning_pass")):
+        la.emit(base, "eng1", ph, "completed", ts=float(i))
+    assert [r["seq"] for r in la.read(base, "eng1")] == [0, 1, 2]   # cursor would be 2
+    la.reset(base, "eng1")
+    la.emit(base, "eng1", "preflight", "started", ts=9.0)
+    la.emit(base, "eng1", "scan", "started", ts=10.0)
+    # polling with the STALE cursor (2) from before the reset -> the new 2 rows, not [] (seq 2 is now beyond EOF)
+    assert [(r["seq"], r["phase"]) for r in la.read(base, "eng1", since=2)] == [(0, "preflight"), (1, "scan")]
 
 
 def test_fail_closed_on_missing_corrupt_and_unsafe():

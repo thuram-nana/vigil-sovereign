@@ -21,8 +21,8 @@ from test_customer_monitoring_screen import _DOM, _fn, _need_node, _src, _var
 
 # app.js's own Live Control code, run verbatim.
 _LIVE_FUNCS = ("pageFlag", "loadingHolder", "own", "here", "liveActive", "liveRow", "renderLiveFeed",
-               "loadLiveActivity", "scheduleLivePoll", "stopLivePoll", "sendInstruction", "liveLaunchAction",
-               "liveControlBody", "viewLiveControl", "onLiveRoute", "onLiveVisibility")
+               "loadLiveActivity", "scheduleLivePoll", "stopLivePoll", "pauseLivePoll", "sendInstruction",
+               "liveLaunchAction", "liveControlBody", "viewLiveControl", "onLiveRoute", "onLiveVisibility")
 _LIVE_VARS = ("API", "STATE_LABELS", "LIVE_POLL_MS", "LIVE_ICON", "live", "LIVE_ON")
 
 # The app's world, stubbed: who is signed in, where the page is, what the server answers, and every call made. The
@@ -229,18 +229,21 @@ out.hasPause = labels.indexOf("Pause") >= 0;      // not offered -> not shown
 
 # --- the poll: single-flight, cursor-advancing, and view-gated ----------------------------------------------------
 def test_poll_is_single_flight_and_never_double_appends():
-    # two concurrent loads read the SAME cursor; without the in-flight guard both would append the same rows.
+    # Mutation-sensitive: two loads fire concurrently BOTH reading the same cursor (-1) while the server has rows
+    # to give. With the `live.loading` single-flight guard, only the first fetches and appends (2 rows); REMOVE the
+    # guard and both fetch the same cursor and both append -> 4 rows. (The naive version, which let the cursor
+    # advance to a since= with no new rows, passed either way — a false green this pins shut.)
     out = _node(r"""
 server["GET api/customer/launches"] = { data: %(running)s };
 server["GET api/customer/live/activity?host=a.example&since=-1"] = { data: %(act)s };
 show();
 await flush();
 out.afterFirst = live.rows.length;
-// fire two more loads back-to-back; the server now returns nothing new at the advanced cursor
-server["GET api/customer/live/activity?host=a.example&since=1"] = { data: { ok: true, cursor: 1, rows: [] } };
+// reset the feed so two concurrent loads BOTH read since=-1 with the two rows still on offer
+live.rows = []; live.cursor = -1;
 const a = loadLiveActivity(), b = loadLiveActivity();
 await Promise.all([a, b]); await flush();
-out.afterConcurrent = live.rows.length;
+out.afterConcurrent = live.rows.length;     // guard present -> 2; guard removed -> 4
 out.steps = document.querySelectorAll("li.live-step").length;
 """ % {"running": json.dumps(_RUNNING), "act": json.dumps(_ACTIVITY)})
     assert out["afterFirst"] == 2 and out["afterConcurrent"] == 2 and out["steps"] == 2
@@ -300,3 +303,62 @@ await flush();
 out.rows = live.rows.length;                 // dropped: we are no longer on #/live
 """ % {"running": json.dumps(_RUNNING), "act": json.dumps(_ACTIVITY)})
     assert out["rows"] == 0
+
+
+def test_poll_stops_and_redirects_to_login_on_session_expiry():
+    # The session expires mid-watch (no sign-out, no hashchange). The next activity poll 401s. It must STOP the
+    # loop (not hammer the edge with a doomed 401 forever) and send the user to sign in again — the frozen-feed +
+    # infinite-401 bug.
+    out = _node(r"""
+server["GET api/customer/launches"] = { data: %(running)s };
+server["GET api/customer/live/activity?host=a.example&since=-1"] = { data: %(act)s };
+show(); await flush();                       // initial load ok; cursor now 1; a next poll is queued
+pollQ.length = 0;                            // ignore the queued timer; we fire the next poll ourselves
+server["GET api/customer/live/activity?host=a.example&since=1"] = { status: 401, data: { error: "login required" } };
+await loadLiveActivity();
+await flush();
+out.navs = navs;                             // sent to sign in
+out.whoRefreshed = whoRefreshes;
+out.pollAfter = pollQ.length;                // NO new poll queued -> the loop stopped
+out.timer = live.timer;
+""" % {"running": json.dumps(_RUNNING), "act": json.dumps(_ACTIVITY)})
+    assert out["navs"] == ["#/login"] and out["whoRefreshed"] == 1
+    assert out["pollAfter"] == 0 and out["timer"] is None
+
+
+def test_poll_stops_without_redirect_when_the_feature_route_goes_away():
+    # A 404 on the feed (the edge switched the Live Control route off) stops the poll too, but does NOT bounce the
+    # signed-in user to login.
+    out = _node(r"""
+server["GET api/customer/launches"] = { data: %(running)s };
+server["GET api/customer/live/activity?host=a.example&since=-1"] = { data: %(act)s };
+show(); await flush();
+pollQ.length = 0;
+server["GET api/customer/live/activity?host=a.example&since=1"] = { status: 404, data: { error: "not found" } };
+await loadLiveActivity();
+await flush();
+out.navs = navs;
+out.pollAfter = pollQ.length;
+out.timer = live.timer;
+""" % {"running": json.dumps(_RUNNING), "act": json.dumps(_ACTIVITY)})
+    assert out["navs"] == [] and out["pollAfter"] == 0 and out["timer"] is None
+
+
+def test_hiding_the_tab_during_an_in_flight_fetch_does_not_freeze_the_feed():
+    # Pause mid-fetch (tab hidden), then show again: the in-flight answer must still land and the loop resume — not
+    # be dropped as stale, leaving the feed frozen forever. (A gen-bump on hide, instead of a plain pause, would
+    # strand it: the returning fetch sees a newer gen and drops itself without rescheduling.)
+    out = _node(r"""
+let release;
+const slow = new Promise(r => { release = r; });
+server["GET api/customer/launches"] = { data: %(running)s };
+server["GET api/customer/live/activity?host=a.example&since=-1"] = { wait: slow };
+show(); await flush();                       // the feed GET is in flight, awaiting `slow`
+document.hidden = true; onLiveVisibility();  // hidden mid-fetch -> PAUSE (must not bump gen / drop the answer)
+document.hidden = false; onLiveVisibility(); // shown again (fetch still in flight -> this call bails on loading)
+release(%(act)s);                            // the in-flight answer finally lands
+await flush();
+out.rows = live.rows.length;                 // 2 -> the answer landed; the feed is live, not frozen
+out.rescheduled = pollQ.length >= 1;         // the loop resumed
+""" % {"running": json.dumps(_RUNNING), "act": json.dumps(_ACTIVITY)})
+    assert out["rows"] == 2 and out["rescheduled"] is True

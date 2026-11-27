@@ -330,8 +330,16 @@ class PhaseLedger:
             return
         try:
             from vigil_core.live_activity import emit as _emit_activity
+            from vigil_core.live_activity import reset as _reset_activity
             from vigil_core.seam_base import resolve_seam_base
-            _emit_activity(resolve_seam_base(), self._slug, phase, status, ts=time.time())
+            base = resolve_seam_base()
+            # A customer slug is reused by every launch of the same (org, host); the activity seam is per slug. So
+            # when a NEW run attempt begins (preflight started — never a resumable phase, so this fires on a fresh
+            # launch AND on a --resume re-attempt), clear the trail first, so the feed shows the CURRENT run, not
+            # the concatenation of every past run on this host. A stale customer cursor auto-recovers (see read()).
+            if phase == P_PREFLIGHT and status == "started":
+                _reset_activity(base, self._slug)
+            _emit_activity(base, self._slug, phase, status, ts=time.time())
         except Exception:  # noqa: BLE001 — a customer-activity mirror must never perturb the engine
             return
 
