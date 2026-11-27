@@ -257,6 +257,7 @@ _REVIEWED_DYNAMIC = frozenset({
     "spine/store.py",                 # the store itself
     "ui/authn_audit.py",              # source=_AUTHN_SOURCE ("authn")
     "ui/provision.py",                # C1b retest: kind=RETEST_KIND ("finding_retest"), source=RETEST_SOURCE ("provision")
+    "tenant_knowledge/store.py",      # Consumer Knowledge: kind="document", source=_SOURCE ("customer_knowledge") — never governor
 })
 
 
