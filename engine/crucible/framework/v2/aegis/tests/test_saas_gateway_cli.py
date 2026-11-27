@@ -93,7 +93,8 @@ def test_loader_refuses_oversized(tmp_path):
 def test_flags_wire_tenant_host_spool_and_file_secret(tmp_path, captured):
     sf = _secret_file(tmp_path)
     with pytest.raises(_Stop):
-        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--saas-tenant", "org_a",
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--secret", "a-real-deployment-secret-key",
+                "--saas-tenant", "org_a",
                 "--saas-host", "app.example.com", "--monitoring-spool", str(tmp_path / "spool"),
                 "--monitoring-secret-file", str(sf)])
     assert captured["saas_tenant"] == "org_a"
@@ -104,7 +105,7 @@ def test_flags_wire_tenant_host_spool_and_file_secret(tmp_path, captured):
 
 def test_default_is_legacy_gateway(captured):
     with pytest.raises(_Stop):
-        C.main(["gateway", "--upstream", "http://127.0.0.1:9"])
+        C.main(["gateway", "--upstream", "http://127.0.0.1:9", "--secret", "a-real-deployment-secret-key"])
     for k in ("saas_tenant", "saas_host", "monitoring_spool", "monitoring_secret"):
         assert captured.get(k) is None
 
