@@ -31,17 +31,20 @@ Supported subset (documented and tested):
 Sigma v2 (AS-17a). Four additions, each strictly additive — the DEFAULT evaluation path is
 BYTE-IDENTICAL to v1, so a rule that uses none of them matches exactly as before:
 
-  * **Wildcard fix.** A plain (no-modifier) field value with an UNESCAPED ``*`` (zero-or-more
-    chars) or ``?`` (exactly one char) is now a Sigma glob, not a literal. ``\\*`` ``\\?`` ``\\\\``
-    are the literal escapes. Previously ``Image: '*cmd.exe'`` never fired (``a == '*cmd.exe'``);
-    now it matches per the standard. Matching is a hand-rolled LINEAR two-pointer glob — no regex
-    is compiled from rule text (DoS-free) — and stays case-insensitive and fail-closed. A value
-    containing none of ``* ? \\`` takes the identical fast ``a == e`` path as v1.
+  * **Wildcard fix.** A plain (no-modifier) field value with a LIVE (unescaped) ``*`` (zero-or-more
+    chars) or ``?`` (exactly one char) is now a Sigma glob, not a literal (``\\*`` ``\\?`` are
+    literals inside such a pattern). Previously ``Image: '*cmd.exe'`` never fired (``a ==
+    '*cmd.exe'``); now it matches per the standard. Matching is a hand-rolled LINEAR two-pointer
+    glob — no regex is compiled from rule text (DoS-free) — and stays case-insensitive and
+    fail-closed. A value with NO live wildcard takes the identical fast ``a == e`` path as v1,
+    backslash values (UNC / device / named-pipe paths) included.
   * **author / licence / references.** Parsed from the rule and surfaced (``describe()`` /
     ``provenance``), so a distributed rule can carry its required attribution (plan §4.7).
   * **field maps.** An OPT-IN ``field_map`` (canonical field -> event-field aliases) lets a rule
     written against standard Sigma field names match a differently-named normalized event field.
-    A direct field hit always wins; the map is a pure fallback. Default ``None`` -> no mapping.
+    A direct field hit always wins; the map is a pure fallback. It is NOT applied to selections used
+    under a ``not`` in the condition (exclusion/filter), so enabling a map can only ADD a match at
+    the rule level, never silently suppress one. Default ``None`` -> no mapping.
   * **logsource + not_deployable.** ``logsource_channels()`` resolves a rule's
     ``logsource`` to the event channel(s) it applies to; an OPT-IN ``match_logsource`` narrows
     evaluation to those channels (an unresolvable logsource never narrows). ``deployable`` /
@@ -402,19 +405,40 @@ def _glob_match(text: str, toks: tuple[tuple[int, str], ...]) -> bool:
     return pi == m
 
 
+def _has_live_wildcard(s: str) -> bool:
+    """Does ``s`` contain a LIVE (unescaped) Sigma wildcard ``*`` or ``?``? Skips ``\\*`` ``\\?``
+    ``\\\\`` escape pairs (a backslash before another char is a plain literal backslash, advanced
+    singly — matching ``_glob_tokens``). This is the ONLY trigger for the glob path: a value with
+    no live wildcard — INCLUDING any value with backslashes such as a UNC path ``\\\\server\\share``
+    or ``\\\\.\\PhysicalDrive0`` — takes the exact ``a == e`` fast path, so v1 byte-identity holds
+    for every backslash value (the glob-tokeniser would otherwise collapse ``\\\\``->``\\`` and
+    silently drop the match)."""
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n and s[i + 1] in "*?\\":
+            i += 2
+            continue
+        if c == "*" or c == "?":
+            return True
+        i += 1
+    return False
+
+
 def _scalar_match(actual: object, expected: object, modifier: str) -> bool:
     """Match one event field value against one expected value under a single string modifier.
     Case-insensitive (Sigma backend default). Unknown modifier -> _Unsupported (fail-closed).
 
-    AS-17a: the plain (no-modifier) branch treats an UNESCAPED ``*``/``?`` as a Sigma glob (and
-    ``\\*`` ``\\?`` ``\\\\`` as the matching literals). A value containing none of ``* ? \\`` takes
-    the identical fast ``a == e`` path as v1 (byte-identical for the whole v1 corpus)."""
+    AS-17a: the plain (no-modifier) branch treats a LIVE (unescaped) ``*``/``?`` as a Sigma glob
+    (``\\*`` ``\\?`` are literals inside such a pattern). A value with NO live wildcard takes the
+    identical fast ``a == e`` path as v1 — byte-identical for the whole v1 corpus, backslash values
+    (UNC / device / named-pipe paths) included. A value whose ONLY ``*``/``?`` is escaped therefore
+    stays an exact literal match on its raw form (v1 behaviour), which is the higher-priority
+    guarantee over re-interpreting a lone escaped ``\\*`` as ``*``."""
     a = _as_str(actual).lower()
     e = _as_str(expected).lower()
     if modifier == "" or modifier == "eq":
-        if ("*" in e) or ("?" in e) or ("\\" in e):
-            # glob tokens unescape '\*' '\?' '\\' and honour live '*'/'?'; an all-literal token
-            # list reduces to exact equality on the UNESCAPED value.
+        if _has_live_wildcard(e):
             return _glob_match(a, _glob_tokens(e))
         return a == e
     if modifier == "contains":
@@ -431,9 +455,11 @@ _MISSING = object()
 
 def _resolve_field(event: LogEvent, fname: str, field_map: "FieldMap | None") -> object:
     """Return the event's value for ``fname``, or (AS-17a field maps) the first present alias
-    from ``field_map[fname]``, or the ``_MISSING`` sentinel. A DIRECT field always wins, so the
-    map is a pure fallback that can only ADD a match, never remove the v1 one. A sentinel (not a
-    truthiness test) is used so a falsy-but-present value (``0``, ``""``) still counts as present."""
+    from ``field_map[fname]``, or the ``_MISSING`` sentinel. A DIRECT field always wins, so at the
+    SELECTION level the map is a pure fallback that can only make a selection match MORE. (The
+    rule-level 'never suppress' guarantee is enforced in :func:`rule_matches_event`, which withholds
+    the map from negated/exclusion selections.) A sentinel (not a truthiness test) is used so a
+    falsy-but-present value (``0``, ``""``) still counts as present."""
     if fname in event.fields:
         return event.fields[fname]
     if field_map:
@@ -598,6 +624,103 @@ def _eval_condition(tokens: list[str], selresults: dict[str, bool], names: list[
     return result
 
 
+def _negated_selection_names(condition: str, names: list[str]) -> set[str]:
+    """Return the selection names that appear at ODD ``not``-depth in ``condition`` (a true
+    negation, e.g. ``filter`` in ``selection and not filter`` or every ``filter_*`` in
+    ``not 1 of filter_*``). Field-map alias resolution MUST be withheld from these: aliasing an
+    exclusion selection can make it fire where v1 could not, flipping ``not filter`` True->False and
+    SILENTLY SUPPRESSING the rule. Walks the same grammar as :func:`_eval_condition`, tracking
+    negation parity. Total/fail-safe: on any parse oddity it returns ALL names (disable aliasing
+    entirely rather than risk a silent suppression)."""
+    tokens = _tokenize_condition(condition)
+    out: set[str] = set()
+    pos = 0
+
+    def peek() -> "str | None":
+        return tokens[pos] if pos < len(tokens) else None
+
+    def advance() -> str:
+        nonlocal pos
+        tok = tokens[pos]
+        pos += 1
+        return tok
+
+    def mark(target: str, neg: bool) -> None:
+        if not neg:
+            return
+        if target == "them":
+            out.update(names)
+        elif target.endswith("*"):
+            prefix = target[:-1]
+            out.update(n for n in names if n.startswith(prefix))
+        elif target in names:
+            out.add(target)
+
+    def aggregate(neg: bool) -> None:
+        if peek() != "of":
+            raise _Unsupported("malformed aggregation")
+        advance()
+        target = peek()
+        if target is None:
+            raise _Unsupported("malformed aggregation target")
+        advance()
+        mark(target, neg)
+
+    def atom(neg: bool) -> None:
+        tok = peek()
+        if tok is None:
+            raise _Unsupported("unexpected end of condition")
+        if tok == "(":
+            advance()
+            or_expr(neg)
+            if peek() != ")":
+                raise _Unsupported("unbalanced parentheses")
+            advance()
+            return
+        low = tok.lower()
+        if low in ("1", "all") and pos + 1 < len(tokens) and tokens[pos + 1] == "of":
+            advance()
+            aggregate(neg)
+            return
+        if low in ("and", "or", "not", "of", ")", "them"):
+            raise _Unsupported(f"unexpected token {tok!r}")
+        advance()
+        if neg and tok in names:
+            out.add(tok)
+
+    def not_expr(neg: bool) -> None:
+        tok = peek()
+        if tok is not None and tok.lower() == "not":
+            advance()
+            not_expr(not neg)
+            return
+        atom(neg)
+
+    def and_expr(neg: bool) -> None:
+        not_expr(neg)
+        tok = peek()
+        while tok is not None and tok.lower() == "and":
+            advance()
+            not_expr(neg)
+            tok = peek()
+
+    def or_expr(neg: bool) -> None:
+        and_expr(neg)
+        tok = peek()
+        while tok is not None and tok.lower() == "or":
+            advance()
+            and_expr(neg)
+            tok = peek()
+
+    try:
+        or_expr(False)
+        if pos != len(tokens):
+            raise _Unsupported("trailing tokens in condition")
+    except _Unsupported:
+        return set(names)          # fail-safe: alias nothing, never risk a silent suppression
+    return out
+
+
 def rule_matches_event(rule: SigmaRule, event: LogEvent, *,
                        field_map: "FieldMap | None" = None) -> bool:
     """Does this Sigma rule fire on this event? FAIL-CLOSED: a statically-unsupported rule, an
@@ -605,12 +728,19 @@ def rule_matches_event(rule: SigmaRule, event: LogEvent, *,
     yield ``False`` — never a fabricated detection. Pure and deterministic.
 
     ``field_map`` (AS-17a, default ``None``) is an optional canonical-field -> event-field alias
-    map; with it ``None`` the match path is byte-identical to v1."""
+    map; with it ``None`` the match path is byte-identical to v1. When a map IS supplied, alias
+    resolution is applied only to NON-negated selections — a selection used under a ``not`` in the
+    condition (an exclusion/filter) resolves with direct fields only, so enabling a field map can
+    only ever ADD a match at the rule level, never silently suppress one via a filter."""
     if not rule.supported:
         return False
     try:
-        selresults = {name: _selection_matches(event, rule.detection[name], field_map)
-                      for name in rule.selection_names}
+        negated = _negated_selection_names(rule.condition, rule.selection_names) if field_map else frozenset()
+        selresults = {
+            name: _selection_matches(event, rule.detection[name],
+                                     None if name in negated else field_map)
+            for name in rule.selection_names
+        }
         tokens = _tokenize_condition(rule.condition)
         return _eval_condition(tokens, selresults, rule.selection_names)
     except _Unsupported:

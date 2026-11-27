@@ -14,6 +14,8 @@ The load-bearing guarantees these tests pin:
 
 from __future__ import annotations
 
+import time
+
 from framework.v2.defender.logsource import LogEvent
 from framework.v2.defender.sigma import (
     default_field_map,
@@ -32,6 +34,11 @@ def _ev(channel: str = "webproxy", **fields) -> LogEvent:
 def _rule(detection_body: str, *, extra: str = "") -> object:
     return parse_sigma_rule(
         f"title: t\nid: r\n{extra}detection:\n{detection_body}\n  condition: sel")
+
+
+def _yaml_scalar(s: str) -> str:
+    """Wrap ``s`` as a YAML single-quoted scalar (backslashes stay literal; only ``'`` is doubled)."""
+    return "'" + s.replace("'", "''") + "'"
 
 
 # ===========================================================================
@@ -67,11 +74,19 @@ def test_middle_star_and_multi_star() -> None:
     assert rule_matches_event(rule, _ev(path="dashboard_admin")) is False
 
 
-def test_escaped_star_is_a_literal_asterisk() -> None:
-    # real newline between keys; '\\*' in the Python string -> YAML single-quoted value 'a\*b'
-    rule = _rule("  sel:\n    token: 'a\\*b'")
-    assert rule_matches_event(rule, _ev(token="a*b")) is True
-    assert rule_matches_event(rule, _ev(token="axb")) is False   # NOT a wildcard — escaped
+def test_escaped_star_is_literal_within_a_globbing_value() -> None:
+    # '\*' is a literal '*' when the value ALSO globs (trailing live '*' makes _glob_tokens run).
+    rule = _rule("  sel:\n    token: 'a\\*b*'")      # YAML value a\*b*  -> lit a, lit '*', lit b, STAR
+    assert rule_matches_event(rule, _ev(token="a*bZZZ")) is True
+    assert rule_matches_event(rule, _ev(token="axbZZZ")) is False   # '\*' is a literal '*', not a wildcard
+
+
+def test_escaped_only_star_takes_v1_exact_match() -> None:
+    # MED-[0]: a value whose ONLY '*' is escaped has NO live wildcard -> v1 exact match on the RAW
+    # value (byte-identity for non-wildcard values is the higher-priority guarantee).
+    rule = _rule("  sel:\n    token: 'a\\*b'")       # YAML value a\*b  (backslash, star, b)
+    assert rule_matches_event(rule, _ev(token="a\\*b")) is True   # matches the raw literal, as v1 did
+    assert rule_matches_event(rule, _ev(token="a*b")) is False    # NOT reinterpreted as '*'
 
 
 def test_wildcard_fails_closed_when_field_absent() -> None:
@@ -79,11 +94,16 @@ def test_wildcard_fails_closed_when_field_absent() -> None:
     assert rule_matches_event(rule, _ev(OtherField="cmd.exe")) is False
 
 
-def test_adversarial_wildcard_pattern_is_linear_no_catastrophe() -> None:
-    # A classic regex-catastrophe shape ('a*a*a*...b') against a long non-matching text. The
-    # hand-rolled two-pointer glob is linear, so this returns promptly with a correct False.
-    rule = _rule("  sel:\n    blob: '" + "a*" * 30 + "b'")
-    assert rule_matches_event(rule, _ev(blob="a" * 300 + "c")) is False
+def test_adversarial_wildcard_pattern_is_bounded_no_catastrophe() -> None:
+    # A classic regex-catastrophe shape ('a*a*a*...b', 40 stars) against a long (2000-char)
+    # non-matching text. The hand-rolled two-pointer glob is bounded-polynomial, so this returns
+    # promptly — asserted with an explicit (generous) wall-clock bound, not just the runner timeout.
+    rule = _rule("  sel:\n    blob: '" + "a*" * 40 + "b'")
+    big = _ev(blob="a" * 2000 + "c")
+    start = time.perf_counter()
+    assert rule_matches_event(rule, big) is False
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"glob took {elapsed:.3f}s — possible catastrophic backtracking"
     assert rule_matches_event(rule, _ev(blob="a" * 50 + "b")) is True
 
 
@@ -196,6 +216,52 @@ def test_field_map_none_is_byte_identical() -> None:
     assert rule_matches_event(rule, ev) is False        # default: no mapping, missing field
 
 
+def test_field_map_not_applied_to_negated_filter_selection() -> None:
+    """MED-[1] regression: a field_map must NOT be applied to a selection used under ``not`` (an
+    exclusion), or aliasing it could make the filter fire where v1 could not and SILENTLY suppress
+    the detection. `selection and not filter`, filter on `Image`, event delivering the trusted
+    process path under the ALIAS `exe` — the rule must STILL fire with the map enabled."""
+    rule = parse_sigma_rule("""
+title: enc without a trusted image
+id: R-NEG
+author: A
+license: MIT
+detection:
+  selection:
+    CommandLine|contains: '-enc'
+  filter:
+    Image|contains: trusted
+  condition: selection and not filter
+""")
+    ev = _ev(CommandLine="powershell -enc AAAA", exe="C:/trusted/app.exe")
+    assert rule_matches_event(rule, ev) is True                                 # v1: Image absent -> fires
+    # buggy behaviour would alias filter.Image -> exe -> filter True -> suppressed; fixed: NOT suppressed.
+    assert rule_matches_event(rule, ev, field_map=default_field_map()) is True
+    # control: the POSITIVE selection still benefits from aliasing (CommandLine via cmdline).
+    ev2 = _ev(cmdline="powershell -enc BBBB")
+    assert rule_matches_event(rule, ev2) is False                               # v1: no CommandLine
+    assert rule_matches_event(rule, ev2, field_map=default_field_map()) is True  # aliased positive ADD
+
+
+def test_field_map_withheld_from_aggregated_negation() -> None:
+    """The negation guard also covers ``not 1 of filter_*`` aggregations: an aliased filter under a
+    negated aggregation must not suppress the rule either."""
+    rule = parse_sigma_rule("""
+title: agg negation
+id: R-NEGAGG
+author: A
+license: MIT
+detection:
+  selection:
+    CommandLine|contains: '-enc'
+  filter_img:
+    Image|contains: trusted
+  condition: selection and not 1 of filter_*
+""")
+    ev = _ev(CommandLine="powershell -enc AAAA", exe="C:/trusted/app.exe")
+    assert rule_matches_event(rule, ev, field_map=default_field_map()) is True   # not suppressed
+
+
 # ===========================================================================
 # 5. logsource resolution + opt-in channel narrowing
 # ===========================================================================
@@ -270,3 +336,39 @@ def test_v1_default_path_is_byte_identical() -> None:
     assert res.matches[0].event_index == 1
     assert rule_matches_event(rule, _ev(cs_uri_query="id=1' OR 1=1 -- ")) is True
     assert rule_matches_event(rule, _ev(cs_uri_query="id=1")) is False
+
+
+def test_backslash_values_take_v1_exact_match_no_glob_regression() -> None:
+    """MED-[0] regression: a plain value with backslashes but NO live wildcard must exact-match as
+    v1 did. The glob tokeniser would otherwise collapse '\\\\'->'\\' and silently DROP the match —
+    and the CEF normaliser (defender/logsource.py) genuinely emits double-backslash event fields,
+    so this is real detection data in this pipeline."""
+    for val in [r"\\", r"\\.\PhysicalDrive0", r"\\server\share", r"\\.\pipe\lsass",
+                r"C:\Windows\System32\cmd.exe"]:
+        rule = parse_sigma_rule(
+            "title: t\nid: r\ndetection:\n  sel:\n    DevicePath: " + _yaml_scalar(val) + "\n  condition: sel")
+        assert rule is not None
+        assert rule_matches_event(rule, _ev(DevicePath=val)) is True, val      # exact match preserved
+        assert rule_matches_event(rule, _ev(DevicePath=val + "X")) is False, val  # no accidental glob
+
+
+def test_plain_equality_is_v1_byte_identical_over_corpus() -> None:
+    """Differential against the v1 plain-equality SPEC (``a.lower() == e.lower()`` — exactly what
+    v1's _scalar_match did on the no-modifier branch) across a corpus of values with NO live
+    wildcard, INCLUDING backslash / escaped-metachar values (the [0] regression class)."""
+    corpus_values = [
+        "cmd.exe", "CMD.EXE", "4688", "", "a b c", "mimikatz",
+        r"\\", r"\\.\PhysicalDrive0", r"\\server\share", r"C:\Windows\System32\cmd.exe",
+        "a\\*b", "a\\?b", "weird\\value",   # escaped-only or lone backslashes -> no live wildcard
+    ]
+    actuals = [
+        "cmd.exe", "CMD.exe", "4688", "", "a b c", r"\\", r"\\.\PhysicalDrive0",
+        "a\\*b", "a*b", "nomatch", r"C:\Windows\System32\cmd.exe", "weird\\value",
+    ]
+    for e in corpus_values:
+        rule = parse_sigma_rule(
+            "title: t\nid: r\ndetection:\n  sel:\n    F: " + _yaml_scalar(e) + "\n  condition: sel")
+        assert rule is not None, e
+        for a in actuals:
+            expected = (str(a).lower() == str(e).lower())        # the v1 plain-equality semantic
+            assert rule_matches_event(rule, _ev(F=a)) is expected, (e, a, expected)
