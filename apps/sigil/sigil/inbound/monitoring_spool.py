@@ -17,9 +17,28 @@ is labelled honestly: these are GATEWAY-REPORTED detections (authenticated to th
 FACTs — the sovereign plane does not re-run engine oracles (FATAL-2). Each confirmed report keeps its certificate
 SHA-256 so it can be matched against the offline-re-runnable certificate the gateway retains.
 
-IDEMPOTENT: content-addressed ``processed/<sha256>`` dedup + read-time ``report_id`` dedup. FAIL-CLOSED: any
-failure moves the file to ``rejected/`` with a ``.reason`` sidecar and appends nothing; ``drain()`` never raises on
-one bad file. SOVEREIGN-only (``assert_no_offense``).
+IDEMPOTENT: content-addressed ``processed/<sha256>`` dedup + read-time ``report_id`` dedup. In STRICT mode the
+drain-boundary hardening adds (AS-3c part 3):
+
+  * ACCEPT-SET admission control — a report is drained for a declared domain only if its OWN authenticated
+    ``(org_id, host)`` slugs to the ``incoming/<slug>/`` subtree it was filed under (``domain_slug`` equality,
+    checked AFTER the MAC so the identity is trusted). A correctly-sealed report of another tenant mis-filed into
+    this subtree passes the MAC but is REJECTED/quarantined here — the MAC proves *who produced it*, the accept-set
+    proves it belongs to *the domain whose drain path drained it*. This binds the AS-3a location isolation to
+    authenticated identity, so a subtree can never be stuffed with another tenant's (still-valid) reports.
+
+  * DEDUP at-most-once — a bounded, file-persisted ``(org_id, report_id)`` dedup window (``<spool>/.dedup-window``,
+    read + superseded under the SAME single-drainer flock as the DRR cursor, so it survives a drainer restart).
+    A report re-delivered with a FRESH envelope (same ``report_id``, different bytes -> a different content hash the
+    ``processed/<sha256>`` marker cannot catch) is spined AT MOST ONCE. Append-only/supersede: the spine is never
+    mutated and the window file is replaced atomically, never edited. A missing window is a fresh spool; a CORRUPT
+    window is UNTRUSTED and a window-miss then falls back to the authoritative durable spine baseline — fail-closed,
+    never a double-drain.
+
+FAIL-CLOSED: an un-authorized (out-of-accept-set) record, a malformed record, a corrupt dedup window, or a lost
+flock all fail toward NOT draining / quarantine, never a silent drop or double-drain; any failure moves the file to
+``rejected/`` with a ``.reason`` sidecar and appends nothing; ``drain()`` never raises on one bad file. DETERMINISTIC:
+no wall-clock in the accept-set or dedup math. SOVEREIGN-only (``assert_no_offense``; FATAL-2 — no framework/strix).
 """
 from __future__ import annotations
 
@@ -27,6 +46,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import stat
 import time
@@ -64,6 +84,25 @@ _RECLAIM_PREFIX = "reclaimed."     # AS-3c: a crash-recovered file's name carrie
 #                                    it against the DURABLE spine. The dedup follows the FILE across passes (not the
 #                                    reclaim pass), closing the cross-pass double-spine — a report carried beyond
 #                                    per_domain_limit, or past a deferred/unreadable-spine pass, is still deduped.
+_DEDUP_FILE = ".dedup-window"      # AS-3c part 3: the bounded, file-persisted (org_id, report_id) dedup window —
+#                                    a REGULAR file in the spool root (never a *.json), read + superseded under the
+#                                    single-drainer flock (like .drr-cursor), so at-most-once survives a drainer
+#                                    restart. Hostile-file hardened on read (O_NOFOLLOW/O_NONBLOCK + S_ISREG).
+_DEDUP_WINDOW_CAP = 8192           # AS-3c part 3: the BOUNDED SAFE DEFAULT dedup horizon — the most-recent N recorded
+#                                    (org, report_id) keys retained. Bounded so a huge spine never bloats the window;
+#                                    a re-delivery within this horizon is deduped (the common retry case), and a crash
+#                                    re-delivery is covered REGARDLESS by the reclaim spine backstop (part 1).
+_DEDUP_MAX_BYTES = 4 * 1024 * 1024  # AS-3c part 3: cap the dedup-window file read (defense-in-depth — the spool root
+#                                    is 0700/operator-owned). A file at/over the cap is read only up to it and marked
+#                                    UNTRUSTED, so a planted/overgrown file can neither wedge memory nor be trusted.
+
+
+class _DedupUnresolved(Exception):
+    """Internal, never surfaced: the bounded dedup window is UNTRUSTED (corrupt/hostile) AND the authoritative
+    durable spine baseline could not be loaded, so at-most-once cannot be resolved this pass. The caller DEFERS the
+    claimed file (leaves it in ``working/<slug>/`` to be reclaimed + retried next pass) rather than risk a
+    double-drain — fail-closed. Distinct from ``MonitoringSpoolError`` so the broad quarantine handler never eats
+    it (an unresolved dedup must DEFER, not quarantine an authentic report)."""
 
 
 def domain_slug(org_id: str, host: str) -> str:
@@ -92,7 +131,13 @@ class MonitoringSpoolWatcher:
                  future_skew_s: float = 300.0,
                  domains: "Optional[Iterable[tuple[str, str]]]" = None,
                  per_domain_limit: Optional[int] = None,
-                 off_domain_limit: int = _OFF_DOMAIN_SWEEP_CAP) -> None:
+                 off_domain_limit: int = _OFF_DOMAIN_SWEEP_CAP,
+                 heartbeat: "Optional[tuple[str, str]]" = None,
+                 append_ceiling_per_s: Optional[float] = None,
+                 pass_window_s: float = 1.0,
+                 drr_quantum: Optional[int] = None,
+                 heartbeat_reserve: Optional[int] = None,
+                 dedup_window: Optional[int] = None) -> None:
         if not callable(secret_for):
             raise ValueError("secret_for (the per-(tenant, host) report-secret resolver) is required")
         if authority is None or not hasattr(authority, "active_at"):
@@ -116,7 +161,120 @@ class MonitoringSpoolWatcher:
             None if domains is None else {domain_slug(str(o), str(h)): (str(o), str(h)) for o, h in domains})
         self.per_domain_limit = (_PER_DOMAIN_DRAIN_CAP if per_domain_limit is None else max(0, int(per_domain_limit)))
         self.off_domain_limit = max(0, int(off_domain_limit))
+        # ------------------------------------------------------------------------------------------------
+        # AS-3c part 2 — FLOOD ISOLATION (deficit round-robin + a reserved-heartbeat APPEND-RATE budget).
+        # All DEFAULT-OFF: a strict drain that declares none of these is byte-for-byte the AS-3a strict drain
+        # (and the global drain, domains=None, is never touched by this layer). The flood-isolation layer only
+        # applies to the per-domain subtree drain, so it is refused in global mode (fail-closed, not silent).
+        if append_ceiling_per_s is not None and self._domains is None:
+            raise ValueError("the append-rate budget applies to strict-domain mode (pass domains=...)")
+        # AS-3c part 3 — ACCEPT-SET + DEDUP are STRICT-only drain-boundary hardening (like DRR / the append budget):
+        # the global drain (domains=None) stays byte-identical, so declaring a dedup window there is REFUSED, not a
+        # silent no-op. ``dedup_window`` bounds the persisted (org, report_id) window; None => the SAFE DEFAULT.
+        if dedup_window is not None and self._domains is None:
+            raise ValueError("the dedup window applies to strict-domain mode (pass domains=...)")
+        if dedup_window is None:
+            self.dedup_window_cap = _DEDUP_WINDOW_CAP
+        else:
+            dw = int(dedup_window)
+            if dw < 1:
+                raise ValueError("dedup_window must be a positive integer (the bounded at-most-once horizon)")
+            self.dedup_window_cap = dw
+        # APPEND-RATE budget: cap the spine ``_record`` writes one pass makes, keyed off the REAL append-rate
+        # ceiling — ``sigil.spine.append_rate``'s ``ceiling`` (appends/s). That module builds in NO target
+        # ("NO TARGET LIVES HERE"): the ceiling is the write rate the OPERATOR measured for their deployment
+        # with ``sigil spine append-rate``, so there is no hardcoded number here either — it is injected. The
+        # per-pass budget is that ceiling over the seconds one pass is allotted (``pass_window_s``), so the
+        # drain's own long-run append rate stays under the ceiling. Nothing dropped over budget is lost: it
+        # stays in ``incoming/<slug>/`` and drains next pass (the exactly-once reclaim of part 1 still holds).
+        self.append_budget: Optional[int] = None
+        if append_ceiling_per_s is not None:
+            if not (math.isfinite(float(append_ceiling_per_s)) and float(append_ceiling_per_s) > 0):
+                raise ValueError("append_ceiling_per_s must be a finite number > 0 (appends/s — the write "
+                                 "ceiling MEASURED with `sigil spine append-rate`)")
+            if not (math.isfinite(float(pass_window_s)) and float(pass_window_s) > 0):
+                raise ValueError("pass_window_s must be a finite number > 0 (seconds of spine-write time one "
+                                 "drain pass is budgeted for)")
+            budget = math.floor(float(append_ceiling_per_s) * float(pass_window_s))
+            if budget < 1:
+                raise ValueError("the append-rate budget (append_ceiling_per_s * pass_window_s) rounds to 0 "
+                                 "writes/pass — widen pass_window_s or raise the ceiling")
+            self.append_budget = budget
+        self.append_ceiling_per_s = (None if append_ceiling_per_s is None else float(append_ceiling_per_s))
+        self.pass_window_s = float(pass_window_s)
+        # DRR quantum: the reports one domain is served per ROUND (the interleaving granularity). The DEFAULT
+        # depends on whether an append budget is in force:
+        #   * WITH a budget -> 1, so the round-robin interleaves one report per domain per round. A larger
+        #     default (e.g. the per-domain cap) would let a flooded domain — the heartbeat past its reserve
+        #     INCLUDED, since it falls through to the shared pool — drain the WHOLE budget in round 1 and starve
+        #     every other domain this pass. Fine interleaving is what makes the budget shared fairly.
+        #   * WITHOUT a budget -> the per-pass per-domain cap, so the round-robin drains each declared domain's
+        #     whole per-pass share in signed-slug order — byte-for-byte the AS-3a strict drain.
+        # An explicit ``drr_quantum`` always overrides both defaults.
+        if drr_quantum is not None:
+            self.drr_quantum = max(1, int(drr_quantum))
+        elif self.append_budget is not None:
+            self.drr_quantum = 1
+        else:
+            self.drr_quantum = self.per_domain_limit
+        # The HEARTBEAT domain (strict mode only): one declared (org, host) whose reports are the liveness
+        # signal that must ALWAYS get through. It is served FIRST every round and holds a RESERVED slice of the
+        # append budget that only it may spend, so a flood of another domain can neither delay it past the DRR
+        # quantum nor consume the budget before it is served.
+        self._heartbeat_slug: Optional[str] = None
+        if heartbeat is not None:
+            if self._domains is None:
+                raise ValueError("heartbeat requires strict-domain mode (pass domains=...)")
+            ho, hh = heartbeat
+            hslug = domain_slug(str(ho), str(hh))
+            if hslug not in self._domains:
+                raise ValueError("the heartbeat (org, host) must be one of the declared domains")
+            self._heartbeat_slug = hslug
+        # DRR cross-pass rotation BASE: the STABLE sorted list of all declared NON-heartbeat domains (the
+        # heartbeat is always served first, so it is excluded). The round-robin starts at a FILE-PERSISTED cursor
+        # (``<spool>/.drr-cursor``, read and advanced under the single-drainer flock — see ``_drr_drain``) into
+        # this list. A STABLE base (it never shrinks as domains empty within a pass) is what makes the rotation
+        # cycle every declared domain to the front over passes, so a sustained tight budget starves none of them
+        # — even across FRESH drain PROCESSES (a systemd/cron/CLI drain unit), which the file-persisted cursor
+        # resumes instead of re-pinning the first-sorting domain every pass.
+        self._drr_rotation = ([] if self._domains is None
+                              else sorted(s for s in self._domains if s != self._heartbeat_slug))
+        n_other = len(self._drr_rotation)          # count of declared NON-heartbeat domains
+        # RESERVED heartbeat budget: writes of the append budget only the heartbeat may spend (and RELEASED to
+        # the shared pool mid-pass once the heartbeat is drained — see ``_drr_drain``). Default = the heartbeat's
+        # own EQUAL share of the budget (budget // #declared-domains, >= 1), but held STRICTLY BELOW the budget
+        # whenever another domain is declared, so the shared pool is never empty (else every non-heartbeat domain
+        # would starve). An explicit value is clamped into [0, budget]. Only meaningful with BOTH a finite append
+        # budget and a declared heartbeat.
+        if heartbeat_reserve is None:
+            if self._heartbeat_slug is not None and self.append_budget is not None:
+                n = max(1, len(self._domains or {}))   # domains is non-None here (heartbeat requires it); narrow for mypy
+                reserve = max(1, self.append_budget // n)
+                if n_other:                            # keep >= 1 write in the shared pool for the other domains
+                    reserve = min(reserve, self.append_budget - 1)
+                self.heartbeat_reserve = min(self.append_budget, max(0, reserve))
+            else:
+                self.heartbeat_reserve = 0
+        else:
+            hr = max(0, int(heartbeat_reserve))
+            self.heartbeat_reserve = hr if self.append_budget is None else min(self.append_budget, hr)
+        # An explicit reserve that swallows the WHOLE budget leaves the shared pool empty, so every non-heartbeat
+        # declared domain would starve forever under a heartbeat flood. Refuse it fail-closed (the default above
+        # never reaches here — it is capped at ``budget - 1`` whenever another domain is declared).
+        if (self.append_budget is not None and self._heartbeat_slug is not None
+                and n_other >= 1 and self.heartbeat_reserve >= self.append_budget):
+            raise ValueError("heartbeat_reserve must be < append_budget when other domains are declared")
+        # ------------------------------------------------------------------------------------------------
         self._pass_seen: "Optional[set]" = None   # AS-3c: the (org, report_id) spine baseline during a recovery pass
+        # AS-3c part 3 — the per-pass DEDUP window state, loaded from <spool>/.dedup-window under the flock at the
+        # start of a strict pass and superseded at its end. ``_dedup_window`` is the bounded membership set,
+        # ``_dedup_order`` its insertion order (for bounded eviction), ``_dedup_trusted`` False when the file was
+        # corrupt/hostile (-> a window-miss falls back to the durable spine), ``_dedup_dirty`` True once a key was
+        # added this pass. All None/reset outside a strict pass (global mode never touches them).
+        self._dedup_window: "Optional[set]" = None
+        self._dedup_order: "Optional[list]" = None
+        self._dedup_trusted: bool = True
+        self._dedup_dirty: bool = False
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
         self.working = self.spool / "working"
@@ -213,7 +371,10 @@ class MonitoringSpoolWatcher:
         AS-3c: when ``slug`` is given (strict mode), the file is claimed into ``working/<slug>/`` rather than flat
         ``working/`` — so a crash-recovery reclaim can restore it to the SAME ``incoming/<slug>/`` subtree it was
         draining (a flat reclaim would drop it into ``incoming/`` root and the next strict pass would sweep it
-        off-domain). The dedup marker stays content-addressed (``processed/<sha256>``), so re-drain is idempotent."""
+        off-domain). The content marker stays content-addressed (``processed/<sha256>``), so byte-identical re-drain
+        is idempotent. AS-3c part 3 layers the ACCEPT-SET (the report's authenticated (org, host) must slug to the
+        declared subtree it was filed under, else quarantine) and the ``(org, report_id)`` DEDUP window (so a
+        same-id re-delivery with fresh bytes is spined at most once) over that — strict mode only."""
         is_reclaimed = src.name.startswith(_RECLAIM_PREFIX)   # AS-3c: a crash-recovered file — dedup it vs the spine
         if slug is not None:
             wdir = self.working / slug
@@ -242,6 +403,18 @@ class MonitoringSpoolWatcher:
             return ("deduped", -1)
         try:
             rep = self._verify(text)
+            key = (str(rep.get("org_id") or ""), str(rep.get("report_id") or ""))
+            rid = key[1]
+            # AS-3c part 3 — ACCEPT-SET admission control (strict mode only). The report's OWN authenticated
+            # (org_id, host) must slug to the declared ``incoming/<slug>/`` subtree it was filed under. Checked
+            # AFTER _verify, so the identity is MAC-authenticated (not spool-controlled bytes): a correctly-sealed
+            # report of ANOTHER tenant mis-filed into this subtree passes the MAC but is REJECTED here. This binds
+            # the AS-3a location isolation to authenticated identity — a subtree can never carry another tenant's
+            # (still-valid) reports, and the DRR fairness/budget accounting it drives stays sound. (Global mode,
+            # slug=None, declares no accept-set and is byte-identical.)
+            if slug is not None and domain_slug(key[0], str(rep.get("host") or "")) != slug:
+                raise MonitoringSpoolError(
+                    "accept-set: report's authenticated (org_id, host) is not the declared domain it was filed under")
             if is_reclaimed:
                 # AS-3c exactly-once: a RECLAIMED file might ALREADY be on the spine — a crash BETWEEN _record and
                 # the marker write below leaves the event SPINED but the marker unwritten, which the content marker
@@ -255,15 +428,29 @@ class MonitoringSpoolWatcher:
                         self._pass_seen = self._load_seen_rids()
                     except Exception:  # noqa: BLE001 — spine unreadable: cannot verify exactly-once this pass. Leave
                         return ("gone", -1)   # the claimed file in working/ (still prefixed); next pass reclaims + retries
-                rid = str(rep.get("report_id") or "")
                 if not rid:
                     raise MonitoringSpoolError("reclaimed report has no report_id — cannot dedup during crash recovery")
-                if (str(rep.get("org_id") or ""), rid) in self._pass_seen:
+                if key in self._pass_seen:
+                    os.replace(claimed, marker)
+                    return ("deduped", -1)
+            elif slug is not None and rid:
+                # AS-3c part 3 — DEDUP at-most-once for a NORMAL (non-reclaim) re-delivery: a report re-emitted with
+                # a FRESH envelope (same report_id, different bytes -> a content hash the processed/<sha256> marker
+                # cannot catch) is spined AT MOST ONCE, keyed by the bounded, flock-persisted (org, report_id)
+                # window. A window-miss under a CORRUPT window falls back to the durable spine (fail-closed, see
+                # _dedup_seen); if neither can resolve it, the file is DEFERRED (reclaimed + retried next pass),
+                # never double-drained.
+                try:
+                    duplicate = self._dedup_seen(key)
+                except _DedupUnresolved:
+                    return ("gone", -1)
+                if duplicate:
                     os.replace(claimed, marker)
                     return ("deduped", -1)
             seq = self._record(rep)
+            self._dedup_remember(key)   # warm the persisted dedup window (no-op in global mode / no report_id)
             if is_reclaimed and self._pass_seen is not None:
-                self._pass_seen.add((str(rep.get("org_id") or ""), str(rep.get("report_id") or "")))
+                self._pass_seen.add(key)
             os.replace(claimed, marker)
             return ("recorded", seq)
         except Exception as exc:  # noqa: BLE001 — any failure is a refusal; nothing appended
@@ -347,12 +534,14 @@ class MonitoringSpoolWatcher:
     def drain(self, *, wait_s: float = 0.0) -> dict:
         """Drain the spool once. DEFAULT (``domains=None``): the unchanged GLOBAL drain — process every file in
         ``incoming/`` in one pass (byte-identical; no lock, no reclaim, no DRR). STRICT (AS-3a, ``domains``
-        declared): under the single-drainer lock, reclaim any crash-stranded ``working/`` files (AS-3c), then
-        process ONLY each declared domain's own ``incoming/<slug>/`` subtree, quarantine everything else
-        OFF-DOMAIN by location, and fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped,
-        seqs}`` and, in strict mode, also ``{off_domain, in_domain_foreign, alert_seq}`` (and ``busy`` when
-        another drainer holds the lock). ``wait_s`` bounds the wait for the lock (default 0: try once). Never
-        raises on one bad file."""
+        declared): under the single-drainer lock, reclaim any crash-stranded ``working/`` files (AS-3c part 1),
+        load the bounded ``(org, report_id)`` dedup window (AS-3c part 3), then DRR-drain each declared domain's own
+        ``incoming/<slug>/`` subtree under the reserved-heartbeat append-rate budget (AS-3c part 2 — flood
+        isolation) — each report ACCEPT-SET-checked (its authenticated identity must slug to its subtree) and
+        DEDUP'd at-most-once (AS-3c part 3) — quarantine everything else OFF-DOMAIN by location, supersede the dedup
+        window, and fire one coalesced alert per pass. Returns ``{recorded, rejected, deduped, seqs}`` and, in
+        strict mode, also ``{off_domain, in_domain_foreign, alert_seq}`` (and ``busy`` when another drainer holds the
+        lock). ``wait_s`` bounds the wait for the lock (default 0: try once). Never raises on one bad file."""
         if self._domains is None:
             return self._drain_global()
         # STRICT (AS-3c): the whole pass — reclaim + every claim — runs under an exclusive flock on
@@ -379,10 +568,20 @@ class MonitoringSpoolWatcher:
             # this pass — a NO-crash pass pays no spine scan — and the dedup follows the FILE (the prefix) across
             # passes, so a reclaimed report carried beyond per_domain_limit, or past a deferred pass, is still deduped.
             self._pass_seen = None
+            # AS-3c part 3: load the bounded (org, report_id) dedup window from <spool>/.dedup-window UNDER the
+            # flock (same single-drainer invariant as the reclaim + the DRR cursor), and SUPERSEDE it atomically at
+            # pass end — so at-most-once survives a drainer restart. Cleared in the finally so no state leaks across
+            # a later global drain on the same watcher.
+            self._load_dedup_window()
             try:
                 return self._drain_strict()
             finally:
+                self._persist_dedup_window()
                 self._pass_seen = None
+                self._dedup_window = None
+                self._dedup_order = None
+                self._dedup_trusted = True
+                self._dedup_dirty = False
         finally:
             try:
                 os.close(fd)
@@ -406,41 +605,39 @@ class MonitoringSpoolWatcher:
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs}
 
     def _drain_strict(self) -> dict:
-        """STRICT-DOMAIN drain (AS-3a). Process each DECLARED domain's own ``incoming/<slug>/`` subtree in
-        isolation — so a given tenant's cost depends ONLY on its own subtree, never on another tenant's volume
-        or poison (TT-A's p95 holds while TT-B is flooded). Then a BOUNDED off-domain sweep quarantines, by
-        LOCATION alone (no content read, no MAC/authority check — i.e. NO GLOBAL SCAN), anything that is not
-        under a declared domain: flat files in ``incoming/`` and whole undeclared ``incoming/<x>/`` subtrees.
-        One coalesced alert per pass fires when any strictness quarantine happened.
+        """STRICT-DOMAIN drain (AS-3a) with AS-3c part-2 FLOOD ISOLATION layered on. Process each DECLARED
+        domain's own ``incoming/<slug>/`` subtree in isolation — so a given tenant's cost depends ONLY on its
+        own subtree, never on another tenant's volume or poison (TT-A's p95 holds while TT-B is flooded). Then
+        a BOUNDED off-domain sweep quarantines, by LOCATION alone (no content read, no MAC/authority check —
+        i.e. NO GLOBAL SCAN), anything that is not under a declared domain. One coalesced alert per pass fires
+        when any strictness quarantine happened.
 
-        THREE red-pen bounds hold every pass (AS-3a follow-up): (1) the ENUMERATION itself is bounded — each
-        declared subtree and the off-domain sweep read via ``os.scandir`` and EARLY-STOP at their caps, so a
-        sustained flood is read only up to the cap, never materialized/sorted in full; (2) every subtree entry
-        that is NOT a flat ``*.json`` report (a non-``.json`` file, a nested path) is swept BY LOCATION into
-        ``rejected/`` — never scanned as input and never silently retained; (3) ``per_domain_limit`` carries a
-        BOUNDED SAFE DEFAULT, so a flooded tenant drains at most that many reports per pass and the next declared
-        tenant is always served in the SAME pass (no starvation)."""
+        THREE AS-3a red-pen bounds hold every pass: (1) the ENUMERATION itself is bounded — each declared
+        subtree and the off-domain sweep read via ``os.scandir`` and EARLY-STOP at their caps; (2) every
+        subtree entry that is NOT a flat ``*.json`` report is swept BY LOCATION into ``rejected/``; (3)
+        ``per_domain_limit`` is a BOUNDED SAFE DEFAULT, so a flooded tenant drains at most that many reports
+        per pass.
+
+        AS-3c part 2 adds FLOOD ISOLATION over the report drain: the picked reports are NOT drained front-to-
+        back per domain but handed to a DEFICIT ROUND-ROBIN scheduler (:meth:`_drr_drain`) under a reserved-
+        heartbeat APPEND-RATE budget — so one domain flooding the spool can neither spend the whole per-pass
+        spine-write budget before the other domains are served (fair share per round) nor starve the heartbeat
+        domain (its reserved slice). Everything left unserved stays in ``incoming/<slug>/`` and carries to the
+        next pass. When no append budget / heartbeat is declared the scheduler degrades to the AS-3a order."""
         declared = self._domains or {}
-        recorded, rejected, deduped = 0, 0, 0
         in_domain_foreign = 0
-        seqs: "list[int]" = []
-        # 1) DECLARED domains first (so a declared tenant is always served before any off-domain work). Each is
-        #    read from its OWN subtree via a SINGLE bounded scandir pass: up to per_domain_limit flat *.json to
-        #    drain + up to off_domain_limit OTHER entries (non-.json, nested dirs) to quarantine by location.
+        # 1) Scan each DECLARED subtree ONCE (a SINGLE bounded scandir pass) into its per-pass backlog of report
+        #    names, and sweep its in-domain-foreign entries BY LOCATION (unchanged from AS-3a). The reports are
+        #    NOT drained here — they are collected for the DRR scheduler so the append budget is shared fairly
+        #    across domains instead of being drained front-to-back (which would let a flood starve the rest).
+        picks: "dict[str, list[str]]" = {}
         for slug in sorted(declared):
             ddir = self.incoming / slug
             if not ddir.is_dir():
                 continue
             picked, foreign = self._scan_declared_subtree(ddir, self.per_domain_limit, self.off_domain_limit)
-            for name in sorted(picked):                # determinism over the BOUNDED slice (signed-path order)
-                status, seq = self._process_one(ddir / name, slug)   # AS-3c: claim into working/<slug>/ (reclaimable)
-                if status == "recorded":
-                    recorded += 1
-                    seqs.append(seq)
-                elif status == "deduped":
-                    deduped += 1
-                elif status == "rejected":
-                    rejected += 1
+            if picked:
+                picks[slug] = sorted(picked)           # determinism over the BOUNDED slice (signed-path order)
             swept_foreign = 0                          # per-subtree AGGREGATE: bound the TOTAL in-domain-foreign
             for entry in foreign:                      # sweep by off_domain_limit (not off_domain_limit PER entry).
                 if swept_foreign >= self.off_domain_limit:  # `foreign` can hold up to off_domain_limit DIRECTORY
@@ -450,9 +647,11 @@ class MonitoringSpoolWatcher:
                     self.off_domain_limit - swept_foreign)  # off_domain_limit**2 moves. A DECREMENTING budget, exactly
                 swept_foreign += got                   # like _sweep_off_domain, caps the whole subtree's foreign
                 in_domain_foreign += got               # work at off_domain_limit and keeps the reported count honest.
-        # 2) BOUNDED off-domain sweep — quarantine by location, never scanning content.
+        # 2) DRR-drain the declared backlogs under the reserved-heartbeat append budget (AS-3c part 2).
+        recorded, deduped, rejected, seqs = self._drr_drain(picks)
+        # 3) BOUNDED off-domain sweep — quarantine by location, never scanning content.
         off_domain = self._sweep_off_domain(set(declared))
-        # 3) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
+        # 4) ONE coalesced alert per pass when strictness quarantined anything (off-domain, an in-domain foreign
         #    entry, OR a poisoned in-domain report). Bounded to one spine event per drain so a flood can never
         #    amplify onto the spine.
         alert_seq = -1
@@ -461,6 +660,275 @@ class MonitoringSpoolWatcher:
                                          in_domain_foreign=in_domain_foreign)
         return {"recorded": recorded, "rejected": rejected, "deduped": deduped, "seqs": seqs,
                 "off_domain": off_domain, "in_domain_foreign": in_domain_foreign, "alert_seq": alert_seq}
+
+    def _drr_drain(self, picks: "dict[str, list[str]]") -> "tuple[int, int, int, list[int]]":
+        """DEFICIT ROUND-ROBIN across the declared domains' per-pass backlogs, under a RESERVED-heartbeat
+        APPEND-RATE budget (AS-3c part 2 — FLOOD ISOLATION). ``picks[slug]`` is that domain's bounded, sorted
+        report names this pass (already capped at ``per_domain_limit`` by the scan — never re-read here).
+
+        FAIRNESS. Domains are served round-robin, ``drr_quantum`` reports at a time: a flooded domain gets its
+        quantum per round and NO more before the next domain is served, so it can never drain front-to-back and
+        delay another domain's reports beyond the quantum. The HEARTBEAT domain is served FIRST every round and
+        draws from a RESERVED slice of the append budget that only it may spend (released to the shared pool once
+        the heartbeat is drained this pass), so a flood can neither consume the budget before the heartbeat is
+        served nor starve it. Under a sustained tight budget the non-heartbeat order ROTATES by a FILE-PERSISTED
+        integer cursor (``<spool>/.drr-cursor``, under the drain's flock) across passes AND across fresh drain
+        processes, so no late-sorting domain starves.
+
+        APPEND-RATE BUDGET. ``append_budget`` caps the spine ``_record`` writes this pass (derived from the real
+        ``sigil spine append-rate`` ceiling; see ``__init__``). Only a ``recorded`` outcome spends budget — a
+        dedup/reject writes nothing to the spine. When the budget is spent the pass STOPS fairly: the unserved
+        reports are still in ``incoming/<slug>/`` (they were never claimed) and drain next pass, nothing lost.
+
+        Returns ``(recorded, deduped, rejected, seqs)``. DETERMINISTIC: the budget derives from injected
+        constants and the schedule from a file-persisted integer cursor — no wall-clock, no RNG in the fairness
+        math. FATAL-2: sovereign-only (no framework/strix import). Never raises on one bad file (``_process_one``
+        is fail-closed)."""
+        recorded = deduped = rejected = 0
+        seqs: "list[int]" = []
+        if not picks:
+            return recorded, deduped, rejected, seqs
+        hb = self._heartbeat_slug if self._heartbeat_slug in picks else None
+        # Budget: None => UNBOUNDED (the per_domain_limit scan still bounds the work). A finite budget splits
+        # into a RESERVED heartbeat pool (only the heartbeat may draw it) and a SHARED pool (any domain draws).
+        unbounded = self.append_budget is None
+        budget = 0 if self.append_budget is None else int(self.append_budget)   # narrowed int for the budget math
+        reserved = min(self.heartbeat_reserve, budget) if (hb is not None and not unbounded) else 0
+        shared = 0 if unbounded else (budget - reserved)   # 0 when unbounded (never consulted: _can_spend short-circuits)
+        q = self.drr_quantum
+        # Service order: the HEARTBEAT domain FIRST every round (never rotated — its reserved share is served
+        # before a flood can touch the shared pool), then the other declared domains. Their base order is the
+        # STABLE declared signed-slug order, ROTATED by the persisted cursor (only under a budget) and filtered
+        # to the domains that actually have reports this pass — so the rotation cycles every declared domain to
+        # the front over passes even as domains empty out (no cross-pass starvation under a tight budget). With
+        # NO budget the base is unrotated, so the order is exactly the AS-3a signed-slug order.
+        cursor = self._read_drr_cursor() if not unbounded else 0   # FILE-persisted, read under the drain's flock
+        rotation = self._drr_rotation
+        if rotation and not unbounded:
+            k = cursor % len(rotation)
+            rotation = rotation[k:] + rotation[:k]
+        others = [s for s in rotation if s in picks and s != hb]
+        order = ([hb] if hb is not None else []) + others
+        pos = {s: 0 for s in order}
+        deficit = {s: 0 for s in order}
+
+        def _can_spend(slug: str) -> bool:
+            if unbounded:
+                return True
+            if slug == hb and reserved > 0:
+                return True
+            return shared > 0
+
+        served_any = True
+        while served_any:
+            served_any = False
+            for slug in order:
+                names = picks[slug]
+                if pos[slug] >= len(names):
+                    continue
+                deficit[slug] += q
+                while deficit[slug] > 0 and pos[slug] < len(names):
+                    if not _can_spend(slug):
+                        break                          # no budget left to possibly record — carry the rest over
+                    name = names[pos[slug]]
+                    pos[slug] += 1
+                    deficit[slug] -= 1
+                    served_any = True
+                    status, seq = self._process_one(self.incoming / slug / name, slug)   # claims into working/<slug>/
+                    if status == "recorded":
+                        recorded += 1
+                        seqs.append(seq)
+                        if not unbounded:              # charge the write: the heartbeat's reserved pool first
+                            if slug == hb and reserved > 0:
+                                reserved -= 1
+                            else:
+                                shared -= 1
+                    elif status == "deduped":
+                        deduped += 1
+                    elif status == "rejected":
+                        rejected += 1
+                    # "gone" (raced away) -> nothing
+                # Once the heartbeat is fully drained this pass, RELEASE its unused reserved budget to the shared
+                # pool (once — ``reserved`` is then 0): otherwise a LIGHT heartbeat (fewer reports than its
+                # reserve) would strand that reserve and throttle every other domain to (budget - reserve)/pass.
+                if hb is not None and not unbounded and reserved > 0 and pos[hb] >= len(picks[hb]):
+                    shared += reserved
+                    reserved = 0
+            if not unbounded and reserved <= 0 and shared <= 0:
+                break                                  # the whole append budget is spent — stop the pass fairly
+        if not unbounded:
+            self._write_drr_cursor(cursor + 1)         # advance the FILE-persisted rotation for the next pass
+        return recorded, deduped, rejected, seqs
+
+    def _read_drr_cursor(self) -> int:
+        """The DRR rotation cursor, FILE-persisted at ``<spool>/.drr-cursor`` so a FRESH drain PROCESS (a
+        systemd/cron/CLI drain unit reconstructs the watcher each run) RESUMES the rotation instead of resetting
+        to 0 and re-pinning the first-sorting domain — which would bring cross-pass starvation back. Read under
+        the drain's single-drainer flock (``_drr_drain`` runs inside it), so the read + advance below is
+        race-free across drainer processes. Best-effort and bounded: any fault, or an implausible value, reads 0
+        (the rotation then simply starts from the front that pass). Never raises. Hardened like the drain lock
+        (``O_NOFOLLOW`` + ``O_NONBLOCK`` + a regular-file check): a planted symlink/FIFO/directory at the path
+        reads 0 — a FIFO cannot block the drain, a directory cannot freeze the rotation (which would silently
+        reopen cross-pass starvation). The spool root is 0700/operator-owned, so this is defense-in-depth."""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(str(self.spool / ".drr-cursor"), flags)
+        except OSError:
+            return 0
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return 0
+            n = int(os.read(fd, 64).decode("utf-8").strip())
+            return n if n >= 0 else 0
+        except (OSError, ValueError):
+            return 0
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _write_drr_cursor(self, n: int) -> None:
+        """Advance the FILE-persisted DRR cursor ATOMICALLY (temp file + ``os.replace``), under the single-drainer
+        flock. Best-effort: a write fault never fails the drain — the only cost is one pass's rotation not
+        advancing (the next pass retries). Never raises."""
+        tmp = self.spool / (".drr-cursor.tmp-" + str(os.getpid()))
+        try:
+            tmp.write_text(str(int(n)), encoding="utf-8")
+            os.replace(tmp, self.spool / ".drr-cursor")
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    # -- AS-3c part 3: the bounded, file-persisted (org, report_id) DEDUP window (under the single-drainer flock) --
+    def _load_dedup_window(self) -> None:
+        """Load the bounded ``(org_id, report_id)`` dedup window from ``<spool>/.dedup-window`` at the START of a
+        strict pass, under the drain's single-drainer flock (so the read + the atomic supersede below are race-free
+        across drainer processes). Hardened like ``_read_drr_cursor`` (``O_NOFOLLOW`` + ``O_NONBLOCK`` + an
+        ``S_ISREG`` check + a bounded read): a planted symlink/FIFO/directory, an oversized file, a non-UTF-8 or
+        malformed line all mark the window UNTRUSTED. A MISSING file is a fresh/empty TRUSTED window (consistent with
+        the DRR cursor's missing->0). The window set holds only keys we KNOW are on the spine (added solely on
+        ``_record``), so a window HIT is authoritative; a window MISS under an UNTRUSTED file falls back to the
+        durable spine baseline in :meth:`_dedup_seen` — fail-closed, never a double-drain. Keeps the MOST-RECENT
+        ``dedup_window_cap`` keys (recency preserved across passes). Never raises."""
+        order: "list[tuple[str, str]]" = []
+        seen: "set[tuple[str, str]]" = set()
+        trusted = True
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        data = b""
+        try:
+            fd = os.open(str(self.spool / _DEDUP_FILE), flags)
+        except FileNotFoundError:
+            self._dedup_window, self._dedup_order, self._dedup_trusted, self._dedup_dirty = seen, order, True, False
+            return
+        except OSError:
+            # a planted symlink (O_NOFOLLOW) or other open fault — UNTRUSTED, start empty (healed on persist).
+            self._dedup_window, self._dedup_order, self._dedup_trusted, self._dedup_dirty = seen, order, False, False
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                trusted = False
+            else:
+                data = os.read(fd, _DEDUP_MAX_BYTES + 1)
+                if len(data) > _DEDUP_MAX_BYTES:
+                    trusted, data = False, data[:_DEDUP_MAX_BYTES]   # oversized -> don't trust (keep only the tail cap)
+        except OSError:
+            trusted = False
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text, trusted = "", False
+        pairs: "list[tuple[str, str]]" = []
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                pair = json.loads(s)
+            except ValueError:
+                trusted = False
+                continue
+            if (isinstance(pair, list) and len(pair) == 2
+                    and isinstance(pair[0], str) and isinstance(pair[1], str)):
+                pairs.append((pair[0], pair[1]))
+            else:
+                trusted = False
+        for k in pairs[-self.dedup_window_cap:]:                    # keep the most-recent cap, de-duped, in order
+            if k not in seen:
+                seen.add(k)
+                order.append(k)
+        self._dedup_window, self._dedup_order, self._dedup_trusted, self._dedup_dirty = seen, order, trusted, False
+
+    def _dedup_seen(self, key: "tuple[str, str]") -> bool:
+        """Has this ``(org_id, report_id)`` ALREADY been recorded (so this is a re-delivery to dedup)? A HIT in the
+        bounded window is authoritative (the window holds only keys written on a real ``_record``). On a MISS while
+        the loaded window was UNTRUSTED (corrupt/hostile file), fall back to the authoritative DURABLE spine baseline
+        (loaded LAZILY, like the reclaim path) — fail-closed, so a corrupt window can never cause a double-drain. If
+        that baseline is also unreadable, raise :class:`_DedupUnresolved` so the caller DEFERS the file rather than
+        risk draining it twice. Never records; never mutates history."""
+        w = self._dedup_window
+        if w is not None and key in w:
+            return True
+        if not self._dedup_trusted:
+            if self._pass_seen is None:
+                try:
+                    self._pass_seen = self._load_seen_rids()
+                except Exception as exc:  # noqa: BLE001 — window UNTRUSTED and spine unreadable: cannot resolve safely
+                    raise _DedupUnresolved from exc
+            if self._pass_seen is not None and key in self._pass_seen:
+                return True
+        return False
+
+    def _dedup_remember(self, key: "tuple[str, str]") -> None:
+        """Record a just-spined ``(org_id, report_id)`` into the bounded dedup window (membership set + insertion
+        order), so a later re-delivery THIS pass or a FUTURE pass (via the persisted file) is deduped. No-op in
+        global mode (the window is never loaded) and for a report with no stable ``report_id`` (nothing to key on —
+        it keeps only the content-marker dedup, unchanged). Bounded eviction happens at persist time."""
+        order = self._dedup_order
+        window = self._dedup_window
+        if order is None or window is None or key[1] == "":
+            return
+        if key in window:
+            return
+        window.add(key)
+        order.append(key)
+        self._dedup_dirty = True
+
+    def _persist_dedup_window(self) -> None:
+        """SUPERSEDE ``<spool>/.dedup-window`` with the bounded, MOST-RECENT ``dedup_window_cap`` keys, ATOMICALLY
+        (temp file + ``os.replace``), under the drain's flock — APPEND-ONLY/SUPERSEDE: a fresh file replaces the
+        old, the spool history is never edited in place. Written when the window gained a key this pass OR the loaded
+        file was UNTRUSTED (to heal a corrupt/hostile file with a clean one). Best-effort: a write fault never fails
+        the drain (the next pass re-persists). Never raises."""
+        order = self._dedup_order
+        if order is None or not (self._dedup_dirty or not self._dedup_trusted):
+            return
+        tail = order[-self.dedup_window_cap:]
+        body = "".join(json.dumps([o, r], separators=(",", ":")) + "\n" for (o, r) in tail)
+        tmp = self.spool / (_DEDUP_FILE + ".tmp-" + str(os.getpid()))
+        try:
+            # The dedup window is a CORRECTNESS oracle (at-most-once), not a fairness hint like the DRR cursor:
+            # a lost entry means a re-delivery double-drains. So fsync the temp file before the atomic rename —
+            # the SAME durability the gateway gives its own spool write (monitoring_report._write) — so the
+            # window survives power loss / OS crash, not merely a clean drainer restart.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.spool / _DEDUP_FILE)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def _scan_declared_subtree(self, ddir: Path, json_budget: int,
                                foreign_budget: int) -> "tuple[list[str], list[os.DirEntry[str]]]":

@@ -29,11 +29,19 @@ AWS mistakes; this is the corrected build):
     for GCP; honest). ``sensitive`` only when the operator LABELS the bucket.
 
 Doctrine (identical to cloud_live): mints only a native inventory (LEADS); FACTs come solely from the
-existing deterministic oracles re-firing over the RETAINED export; AMBIENT credentials (google-auth ADC —
-the sealed service-account JSON materialised by the offense bridge / a gcloud ADC / the metadata server),
-never handed over, no ADC/SDK ⇒ honest ``ok=False`` no-op; GATED Tier-2 ACTIVE_RECON with declared
+existing deterministic oracles re-firing over the RETAINED export; GATED Tier-2 ACTIVE_RECON with declared
 ``egress_hosts`` (incl. the metadata server); READ-ONLY list/get; the response → native-inventory
 translation is a PURE, total, CI-tested function of the retained responses.
+
+CREDENTIALS (the GCP twin of cloud_live's Wave B.1 customer-credential seam): a run may be scoped to EXACTLY
+one customer identity by an INJECTED read-only session (a duck-typed ``vigil_core.cloud_session.MintedSession``
+for a GCP provider — ``provider`` / ``account_id`` [the project] / ``bearer_token`` [a short-lived OAuth2
+access token]). When injected, the collector builds its google credentials from THAT bearer and NEVER consults
+the ambient ADC chain; a partial/empty or non-GCP session is REJECTED before any SDK call (fail-closed, no
+identity substitution), and ``require_injected_credentials=True`` makes the run REFUSE rather than fall back to
+VIGIL's own identity. With no injection (the default) the EXISTING AMBIENT path is used unchanged: google-auth
+ADC (the sealed service-account JSON materialised by the offense bridge / a gcloud ADC / the metadata server),
+never handed over, no ADC/SDK ⇒ honest ``ok=False`` no-op.
 """
 
 from __future__ import annotations
@@ -233,10 +241,12 @@ def org_pap_enforced_from_policy(policy: Any) -> bool | None:
 
 
 class GcpLiveSensor:
-    """Live, read-only GCP posture collector (Tier-2, ``ACTIVE_RECON``). Ambient ADC; read-only Cloud Storage
-    + project IAM + the effective PAP org policy; emits the native inventory as
-    ``{"export": <json>, "format": "native"}``. Fail-closed no-op when the SDKs are absent, no ADC is
-    discoverable, or the project cannot be resolved."""
+    """Live, read-only GCP posture collector (Tier-2, ``ACTIVE_RECON``). Scoped to an INJECTED customer session
+    (``credentials=`` / ``require_injected_credentials=`` — the GCP twin of cloud_live's Wave B.1 seam) or, by
+    default, VIGIL's own ambient ADC; read-only Cloud Storage + project IAM + the effective PAP org policy;
+    emits the native inventory as ``{"export": <json>, "format": "native"}``. Fail-closed no-op when an injected
+    session is partial/non-GCP, when a required injection is absent, when the SDKs are absent, when no ambient
+    ADC is discoverable, or when the project cannot be resolved."""
 
     name = "gcp_live"
     tier = "T2"
@@ -246,7 +256,19 @@ class GcpLiveSensor:
 
     _MAX_BUCKETS = 500
 
-    def __init__(self, *, project: str | None = None) -> None:
+    def __init__(self, *, project: str | None = None,
+                 credentials: Any = None, require_injected_credentials: bool = False) -> None:
+        # An injected ``credentials`` object scopes this run to EXACTLY one customer identity. It is duck-typed
+        # (``provider`` / ``account_id`` [the GCP project] / ``bearer_token`` [a short-lived OAuth2 access token])
+        # so a ``vigil_core.cloud_session.MintedSession`` for a GCP provider satisfies it with NO import here (the
+        # sovereign mint hands the collector DATA, never a governor object — the FATAL-2 boundary). When present,
+        # the ambient ADC chain (``google.auth.default``) is NEVER consulted. ``require_injected_credentials``
+        # makes a CUSTOMER run FAIL CLOSED rather than silently fall back to VIGIL's own ambient Google identity
+        # (the no-substitution guard — the single most important invariant of a customer cloud-posture run). Both
+        # default OFF, so the bare ``GcpLiveSensor()`` ambient path (``engage_fusion`` + the ambient tests) is
+        # byte-identical. (The AWS twin is ``cloud_live.CloudLiveSensor``; this mirrors its Wave B.1 seam.)
+        self._credentials = credentials
+        self._require_injected = bool(require_injected_credentials)
         self._project = (project or os.environ.get("GOOGLE_CLOUD_PROJECT")
                          or os.environ.get("CLOUDSDK_CORE_PROJECT") or "")
 
@@ -321,25 +343,74 @@ class GcpLiveSensor:
         return self._safe(_pull)
 
     def run(self, args: dict, ctx: ToolContext) -> ToolResult:
-        try:
-            import google.auth  # optional dependency
-        except Exception:
-            return inconclusive_result("gcp_live", missing="google-auth", detail=(
-                "google-auth not installed — live GCP collection unavailable (fail-closed no-op). "
-                "Install google-cloud-storage + google-cloud-resource-manager + google-cloud-org-policy."))
-        try:
-            credentials, adc_project = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
-        except Exception as e:
-            return inconclusive_result(
-                "gcp_live", missing="ambient Google credentials (Application Default Credentials)", detail=(
-                    "no ambient Google credentials discoverable (Application Default Credentials) — "
-                    f"fail-closed no-op: {type(e).__name__}"))
-        project = self._project or str(adc_project or "")
-        if not project:
-            return inconclusive_result(
-                "gcp_live", missing="a resolvable GCP project (GOOGLE_CLOUD_PROJECT)", detail=(
-                    "could not resolve a GCP project (set GOOGLE_CLOUD_PROJECT) — fail-closed no-op."))
+        # The read-only identity + project are resolved FIRST, and the credential seam runs BEFORE any google
+        # import — so the fail-closed rejections (a partial / non-GCP injected session, or a required-but-absent
+        # injection) are a PURE, dependency-free refusal that never reaches the SDK (and runs in CI with no
+        # google libs). ``credentials`` is the google-auth object the google-cloud clients consume, bound here
+        # to EXACTLY one customer identity (injected bearer) or to VIGIL's own ambient ADC — never mixed.
+        credentials: Any = None
+        project = ""
+        injected = self._credentials
+        if injected is not None:
+            # SCOPED customer identity: build the google credentials ONLY from a COMPLETE GCP bearer session, and
+            # NEVER consult the ambient ADC chain (``google.auth.default``) when an injection is present. A GCP
+            # OAuth2 bearer rides on a non-AWS ``MintedSession`` (its aws_* fields empty); an empty/partial one —
+            # or a non-GCP provider — is REJECTED here, not handed on (the ``is not None`` ``require_injected``
+            # branch below cannot catch a non-None-but-incomplete object — the no-substitution invariant).
+            provider = str(getattr(injected, "provider", "gcp") or "gcp")
+            bearer = str(getattr(injected, "bearer_token", "") or "")
+            project = str(getattr(injected, "account_id", "") or "")
+            if provider not in ("gcp", "google") or not bearer or not project:
+                return inconclusive_result(
+                    "gcp_live", missing="a complete GCP scoped read-only session", detail=(
+                        "the injected session is not a complete GCP read-only session (a missing OAuth2 bearer "
+                        "token / project, or a non-GCP provider) — refusing to fall back to VIGIL's ambient "
+                        "Google identity (fail-closed, no identity substitution)."))
+            try:
+                from google.oauth2.credentials import Credentials as _OAuth2Credentials  # optional dependency
+            except Exception:
+                return inconclusive_result("gcp_live", missing="google-auth", detail=(
+                    "google-auth not installed — live GCP collection unavailable (fail-closed no-op). "
+                    "Install google-cloud-storage + google-cloud-resource-manager + google-cloud-org-policy."))
+            try:
+                credentials = _OAuth2Credentials(
+                    token=bearer, scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
+            except Exception as e:
+                return inconclusive_result("gcp_live", missing="a usable injected read-only session", detail=(
+                    "could not initialise the scoped GCP credentials from the minted bearer token "
+                    f"(fail-closed): {type(e).__name__}"))
+            # Account/project DRIFT GUARD vs AWS (cloud_live.py ~643-653): AWS re-confirms tenancy at collection
+            # time via STS get-caller-identity — the landed Account must EQUAL the claimed one. A GCP OAuth2
+            # access token carries NO project binding — the project is a CLIENT-SIDE argument, not a property of
+            # the token — so there is no cheap, reliable server-side "what project am I" that mirrors STS. We
+            # therefore scope every client to the INJECTED project (``account_id``) and deliberately DO NOT invent
+            # a drift check (a C3 follow-up may add a token-introspection/identity self-check if one is warranted).
+        elif self._require_injected:
+            # A CUSTOMER run must NEVER fall back to VIGIL's ambient identity (no identity substitution).
+            return inconclusive_result("gcp_live", missing="an injected customer read-only session", detail=(
+                "this run requires an explicitly-minted, customer-scoped read-only session; refusing to fall "
+                "back to VIGIL's own ambient Google identity (fail-closed — no identity substitution)."))
+        else:
+            # EXISTING ambient ADC path, UNCHANGED: VIGIL's own discoverable read-only Google identity.
+            try:
+                import google.auth  # optional dependency
+            except Exception:
+                return inconclusive_result("gcp_live", missing="google-auth", detail=(
+                    "google-auth not installed — live GCP collection unavailable (fail-closed no-op). "
+                    "Install google-cloud-storage + google-cloud-resource-manager + google-cloud-org-policy."))
+            try:
+                credentials, adc_project = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
+            except Exception as e:
+                return inconclusive_result(
+                    "gcp_live", missing="ambient Google credentials (Application Default Credentials)", detail=(
+                        "no ambient Google credentials discoverable (Application Default Credentials) — "
+                        f"fail-closed no-op: {type(e).__name__}"))
+            project = self._project or str(adc_project or "")
+            if not project:
+                return inconclusive_result(
+                    "gcp_live", missing="a resolvable GCP project (GOOGLE_CLOUD_PROJECT)", detail=(
+                        "could not resolve a GCP project (set GOOGLE_CLOUD_PROJECT) — fail-closed no-op."))
         try:
             from google.cloud import storage  # optional dependency
         except Exception:
