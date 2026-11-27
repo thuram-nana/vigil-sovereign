@@ -26,6 +26,18 @@ mapped to IAM TOPOLOGY only (principals) — there is no anonymous-public RBAC t
 public surface. Azure Storage is always encrypted at rest, so there is no unencrypted state to promote
 (the encryption FACT never fires for Azure; honest). ``sensitive`` only when the operator TAGS the resource.
 
+CREDENTIALS (the Azure twin of cloud_live's Wave B.1 / gcp_live's Phase-C2 customer-credential seam): a run may
+be scoped to EXACTLY one customer identity by an INJECTED read-only session (a duck-typed
+``vigil_core.cloud_session.MintedSession`` for an Azure provider — ``provider`` / ``account_id`` [the
+subscription] / ``bearer_token`` [a short-lived AAD OAuth2 access token]). When injected, the collector wraps
+THAT bearer in a static ``azure.core.credentials``-shaped ``TokenCredential`` and hands it to EVERY management
+client (storage mgmt + authorization/RBAC mgmt), each SCOPED to the injected subscription, and NEVER consults
+the ambient ``DefaultAzureCredential`` chain; a partial/empty or non-Azure session is REJECTED before any azure
+import (fail-closed, no identity substitution), and ``require_injected_credentials=True`` makes the run REFUSE
+rather than fall back to VIGIL's own identity. With no injection (the default) the EXISTING AMBIENT path is used
+unchanged: azure-identity ``DefaultAzureCredential`` (the sealed service principal / a managed identity), never
+handed over, no credential/subscription ⇒ honest ``ok=False`` no-op.
+
 Doctrine (identical to cloud_live / gcp_live): mints only a native inventory (LEADS); FACTs come solely from
 the existing deterministic oracles re-firing over the RETAINED export; AMBIENT credentials (azure-identity
 ``DefaultAzureCredential`` — the service principal the operator sealed in the Cloud-credentials plane
@@ -39,6 +51,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from typing import Any
 
 from ..agents.tools import ToolContext, ToolResult
@@ -171,15 +184,66 @@ def azure_inventory_from_responses(
 
 
 # ---------------------------------------------------------------------------
+# injected customer identity — a static replay of the sovereign-minted AAD bearer
+# ---------------------------------------------------------------------------
+#
+# A far-future sentinel expiry (epoch seconds, 9999-12-31) for the injected STATIC token. The AAD bearer the
+# sovereign mint hands over is short-lived, but this wrapper has NO refresh path — it is a pure REPLAY of one
+# token — exactly as gcp_live's injected ``google.oauth2.credentials.Credentials`` carries no refresh and is
+# treated as valid client-side. Freshness is the SOVEREIGN MINT's responsibility (``MintedSession.is_fresh`` at
+# run start); if the token expires mid-run the SDK simply 401s and the per-resource collectors degrade via
+# ``_safe`` — never a false clean. The client-side ``expires_on`` only governs the SDK's refresh caching, so a
+# far-future value (= no refresh attempt) is the honest choice for a non-refreshable replay token.
+_STATIC_TOKEN_EXPIRES_ON = 253402300799   # 9999-12-31T23:59:59Z
+
+
+class _InjectedTokenCredential:
+    """A static-token ``azure.core.credentials.TokenCredential`` wrapping the INJECTED customer AAD bearer.
+
+    DRIFT vs gcp_live: GCP has a ready-made static credential (``google.oauth2.credentials.Credentials(token=
+    …)``) the collector instantiates directly; Azure's SDK has NO equivalent static-token credential, so this
+    thin wrapper supplies the exact shape azure-mgmt clients consume — ``get_token(*scopes, **kwargs) ->
+    AccessToken(token, expires_on)`` (``azure.core.credentials``). It REPLAYS the one minted bearer for EVERY
+    requested scope: the token's audience (commercial / US-Gov / China ARM) was fixed by the sovereign mint, so
+    the per-client scope the SDK passes is immaterial here — the collector never mints, exchanges or refreshes a
+    token, it only hands back the one the sovereign side already scoped (the analog of gcp_live scoping every
+    client to the injected project rather than re-deriving it from the token).
+
+    The bearer rides on ``self.token`` (an in-process field, never serialised into a ToolResult — the no-leak
+    invariant is asserted on the result, not on this object), mirroring how gcp_live's injected ``Credentials``
+    carries its token. Constructing it imports NO azure module (``AccessToken`` is resolved LAZILY, only if/when
+    the SDK actually calls ``get_token``), so the fail-closed reject cases run with no azure libs installed."""
+
+    __slots__ = ("token",)
+
+    def __init__(self, bearer: str) -> None:
+        self.token = bearer
+
+    def get_token(self, *scopes: Any, **kwargs: Any) -> Any:
+        # ``AccessToken`` is a 2-field namedtuple ``(token, expires_on)``; azure-mgmt reads only those two
+        # attributes, so the authentic type (when azure-core is importable) and a structural stand-in both
+        # satisfy the SDK. The import is DEFERRED to call time so this module imports cleanly in the sovereign
+        # leg (where azure is absent) and the reject paths never touch azure.
+        try:
+            from azure.core.credentials import AccessToken  # optional dependency
+        except Exception:
+            return SimpleNamespace(token=self.token, expires_on=_STATIC_TOKEN_EXPIRES_ON)
+        return AccessToken(self.token, _STATIC_TOKEN_EXPIRES_ON)
+
+
+# ---------------------------------------------------------------------------
 # the live sensor
 # ---------------------------------------------------------------------------
 
 
 class AzureLiveSensor:
-    """Live, read-only Azure posture collector (Tier-2, ``ACTIVE_RECON``). Ambient ``DefaultAzureCredential``;
-    read-only Storage-account + blob-container + RBAC reads over Azure Resource Manager; emits the native
-    inventory as ``{"export": <json>, "format": "native"}``. Fail-closed no-op when azure-identity /
-    azure-mgmt-storage are absent, no credential is discoverable, or no subscription is resolvable."""
+    """Live, read-only Azure posture collector (Tier-2, ``ACTIVE_RECON``). Scoped to an INJECTED customer
+    session (``credentials=`` / ``require_injected_credentials=`` — the Azure twin of cloud_live's Wave B.1 /
+    gcp_live's Phase-C2 seam) or, by default, VIGIL's own ambient ``DefaultAzureCredential``; read-only
+    Storage-account + blob-container + RBAC reads over Azure Resource Manager; emits the native inventory as
+    ``{"export": <json>, "format": "native"}``. Fail-closed no-op when an injected session is partial/non-Azure,
+    when a required injection is absent, when azure-identity / azure-mgmt-storage are absent, when no ambient
+    credential is discoverable, or when no subscription is resolvable."""
 
     name = "azure_live"
     tier = "T2"
@@ -190,7 +254,20 @@ class AzureLiveSensor:
     _MAX_ACCOUNTS = 500
     _MAX_CONTAINERS = 1000                            # per account, bound the leaf-resource fan-out
 
-    def __init__(self, *, subscription: str | None = None) -> None:
+    def __init__(self, *, subscription: str | None = None,
+                 credentials: Any = None, require_injected_credentials: bool = False) -> None:
+        # An injected ``credentials`` object scopes this run to EXACTLY one customer identity. It is duck-typed
+        # (``provider`` / ``account_id`` [the Azure subscription] / ``bearer_token`` [a short-lived AAD OAuth2
+        # access token]) so a ``vigil_core.cloud_session.MintedSession`` for an Azure provider satisfies it with
+        # NO import here (the sovereign mint hands the collector DATA, never a governor object — the FATAL-2
+        # boundary). When present, the ambient ``DefaultAzureCredential`` chain is NEVER consulted.
+        # ``require_injected_credentials`` makes a CUSTOMER run FAIL CLOSED rather than silently fall back to
+        # VIGIL's own ambient Azure identity (the no-substitution guard — the single most important invariant of a
+        # customer cloud-posture run). Both default OFF, so the bare ``AzureLiveSensor()`` ambient path
+        # (``engage_fusion`` + the ambient tests) is byte-identical. (The AWS twin is ``cloud_live.CloudLiveSensor``;
+        # the GCP twin is ``gcp_live.GcpLiveSensor`` — this mirrors their customer-credential seam.)
+        self._credentials = credentials
+        self._require_injected = bool(require_injected_credentials)
         self._subscription = (subscription or os.environ.get("AZURE_SUBSCRIPTION_ID") or "")
 
     @staticmethod
@@ -270,23 +347,69 @@ class AzureLiveSensor:
         return self._safe(_pull, []) or []
 
     def run(self, args: dict, ctx: ToolContext) -> ToolResult:
-        if not self._subscription:
-            return inconclusive_result(
-                "azure_live", missing="a resolvable subscription (AZURE_SUBSCRIPTION_ID)", detail=(
-                    "no subscription resolvable (set AZURE_SUBSCRIPTION_ID) — fail-closed no-op."))
-        try:
-            from azure.identity import DefaultAzureCredential  # optional dependency
-        except Exception:
-            return inconclusive_result("azure_live", missing="azure-identity", detail=(
-                "azure-identity not installed — live Azure collection unavailable (fail-closed "
-                "no-op). Install azure-identity + azure-mgmt-storage + azure-mgmt-authorization."))
-        try:
-            credential = DefaultAzureCredential()
-        except Exception as e:
-            return inconclusive_result(
-                "azure_live", missing="ambient Azure credential (service principal / managed identity)", detail=(
-                    f"no ambient Azure credential discoverable (service principal / managed identity) "
-                    f"— fail-closed no-op: {type(e).__name__}"))
+        # The read-only identity + subscription are resolved FIRST, and the credential seam runs BEFORE any azure
+        # import — so the fail-closed rejections (a partial / non-Azure injected session, or a required-but-absent
+        # injection) are a PURE, dependency-free refusal that never reaches the SDK (and runs in CI with no azure
+        # libs). ``credential`` is the azure-core TokenCredential the azure-mgmt clients consume, bound here to
+        # EXACTLY one customer identity (the injected bearer) or to VIGIL's own ambient identity — never mixed.
+        # ``subscription`` scopes every management client.
+        credential: Any = None
+        subscription = ""
+        injected = self._credentials
+        if injected is not None:
+            # SCOPED customer identity: build the credential ONLY from a COMPLETE Azure bearer session, and NEVER
+            # consult the ambient ``DefaultAzureCredential`` when an injection is present. An Azure AAD bearer
+            # rides on a non-AWS ``MintedSession`` (its aws_* fields empty); an empty/partial one — or a non-Azure
+            # provider — is REJECTED here, not handed on (the ``is not None`` ``require_injected`` branch below
+            # cannot catch a non-None-but-incomplete object — the no-substitution invariant).
+            provider = str(getattr(injected, "provider", "azure") or "azure")
+            bearer = str(getattr(injected, "bearer_token", "") or "")
+            subscription = str(getattr(injected, "account_id", "") or "")
+            if provider not in ("azure", "az") or not bearer or not subscription:
+                return inconclusive_result(
+                    "azure_live", missing="a complete Azure scoped read-only session", detail=(
+                        "the injected session is not a complete Azure read-only session (a missing AAD bearer "
+                        "token / subscription, or a non-Azure provider) — refusing to fall back to VIGIL's ambient "
+                        "Azure identity (fail-closed, no identity substitution)."))
+            credential = _InjectedTokenCredential(bearer)
+            # Subscription DRIFT asymmetry vs AWS (cloud_live.py ~643-653): AWS re-confirms tenancy at collection
+            # time via STS get-caller-identity — the landed Account must EQUAL the claimed one. An Azure AAD access
+            # token carries NO subscription binding (its claims name the tenant/identity, not a subscription) — the
+            # subscription is a CLIENT-SIDE argument to each management client, exactly like a GCP OAuth2 token's
+            # project — so there is no cheap, reliable server-side "what subscription am I" that mirrors STS. We
+            # therefore scope every client to the INJECTED subscription (``account_id``) and deliberately DO NOT
+            # invent a drift check, exactly as gcp_live documented for its no-STS-equivalent project asymmetry (a
+            # C3 follow-up may add a token-introspection self-check if one is warranted).
+        elif self._require_injected:
+            # A CUSTOMER run must NEVER fall back to VIGIL's ambient identity (no identity substitution). This elif
+            # returns BEFORE the ambient branch — the required-but-absent injection never even reaches a credential.
+            return inconclusive_result("azure_live", missing="an injected customer read-only session", detail=(
+                "this run requires an explicitly-minted, customer-scoped read-only session; refusing to fall "
+                "back to VIGIL's own ambient Azure identity (fail-closed — no identity substitution)."))
+        else:
+            # EXISTING ambient path, UNCHANGED: VIGIL's own sealed service principal / managed identity, resolved
+            # by ``DefaultAzureCredential``. The subscription + azure-identity fail-closed checks keep their prior
+            # wording/order (the subscription check now lives in this branch — the injected path resolves its
+            # subscription from ``account_id`` instead). All azure imports stay function-local to this branch /
+            # below so the module still imports in the sovereign leg where azure is absent.
+            if not self._subscription:
+                return inconclusive_result(
+                    "azure_live", missing="a resolvable subscription (AZURE_SUBSCRIPTION_ID)", detail=(
+                        "no subscription resolvable (set AZURE_SUBSCRIPTION_ID) — fail-closed no-op."))
+            try:
+                from azure.identity import DefaultAzureCredential  # optional dependency
+            except Exception:
+                return inconclusive_result("azure_live", missing="azure-identity", detail=(
+                    "azure-identity not installed — live Azure collection unavailable (fail-closed "
+                    "no-op). Install azure-identity + azure-mgmt-storage + azure-mgmt-authorization."))
+            try:
+                credential = DefaultAzureCredential()
+            except Exception as e:
+                return inconclusive_result(
+                    "azure_live", missing="ambient Azure credential (service principal / managed identity)",
+                    detail=(f"no ambient Azure credential discoverable (service principal / managed identity) "
+                            f"— fail-closed no-op: {type(e).__name__}"))
+            subscription = self._subscription
         try:
             from azure.mgmt.storage import StorageManagementClient  # optional dependency
         except Exception:
@@ -294,23 +417,23 @@ class AzureLiveSensor:
                 "install azure-mgmt-storage to enable live Azure collection."))
         try:
             containers, account_public, account_net = self._collect_storage(
-                StorageManagementClient(credential, self._subscription))
+                StorageManagementClient(credential, subscription))
         except Exception as e:
             return inconclusive_result(
                 "azure_live", missing="valid, reachable Azure credential", detail=(
                     f"Azure Storage enumeration failed — credential invalid/expired or access denied "
                     f"(fail-closed): {type(e).__name__}"))
-        role_assignments = self._safe(lambda: self._collect_rbac(credential, self._subscription), [])
+        role_assignments = self._safe(lambda: self._collect_rbac(credential, subscription), [])
         inventory = azure_inventory_from_responses(
             containers=containers, account_public_by_id=account_public,
             account_internet_open_by_id=account_net,
-            role_assignments=role_assignments, subscription=self._subscription)
+            role_assignments=role_assignments, subscription=subscription)
         n_res, n_pri = len(inventory.get("resources", [])), len(inventory.get("principals", []))
         return ToolResult(
             ok=True,
-            summary=f"azure_live: Azure subscription {self._subscription} — {n_res} resources, {n_pri} principals (read-only)",
+            summary=f"azure_live: Azure subscription {subscription} — {n_res} resources, {n_pri} principals (read-only)",
             output={"export": json.dumps(inventory), "format": "native", "provider": "azure",
-                    "subscription": self._subscription})
+                    "subscription": subscription})
 
     def normalize(self, result: ToolResult, ctx: ToolContext, *, seq: int) -> list[Observation]:
         out = result.output or {}
