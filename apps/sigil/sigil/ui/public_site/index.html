@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VIGIL: sovereign, proof-carrying offensive security</title>
-<meta name="description" content="VIGIL is a source-available, self-hostable autonomous offensive-security engine. Every finding is a signed, oracle-confirmed FACT you can re-verify offline, with zero false positives by construction. Your keys, your hardware, your LLM.">
+<title>VIGIL: offensive security that proves every finding</title>
+<meta name="description" content="VIGIL is a hosted offensive-security platform that proves every finding. It turns only what it can actually exploit into a signed, oracle-confirmed FACT you can re-verify yourself, with zero false positives by construction, and stands a provable defense in front of it.">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
@@ -35,19 +35,18 @@
 <main id="main">
 
   <section class="hero hero--home">
+    <div class="hero__globe" aria-hidden="true"><canvas id="home-globe"></canvas></div>
     <div class="wrap hero__content">
       <span class="chip chip--fact"><i class="dot dot--pulse"></i>Prove, don't guess</span>
       <h1 class="hero__title">Offensive security that proves every finding.</h1>
-      <p class="lede">VIGIL is a source-available, self-hostable autonomous pentesting engine. It doesn't
-        hand you a list of maybes. It mints a <strong>signed, oracle-confirmed FACT</strong> only when an
-        exploit actually fires, and that proof re-verifies <strong>offline, with zero VIGIL code installed</strong>.
-        Your keys, your hardware, your choice of LLM.</p>
+      <p class="lede">VIGIL is a hosted platform that runs real attacks against your web apps, cloud and
+        code. It never hands you a list of maybes. It mints a <strong>signed, oracle-confirmed FACT</strong>
+        only when an exploit actually fires, and that proof <strong>re-verifies on its own, with nothing of
+        ours to trust</strong>.</p>
       <div class="btn-row">
         <a class="btn btn--primary" href="/support">Request access</a>
         <a class="btn btn--ghost" href="/vs">How VIGIL compares</a>
       </div>
-      <p class="muted hero__note">
-        Source-available (PolyForm Noncommercial + Commercial). Self-hosted and air-gappable. No telemetry.</p>
     </div>
   </section>
 
@@ -55,9 +54,9 @@
     <div class="wrap">
       <div class="stats stats--home reveal">
         <div class="stat"><div class="n">0</div><div class="l">False positives by construction</div></div>
-        <div class="stat"><div class="n">Offline</div><div class="l">Re-verifiable signed proof</div></div>
-        <div class="stat"><div class="n">4</div><div class="l">Enforced sovereignty tiers</div></div>
-        <div class="stat"><div class="n">10</div><div class="l">Compliance frameworks mapped</div></div>
+        <div class="stat"><div class="n">Offline</div><div class="l">Proof you re-verify yourself</div></div>
+        <div class="stat"><div class="n">2-plane</div><div class="l">Attack and provable defense</div></div>
+        <div class="stat"><div class="n">30+</div><div class="l">Scanners driven and proven</div></div>
       </div>
     </div>
   </section>
@@ -69,9 +68,9 @@
       <div class="proofs">
         <div class="proof reveal">
           <span class="proof__k">Proof</span>
-          <h3>A FACT re-verifies offline, by a third party, with nothing of ours installed</h3>
-          <p>Every confirmed finding ships as a proof-carrying certificate. Re-run the check from the
-            evidence alone and get the same verdict. No trust in our dashboard required.</p>
+          <h3>Every finding re-verifies on its own, by anyone, with nothing of ours to trust</h3>
+          <p>A confirmed finding ships as a proof-carrying certificate. Re-run the check from the evidence
+            alone and get the same verdict. You believe the proof, not our dashboard.</p>
         </div>
         <div class="proof reveal">
           <span class="proof__k">Zero FP</span>
@@ -81,11 +80,10 @@
             never dressed up as confirmed.</p>
         </div>
         <div class="proof reveal">
-          <span class="proof__k">Sovereign</span>
-          <h3>Self-hostable, air-gappable, BYO-LLM</h3>
-          <p>Run it on your own hardware with your own model keys (Ollama, vLLM, Bedrock, Vertex, Azure,
-            Mistral). The owner holds the only signing keys. <span class="bound">A deployment tier is not,
-            by itself, a network control. Pair it with your firewall.</span></p>
+          <span class="proof__k">Managed</span>
+          <h3>Nothing to deploy, nothing to babysit</h3>
+          <p>VIGIL runs as a hosted service. Point it at your targets and it does the work: no agents to
+            install, no scanners to wire up, no infrastructure to keep running.</p>
         </div>
         <div class="proof reveal">
           <span class="proof__k">Offense + Defense</span>
@@ -94,17 +92,16 @@
             not an offense-only point tool.</p>
         </div>
         <div class="proof reveal">
-          <span class="proof__k">Isolated</span>
-          <h3>A two-plane boundary the key-holder can't cross</h3>
-          <p>The sovereign, key-holding governor carries no offensive capability and cannot even load
-            offense code, a formally-stated, test-enforced separation.</p>
+          <span class="proof__k">Scoped</span>
+          <h3>Scoped to exactly what you authorize</h3>
+          <p>VIGIL attacks only the targets you point it at, inside the scope you set, and shows you every
+            action it took. Authorization is explicit, and nothing runs outside it.</p>
         </div>
         <div class="proof reveal">
           <span class="proof__k">Honest</span>
           <h3>Radical honesty as a verifiable control</h3>
-          <p>Every public claim traces to source, an enforcing mechanism, and a test. We say
-            <em>source-available</em>, the precise license, and never claim a credential, badge, or
-            attestation we don't actually hold.</p>
+          <p>Every public claim traces to a mechanism and a test. We never dress a lead up as a fact, and we
+            never claim a badge or attestation we do not actually hold.</p>
         </div>
       </div>
     </div>
@@ -129,10 +126,26 @@
 
   <section class="section">
     <div class="wrap">
+      <div class="feed__head reveal">
+        <div>
+          <p class="eyebrow">What's new in cyber</p>
+          <h2 class="section__h2 feed__h2">Recent CVEs, read with proof in mind</h2>
+        </div>
+        <a class="btn btn--ghost feed__all" href="/cve">Browse the CVE database</a>
+      </div>
+      <div id="home-cve" class="cve-mini reveal" aria-live="polite">
+        <p class="muted cve-mini__empty">Browse the live CVE database for recent advisories, each with its
+          severity and CVSS. Intel is a lead until an oracle proves it exploitable in your stack.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
       <div class="band band--home reveal">
         <h2>See a finding prove itself.</h2>
-        <p>Request access for a walkthrough, or read exactly how a VIGIL proof re-verifies offline. No
-          account, no “free trial” theatre, no data leaving your machine.</p>
+        <p>Request access for a walkthrough, or read exactly how a VIGIL proof re-verifies on its own. You
+          get evidence you can check for yourself, not a dashboard you have to take on trust.</p>
         <div class="btn-row btn-row--center">
           <a class="btn btn--primary" href="/support">Request access</a>
           <a class="btn btn--ghost" href="/trust">How the proof works</a>
@@ -150,8 +163,8 @@
         <div class="brand footer__brand">
           <img class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL" width="99" height="22">
         </div>
-        <p class="footer__tagline">Sovereign, proof-carrying offensive
-          security. Prove, don't guess.</p>
+        <p class="footer__tagline">Proof-carrying offensive security.
+          Prove, don't guess.</p>
       </div>
       <div><h4>Product</h4><ul>
         <li><a href="/vs">Compare</a></li>
@@ -177,11 +190,12 @@
     </div>
     <div class="footer__legal">
       <span>© VIGIL</span>
-      <span>Source-available: PolyForm Noncommercial 1.0.0 + Commercial (public-sector excluded from the free grant)</span>
-      <span>No telemetry · self-hosted</span>
+      <span>Proof-carrying offensive security. Every finding carries its proof.</span>
+      <span>Prove, don't guess.</span>
     </div>
   </div>
 </footer>
 
+<script src="/assets/home.js" defer></script>
 </body>
 </html>

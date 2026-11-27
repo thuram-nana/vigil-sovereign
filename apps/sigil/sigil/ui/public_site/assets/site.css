@@ -74,15 +74,17 @@ code, kbd, pre { font-family: var(--font-mono); }
   padding: calc(var(--sp-8) + var(--sp-4)) 0 var(--sp-8); }
 .hero--home .hero__content { position: relative; z-index: 1; }
 .hero--home .chip { margin-bottom: var(--sp-4); }
-.hero--home .hero__title { font-size: clamp(2.2rem, 1.35rem + 3.3vw, 3.75rem); line-height: 1.04;
-  letter-spacing: -.03em; margin: var(--sp-2) 0 var(--sp-4); max-width: 20ch; color: var(--text-0); }
+.hero--home .hero__title { font-size: clamp(2.1rem, 1.3rem + 3vw, 3.5rem); line-height: 1.05;
+  letter-spacing: -.032em; font-weight: 680; margin: var(--sp-2) 0 var(--sp-4); max-width: 19ch;
+  color: var(--text-0); text-wrap: balance; }
 @supports ((-webkit-background-clip: text) or (background-clip: text)) {
   .hero--home .hero__title {
     background: linear-gradient(176deg, var(--text-0) 54%, color-mix(in srgb, var(--text-0) 58%, var(--text-1)));
     -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent; color: transparent; }
 }
-.hero--home .lede { max-width: 58ch; font-size: clamp(1rem, .96rem + .4vw, 1.18rem); }
+.hero--home .lede { max-width: 56ch; font-size: clamp(1.02rem, .97rem + .42vw, 1.2rem);
+  color: var(--text-1); line-height: 1.5; }
 
 /* a faint grid, masked so it dissolves into the page */
 .hero--home::before { content: ""; position: absolute; inset: -2px; z-index: 0; pointer-events: none;
@@ -93,14 +95,14 @@ code, kbd, pre { font-family: var(--font-mono); }
   -webkit-mask-image: radial-gradient(135% 92% at 50% -8%, #000 32%, transparent 76%);
           mask-image: radial-gradient(135% 92% at 50% -8%, #000 32%, transparent 76%);
   opacity: .55; }
-/* a slow, breathing glow in the FACT green with a restrained cool companion */
+/* a slow, breathing ambient glow: cool and restrained, no green decorative field */
 .hero--home::after { content: ""; position: absolute; z-index: 0; pointer-events: none;
-  top: -26%; left: 50%; width: min(1180px, 132%); aspect-ratio: 2 / 1; transform: translateX(-50%);
+  top: -30%; left: 50%; width: min(1180px, 130%); aspect-ratio: 2 / 1; transform: translateX(-50%);
   background:
-    radial-gradient(42% 56% at 50% 42%, color-mix(in srgb, var(--st-confirmed) 28%, transparent), transparent 70%),
-    radial-gradient(56% 64% at 64% 30%, color-mix(in srgb, var(--st-running) 15%, transparent), transparent 72%);
-  filter: blur(16px); opacity: .9;
-  animation: hero-glow 15s ease-in-out infinite; }
+    radial-gradient(48% 60% at 50% 40%, color-mix(in srgb, var(--text-0) 6%, transparent), transparent 72%),
+    radial-gradient(56% 64% at 62% 28%, color-mix(in srgb, var(--st-running) 9%, transparent), transparent 74%);
+  filter: blur(22px); opacity: .85;
+  animation: hero-glow 18s ease-in-out infinite; }
 @keyframes hero-glow {
   0%, 100% { opacity: .76; transform: translateX(-50%) translateY(0) scale(1); }
   50%      { opacity: 1;   transform: translateX(-50%) translateY(10px) scale(1.06); } }
@@ -235,21 +237,21 @@ code, kbd, pre { font-family: var(--font-mono); }
 .card--scope { position: relative; overflow: hidden;
   transition: border-color .18s ease, transform .18s ease, background .18s ease; }
 .card--scope::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px;
-  background: linear-gradient(90deg, var(--st-confirmed), color-mix(in srgb, var(--st-running) 65%, transparent));
+  background: linear-gradient(90deg, var(--text-1), transparent);
   transform: scaleX(0); transform-origin: left; transition: transform .25s ease; }
 .card--scope:hover { transform: translateY(-4px); border-color: var(--border-strong);
   background: color-mix(in srgb, var(--bg-2) 62%, var(--bg-1)); }
 .card--scope:hover::before { transform: scaleX(1); }
 .card--scope h3 { margin-top: 0; }
 
-/* -- CTA band: soft FACT-green wash + a hairline top ring ------------------- */
+/* -- CTA band: a restrained FACT-green hint + a hairline top ring ----------- */
 .band--home { position: relative; overflow: hidden; border-color: var(--border-strong);
   background:
-    radial-gradient(120% 150% at 50% -30%, color-mix(in srgb, var(--st-confirmed) 13%, transparent), transparent 58%),
+    radial-gradient(120% 150% at 50% -30%, color-mix(in srgb, var(--st-confirmed) 7%, transparent), transparent 60%),
     var(--bg-1); }
 .band--home::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
   pointer-events: none;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--st-confirmed) 48%, var(--border)), transparent 62%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--st-confirmed) 28%, var(--border)), transparent 64%);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
           mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor; mask-composite: exclude; }
@@ -307,4 +309,58 @@ code, kbd, pre { font-family: var(--font-mono); }
     animation-delay: 0ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important;
   }
   .reveal, .hero--home .hero__content > * { opacity: 1 !important; transform: none !important; }
+}
+
+/* ==========================================================================
+   HOME v2: the dotted globe (a same-origin canvas, drawn by /assets/home.js)
+   and the "what's new in cyber" CVE feed. Both are progressive: the page is
+   complete at rest with no script, and each visual degrades to nothing.
+   ========================================================================== */
+
+/* the globe lives behind the hero copy, clipped to the hero (no horizontal scroll) */
+.hero__globe { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+#home-globe { position: absolute; top: 50%; right: -5%; width: min(560px, 60%);
+  aspect-ratio: 1 / 1; transform: translateY(-50%); opacity: .9; display: block; background: transparent; }
+@media (min-width: 900px) { .hero--home { min-height: 520px; } }
+@media (max-width: 760px) {
+  #home-globe { right: -24%; top: 44%; width: 78%; opacity: .34; }
+}
+
+/* feed header: title on the left, "browse all" on the right, wraps on phones */
+.feed__head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--sp-4);
+  flex-wrap: wrap; margin-bottom: var(--sp-5); }
+.feed__head .eyebrow { margin-bottom: var(--sp-2); }
+.feed__h2 { margin: 0; }
+.feed__all { flex: none; }
+
+/* the compact CVE list (filled by home.js; the static copy is the resting state) */
+.cve-mini { display: grid; gap: var(--sp-3); }
+.cve-mini__empty { margin: 0; font-size: var(--fs-sm); max-width: 72ch; }
+.cve-mini__row { display: flex; align-items: center; gap: var(--sp-4); padding: 13px var(--sp-4);
+  border: 1px solid var(--border); border-radius: var(--r-2); background: var(--bg-1);
+  transition: border-color .15s ease, transform .15s ease, background .15s ease; }
+.cve-mini__row:hover { border-color: var(--border-strong); transform: translateY(-1px);
+  background: color-mix(in srgb, var(--bg-2) 70%, var(--bg-1)); }
+.cve-mini__id { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-1);
+  white-space: nowrap; }
+.cve-mini__title { flex: 1; min-width: 0; color: var(--text-0); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cve-mini__kev { color: var(--sev-critical); font-size: var(--fs-micro); font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.cve-mini__sev { display: inline-flex; align-items: center; font-size: var(--fs-xs); font-weight: 650;
+  padding: 3px 10px; border-radius: var(--r-pill); border: 1px solid var(--border-strong);
+  color: var(--text-1); white-space: nowrap; }
+.cve-mini__sev--critical { color: var(--sev-critical);
+  border-color: color-mix(in srgb, var(--sev-critical) 50%, var(--border)); }
+.cve-mini__sev--high { color: var(--sev-high);
+  border-color: color-mix(in srgb, var(--sev-high) 50%, var(--border)); }
+.cve-mini__sev--medium { color: var(--sev-medium);
+  border-color: color-mix(in srgb, var(--sev-medium) 50%, var(--border)); }
+.cve-mini__sev--low { color: var(--sev-low);
+  border-color: color-mix(in srgb, var(--sev-low) 50%, var(--border)); }
+.cve-mini__sev--info { color: var(--sev-info);
+  border-color: color-mix(in srgb, var(--sev-info) 50%, var(--border)); }
+@media (max-width: 560px) {
+  .cve-mini__row { flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+  .cve-mini__title { flex-basis: 100%; white-space: normal; order: 3; }
 }
