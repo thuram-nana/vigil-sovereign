@@ -472,6 +472,7 @@ jobs:
               --ignore=integration/tests/test_brain_engine.py \
               --ignore=integration/tests/test_sovereignty_governs_llm_egress.py \
               --ignore=integration/tests/test_live_executor_report_builders.py \
+              --ignore=integration/tests/test_cli_launch_run.py \
               --junit-xml="${RUNNER_TEMP:-/tmp}/sovereign-junit.xml" -q -m "not volume"
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
@@ -552,7 +553,7 @@ jobs:
             #     a wrong path — exactly what importorskip would otherwise hide as a skip.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
-            PYTHONPATH=integration:engine/crucible:gateway:.github/scripts python -m pytest \
+            PYTHONPATH=integration:engine/crucible:gateway:apps/aegis-ingest:.github/scripts python -m pytest \
               -p pytest_require_planes -rs \
               docs/tests/test_out_of_scope_is_honest.py \
               integration/tests/test_tool_intake.py \
@@ -566,6 +567,7 @@ jobs:
               integration/tests/test_reconciliation.py \
               integration/tests/test_launch_trigger.py \
               integration/tests/test_launch_drain.py \
+              integration/tests/test_cli_launch_run.py \
               integration/tests/test_engage_runner.py \
               integration/tests/test_engage_worker_metered.py \
               integration/tests/test_engage_worker_heartbeat.py \
@@ -575,7 +577,12 @@ jobs:
               integration/tests/test_seam_migration_engine_floor.py \
               integration/tests/test_ci_runner.py \
               integration/tests/test_findings_crossing.py \
+              integration/tests/test_graph_evidence_join.py \
               integration/tests/test_aegis_saas_acceptance.py \
+              apps/aegis-ingest/tests/test_distribution.py \
+              integration/tests/IT/test_aegis_tt_rig.py \
+              integration/tests/test_langplugins.py \
+              integration/tests/test_backup_aegis_monitoring_excluded.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
               integration/tests/test_pr_bot_runner.py \
@@ -714,6 +721,15 @@ jobs:
               integration/tests/test_hexstrike_profile_observations.py \
               integration/tests/test_sovereignty_governs_llm_egress.py \
               integration/tests/test_cloud_live_posture.py \
+              integration/tests/test_cloud_posture_run_e2e.py \
+              integration/tests/test_cloud_posture_run_report.py \
+              integration/tests/test_cloud_posture_run_gcp_e2e.py \
+              integration/tests/test_cloud_posture_run_gcp_report.py \
+              integration/tests/test_cloud_posture_run_azure_e2e.py \
+              integration/tests/test_cloud_posture_run_azure_report.py \
+              integration/tests/test_cloud_posture_run_cloudflare_e2e.py \
+              integration/tests/test_cloud_posture_run_cloudflare_report.py \
+              integration/tests/test_cloud_posture_run_multicloud.py \
               integration/tests/test_cloud_benchmark.py \
               integration/tests/test_cloud_scope.py \
               integration/tests/test_iac_posture.py \
@@ -744,6 +760,7 @@ jobs:
               integration/tests/test_mesh_cicd_posture.py \
               integration/tests/test_eval_capability_grant_e2e.py \
               integration/tests/test_fair_queue_job_runner.py \
+              integration/tests/test_graph_lifecycle_s1.py \
               engine/crucible/framework/v2/verify/tests/test_egress_pin.py \
               engine/crucible/framework/v2/verify/tests/test_reachability.py \
               engine/crucible/framework/v2/verify/tests/test_tls_weakness.py \
@@ -757,6 +774,7 @@ jobs:
               engine/crucible/framework/v2/agents/tests/test_egress_guard_floor.py \
               engine/crucible/framework/v2/agents/tests/test_engage_signed_authority.py \
               engine/crucible/framework/v2/common/tests/test_egress_backstop.py \
+              engine/crucible/framework/v2/aegis/tests/test_egress_backstop_mirror.py \
               engine/crucible/framework/v2/console/tests/test_approvals_screen.py \
               engine/crucible/framework/v2/console/tests/test_chat_clone.py \
               engine/crucible/framework/v2/console/tests/test_chat_codebase_edit.py \
@@ -1161,7 +1179,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "21"
@@ -1242,3 +1260,83 @@ jobs:
           PYTHONPATH=gateway python -m pytest -rA -v \
             integration/tests/test_aegis_dockerfile_wired.py \
             gateway/tests/test_env_gated_tests_run_in_ci.py
+
+  aegis-tt-uids:
+    name: AEGIS TT distinct-uid isolation (root container)
+    # AS-1a red-pen: the distinct-OS-uid tenant-isolation tests ran in NO CI leg, so an isolation
+    # regression would ship GREEN. integration/tests/IT/test_aegis_tt_rig.py is collected only by the
+    # offense leg of the required "integration two-env boundary (P5)" job, which runs on a plain
+    # ubuntu-latest as the non-root `runner` user. The two real-OS-boundary tests —
+    # test_observe_acceptance_distinct_uids and test_cli_require_uids_runs_distinct — are guarded by
+    # @pytest.mark.skipif(not tt_uids_provisionable()) (root + useradd), so there they SKIP, silently,
+    # on every run: the guarantee that TT-B cannot read TT-A's monitoring feed across a dropped-privilege
+    # OS boundary (tt_rig.py: chown 0700 + setgid/setgroups([])/setuid) was never once exercised. A
+    # regression — tenant_root 0700 → 0755, or dropping setgroups([]) — would leave CI green.
+    #
+    # This leg CLOSES that: a job with a `container:` runs as root inside the container (GitHub-hosted
+    # runners start the job container as its default user, which is root for the official python image),
+    # so tt_uids_provisionable() is True and the two tests actually EXECUTE as root with real useradd/
+    # setuid. VIGIL_REQUIRE_TT_UIDS=1 selects the required-uids semantics on the CLI path. The step after
+    # reads the JUnit report and FAILS this leg unless both proofs ran and were NOT skipped — so the leg
+    # cannot silently rot back to skipping (pytest exits 0 on a skipif skip; pytest_require_planes does
+    # NOT catch this skip because its reason names no plane — hence the dedicated assert_tt_uid_isolation_ran).
+    #
+    # ADVISORY (not a required check): it is a NEW pull_request job, and per the repository's governance
+    # on-ramp a check is promoted to a merge blocker only after it is on `main` and reporting on PRs, via
+    # the operator's tools/governance/require-checks.sh --apply (a GitHub-admin action). It is enumerated
+    # WITH THIS REASON in docs/tests/test_required_checks_canonical.py (KNOWN_ADVISORY) so it can never
+    # become a silently-unguarded PR job. Until promoted it reports red on the PR when isolation breaks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash  # the container's default shell is `sh` (dash); bash is required for `set -o pipefail`
+    # Pinned by digest (python:3.13-bookworm) — the full image ships git (for actions/checkout) and
+    # useradd/userdel (the shadow `passwd` package the distinct-uid provisioner needs), so no apt step
+    # and no network beyond the pinned base + the hash-locked pip installs below.
+    container:
+      image: python:3.13-bookworm@sha256:ee1a30c36c5cf43df939eb664489fb167e1bbe07cd884ea694054f6aff4dd9d9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: install the offense-leg deps (identical to the required P5 / nightly volume legs)
+        run: |
+          # Byte-for-byte the install the offense leg of "integration two-env boundary (P5)" does, so this
+          # leg drives the SAME tree: runtime from the committed HASH LOCK, vigil_core editable --no-deps,
+          # pytest from the pinned CI toolchain lock. The container ships pip; the official python image
+          # allows global pip installs (no externally-managed marker).
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      - name: preflight — this leg MUST be root with useradd, or the whole point is lost
+        # If the container ever stopped running as root (or useradd went missing), tt_uids_provisionable()
+        # would be False and the isolation tests would SKIP — the exact silent-green this leg exists to end.
+        # Fail LOUDLY here rather than let them skip; the JUnit assertion below is the second, authoritative
+        # backstop, but this makes the "not root" cause unmistakable in the log.
+        run: |
+          set -euo pipefail
+          euid="$(python3 -c 'import os; print(os.geteuid())')"
+          if [ "$euid" != "0" ]; then
+            echo "::error::this leg is not running as root (euid=$euid) — the distinct-uid isolation tests would SKIP"; exit 1
+          fi
+          command -v useradd >/dev/null 2>&1 || { echo "::error::useradd not on PATH — cannot provision distinct tenant uids"; exit 1; }
+          echo "root + useradd present (euid=$euid, useradd=$(command -v useradd)) — the OS-boundary tests can run"
+      - name: run the distinct-uid OS-isolation acceptance AS ROOT (skip is a FAILURE)
+        run: |
+          set -euo pipefail
+          # The two tests gated on tt_uids_provisionable() (root + useradd): each tenant in its OWN process
+          # under a DISTINCT uid, so cross-tenant isolation is a real OS boundary, not in-process separation.
+          # Node ids (not -k) so a rename becomes a hard collection error the JUnit guard then reports.
+          # VIGIL_REQUIRE_TT_UIDS=1: the required-uids CLI semantics. VIGIL_REQUIRE_PLANES + pytest_require_planes:
+          # a missing engine plane becomes a FAILURE here (the file importorskips framework.v2.aegis.tt_rig).
+          VIGIL_REQUIRE_TT_UIDS=1 \
+          VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
+          PYTHONPATH=integration:engine/crucible:gateway:.github/scripts python -m pytest \
+            -p pytest_require_planes -rs -p no:cacheprovider \
+            --junit-xml="${RUNNER_TEMP:-/tmp}/tt-uid-junit.xml" \
+            "integration/tests/IT/test_aegis_tt_rig.py::test_observe_acceptance_distinct_uids" \
+            "integration/tests/IT/test_aegis_tt_rig.py::test_cli_require_uids_runs_distinct"
+      - name: the distinct-uid isolation proofs MUST have actually executed (a skipped proof fails this leg)
+        # pytest exits 0 when a skipif skip fires or a node id selects nothing after a rename — both would
+        # leave this leg green having proved nothing. This reads the JUnit report and FAILS unless BOTH
+        # named OS-boundary proofs are present AND were neither skipped, errored, nor failed.
+        run: python .github/scripts/assert_tt_uid_isolation_ran.py "${RUNNER_TEMP:-/tmp}/tt-uid-junit.xml"

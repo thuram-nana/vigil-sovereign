@@ -43,8 +43,10 @@ import hashlib
 import json
 import math
 import secrets
+import threading
 import time
-from typing import Any, Callable, NoReturn, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, NoReturn, Optional
 
 from ..reuse import assert_no_offense
 
@@ -82,6 +84,10 @@ _ADD_NO_ACCOUNT = ("there is no VIGIL account for that email. Ask your teammate 
 _ADD_ALREADY_MEMBER = ("that person is already a member of this workspace. To give them another role, use Change role "
                        "on their row")
 _ADD_BAD_EMAIL = "enter the email address your teammate signs in to VIGIL with"
+# V12 seats: the refusal a customer reads when a NEW member would exceed the workspace's seat limit
+# (only while VIGIL_CUSTOMER_SEATS is on). {limit} is the current allowance.
+_SEAT_LIMIT_MSG = ("this workspace has reached its member limit ({limit}). Remove a member, or add a seat, "
+                   "before adding another")
 # The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
 # one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
 _SIGNUP_CODE_EMAIL = (
@@ -278,6 +284,12 @@ class ProvisionRateLimited(ProvisionError):
         self.retry_after = retry_after
 
 
+class ProvisionBusy(ProvisionRateLimited):
+    """The provisioner is at its bound of concurrent unauthenticated work (SSO): retry after `retry_after` seconds.
+    The HTTP layer answers 503 + Retry-After (a ProvisionRateLimited, so a caller that does not know it still backs
+    off)."""
+
+
 class ProvisionStepUpRequired(ProvisionError):
     """E3c — a sensitive op needs a FRESH step-up second factor (the session's `mfa_at` is absent/stale and
     step-up enforcement is ON). The HTTP layer maps it to 401 with `step_up_required=True` so the SPA prompts
@@ -419,15 +431,36 @@ def _member_target(username) -> str:
 #: How long a member verb waits for the membership critical section before it gives up (nothing written).
 _MEMBERS_LOCK_WAIT_S = 10.0
 
+def _subscription_is_live(cur, t: float) -> bool:
+    """PL01 CHK-1b — does a (credit or monitoring) subscription still block a SECOND plan of its kind at time t?
+    It blocks while the FIRST subscription can still produce a charge; selling a second one in that window would
+    double-bill. A canceled/expired subscription (status outside ACTIVE/PAST_DUE) never blocks. The grace past
+    period_end is SPLIT by status, because the two gaps differ by orders of magnitude:
+      * ACTIVE  — a successful auto-renewal webhook lands within minutes, so a SHORT grace
+        (config.PLAN_RENEWAL_GRACE_SECONDS, ~72h) covers the stale-period_end window before it lands.
+      * PAST_DUE — the processor keeps RETRYING for its full dunning window (weeks) and a late success
+        RE-ACTIVATES this subscription with a pushed-forward period_end, so the guard must stay on for the whole
+        dunning deadline (config.PLAN_PAST_DUE_GRACE_SECONDS, ~30d). After it the plan is presumed dead (no
+        terminal-cancel webhook is wired) and a fresh purchase is allowed."""
+    from .. import config
+    from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE
+    if cur is None or getattr(cur, "status", None) not in (STATUS_ACTIVE, STATUS_PAST_DUE):
+        return False
+    grace = (config.PLAN_PAST_DUE_GRACE_SECONDS if cur.status == STATUS_PAST_DUE
+             else config.PLAN_RENEWAL_GRACE_SECONDS)
+    return t < float(cur.period_end) + grace
 
-def _members_lock(store):
+
+def _members_lock(store, *, wait_s: "Optional[float]" = None):
     """The CROSS-PROCESS critical section for membership changes on `store`'s spine: an flock on
     ``<spine dir>/<stem>.members.lock`` (a ``*.lock`` transient the backups skip), taken with the same hardened
     ``locked_file`` as the settle lock. Every member verb that applies the last-admin rule holds it around that
     check AND its audit and owner-signed write — the customer `grant_member`/`revoke_member` in the cockpit and the
     owner verbs in the `sigil` CLI — so two processes always decide against the administrator set the other left,
     never against the same one. Lock order: ``spine_lock`` (in-process) -> this -> the spine's append lock. A
-    bounded wait, then ``LockBusy`` with nothing written; an unusable lock file raises ``OSError`` (fail-closed)."""
+    bounded wait (`wait_s`, default `_MEMBERS_LOCK_WAIT_S`), then ``LockBusy`` with nothing written; an unusable
+    lock file raises ``OSError`` (fail-closed). The verbs take it through `_members_section`, which only ever TRIES
+    it while holding ``spine_lock`` and waits without it."""
     from pathlib import Path
     from vigil_integration.live.seam_lock import locked_file
     raw = getattr(store, "path", None)
@@ -435,7 +468,56 @@ def _members_lock(store):
         raise ValueError("the membership lock needs a spine store with a path")
     sp = Path(raw)
     path = sp.parent / f"{sp.stem or sp.name}.members.lock"
-    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S, create=False, chown_like=path.parent)
+    return locked_file(path, wait_s=_MEMBERS_LOCK_WAIT_S if wait_s is None else float(wait_s), create=False,
+                       chown_like=path.parent)
+
+
+_MEMBERS_SECTION = threading.local()                  # this thread's depth inside `_members_section`
+
+
+def members_section_held() -> bool:
+    """True iff THIS thread is inside `_members_section` (it holds the spine lock and the membership flock)."""
+    return getattr(_MEMBERS_SECTION, "depth", 0) > 0
+
+
+@contextmanager
+def _members_section(lock, store) -> "Iterator[None]":
+    """The membership critical section — `lock` (the process-wide re-entrant spine lock), then the cross-process
+    membership flock (`_members_lock`) — taken so that this thread NEVER WAITS ON THE FLOCK WHILE HOLDING `lock`
+    (every spine append of the process waits on `lock`): the flock is only ever TRIED under `lock`; when another
+    holder has it, `lock` is released, the wait happens without it, and both are tried again — up to
+    `_MEMBERS_LOCK_WAIT_S`, then `LockBusy` with nothing held. A thread that already holds the section (a nested
+    entry: its own flock would conflict with itself), or that holds `lock` from an outer frame (releasing it would
+    not free it), gets ONE try and then `LockBusy` at once, never a wait."""
+    from vigil_integration.live.seam_lock import POLL_S, LockBusy
+    if members_section_held():
+        raise LockBusy("the membership critical section is already held by this thread (nested entry refused)")
+    outer = bool(getattr(lock, "_is_owned", lambda: False)())
+    deadline = time.monotonic() + _MEMBERS_LOCK_WAIT_S
+    while True:
+        lock.acquire()
+        try:
+            cm = _members_lock(store, wait_s=0.0)
+            cm.__enter__()
+        except LockBusy:
+            lock.release()
+            if outer or time.monotonic() >= deadline:
+                raise
+            time.sleep(POLL_S)
+            continue
+        except BaseException:
+            lock.release()
+            raise
+        break
+    _MEMBERS_SECTION.depth = getattr(_MEMBERS_SECTION, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _MEMBERS_SECTION.depth -= 1
+        try:
+            cm.__exit__(None, None, None)
+        finally:
+            lock.release()
 
 
 def _member_admins(orgs, org_id: str) -> "set[str]":
@@ -487,7 +569,7 @@ def owner_set_member_role(store, org_id: str, username: str, role: str, *, reaso
         raise ValueError("a reason is required (it is recorded in the audit)")
     orgs = orgs if orgs is not None else OrgRegistry(store)
     customers = customers if customers is not None else CustomerRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         prev = orgs.membership_role(u, oid)
@@ -514,7 +596,7 @@ def owner_demote_founders(store, *, reason: str, issued_at: float, org_id: "Opti
         raise ValueError("a reason is required (it is recorded in the audit)")
     oid = _check_org_id(org_id) if org_id is not None else None
     orgs = orgs if orgs is not None else OrgRegistry(store)
-    with spine_lock(store.path), _members_lock(store):
+    with _members_section(spine_lock(store.path), store):
         if oid is not None and orgs.org(oid) is None:
             raise ValueError(f"no active org {oid!r}")
         founders = [m for m in orgs.memberships(oid)
@@ -534,7 +616,9 @@ class Provisioner:
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
                  signup_cap_limiter=None, member_limiter=None, target_fetcher=None, cloud_fetcher=None,
-                 cloud_principal_arn="", connect_check_limiter=None, connect_org_limiter=None,
+                 cloud_principal_arn="", cloud_gcp_fetcher=None, cloud_gcp_connector_sa="",
+                 azure_fetcher=None, azure_client_id="", cloudflare_fetcher=None,
+                 connect_check_limiter=None, connect_org_limiter=None,
                  cloud_connect_limiter=None,
                  signup_email_limiter=None,
                  customer_credentials=None, oidc_provider=None, mfa_replay=None, signcount=None,
@@ -543,7 +627,10 @@ class Provisioner:
                  trial_credits: int = _DEFAULT_TRIAL_CREDITS, trial_claims=None, trial_launch_limiter=None,
                  trial_ip_limiter=None, email_codes=None, email_code_limiter=None, installation_verifier=None,
                  shard_assignments=None,
-                 expose_dev_tokens: bool = False, now_fn=time.time):
+                 saml_replay=None, scim_auth_limiter=None, scim_write_limiter=None, scim_read_limiter=None,
+                 scim_deprov_limiter=None, scim_deprov_floor_limiter=None, sso_signin_limiter=None,
+                 sso_oidc_http_post=None,
+                 sso_oidc_jwks_fetcher=None, expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         # PR-F: the owner-signed ShardAssignmentRegistry used to PLACE a new tenant on a shard at sign-up
         # (`build_provisioner` injects it; None ⇒ shard-on-signup is a no-op). Injected, it stays inert unless
@@ -595,7 +682,32 @@ class Provisioner:
         # sovereign egress posture until the owner provisions VIGIL's connector identity. ``cloud_principal_arn`` is
         # that identity's ARN, printed into the customer's trust policy ("" ⇒ the cloud leg offers nothing).
         self.cloud_fetcher = cloud_fetcher
+        # Consumer PR-C (Cloudflare leg) — the READ-ONLY Cloudflare token fetcher (``ui.cloudflare_fetch``): it
+        # verifies the customer's read-only API token and reads the token's OWN definition to bind the challenge and
+        # confirm read-only + single-account (``assume(provider=, account_id=, role_ref=<the token, a bearer secret>,
+        # external_id=, control_external_id=, now=) -> {token_id, account, name_matched, external_id, read_only,
+        # single_account}``). None ⇒ Cloudflare connect offers nothing (fail-closed). Unlike AWS, VIGIL holds no
+        # Cloudflare credential of its own; the customer's token is the only secret and this leg never stores it.
+        self.cloudflare_fetcher = cloudflare_fetcher
         self.cloud_principal_arn = str(cloud_principal_arn or "")
+        # The GCP leg of the cloud connect (``ui.cloud_fetch.GcpImpersonationConnectFetcher``): it signs VIGIL's
+        # connector-SA assertion and impersonates the challenge-NAMED target SA (whose id encodes the issued external
+        # id), proving control in one call (``assume(provider=, account_id=, role_ref=, external_id=,
+        # control_external_id=, now=) -> {impersonated, expected_email, project, external_id}`` — the SAME signature as
+        # the AWS fetcher). None ⇒ the GCP leg offers nothing (fail-closed) until the owner provisions VIGIL's connector
+        # SA. ``cloud_gcp_connector_sa`` is that connector SA's email, shown to the customer as the member to grant
+        # tokenCreator ("" ⇒ the GCP leg offers nothing).
+        self.cloud_gcp_fetcher = cloud_gcp_fetcher
+        self.cloud_gcp_connector_sa = str(cloud_gcp_connector_sa or "")
+        # Consumer PR-C (Azure leg) — the READ-ONLY Azure consent fetcher (``ui.cloud_fetch.AzureConsentConnectFetcher``):
+        # under VIGIL's multi-tenant app it takes a client-credentials token against the customer's tenant (admin
+        # consent), reads VIGIL's own service principal back over Microsoft Graph to confirm the admin-set external_id
+        # binding, and runs the same-shape negative control (``assume(provider=, account_id=, role_ref=, external_id=,
+        # control_external_id=, now=) -> {tenant, external_id_matched, external_id, control_tenant, control_denied}``).
+        # None ⇒ the Azure flow offers nothing (fail-closed) until the owner provisions VIGIL's Azure app.
+        # ``azure_client_id`` is that app's client id, printed into the customer's admin-consent URL ("" ⇒ no flow).
+        self.azure_fetcher = azure_fetcher
+        self.azure_client_id = str(azure_client_id or "")
         # PR-C — the connect surface's durable limiters (LoginRateLimiter, guard-and-count ``admit``). FAIL-CLOSED when
         # unwired (they guard OUTBOUND fetches, like the checkout limiter guards a money call): the automatic ownership
         # re-check needs BOTH the per-(org, host) cadence and the per-org ceiling, cloud verify needs its own per-org
@@ -647,6 +759,22 @@ class Provisioner:
         # vigil-customer.nginx.conf). The limiter stores only sha256(key). Over the limit means no trial (the
         # account is still created). The IP is never an identity or a claim key.
         self.trial_ip_limiter = trial_ip_limiter
+        # Consumer PR-H — SSO / SCIM (VIGIL_CUSTOMER_SSO; wired by the factory only while the flag is on). The
+        # durable single-use SAML assertion-ID ledger (None ⇒ SAML sign-in refused), the per-(org, IP) SCIM
+        # failed-authentication limiter and the per-org SCIM write and read budgets (any None ⇒ SCIM refused, 503),
+        # and the enterprise-OIDC egress hooks (both None ⇒ the owner-signed per-org host allowlist; a test injects a
+        # local fake IdP).
+        self.saml_replay = saml_replay
+        self.scim_auth_limiter = scim_auth_limiter
+        self.scim_write_limiter = scim_write_limiter
+        self.scim_read_limiter = scim_read_limiter
+        # The per-org deprovisioning cap + its one-per-minute floor (either None ⇒ SCIM refused, 503) and the per-org
+        # enterprise sign-in budget (None ⇒ every SSO sign-in refused).
+        self.scim_deprov_limiter = scim_deprov_limiter
+        self.scim_deprov_floor_limiter = scim_deprov_floor_limiter
+        self.sso_signin_limiter = sso_signin_limiter
+        self.sso_oidc_http_post = sso_oidc_http_post
+        self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
         # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
@@ -761,6 +889,18 @@ class Provisioner:
         if locked is not None:
             raise ProvisionRateLimited(locked)
         self.member_limiter.record_failure(f"member:org:{org_id}", now=now)
+
+    def _seat_guard(self, org_id: str) -> None:
+        """Refuse adding a NEW member once ``org_id`` is at its seat limit (V12). A no-op unless
+        ``VIGIL_CUSTOMER_SEATS`` is on, so the default is byte-identical. Called INSIDE the member lock,
+        immediately before the owner-signed grant, so the count it reads is the count the grant would grow —
+        no TOCTOU with a concurrent add. Only the NEW-member paths call it; a role change consumes no seat."""
+        from .. import config
+        if not config.customer_seats_enabled():
+            return
+        limit = config.customer_default_seats()
+        if self.orgs.member_count(org_id) >= limit:
+            raise ProvisionDenied(_SEAT_LIMIT_MSG.format(limit=limit))
 
     # -- enrolment hardening (customer_mfa_enroll_stepup_enabled; default OFF ⇒ all three are no-ops) ----
     def _enroll_hardening_on(self) -> bool:
@@ -929,10 +1069,12 @@ class Provisioner:
         paused = self._latch_refusal("customer_signup")    # the owner's latch: no NEW sign-up is started
         if paused is not None:
             raise ProvisionDenied(paused)
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP signup counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"signup:ip:{ip}", f"signup:email:{email_l}", now=t)
-        self.rate_limiter.record_failure(f"signup:ip:{ip}", now=t)   # count every attempt (anti-flood)
+        ipk = f"signup:ip:{ip_rate_key(ip)}"
+        self._rate_guard(ipk, f"signup:email:{email_l}", now=t)
+        self.rate_limiter.record_failure(ipk, now=t)   # count every attempt (anti-flood)
         if self.signup_email_limiter is not None:
             from ..governor.trial_policy import canonical_email
             ekey = canonical_email(email_l)
@@ -1106,18 +1248,23 @@ class Provisioner:
         Returns {username, orgs:[...]} (the orgs the customer is an active member of — the edge binds ONE as
         the session's active org). Raises on lockout / bad credentials. Behaviour is identical to the pre-E3a
         inline path; the provider + finish_login seam is what Google-OIDC / passkey login reuse (E2/E3)."""
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP login counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"login:email:{email_l}", f"login:ip:{ip}", now=t)
+        ipk = f"login:ip:{ip_rate_key(ip)}"
+        self._rate_guard(f"login:email:{email_l}", ipk, now=t)
         try:
             identity = PasswordIdentityProvider(self.customers).verify(email=email_l, password=password)
         except IdentityRefused:
             self.rate_limiter.record_failure(f"login:email:{email_l}", now=t)
-            self.rate_limiter.record_failure(f"login:ip:{ip}", now=t)
+            self.rate_limiter.record_failure(ipk, now=t)
             self._audit("login", target=email_l, outcome="denied")
             raise ProvisionDenied("invalid email or password")
+        # PL01: a successful login clears only THIS EMAIL's failure counter (so a legitimate user is never locked
+        # out by their own earlier typos). The per-IP counter is deliberately NOT cleared on success: otherwise an
+        # attacker holding one valid account on the IP could reset it at will and brute-force OTHER accounts from
+        # the same address unthrottled.
         self.rate_limiter.record_success(f"login:email:{email_l}")
-        self.rate_limiter.record_success(f"login:ip:{ip}")
         result = self.finish_login(identity)
         self._audit("login", requester=result["username"], target=result["username"], outcome="ok")
         return result
@@ -1158,6 +1305,32 @@ class Provisioner:
             cred = self.customer_credentials.by_credential_id(identity.credential_id or "")
             return cred.username if cred is not None else None
         return None
+
+    # -- Consumer PR-H: enterprise SSO + SCIM (VIGIL_CUSTOMER_SSO; dispatched only while it is on) --------
+    # Session-less bootstrap actions like login/oidc_finish: the hop key alone gates the call, and the org only
+    # selects WHICH owner-signed config the presented proof (IdP signature bound to the login's AuthnRequest /
+    # nonce, or the org's SCIM bearer) must verify under — see ui/sso_provision.py for the full contract.
+    def sso_login_start(self, org_id: str, *, ip: str = "") -> dict:
+        """The org's IdP sign-in endpoint (owner-signed, non-secret) for an SP-initiated SSO sign-in."""
+        from .sso_provision import sso_login_start
+        return sso_login_start(self, org_id, ip=ip)
+
+    def sso_saml_acs(self, org_id: str, saml_response: str, *, request_id: str, ip: str = "") -> dict:
+        """Verify a SAML Response bound to this login's AuthnRequest → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_saml_acs
+        return sso_saml_acs(self, org_id, saml_response, request_id=request_id, ip=ip)
+
+    def sso_oidc_finish(self, org_id: str, *, code: str, code_verifier: str, nonce: str, ip: str = "") -> dict:
+        """Enterprise-OIDC code exchange + id_token verification → {username, org_id} (fail-closed)."""
+        from .sso_provision import sso_oidc_finish
+        return sso_oidc_finish(self, org_id, code=code, code_verifier=code_verifier, nonce=nonce, ip=ip)
+
+    def scim_request(self, org_id: str, *, method: str, path: str, query: str = "", body=None,
+                     authorization: str = "", ip: str = "") -> dict:
+        """One bearer-authenticated SCIM 2.0 request → {status, body, deactivated[, retry_after]}."""
+        from .sso_provision import scim_request
+        return scim_request(self, org_id, method=method, path=path, query=query, body=body,
+                            authorization=authorization, ip=ip)
 
     # -- Google OIDC login (E2b) -------------------------------------------------------------------
     def oidc_finish(self, *, code: str, code_verifier: str, nonce: str, ip: str = "",
@@ -1461,6 +1634,126 @@ class Provisioner:
         # an OSError (ProfileUnreadable included) is a store fault, not the input: it reaches the cockpit's clean 500
         return {"ok": True, "preferences": merged}
 
+    def privacy_center(self, requester: str, org_id: str = "", *, ip: str = "") -> dict:
+        """The customer Privacy centre's read (legal/governance S2): the PUBLISHED privacy facts this deployment already
+        shows on its public pages — the strictly-necessary cookie inventory, the subprocessor list, and the links to the
+        full pages — read from the ONE canonical source (``privacy_center_store`` reads the packaged ``public_site``
+        pages), never a reworded copy. These facts are org-INDEPENDENT (the same for every workspace), so ``org_id`` is
+        taken (the edge passes the SESSION org) but the answer does not depend on it. The only gate is an ACTIVE
+        customer — any signed-in customer sees the same published facts; the requester is the hop-bound session
+        principal, never a body field. A pure read: it mints nothing, decides no money, and never touches the signed
+        append-only spine (no audit row)."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .privacy_center_store import read_privacy_center
+        return {"ok": True, **read_privacy_center()}
+
+    # -- Legal/governance S3 — the customer data-rights screen (VIGIL_CUSTOMER_DATA_RIGHTS) --------------
+    def data_rights_overview(self, requester: str, *, ip: str = "") -> dict:
+        """The Data-rights screen's read for the requesting customer's OWN account: the published response SLA and
+        data-subject contact (the owner decision, single-sourced in ``config``) and the account's recorded data-rights
+        requests. Account-level, like the preferences read: the requester is the hop-bound session principal, never a
+        body field, and must be an ACTIVE customer. The request list is read STRICTLY: a ledger file that is there but
+        cannot be read (``data_rights_store.LedgerUnreadable``) is a store fault — the cockpit's clean 500 — never an
+        empty history the screen would show as the customer's."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .. import config as _config
+        from . import data_rights_store
+        pub = getattr(self.orgs, "trusted_pubkey", None)
+        requests = data_rights_store.list_requests(requester, trusted_pubkey=pub, strict=True)
+        return {"ok": True, "sla_days": int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS),
+                "contact": str(_config.CUSTOMER_DATA_RIGHTS_CONTACT), "requests": requests}
+
+    def data_rights_export(self, requester: str, requester_org_id: str, *, ip: str = "",
+                           now: "Optional[float]" = None) -> dict:
+        """Assemble the requesting customer's OWN org's non-secret records for export — the SAME tenant-scoped, redacted
+        invoices / usage / findings reads the other screens use (no new authority, no new read, no mutation). Each
+        section is ``admit_customer``-gated for the SESSION org (``requester``/``org_id`` are the hop-bound session
+        principal, NEVER a body field), so another org's rows are structurally absent (IDOR-safe); a section the role
+        may not read degrades to an honest ``{"restricted": true}`` marker, never another role's data and never an
+        error. The export carries only what those customer-safe projections carry — it adds NO secret material (API
+        keys, fingerprints), exactly as the screens redact them.
+
+        Rate-limited the same way a login / checkout is (``self.rate_limiter``): a locked key raises
+        ``ProvisionRateLimited`` BEFORE any read, and every attempt is counted."""
+        t = self._now() if now is None else float(now)
+        rk, ik = f"data_rights:export:{requester}", f"data_rights:export:ip:{ip or ''}"
+        locked = self.rate_limiter.check(rk, ik, now=t)
+        if locked is not None:
+            raise ProvisionRateLimited(locked)
+        self.rate_limiter.record_failure(rk, now=t)       # count every export attempt (anti-flood), like login/checkout
+        sections = {}
+        for key, reader in (("invoices", self.customer_invoices),
+                            ("usage", self.customer_billing_usage),
+                            ("findings", self.customer_assessment_findings)):
+            try:
+                sections[key] = reader(requester, requester_org_id, ip=ip)
+            except ProvisionDenied:
+                sections[key] = {"restricted": True}      # the role may not read this section: an honest marker, never
+                #                                           another role's data (the admit gate inside the reader held)
+        return {"ok": True, "org_id": requester_org_id, "generated_at": t, "export": sections,
+                "note": ("This export is a read of your own workspace's non-secret records (invoices, usage and "
+                         "findings). It contains no secret material such as API keys or fingerprints.")}
+
+    def data_rights_request(self, requester: str, requester_org_id: str, *, kind: str = "", request_id: str = "",
+                            ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Record a customer's data-rights request (a close-account / deletion request, or an export acknowledgement) as
+        ONE owner-signed, append-only row for the requesting account (``ui/data_rights_store``), idempotent per
+        ``request_id``. Account-level: the requester is the hop-bound session principal and the org is the session org —
+        NEVER a body field (a body ``username``/``org_id`` is ignored); only the ``kind`` and the client-chosen
+        ``request_id`` travel. The row carries NO role, money or authority — it unlocks nothing and never touches the
+        hot signed spine; it is the item the owner's documented 30-day process acts on, and the owner-gated hard-prune
+        (VAULT-PRUNE) is what actually removes records from the immutable spine, not this request.
+
+        With the request recorded, the owner is notified at the published contact through ``self.email_sender`` — OFF by
+        default (``NullEmailSender`` sends nothing): the record is kept REGARDLESS of send success. Every refusal of the
+        input is a ``ProvisionError`` (a 400) in plain words; a store that cannot be read / written, or no owner key to
+        sign with, is a store fault — the cockpit's clean 500 — never a 400 that blames the input."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        t = self._now() if now is None else float(now)
+        from .. import config as _config
+        from ..governor.identity import owner_keypair
+        from . import data_rights_store
+        try:
+            out = data_rights_store.record_request(requester, requester_org_id, str(kind or ""), str(request_id or ""),
+                                                   owner_key=owner_keypair(), now=t)
+        except ValueError as e:
+            raise ProvisionError(f"the data-rights request could not be recorded: {str(e)[:120]}") from None
+        # an OSError (LedgerUnreadable included) / a missing owner key is a store fault: it reaches the cockpit's clean
+        # 500, never a 400 that blames the input.
+        contact = str(_config.CUSTOMER_DATA_RIGHTS_CONTACT)
+        if out.get("recorded"):                           # notify the owner only for a NEW row; best-effort, never
+            try:                                          # failing the record (it is already written) on a send fault
+                req = out.get("request") or {}
+                self.email_sender.send(
+                    contact, "VIGIL data-rights request",
+                    f"A customer recorded a {req.get('kind')} data-rights request "
+                    f"(request {req.get('request_id')}, org {req.get('org_id')}). Respond within "
+                    f"{int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS)} days.")
+            except Exception:  # noqa: BLE001 — a notify fault must never undo a recorded request
+                pass
+        return {"ok": True, "recorded": bool(out.get("recorded")), "request": out.get("request"),
+                "sla_days": int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS), "contact": contact,
+                "note": ("Your request is recorded and we will respond within "
+                         f"{int(_config.CUSTOMER_DATA_RIGHTS_SLA_DAYS)} days. Deleting records from our immutable, "
+                         "signed history is the owner-gated hard-prune (VAULT-PRUNE) process, not an instant erase; "
+                         "this request is what we act on.")}
+
+    def seller_identity_get(self, requester: str) -> dict:
+        """The PUBLISHED seller identity of the hosted VIGIL service (legal/governance S7): SIGIL SARL's legal name,
+        form, registered city/country, registration number, contact email, website and governing law, exactly as
+        published on the public Terms and Privacy pages. GLOBAL, owner-reviewed CODE (``ui/seller_identity.py``) — the
+        SAME trust root as the catalog — never a per-tenant field and never an invented value: the block is IDENTICAL
+        for every account, so no org or tenant data travels. A pure READ, off the signed spine (no audit row). The
+        requester is the hop-bound session principal (never a body field) and must be an ACTIVE customer, exactly as the
+        other account-level reads; the block it returns does not depend on who they are."""
+        if self.customers.customer(requester) is None:
+            raise ProvisionDenied("requester is not an active customer")
+        from .seller_identity import published_seller_identity
+        return {"ok": True, "seller": published_seller_identity()}
+
     def verify_mfa(self, requester: str, *, code: str = "", now: "Optional[float]" = None) -> dict:
         """E3b — verify a fresh TOTP code for the requesting customer: the step-up / second-factor PROOF
         primitive E3c consumes. Fail-closed at every step: requester must be an ACTIVE customer with an
@@ -1600,10 +1893,12 @@ class Provisioner:
     def request_recover(self, email: str, *, ip: str = "", now: "Optional[float]" = None) -> dict:
         """Issue a single-use recovery token for an existing account and send it. Always returns the same
         response (never reveals whether the email exists); only issues a token when the account exists."""
+        from .oidc_handoff import ip_rate_key            # PL01: bucket the per-IP recover counter (IPv6 by /64)
         t = self._now() if now is None else float(now)
         email_l = str(email or "").strip().lower()
-        self._rate_guard(f"recover:ip:{ip}", f"recover:email:{email_l}", now=t)
-        self.rate_limiter.record_failure(f"recover:ip:{ip}", now=t)
+        ipk = f"recover:ip:{ip_rate_key(ip)}"
+        self._rate_guard(ipk, f"recover:email:{email_l}", now=t)
+        self.rate_limiter.record_failure(ipk, now=t)
         out: "dict[str, object]" = {"status": "recovery_sent"}
         if self.email_codes is not None:
             out["code"] = True                         # the deployment sends codes (the same answer for every email)
@@ -1693,7 +1988,7 @@ class Provisioner:
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
         member_username = _member_target(member_username)
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
@@ -1712,6 +2007,8 @@ class Provisioner:
             if (not role_can(role, "manage_members")
                     and self._member_admins(requester_org_id) == {member_username}):
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
+            if self.orgs.membership_role(member_username, requester_org_id) is None:
+                self._seat_guard(requester_org_id)   # V12: a NEW member consumes a seat; a role change does not
             # NH-3: durable audit BEFORE the owner-signed mutation — a critical-audit store failure then fails
             # CLOSED with no membership change (committed⟹audited), mirroring the signup audit-before-commit.
             self._audit("grant_member", requester=requester, org_id=requester_org_id, target=member_username,
@@ -1740,7 +2037,7 @@ class Provisioner:
         so every check reads the exact membership the revoke removes."""
         t = self._now() if now is None else float(now)
         member_username = _member_target(member_username)   # NH-3 prep: validate target shape before any audit
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
@@ -1784,7 +2081,11 @@ class Provisioner:
                 rows.append(row)
             rows.sort(key=lambda r: (_TEAM_ORDER.get(str(r["role"]), len(_TEAM_ORDER)),
                                      str(r.get("email") or r["username"])))
-            return {"org_id": org_id, "members": rows, "count": len(rows)}
+            out: "dict[str, object]" = {"org_id": org_id, "members": rows, "count": len(rows)}
+            from .. import config
+            if config.customer_seats_enabled():   # V12: Team screen shows "used of limit" only when seats are on
+                out["seats"] = {"used": len(rows), "limit": config.customer_default_seats()}
+            return out
         return self._customer_read(requester, requester_org_id, "manage_members", project)
 
     def add_member(self, requester: str, requester_org_id: str, email: str, role: str, *, ip: str = "",
@@ -1810,7 +2111,7 @@ class Provisioner:
             email_l = _check_email(email)
         except ValueError:
             raise ProvisionError(_ADD_BAD_EMAIL) from None
-        with self._lock, _members_lock(self.store):
+        with _members_section(self._lock, self.store):
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("add_member", requester=requester, org_id=requester_org_id, outcome="denied")
@@ -1823,6 +2124,7 @@ class Provisioner:
             member_username = _member_target(acct.username)
             if self.orgs.membership_role(member_username, requester_org_id) is not None:
                 raise ProvisionDenied(_ADD_ALREADY_MEMBER)
+            self._seat_guard(requester_org_id)   # V12: refuse a NEW member once the workspace is at its seat limit
             # durable audit BEFORE the owner-signed grant (fail-closed; committed implies audited), as grant_member
             self._audit("add_member", requester=requester, org_id=requester_org_id, target=member_username,
                         outcome=f"role={role}", critical=True)
@@ -2155,9 +2457,8 @@ class Provisioner:
         CHK-1b double-billing guard (checkout refuses a second credit plan; the offers read reports it so the UI
         does not offer one). Reads the credit-plan line (``governor.subscription``) ONLY: a live AEGIS monitoring
         plan is on a different line and never blocks a credit plan (one plan per KIND)."""
-        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE, SubscriptionRegistry
-        cur = SubscriptionRegistry(self.store).subscription(org_id)
-        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+        from ..governor.subscription import SubscriptionRegistry
+        return _subscription_is_live(SubscriptionRegistry(self.store).subscription(org_id), t)
 
     def _org_has_live_monitoring_plan(self, org_id: str, t: float) -> bool:
         """True iff the org already holds an AEGIS MONITORING plan that is active or past_due and not yet expired
@@ -2165,9 +2466,7 @@ class Provisioner:
         (``governor.monitoring_subscription``) ONLY, so a live AEGIS plan blocks a second AEGIS plan but NEVER a
         credit plan, and vice-versa. Keyless read (``owner_key=None``)."""
         from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
-        from ..governor.subscription import STATUS_ACTIVE, STATUS_PAST_DUE
-        cur = MonitoringSubscriptionRegistry(self.store, owner_key=None).subscription(org_id)
-        return cur is not None and cur.status in (STATUS_ACTIVE, STATUS_PAST_DUE) and t < float(cur.period_end)
+        return _subscription_is_live(MonitoringSubscriptionRegistry(self.store, owner_key=None).subscription(org_id), t)
 
     def _spine_plan_checkouts(self, org_id: str, t: float, *, monitoring: bool) -> "tuple[str, list[str]]":
         """Audit E1b backstop — the PLAN checkouts of ONE kind the spine audit shows CREATED for ``org_id`` (a
@@ -2701,6 +3000,62 @@ class Provisioner:
             out["credit_resumed"] = True
         return out
 
+    def launch_instruct(self, requester: str, requester_org_id: str, *, host: str = "", text: str = "",
+                        idem_key: str = "", ip: str = "", mfa_at: float = 0.0,
+                        now: "Optional[float]" = None) -> dict:
+        """Live Control MISSION STEERING — enqueue ONE advisory instruction ("focus on auth", "check the admin
+        API") for the session org's running engagement on ``host``, WITHOUT restarting it. Behind
+        ``customer_live_control_enabled()`` (default-OFF → the action is a 404 unknown-action), then
+        ``admit_customer(run_engagement)`` + tenant-bind: the engagement slug is resolved SERVER-side from
+        (org, host) ONLY for a host the org has ownership-proven, so a customer can neither name another tenant's
+        slug nor steer a host its org never proved. NO fresh step-up: an instruction is ADVISORY — it is folded
+        into the engine's UNTRUSTED think context (it fires no tool, relaxes no scope, mints no fact), so it
+        carries no more authority than the objective the run already held, and the session admit + tenant bind
+        are sufficient. Idempotent on ``idem_key`` (a double-click / reconnect is a no-op). Returns
+        {slug, seq, idempotent}; raises ProvisionDenied on an unknown/unproven host or empty text."""
+        from .. import config
+        if not config.customer_live_control_enabled():
+            raise ProvisionDenied("customer live control is not enabled")
+        from . import live_control
+        with self._lock:                         # serialise the idempotency check-and-enqueue (single-process)
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_instruct", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            try:
+                r = live_control.submit_instruction(self.store, requester_org_id, host, text, idem_key=idem_key)
+            except ValueError as e:
+                self._audit("launch_instruct", requester=requester, org_id=requester_org_id, outcome="refused")
+                raise ProvisionDenied(str(e)) from e
+        self._audit("launch_instruct", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="accepted", critical=True)
+        return {"slug": r.get("slug"), "seq": r.get("seq"), "idempotent": bool(r.get("idempotent"))}
+
+    def launch_activity(self, requester: str, requester_org_id: str, *, host: str = "", since: "Any" = "",
+                        ip: str = "") -> dict:
+        """Live Control — READ the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``. Behind ``customer_live_control_enabled()`` + ``admit_customer(run_engagement)``.
+        A pure READ: no step-up, no mutation, no money. The engagement slug is resolved SERVER-side from
+        (org, host) ONLY for a host the org has ownership-proven (tenant-safe); returns the fixed-field,
+        customer-safe activity rows + a ``since`` cursor (the seam itself drops anything off the allowlist, so no
+        secret/IP/target detail can cross). Raises ProvisionDenied on an unknown/unproven host."""
+        from .. import config
+        if not config.customer_live_control_enabled():
+            raise ProvisionDenied("customer live control is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("launch_activity", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not view launches for this org")
+        from . import live_control
+        raw = str(since or "").strip()
+        try:
+            s = int(raw) if raw not in ("", "-") else -1
+        except ValueError:
+            s = -1
+        try:
+            return live_control.activity(self.store, requester_org_id, host, since=s)
+        except ValueError as e:
+            raise ProvisionDenied(str(e)) from e
+
     def retest(self, requester: str, requester_org_id: str, finding_ref: str, *, engagement_slug: str = "",
                oracle_context_digest: str = "", ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None,
                reverify=None, _drive_reproof: "Optional[Callable[[Any], None]]" = None,
@@ -3010,6 +3365,341 @@ class Provisioner:
                         outcome="revoked" if was_active else "noop", critical=True)
         return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
 
+    # -- AEGIS AS-2f: SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a authority-v2 contracts) --------
+    # Default-OFF behind `config.aegis_sovereign_v2_enabled` (a second gate on top of the monitoring master
+    # flag): with it off these actions are 404 and nothing v2 is minted or published (byte-identical). No tenant
+    # origins here (AS-2g). No LLM anywhere on this path (authority is never a model call). The v2 REGISTRY
+    # (`governor.monitoring_authority_v2`) holds the lifecycle/high-water/publish/read-back; these methods wire
+    # the sovereign ENFORCEMENT: flag -> admit (cross-tenant => 403) -> STEP-UP for Respond + capability changes
+    # -> INTENT ROW FIRST -> owner-signed grant -> EpochStatement -> READ-BACK -> audited activity line.
+    def _owner_root_single(self, trusted_pubkey: "Optional[str]"):
+        """The single-authoriser owner TrustRoot used to READ BACK (verify) a just-published v2 grant.
+        Fail-closed: no trusted owner pubkey => no root to verify against (read-back then refuses)."""
+        from vigil_core import AuthorizerKey, TrustRoot
+        if not trusted_pubkey:
+            raise ProvisionError("no owner trust root available to verify the published authority")
+        return TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=trusted_pubkey)])
+
+    def _require_stepup_v2(self, mfa_at, *, now: float, force: bool) -> None:
+        """Step-up for the v2 sensitive operations. When ``force`` (an ENFORCING capability such as RESPOND, or
+        ANY capability change), a FRESH second factor is ALWAYS required — independent of the global
+        ``customer_stepup_required`` toggle: these are A3, explicit-required acts. Otherwise defer to the shared
+        global-flag-gated ``_require_stepup`` (observe-only, no change => byte-identical to the v1 behaviour).
+        Fail-closed: a missing / stale / non-numeric ``mfa_at`` raises ProvisionStepUpRequired."""
+        if not force:
+            self._require_stepup(mfa_at, now=now)
+            return
+        from .. import config
+        try:
+            at = float(mfa_at)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= 0.0 or (now - at) > float(config.CUSTOMER_STEPUP_WINDOW_SECONDS):
+            raise ProvisionStepUpRequired("a fresh second-factor (step-up) is required to grant Respond or change "
+                                          "monitoring capabilities")
+
+    def _seed_last_issued(self, floor: float) -> None:
+        """SEED the provisioner's monotone ``issued_at`` high-water from the spine before a v2 mint. The HTTP
+        transport builds a fresh Provisioner per request (``_last_issued`` starts at 0.0), so without this a
+        per-request mint could carry an ``issued_at`` BELOW the subject's existing spine high-water and be
+        rejected as a replay. Caller holds the lock; only ever RAISES the floor (never lowers it)."""
+        try:
+            f = float(floor)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(f) and f > self._last_issued:
+            self._last_issued = f
+
+    @staticmethod
+    def _parse_v2_capabilities(capabilities) -> list:
+        """Parse the requested capability set FAIL-CLOSED to a list of ``MonitoringCapability``. Default (None /
+        empty) is the always-safe OBSERVE base. A bad capability value raises ProvisionError (=> 400)."""
+        from vigil_core.authority_v2 import MonitoringCapability
+        if capabilities is None:
+            return [MonitoringCapability.OBSERVE]
+        if isinstance(capabilities, (str, bytes)) or not hasattr(capabilities, "__iter__"):
+            raise ProvisionError("capabilities must be a list of capability values")
+        out = []
+        for c in capabilities:
+            try:
+                out.append(c if isinstance(c, MonitoringCapability) else MonitoringCapability(str(c)))
+            except ValueError:
+                raise ProvisionError(f"unknown monitoring capability: {c!r}") from None
+        return out or [MonitoringCapability.OBSERVE]
+
+    def _monitor_v2_plan_admit(self, reg, org_id: str, host: str, is_enforcing: bool, now: float) -> float:
+        """AE-5-style billing gate for v2 (reuses the SAME subscription registry + catalog as v1): the session
+        org needs an ACTIVE monitoring subscription with a free host slot (counted over the org's ACTIVE v2
+        grants; re-authorizing an already-granted host reuses its slot), and an ENFORCING capability needs a plan
+        tier that includes respond. Returns the plan ``period_end`` (the grant is clamped to it). Raises
+        ValueError (refused + audited)."""
+        from ..governor.asset_ownership import _check_host
+        from ..governor.catalog import monitoring_plan
+        from ..governor.monitoring_subscription import MonitoringSubscriptionRegistry
+        sub = MonitoringSubscriptionRegistry(self.store, owner_key=None).active_subscription(org_id, now=now)
+        plan = monitoring_plan(sub.plan_id) if sub is not None else None
+        if sub is None or plan is None:
+            raise ValueError("an active monitoring plan is required")
+        if is_enforcing and not plan.respond:
+            raise ValueError("an enforcing capability (block / respond / virtual_patch) requires a monitoring "
+                             "plan that includes respond")
+        h = _check_host(host)
+        used = {g.host for g in reg.grants(org_id) if reg.active_at(org_id, g.host, now=now) is not None} - {h}
+        if len(used) >= plan.host_slots:
+            raise ValueError("no free protected-host slot on the monitoring plan")
+        return float(sub.period_end)
+
+    def _monitor_v2_window(self, window_s, now: float) -> float:
+        """The SERVER-decided v2 window (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it.
+        Fail-closed ProvisionError on a non-positive / non-finite / bool ``window_s``."""
+        from .. import config
+        window = float(config.MONITORING_WINDOW_SECONDS)
+        if window_s is not None:
+            if isinstance(window_s, bool):
+                raise ProvisionError("window_s must be a positive number of seconds")
+            try:
+                asked = float(window_s)
+            except (TypeError, ValueError):
+                raise ProvisionError("window_s must be a positive number of seconds") from None
+            if not math.isfinite(asked) or asked <= 0.0:
+                raise ProvisionError("window_s must be a positive number of seconds")
+            window = min(window, asked)
+        return window
+
+    def monitor_authorize_v2(self, requester: str, requester_org_id: str, host: str, *, capabilities=None,
+                             window_s=None, instance_id: str = "default", replica_index: int = 0, ip: str = "",
+                             mfa_at=0.0, now: "Optional[float]" = None, origin_host: str = "",
+                             origin_port: int = 443, edge_chain: str = "shared_actor",
+                             origin_secret_sha256: str = "") -> dict:
+        """Owner-sign + publish a v2 DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag(v2) →
+        ``admit_customer(manage_monitoring)`` (org_admin; cross-tenant => ProvisionDenied => 403) → STEP-UP (for
+        an enforcing capability or any capability change) → plan gate → seed the issued high-water → INTENT ROW
+        FIRST → registry grant (monotone epoch read back from the spine, clamped to the ownership proof) →
+        publish → EpochStatement → READ-BACK verify → audited activity line.
+
+        AS-2g binding+publish: when ``origin_host`` is given, the grant is BOUND — the sovereign owner-signs and
+        publishes a :class:`vigil_core.aegis_origin_binding.AegisOriginBinding` (origin tuple + edge_chain + a
+        sha256 COMMITMENT to the SEALED origin-lock secret; NO plaintext), mints the grant carrying that binding's
+        sha256, and reads BOTH artifacts back — the whole step fails closed with a full revert. A bind requires
+        ``origin_secret_sha256`` (the AS-2h sealed-secret commitment the custody layer computed); absent => refused
+        (no binding without the sealed origin-lock, the fail-closed direction). With no ``origin_host`` the grant
+        is UNBOUND, byte-identical to the AS-2f path (the published grant carries origin=None)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from vigil_core.authority_v2 import ENFORCING_CAPABILITIES
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        caps = self._parse_v2_capabilities(capabilities)
+        requested = frozenset(c.value for c in caps)
+        enforcing = frozenset(c.value for c in ENFORCING_CAPABILITIES)
+        is_enforcing = bool(requested & enforcing)
+        window = self._monitor_v2_window(window_s, t)
+        lease_window = float(config.MONITORING_LEASE_SECONDS)
+        with self._lock:
+            self._monitor_admit("monitor_authorize_v2", requester, requester_org_id, host, "manage_monitoring")
+            reg = MonitoringAuthorityV2Registry(self.store)
+            current = reg.grant_for(requester_org_id, host)
+            current_caps = frozenset(c.value for c in current.capabilities) if current is not None else frozenset()
+            # A CAPABILITY CHANGE is a change to an EXISTING grant's capability set. The first grant establishing
+            # the always-safe OBSERVE baseline is not a "change" (an enforcing capability in it still forces
+            # step-up via `is_enforcing`); re-authorizing the SAME set is not a change either.
+            is_cap_change = current is not None and requested != current_caps
+            # STEP-UP for Respond + capability changes (always; a plain unchanged OBSERVE needs none).
+            self._require_stepup_v2(mfa_at, now=t, force=(is_enforcing or is_cap_change))
+            try:
+                period_end = self._monitor_v2_plan_admit(reg, requester_org_id, host, is_enforcing, t)
+            except ValueError as e:
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            self._seed_last_issued(reg.issued_highwater(requester_org_id, host))
+            not_after = min(t + window, period_end)
+            issued = self._next_issued()
+            # INTENT ROW FIRST — the explicit, human-authorized decision precedes the owner-signed mint.
+            reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
+                              now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0))
+            # AS-2g — the BOUND path: owner-sign + publish the origin binding, mint the grant carrying it, read
+            # both back (fail-closed revert). Requires the sealed origin-lock commitment (no binding without it).
+            if str(origin_host or "").strip():
+                if not str(origin_secret_sha256 or "").strip():
+                    self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                                outcome="refused", reason="origin binding requires the sealed origin-lock commitment")
+                    raise ProvisionDenied("binding a monitoring origin requires the sealed origin-lock secret "
+                                          "commitment (origin_secret_sha256)")
+                from ..governor import monitoring_binding as _mb
+                try:
+                    res = _mb.bind_and_publish(
+                        reg, requester_org_id, host, origin_host=str(origin_host).strip(),
+                        origin_port=origin_port, edge_chain=str(edge_chain or "shared_actor"),
+                        origin_secret_sha256=str(origin_secret_sha256).strip(), capabilities=caps,
+                        not_before=t, not_after=not_after, lease_not_before=t,
+                        lease_not_after=min(t + lease_window, not_after), instance_id=instance_id, now=t,
+                        issued_at=issued, binding_issued_at=self._next_issued(),
+                        trust_root=self._owner_root_single(reg.trusted_pubkey), replica_index=replica_index,
+                        requested_by=requester)
+                except ValueError as e:
+                    # bind_and_publish is fail-closed: a grant refusal published NOTHING; a publish/read-back fault
+                    # already reverted (revoke + unpublish both). Translate by which half failed.
+                    published_fault = "could not publish/verify" in str(e)
+                    self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                                outcome="publish_failed" if published_fault else "refused", critical=published_fault)
+                    if published_fault:
+                        raise ProvisionError(str(e)) from None
+                    raise ProvisionDenied(str(e)) from None
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome=f"granted_bound_{'+'.join(sorted(requested))}", critical=True)
+                return {"org_id": requester_org_id, "host": host, "capabilities": res["capabilities"],
+                        "epoch": res["epoch"], "not_before": res["not_before"], "not_after": res["not_after"],
+                        "lease_not_before": res["lease_not_before"], "lease_not_after": res["lease_not_after"],
+                        "instance_id": res["instance_id"], "replica_index": res["replica_index"],
+                        "published": res["grant_published"], "bound": True, "origin_host": res["origin_host"],
+                        "origin_port": res["origin_port"], "edge_chain": res["edge_chain"],
+                        "binding_published": res["binding_published"],
+                        "binding_sha256_prefix": str(res["binding_sha256"])[:12], "authority": res["authority"]}
+            try:
+                view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
+                                         not_after=not_after, lease_not_before=t,
+                                         lease_not_after=min(t + lease_window, not_after),
+                                         instance_id=instance_id, now=t, issued_at=issued,
+                                         replica_index=replica_index)
+            except ValueError as e:
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            try:
+                path = reg.publish(signed)
+                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
+                                                 issued_at=self._next_issued())
+                reg.publish_epoch_statement(stmt)
+                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))      # fail-closed read-back
+            except Exception as e:  # noqa: BLE001 — never leave an active-but-unpublished/unverifiable grant
+                reg.revoke(requester_org_id, host, issued_at=self._next_issued(), reason="publish/read-back failed")
+                reg.unpublish(requester_org_id, host, instance_id=instance_id, replica_index=replica_index)
+                self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not publish/verify the v2 monitoring authority: "
+                                     f"{type(e).__name__}") from e
+            self._audit("monitor_authorize_v2", requester=requester, org_id=requester_org_id, target=host,
+                        outcome=f"granted_{'+'.join(sorted(requested))}", critical=True)
+        return {"org_id": requester_org_id, "host": host, "capabilities": sorted(requested), "epoch": view.epoch,
+                "not_before": view.not_before, "not_after": view.not_after,
+                "lease_not_before": view.lease_not_before, "lease_not_after": view.lease_not_after,
+                "instance_id": view.instance_id, "replica_index": view.replica_index, "published": path.name,
+                "authority": signed.model_dump(mode="json")}
+
+    def monitor_revoke_v2(self, requester: str, requester_org_id: str, host: str, *, instance_id: str = "default",
+                          replica_index: int = 0, ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Owner-sign a v2 revocation (the SAFE direction) + unpublish the (org, host) grant. Idempotent;
+        admit-gated so a tenant can only revoke ITS OWN org's grants (cross-tenant => 403). No step-up (revoking
+        only ever reduces authority). The revocation epoch is minted above the high-water so it supersedes."""
+        from .. import config
+        from ..governor.asset_ownership import _check_host
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        with self._lock:
+            self._monitor_admit("monitor_revoke_v2", requester, requester_org_id, host, "manage_monitoring")
+            try:
+                h = _check_host(host)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            reg = MonitoringAuthorityV2Registry(self.store)
+            current = reg.grant_for(requester_org_id, h)
+            was_active = current is not None
+            # Unpublish the grant's ACTUAL published path. The file name is content-addressed over
+            # (subject, instance_id, replica_index), so defaulting to instance_id="default" would delete the
+            # WRONG path for a grant authorized under a non-default instance_id — the real file would stay
+            # published (the keyless data plane keeps honoring it) while the spine records a revocation. Take the
+            # instance_id/replica_index from the spine fold's active grant; fall back to the caller's args only
+            # when no active grant stands (nothing to unpublish but the idempotent delete is still attempted).
+            inst = current.instance_id if current is not None else instance_id
+            repl = current.replica_index if current is not None else replica_index
+            removed = reg.unpublish(requester_org_id, h, instance_id=inst, replica_index=repl)
+            if was_active:
+                reg.revoke(requester_org_id, h, issued_at=self._next_issued(), reason="tenant revoke")
+            self._audit("monitor_revoke_v2", requester=requester, org_id=requester_org_id, target=h,
+                        outcome="revoked" if was_active else "noop", critical=True)
+        return {"org_id": requester_org_id, "host": h, "revoked": was_active, "unpublished": removed}
+
+    def monitor_renew(self, requester: str, requester_org_id: str, host: str, *, instance_id: str = "default",
+                      replica_index: int = 0, window_s=None, ip: str = "", mfa_at=0.0,
+                      now: "Optional[float]" = None) -> dict:
+        """Renew the LEASE of an ACTIVE v2 grant: re-mint the SAME capability set with a fresh lease + window and
+        a strictly-higher epoch, re-publish + re-issue the EpochStatement. A renewal is NOT a capability change,
+        so it needs no step-up (unless the current grant already carries an enforcing capability, which keeps the
+        step-up requirement). Fail-closed ProvisionDenied if no active grant exists for the (org, host)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from vigil_core.authority_v2 import ENFORCING_CAPABILITIES
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            raise ProvisionDenied("the AEGIS sovereign-v2 authority surface is not enabled on this deployment")
+        window = self._monitor_v2_window(window_s, t)
+        lease_window = float(config.MONITORING_LEASE_SECONDS)
+        with self._lock:
+            self._monitor_admit("monitor_renew", requester, requester_org_id, host, "manage_monitoring")
+            reg = MonitoringAuthorityV2Registry(self.store)
+            current = reg.grant_for(requester_org_id, host)
+            if current is None:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason="no active grant")
+                raise ProvisionDenied("no active v2 grant to renew for this (org, host)")
+            caps = list(current.capabilities)
+            requested = frozenset(c.value for c in caps)
+            is_enforcing = bool(requested & frozenset(c.value for c in ENFORCING_CAPABILITIES))
+            # A renewal preserves capabilities (never an escalation) so it is not a capability change; an
+            # enforcing grant still requires a fresh step-up to keep renewing (defence in depth).
+            self._require_stepup_v2(mfa_at, now=t, force=is_enforcing)
+            try:
+                period_end = self._monitor_v2_plan_admit(reg, requester_org_id, host, is_enforcing, t)
+            except ValueError as e:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            self._seed_last_issued(reg.issued_highwater(requester_org_id, host))
+            not_after = min(t + window, period_end)
+            issued = self._next_issued()
+            reg.record_intent(requester=requester, org_id=requester_org_id, host=host, capabilities=caps,
+                              now=t, issued_at=issued, step_up_at=float(mfa_at or 0.0), note="INTENT: renew lease")
+            # Mirror ``monitor_authorize_v2``: grant() in its OWN try (a ValueError here means nothing was
+            # published yet -> ProvisionDenied), and publish/epoch/read-back under a SEPARATE try whose revert
+            # runs on ``except Exception``. Keeping these in ONE try (with ``except ValueError`` first) made the
+            # revert DEAD CODE: ``read_back`` raises ValueError on every failure mode, so an IO/verify fault was
+            # caught by the ValueError clause and the revoke+unpublish never ran — leaving a PHANTOM active grant
+            # on the spine and (``authority_publish_path`` is epoch-less, so publish() already overwrote the prior
+            # valid file) a destroyed valid grant: the inconsistent state this method's invariant forbids.
+            try:
+                view, signed = reg.grant(requester_org_id, host, capabilities=caps, not_before=t,
+                                         not_after=not_after, lease_not_before=t,
+                                         lease_not_after=min(t + lease_window, not_after),
+                                         instance_id=instance_id, now=t, issued_at=issued,
+                                         replica_index=replica_index)
+            except ValueError as e:
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="refused", reason=str(e))
+                raise ProvisionDenied(str(e)) from None
+            try:
+                path = reg.publish(signed)
+                stmt = reg.issue_epoch_statement(requester_org_id, host, epoch=view.epoch,
+                                                 issued_at=self._next_issued())
+                reg.publish_epoch_statement(stmt)
+                reg.read_back(signed, self._owner_root_single(reg.trusted_pubkey))      # fail-closed read-back
+            except Exception as e:  # noqa: BLE001 — never leave an active-but-unpublished/unverifiable renewed grant
+                reg.revoke(requester_org_id, host, issued_at=self._next_issued(),
+                           reason="renew publish/read-back failed")
+                reg.unpublish(requester_org_id, host, instance_id=instance_id, replica_index=replica_index)
+                self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                            outcome="publish_failed", critical=True)
+                raise ProvisionError(f"could not renew the v2 monitoring authority: {type(e).__name__}") from e
+            self._audit("monitor_renew", requester=requester, org_id=requester_org_id, target=host,
+                        outcome=f"renewed_epoch_{view.epoch}", critical=True)
+        return {"org_id": requester_org_id, "host": host, "capabilities": sorted(requested), "epoch": view.epoch,
+                "not_before": view.not_before, "not_after": view.not_after,
+                "lease_not_before": view.lease_not_before, "lease_not_after": view.lease_not_after,
+                "published": path.name}
+
     def monitor_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                      now: "Optional[float]" = None) -> dict:
         """The SESSION org's monitoring grants (org-scoped read; ``active`` applies window + ownership), and whether
@@ -3034,6 +3724,16 @@ class Provisioner:
             out: dict = {"org_id": requester_org_id, "grants": rows, "can_manage": can_manage}
             if can_manage:
                 out["hosts"], out["plan"] = self._monitor_setup(requester_org_id, t)
+            # AS-2g — the v2 origin-binding status, surfaced on the SAME Monitoring screen. Present only when the
+            # sovereign-v2 surface is on (else absent: the page renders no binding section, byte-identical to
+            # before). Verify-only, derived from the PUBLISHED artifacts the data plane cross-checks.
+            from .. import config
+            if config.aegis_sovereign_v2_enabled():
+                from ..governor import monitoring_binding as mb
+                from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+                v2reg = MonitoringAuthorityV2Registry(self.store, owner_key=None)
+                root = self._owner_root_single(v2reg.trusted_pubkey)
+                out["bindings"] = mb.bindings_overview(v2reg, requester_org_id, now=t, trust_root=root)
         return out
 
     def _monitor_setup(self, org_id: str, now: float) -> "tuple[list[dict], Optional[dict]]":
@@ -3057,6 +3757,26 @@ class Provisioner:
         with self._lock:
             self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
         return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
+    def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                             now: "Optional[float]" = None) -> dict:
+        """AS-2g — the SESSION org's v2 origin-binding status (org-scoped, read-only). For each ACTIVE v2 grant:
+        whether its PUBLISHED origin binding cross-checks against the published grant (``bound`` — the same check
+        the keyless data plane runs), the origin host/port, the edge_chain and a short binding-sha256 PREFIX
+        (never a secret). Verify-only (no owner key); fail-closed per host. Flag-gated: with the v2 surface off
+        the read returns ``enabled: False`` and no rows (so the page renders no binding section)."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from ..governor import monitoring_binding as mb
+        from ..governor.monitoring_authority_v2 import MonitoringAuthorityV2Registry
+        if not (config.customer_monitoring_enabled() and config.aegis_sovereign_v2_enabled()):
+            return {"org_id": requester_org_id, "bindings": [], "enabled": False}
+        with self._lock:
+            self._monitor_admit("monitor_binding_list", requester, requester_org_id, "", "read")
+            reg = MonitoringAuthorityV2Registry(self.store, owner_key=None)
+            root = self._owner_root_single(reg.trusted_pubkey)
+            rows = mb.bindings_overview(reg, requester_org_id, now=t, trust_root=root)
+        return {"org_id": requester_org_id, "bindings": rows, "enabled": True}
 
     # -- C6: the customer Code (Red-Pen) screen — connected GitHub repositories (own-a-repo != own-a-host) ----------
     # Every action is behind the master flag VIGIL_REDPEN_ENABLED (off ⇒ the dispatch never reaches here: 404) AND
@@ -3742,6 +4462,80 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
 
+    # -- Legal/governance S12: the read-only Authorizations surface (behind VIGIL_CUSTOMER_AUTHORIZATIONS) -------------
+    # DISCLOSURE, never a mint. ``customer_authorizations_list`` READS the owner-signed EngagementAuthorities on record
+    # for the SESSION org's OWN proven-owned hosts (re-derived per-(org,host) slug, so org A never sees org B's), and
+    # discloses scope/window/GET-only + whether each is active. ``customer_authorization_request`` DROPS an UNSIGNED
+    # owner-review request (``authorization_requests_store``) — it mints NO authority, signs nothing and writes no
+    # spine row; the owner still signs the real authority in the cockpit (``target_authorization.add_customer_target``).
+    # Both are flag-gated (default OFF; the dispatch also 404s) and org-scoped by the hop-bound SESSION principal.
+    def _authorizations_enabled_or_deny(self, action: str, requester: str, org_id: str) -> None:
+        """Flag gate (default OFF, defence in depth under the dispatch's 404): off ⇒ a clean refusal, audited, exactly
+        as an unknown route. Caller then does its own admit."""
+        from .. import config as _config
+        if not _config.customer_authorizations_enabled():
+            self._audit(action, requester=requester, org_id=org_id, outcome="authorizations_off")
+            raise ProvisionDenied("the authorizations surface is not enabled on this deployment")
+
+    def customer_authorizations_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                     now: "Optional[float]" = None) -> dict:
+        """The SESSION org's owner-signed engagement authorities, DISCLOSED read-only (legal/governance S12): one row per
+        host the org PROVEN-OWNS (verified or lapsed proof) — whether an owner-signed authority is on record, whether it
+        is active (window honored), and its scope / environment / validity window / GET-only (non-destructive) flags —
+        plus which hosts already have an open owner-review request. Tenant-scoped by ``_customer_read``'s
+        ``admit_customer(view_assessments)`` (NO global leg, live membership re-check); the ``org_id`` is the hop-bound
+        session principal, never a body field, so org A can never read org B's authorities. A pure read: it mints
+        nothing, signs nothing, touches no owner key for a decision and writes no record."""
+        import time as _t
+        self._authorizations_enabled_or_deny("customer_authorizations_list", requester, requester_org_id)
+        t = _t.time() if now is None else float(now)
+
+        def project(store, org_id):
+            from ..governor.asset_ownership import AssetOwnershipRegistry
+            from . import authorization_requests_store as _reqs
+            from . import target_authorization as _ta
+            # the org's OWN hosts (proven-owned now or lapsed) — never another org's; pending (no proof yet) has no
+            # authority, so it is excluded.
+            hosts = [a["host"] for a in AssetOwnershipRegistry(store, owner_key=None).assets_overview(org_id, now=t)
+                     if a.get("status") in ("verified", "expired")]
+            authorities = _ta.list_customer_authorities(org_id, hosts, now=t)
+            requested = _reqs.pending_hosts(org_id)
+            return {"org_id": org_id, "can_request": True, "authorities": authorities, "requested": requested}
+
+        return self._customer_read(requester, requester_org_id, "view_assessments", project)
+
+    def customer_authorization_request(self, requester: str, requester_org_id: str, host: str, *,
+                                       note: str = "", ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Drop an UNSIGNED owner-review request to authorize an assessment of ``host`` for the SESSION org (legal/
+        governance S12). This MINTS NO AUTHORITY, signs nothing and writes no spine row — it only records the ask so the
+        owner can act on it (the owner signs the real authority in the cockpit). Gated, fail-closed at each step: the
+        flag (default OFF); ``admit_customer(view_assessments)`` on the hop-bound SESSION org (never a body field — org
+        A can never request for org B); and the host must be one THIS org PROVEN-OWNS right now (a request for a host
+        the org cannot prove it controls is refused — ownership is separate from billing/membership)."""
+        import time as _t
+        self._authorizations_enabled_or_deny("customer_authorization_request", requester, requester_org_id)
+        t = _t.time() if now is None else float(now)
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+                self._audit("customer_authorization_request", requester=requester, org_id=requester_org_id,
+                            target=str(host or ""), outcome="denied")
+                raise ProvisionDenied("requester may not request authorization for this org (view_assessments)")
+            h = str(host or "").strip()
+            from ..governor.asset_ownership import AssetOwnershipRegistry
+            if not h or not AssetOwnershipRegistry(self.store, owner_key=None).has_current_proof(
+                    requester_org_id, h, now=t):
+                self._audit("customer_authorization_request", requester=requester, org_id=requester_org_id,
+                            target=h, outcome="no_proof")
+                raise ProvisionDenied("no current ownership proof for this host: prove control of the asset before "
+                                      "requesting an assessment authorization for it")
+            from . import authorization_requests_store as _reqs
+            try:
+                _reqs.record_request(requester_org_id, host=h, requested_by=requester, note=str(note or ""), now=t)
+            except ValueError as e:
+                raise ProvisionError(f"the authorization request could not be recorded ({e})") from None
+        # NOT audited as a spine signal and NOT owner-signed: this is a non-authority, off-spine owner-review note.
+        return {"ok": True, "requested": True, "host": h, "org_id": requester_org_id}
+
     # -- Consumer PR-C: the unified CONNECT surface (site + repo + cloud) — one screen, behind VIGIL_CUSTOMER_CONNECT ----
     # CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER AUTHORIZES OFFENSE. Every action here is behind the master
     # flag ``VIGIL_CUSTOMER_CONNECT`` (the cloud actions ALSO behind ``VIGIL_CUSTOMER_CLOUD_CONNECT``; off ⇒ the
@@ -3773,12 +4567,42 @@ class Provisioner:
             self._audit(action, requester=requester, org_id=org_id, target=target, outcome="connect_off")
             raise ProvisionDenied("the unified connect surface is not enabled on this deployment")
 
-    def _cloud_ready(self) -> bool:
-        """The cloud leg can actually connect an account here: the flag, VIGIL's connector principal, the live
-        fetcher and the verify limiter are all in place. Anything missing ⇒ the screen offers no cloud flow."""
+    def _cloud_ready(self, provider: "Optional[str]" = None) -> bool:
+        """The cloud leg can actually connect an account here: the flag, the verify limiter, and the PROVIDER's own
+        connector identity + live fetcher are all in place. ``provider`` None ⇒ ANY wired provider is ready (the
+        overview's single availability flag); a specific provider ⇒ exactly that provider's readiness. Anything
+        missing ⇒ the screen offers no cloud flow for it (fail-closed; no dead-end flow). Cloudflare needs only its
+        fetcher — VIGIL holds no Cloudflare credential of its own (the customer's token travels per-verify)."""
         from .. import config
-        return bool(config.customer_cloud_connect_enabled() and self.cloud_principal_arn
-                    and self.cloud_fetcher is not None and self.cloud_connect_limiter is not None)
+        from ..governor.cloud_connect import PROVIDER_AWS, PROVIDER_GCP, PROVIDER_AZURE, PROVIDER_CLOUDFLARE
+        if not (config.customer_cloud_connect_enabled() and self.cloud_connect_limiter is not None):
+            return False
+        aws_ok = bool(self.cloud_principal_arn and self.cloud_fetcher is not None)
+        gcp_ok = bool(self.cloud_gcp_connector_sa and self.cloud_gcp_fetcher is not None)
+        azure_ok = bool(self.azure_client_id and self.azure_fetcher is not None)
+        cloudflare_ok = self.cloudflare_fetcher is not None
+        if provider == PROVIDER_AWS:
+            return aws_ok
+        if provider == PROVIDER_GCP:
+            return gcp_ok
+        if provider == PROVIDER_AZURE:
+            return azure_ok
+        if provider == PROVIDER_CLOUDFLARE:
+            return cloudflare_ok
+        return aws_ok or gcp_ok or azure_ok or cloudflare_ok
+
+    def _cloud_fetcher_for(self, provider: str):
+        """The live cloud fetcher for ``provider`` (AWS STS / GCP impersonation / Azure consent / Cloudflare token) —
+        all share one ``assume(...)`` signature. Only reached once ``_cloud_ready(provider)`` has confirmed it is wired."""
+        from ..governor.cloud_connect import PROVIDER_GCP, PROVIDER_AZURE, PROVIDER_CLOUDFLARE
+        p = str(provider or "").strip().lower()
+        if p == PROVIDER_GCP:
+            return self.cloud_gcp_fetcher
+        if p == PROVIDER_AZURE:
+            return self.azure_fetcher
+        if p == PROVIDER_CLOUDFLARE:
+            return self.cloudflare_fetcher
+        return self.cloud_fetcher
 
     def customer_connect_overview(self, requester: str, requester_org_id: str, *, ip: str = "",
                                   now: "Optional[float]" = None) -> dict:
@@ -3797,13 +4621,20 @@ class Provisioner:
             username=requester, org_id=requester_org_id, permission="manage_code"))
         cloud_on = config.customer_cloud_connect_enabled()
         site_check = self.target_fetcher is not None
+        from ..governor.cloud_connect import (PROVIDER_AWS, PROVIDER_AZURE, PROVIDER_CLOUDFLARE, PROVIDER_GCP)
         available = {
             "site_check": site_check,
             "site_auto_recheck": bool(site_check and self.connect_check_limiter is not None
                                       and self.connect_org_limiter is not None),
             "repos": repos_ok,
             "repo_connect": bool(repos_ok and config.github_app_slug()),
-            "cloud_connect": self._cloud_ready(),
+            "cloud_connect": self._cloud_ready() or self._cloud_ready("cloudflare"),
+            # Per-provider readiness, so the connect screen's provider picker offers only the providers this deployment
+            # can actually finish (read-only; the server still refuses an unprovisioned provider with its own error).
+            "cloud_providers": {PROVIDER_AWS: self._cloud_ready(PROVIDER_AWS),
+                                PROVIDER_GCP: self._cloud_ready(PROVIDER_GCP),
+                                PROVIDER_AZURE: self._cloud_ready(PROVIDER_AZURE),
+                                PROVIDER_CLOUDFLARE: self._cloud_ready(PROVIDER_CLOUDFLARE)},
         }
 
         def _proj(s, o):
@@ -3893,19 +4724,31 @@ class Provisioner:
     def cloud_connect_challenge(self, requester: str, requester_org_id: str, provider: str, account_id: str, *,
                                 ip: str = "", now: "Optional[float]" = None) -> dict:
         """Start (or RESUME) a READ-ONLY cloud connection for (org, provider, account) and return exactly what the
-        customer configures: a read-only role in THAT account whose trust policy (``trust_policy``, ready to paste)
-        trusts VIGIL's connector principal ONLY under the external id, with AWS's managed read-only ``SecurityAudit``
-        policy attached. When a connection for that account is already outstanding it is RESUMED (``resumed`` True:
-        the same external id, so a role the customer already created keeps working and nothing is written), else an
-        owner-signed challenge is issued (``CloudConnectRegistry.open_challenge``). Behind BOTH flags; refused unless
-        this deployment can really verify it (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the testing
-        axis, NOT billing), mirroring ``target_challenge``. The requester + org are the SERVER-authenticated session
-        principal (never body fields). A challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
-        from ..governor.cloud_connect import AWS_READ_ONLY_POLICY_ARN, CloudConnectRegistry, aws_trust_policy
+        customer configures. For AWS: a read-only role in THAT account whose trust policy (``trust_policy``, ready to
+        paste) trusts VIGIL's connector principal ONLY under the external id, with AWS's managed read-only
+        ``SecurityAudit`` policy attached. For GCP: ``gcp_placement`` — create a service account whose ID encodes the
+        external id and grant VIGIL's connector SA tokenCreator on it (the exact gcloud commands). For Azure:
+        ``azure_placement`` — admin-consent VIGIL's app into the tenant and set the external id as the binding tag on
+        VIGIL's enterprise application. For Cloudflare: ``cloudflare_placement`` — create a read-only, single-account
+        API token named vigil-verify-{external_id} and paste it once (VIGIL holds no connector principal). When a
+        connection for that account is already outstanding it is RESUMED (``resumed`` True: the same external id, so a
+        role/SA/consent/token the customer already created keeps working and nothing is written), else an owner-signed
+        challenge is issued (``CloudConnectRegistry.open_challenge``). Behind BOTH flags; an unverifiable provider is
+        refused with the reason BEFORE any write, then the PROVIDER's own connector identity must be provisioned here
+        (``_cloud_ready`` — no dead-end flow); ``run_engagement`` (the testing axis, NOT billing), mirroring
+        ``target_challenge``. The requester + org are the SERVER-authenticated session principal (never body fields). A
+        challenge grants NOTHING. CONNECTING AUTHORIZES NO OFFENSE."""
+        from ..governor.cloud_connect import (AWS_READ_ONLY_POLICY_ARN, PROVIDER_GCP, PROVIDER_AZURE,
+                                              PROVIDER_CLOUDFLARE, CloudConnectRegistry, _check_verifiable,
+                                              aws_trust_policy, azure_placement, cloudflare_placement, gcp_placement)
         with self._lock:
             self._connect_enabled_or_deny("cloud_connect_challenge", requester, requester_org_id,
                                           target=f"{provider}:{account_id}", cloud=True)
-            if not self._cloud_ready():
+            try:
+                prov = _check_verifiable(provider)       # an unverifiable/unknown provider -> refuse (no dead-end)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            if not self._cloud_ready(prov):
                 raise ProvisionError("connecting a cloud account is not available on this deployment")
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
@@ -3919,8 +4762,19 @@ class Provisioner:
                 raise ProvisionDenied(str(e)) from None
             self._audit("cloud_connect_challenge", requester=requester, org_id=requester_org_id,
                         target=f"{ch.provider}:{ch.account_id}", outcome="resumed" if resumed else "issued")
-        return {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id,
-                "resumed": resumed, "principal_arn": self.cloud_principal_arn,
+        common = {"provider": ch.provider, "account_id": ch.account_id, "external_id": ch.external_id,
+                  "resumed": resumed}
+        if ch.provider == PROVIDER_GCP:
+            return {**common, **gcp_placement(self.cloud_gcp_connector_sa, ch.account_id, ch.external_id)}
+        if ch.provider == PROVIDER_AZURE:
+            # Azure placement: the admin-consent URL (VIGIL's client id + the tenant), the external_id binding tag the
+            # Global Admin sets on VIGIL's enterprise application, and the exact Graph read VIGIL performs.
+            return {**common, **azure_placement(self.azure_client_id, ch.account_id, ch.external_id)}
+        if ch.provider == PROVIDER_CLOUDFLARE:
+            # Cloudflare: the customer creates a read-only, single-account API token named vigil-verify-{external_id}
+            # and pastes it ONCE; VIGIL holds no connector principal and prints no trust policy (see cloudflare_fetch).
+            return {**common, **cloudflare_placement(ch.external_id, ch.account_id)}
+        return {**common, "principal_arn": self.cloud_principal_arn,
                 "trust_policy": aws_trust_policy(self.cloud_principal_arn, ch.external_id),
                 "permissions_policy_arn": AWS_READ_ONLY_POLICY_ARN, "role_name_hint": "VigilSecurityAudit"}
 
@@ -3939,7 +4793,12 @@ class Provisioner:
         with self._lock:                                            # authorize BEFORE spending a network fetch
             self._connect_enabled_or_deny("cloud_connect_verify", requester, requester_org_id,
                                           target=f"{provider}:{account_id}", cloud=True)
-            if not self._cloud_ready():
+            from ..governor.cloud_connect import _check_verifiable
+            try:
+                prov = _check_verifiable(provider)       # an unverifiable/unknown provider -> refuse here, no dead-end
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            if not self._cloud_ready(prov):
                 raise ProvisionError("connecting a cloud account is not available on this deployment")
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
@@ -3957,12 +4816,18 @@ class Provisioner:
                 self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                             target=f"{provider}:{account_id}", outcome="rate_limited")
                 raise ProvisionRateLimited(wait)
+        # the right trusted fetcher for the challenge's provider (provider-agnostic from here: the verdict + record
+        # are the same for AWS, GCP and Azure). The FETCH is OUTSIDE the lock (network I/O).
         control = _secrets.token_urlsafe(32)                        # the same-shape negative control's random id
         from .cloud_fetch import CloudFetchError
+        # The trusted fetcher for this provider (AWS assumes the role; Cloudflare reads the bearer token ONCE). For
+        # Cloudflare ``role_ref`` carries the customer's SECRET token — it reaches ONLY the fetcher, never a record,
+        # log, audit line or return (see below: only the token's public id + a sha256 are recorded).
+        fetcher = self._cloud_fetcher_for(ch.provider)
         try:
-            observed = self.cloud_fetcher.assume(provider=ch.provider, account_id=ch.account_id, role_ref=role_ref,
-                                                 external_id=ch.external_id, control_external_id=control, now=t)
-        except CloudFetchError as e:   # the fetcher's OWN fixed reason reaches the customer; AWS detail is audit-only
+            observed = fetcher.assume(provider=ch.provider, account_id=ch.account_id, role_ref=role_ref,
+                                      external_id=ch.external_id, control_external_id=control, now=t)
+        except CloudFetchError as e:   # the fetcher's OWN fixed reason reaches the customer; the detail is audit-only
             self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                         target=f"{provider}:{account_id}", outcome="fetch_failed", reason=e.detail or str(e))
             raise ProvisionDenied(str(e)) from None
@@ -3970,15 +4835,27 @@ class Provisioner:
             self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                         target=f"{provider}:{account_id}", outcome="assume_failed")
             raise ProvisionDenied("could not assume the read-only role with the issued external id") from None
-        from ..governor.cloud_connect import CloudConnectRegistry
+        from ..governor.cloud_connect import PROVIDER_CLOUDFLARE, CloudConnectRegistry
+        # For Cloudflare the grant records the token's PUBLIC id (from the trusted observation) and a sha256 of the
+        # token — NEVER the token. ``role_ref`` here is the token id (public); ``token_sha256`` ties the grant to the
+        # token that was verified without storing it. The hash comes from the FETCHER, which hashes the exact (stripped)
+        # bytes it verified — so a re-presented token in canonical form is recognised (provision never re-hashes the raw
+        # field, which could carry copy-paste whitespace). For AWS the grant records the role ARN and no token sha256.
+        if ch.provider == PROVIDER_CLOUDFLARE:
+            grant_role_ref = str(observed.get("token_id") or "")
+            grant_token_sha256 = str(observed.get("token_sha256") or "")
+        else:
+            grant_role_ref = role_ref
+            grant_token_sha256 = ""
+        role_ref = ""                                               # shed the token reference past the fetch (Cloudflare)
         with self._lock:
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="run_engagement"):
                 raise ProvisionDenied("requester may not register assets for this org")  # TOCTOU
             try:
                 grant = CloudConnectRegistry(self.store).verify_and_connect(
-                    requester_org_id, provider, account_id, role_ref=role_ref, observed=observed,
-                    control_external_id=control, now=t)
+                    requester_org_id, provider, account_id, role_ref=grant_role_ref, observed=observed,
+                    control_external_id=control, now=t, token_sha256=grant_token_sha256)
             except ValueError as e:
                 self._audit("cloud_connect_verify", requester=requester, org_id=requester_org_id,
                             target=f"{provider}:{account_id}", outcome="not_proven", reason=str(e))
@@ -4418,6 +5295,21 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _cv.compliance_view(s, o, now=t, retests=retests))
 
+    def customer_ai_governance(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """Legal/governance S5 — the session org's AI / human-in-the-loop governance disclosure
+        (``ui/ai_governance``): a READ-ONLY statement of how VIGIL uses AI and the human oversight around it,
+        SYNTHESISED from the published Terms, the README invariant and the Safety & Authorization briefing (each cited
+        in the payload). ``admit_customer(view_assessments)`` for the SESSION org — the requester / org are the
+        hop-bound session principal, NEVER a body field, so no one reads another tenant's view (a revoked membership
+        dies on the next request). A pure read: it carries no finding, no proof, no authority and no money, mints
+        nothing and touches no owner key."""
+        from .. import config
+        if not config.customer_ai_governance_enabled():
+            raise ProvisionDenied("the AI governance disclosure is not enabled")
+        from . import ai_governance as _aig
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda s, o: _aig.disclosure(o))
+
     def customer_report_export(self, requester: str, requester_org_id: str, *, fmt: str = "html", ip: str = "",
                                now: "Optional[float]" = None) -> dict:
         """PR-G — the session org's shareable report (``ui/report_export``): the deterministic HTML document, or (``fmt
@@ -4469,7 +5361,8 @@ class Provisioner:
 
 
 def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time,
-                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None) -> Provisioner:
+                      customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,
+                      sso_oidc_http_post=None, sso_oidc_jwks_fetcher=None) -> Provisioner:
     """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
     the persisted owner identity — THIS is the only process that holds it), the filesystem email-token +
     login-rate-limit ledgers rooted under SIGIL_HOME (config), and the configured EmailSender
@@ -4582,8 +5475,21 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                                 max_lock_s=6 * Provisioner._CLOUD_VERIFY_WINDOW_S)
                                if config.customer_cloud_connect_enabled() else None),
         cloud_fetcher=config.cloud_connect_fetcher(),
+        # Cloudflare leg: VIGIL holds no connector identity of its own (the customer brings a read-only token), so the
+        # fetcher is built whenever the cloud leg's flag is on (None otherwise ⇒ Cloudflare connect is offered nowhere).
+        cloudflare_fetcher=config.cloud_connect_cloudflare_fetcher(),
         cloud_principal_arn=(config.cloud_connect_aws_principal_arn()
                              if config.customer_cloud_connect_enabled() else ""),
+        # The GCP leg: the owner-provisioned impersonation fetcher + VIGIL's connector SA email (None / "" until the
+        # owner provisions VIGIL's GCP connector identity ⇒ the GCP flow is offered nowhere).
+        cloud_gcp_fetcher=config.cloud_connect_gcp_fetcher(),
+        cloud_gcp_connector_sa=(config.cloud_connect_gcp_connector_sa()
+                                if config.customer_cloud_connect_enabled() else ""),
+        # Consumer PR-C (Azure leg) — VIGIL's multi-tenant Azure app fetcher + its client id (None / "" until the
+        # owner provisions VIGIL's Azure app ⇒ the Azure flow is offered nowhere).
+        azure_fetcher=config.azure_connect_fetcher(),
+        azure_client_id=(config.cloud_connect_azure_client_id()
+                         if config.customer_cloud_connect_enabled() else ""),
         # E2a/E2b — the owner-signed customer-credential registry (always wired; finish_login's federated
         # branch resolves through it) + the Google-OIDC provider (None unless customer_oidc_enabled()).
         customer_credentials=CustomerCredentialRegistry(store),
@@ -4615,4 +5521,37 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                               if config.TRIAL_LAUNCH_DAILY_CAP > 0 else None),
         expose_dev_tokens=expose_dev_tokens,
         now_fn=now_fn,
+        **_sso_wiring(config, LoginRateLimiter, sso_oidc_http_post, sso_oidc_jwks_fetcher),
     )
+
+
+def _sso_wiring(config, limiter_cls, sso_oidc_http_post, sso_oidc_jwks_fetcher) -> dict:
+    """Consumer PR-H — the SSO / SCIM ledgers, ONLY while VIGIL_CUSTOMER_SSO is on (off ⇒ {} ⇒ the Provisioner is
+    built exactly as before, and its SSO/SCIM methods are unreachable: the dispatch 404s them). The durable SAML
+    assertion-ID replay ledger; the per-(org, client IP) failed-SCIM-authentication limiter (10 per 5 minutes,
+    then a lock doubling up to an hour); the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per
+    minute: guard-and-count one unit to admit a write, then `charge` per further record it appended); the per-org
+    SCIM read budget (VIGIL_SCIM_READS_PER_MIN reads per minute, guard-and-count); the per-org deprovisioning cap
+    (VIGIL_SCIM_DEPROVISIONS_PER_MIN) and its one-a-minute floor; the per-org enterprise sign-in budget
+    (VIGIL_SSO_SIGNINS_PER_MIN verified sign-ins a minute); and the enterprise-OIDC egress hooks a test injects."""
+    if not config.customer_sso_enabled():
+        return {}
+    from .saml import SamlReplayLedger
+    return {"saml_replay": SamlReplayLedger(config.CUSTOMER_SAML_REPLAY_DIR),
+            "scim_auth_limiter": limiter_cls(config.SCIM_AUTH_RATELIMIT_DIR, max_fails=10, window_s=300.0,
+                                             base_lock_s=300.0, max_lock_s=3600.0),
+            # a BUDGET, not a penalty: an over-budget burst waits until the budget has repaid it (no escalation),
+            # so a large initial IdP sync slows down rather than locking itself out
+            "scim_write_limiter": limiter_cls(config.SCIM_WRITE_RATELIMIT_DIR, max_fails=config.SCIM_OPS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_read_limiter": limiter_cls(config.SCIM_READ_RATELIMIT_DIR, max_fails=config.SCIM_READS_PER_MIN,
+                                             window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "scim_deprov_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR,
+                                               max_fails=config.SCIM_DEPROVISIONS_PER_MIN,
+                                               window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            # the floor: ONE deprovisioning a minute is admitted even while the cap above is spent (its own keys)
+            "scim_deprov_floor_limiter": limiter_cls(config.SCIM_DEPROV_RATELIMIT_DIR, max_fails=1,
+                                                     window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_signin_limiter": limiter_cls(config.SSO_SIGNIN_RATELIMIT_DIR, max_fails=config.SSO_SIGNINS_PER_MIN,
+                                              window_s=60.0, base_lock_s=60.0, max_lock_s=60.0),
+            "sso_oidc_http_post": sso_oidc_http_post, "sso_oidc_jwks_fetcher": sso_oidc_jwks_fetcher}

@@ -46,6 +46,7 @@ from vigil_core.posture import is_production_posture  # noqa: E402
 from ..bridge.daemon import bind_ok  # noqa: E402
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
+from .sso_edge import SsoEdgeMixin  # noqa: E402  (PR-H: the SSO / SCIM routes — every one absent while the flag is off)
 from .static_site import IMMUTABLE, SiteSnapshot, normalize_rel, not_modified  # noqa: E402
 
 CUSTOMER_COOKIE = "vigil_customer_session"       # DISTINCT from the operator `sigil_session` (no cross-bleed)
@@ -96,6 +97,11 @@ _SLOW_HOP_TIMEOUTS_S = {
     # against _HASH_WAIT_S by test_custui_hop_budget.py.
     "signup_confirm": 45.0,
     "recover_confirm": 45.0,
+    # PR-H enterprise OIDC: the same token exchange POST + JWKS GET as oidc_finish, to the org's own IdP.
+    "sso_oidc_finish": 45.0,
+    # PR-H SCIM: one request may re-role up to a thousand group members (each an owner-signed grant + its critical
+    # audit row); a hop that gave up first would tell the IdP "failed" for a change that landed.
+    "scim_request": 45.0,
     # PR-G: a plan change makes up to 4 Stripe calls (2 reads + 2 writes), each bounded per blocking socket op by
     # plan_change.EGRESS_TIMEOUT_S (connect + read) -> 48 s + margin. Pinned by test_customer_plans.py.
     "billing_plan_change": 55.0,
@@ -224,10 +230,35 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
+    # Live Control (VIGIL_CUSTOMER_LIVE_CONTROL) — the #/live screen: watch the live engagement (phase activity)
+    # and steer it with an advisory instruction. The SAME flag that serves /api/customer/launch/instruct +
+    # /api/customer/live/activity, so the screen and its routes are never out of step; off, the tab is absent and
+    # #/live is the home screen (byte-identical). A non-secret on/off value counting in the build id.
+    live_control = _config.customer_live_control_enabled()
     # Legal/governance S1 — the settings shell (the #/settings hub + the General preferences tab). Like every switch
     # here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
     settings = _config.customer_settings_enabled()
+    # Legal/governance S12 — the read-only Authorizations surface (the #/settings/authorizations screen). Like every
+    # switch here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
+    # when it is on.
+    authorizations = _config.customer_authorizations_enabled()
+    # Legal/governance S2 — the Privacy centre (the #/privacy screen): the published cookie inventory, subprocessor
+    # list and the links to the full pages. Like every switch here, a non-secret on/off value written into the page,
+    # counting in the build id; its route is served only when it is on.
+    privacy_center = _config.customer_privacy_center_enabled()
+    # Legal/governance S3 — the Data-rights screen (the rights statement + SLA, the own-data export, the close-account /
+    # deletion request). The same VIGIL_CUSTOMER_DATA_RIGHTS that serves its routes, so the screen and its API are never
+    # out of step; a non-secret on/off value written into the page, counting in the build id.
+    data_rights = _config.customer_data_rights_enabled()
+    # Legal/governance S5 — the AI / human-in-the-loop governance disclosure sub-screen (VIGIL_CUSTOMER_AI_GOVERNANCE,
+    # the same flag that serves its route). A non-secret on/off value written into the page, counting in the build id;
+    # off, its #/ai-governance link is absent and the route is the home screen exactly as any unknown route.
+    ai_governance = _config.customer_ai_governance_enabled()
+    # Legal/governance S7 — the Seller identity screen (#/seller-identity): a READ-ONLY display of the hosted service's
+    # published seller identity (SIGIL SARL). Like every switch here, a non-secret on/off value written into the page,
+    # counting in the build id; its route is served only when it is on.
+    seller_identity = _config.customer_seller_identity_enabled()
     # C7: whether the home screen is the fuller Overview (the summary cards); like every switch here, it is a
     # non-secret on/off value written into the page, and it counts in the build id.
     overview = _config.customer_overview_enabled()
@@ -255,6 +286,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # attack_path / oob_attestation field (byte-identical). Same flags that gate the projection in config.py.
     attack_path = _config.customer_attack_path_enabled()
     blind_vuln = _config.customer_blind_vuln_enabled()
+    # PR-H (Area 7): whether the customer login screen offers enterprise SSO ("Sign in with your company"). The
+    # same VIGIL_CUSTOMER_SSO that serves the /api/customer/sso/* edge routes (sso_edge.py), so the button and the
+    # routes are never out of step; a non-secret on/off value written into the page, counting in the build id. Off
+    # ⇒ the button is absent and every SSO route 404s (byte-identical to a build without SSO).
+    sso = _config.customer_sso_enabled()
     return SiteSnapshot(_APP_ROOT if root is None else root, _APP_CTYPES, max_file=_MAX_APP_BYTES,
                         stable=(_WORKER,), templates={_WORKER: _render_worker},
                         html_values={"__VIGIL_IOS_INSTALL__": "1" if ios else "0",
@@ -264,6 +300,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_CODE__": "1" if _config.redpen_enabled() else "0",
                                      "__VIGIL_GOOGLE_SIGNIN__": "1" if google else "0",
                                      "__VIGIL_OIDC_HANDOFF__": "1" if handoff else "0",
+                                     "__VIGIL_SSO__": "1" if sso else "0",
                                      "__VIGIL_ONBOARDING__": "1" if onboarding else "0",
                                      "__VIGIL_SECURITY__": "1" if security else "0",
                                      "__VIGIL_PASSKEY__": "1" if passkey else "0",
@@ -272,7 +309,13 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_POSTURE__": "1" if posture else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
+                                     "__VIGIL_LIVE_CONTROL__": "1" if live_control else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
+                                     "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
+                                     "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
+                                     "__VIGIL_DATA_RIGHTS__": "1" if data_rights else "0",
+                                     "__VIGIL_AI_GOVERNANCE__": "1" if ai_governance else "0",
+                                     "__VIGIL_SELLER_IDENTITY__": "1" if seller_identity else "0",
                                      "__VIGIL_OVERVIEW__": "1" if overview else "0",
                                      "__VIGIL_BILLING_DASHBOARD__": "1" if billing_dashboard else "0",
                                      "__VIGIL_CONNECT__": "1" if connect else "0",
@@ -433,6 +476,9 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         # per-IP limit on redeeming them — SIBLING dirs, like the two above.
         self.oidc_handoff_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff"
         self.oidc_handoff_limit_dir = Path(str(sessions_dir)).parent / "customer-oidc-handoff-limit"
+        # PR-H — the edge's single-use enterprise-SSO login states + finish tickets (ui/sso_edge.py), a SIBLING dir;
+        # nothing is written there unless VIGIL_CUSTOMER_SSO is on and a sign-in starts.
+        self.sso_state_dir = Path(str(sessions_dir)).parent / "customer-sso-state"
         # the app, read ONCE: what this process serves until it stops (one consistent build; see static_site)
         self.app = build_app_snapshot()
         port = self.server_address[1]
@@ -452,7 +498,7 @@ class CustomerServer(GracefulMixin, ThreadingHTTPServer):
         self.allowed_origins = frozenset(origins)
 
 
-class CustomerHandler(BaseHTTPRequestHandler):
+class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
     server: CustomerServer
     server_version = "vigil-custui/1.0"
     timeout = 30
@@ -702,6 +748,16 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._onboarding(None)
         if path == "/api/customer/preferences" and _settings_on():      # settings General prefs (flag OFF -> 404)
             return self._preferences(None)
+        if path == "/api/customer/authorizations" and _authorizations_on():   # S12 read-only disclosure (OFF -> 404)
+            return self._customer_read_relay("customer_authorizations_list")
+        if path == "/api/customer/privacy" and _privacy_center_on():     # S2 Privacy centre (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("privacy_center")
+        if path == "/api/customer/data-rights" and _data_rights_on():    # S3 rights + SLA + requests (OFF -> 404)
+            return self._customer_read_relay("data_rights_overview")
+        if path == "/api/customer/data-rights/export" and _data_rights_on():   # S3 own-data export (flag OFF -> 404)
+            return self._customer_read_relay("data_rights_export")
+        if path == "/api/customer/seller-identity" and _seller_identity_on():   # S7 seller identity (flag OFF -> 404)
+            return self._seller_identity()
         if path == "/api/customer/security" and _security_on():         # the account's factors (flag OFF -> 404)
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
@@ -716,6 +772,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
+            return self._live_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
         # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
         if path == "/api/customer/posture" and _posture_on():
@@ -730,6 +788,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._customer_read_relay("report_export_pdf" if path.endswith("/pdf") else "report_export")
         if path == "/api/customer/compliance" and _compliance_on():     # PR-G compliance view (flag OFF -> 404)
             return self._customer_read_relay("compliance_view")
+        if path == "/api/customer/ai-governance" and _ai_governance_on():   # legal/governance S5 (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("ai_governance_disclosure")
         if path == "/api/customer/assessments/proof" and _proof_badge_on():    # PR-I (flag OFF -> unknown-route 404)
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
@@ -746,6 +806,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             if not _config.customer_oidc_enabled():
                 return self._deny(404, "not found")
             return self._oidc_login() if path.endswith("/login") else self._oidc_callback()
+        # PR-H — enterprise SSO sign-in (start / SAML finish / OIDC callback) and SCIM reads, served ONLY while
+        # VIGIL_CUSTOMER_SSO is on; off, these paths fall through to the unknown-route 404 below, byte-identical.
+        if self._sso_handles_get(path):
+            return self._sso_get(path)
         if path.startswith("/api/"):           # an unknown API route 404s — NEVER fall through to the SPA shell
             return self._deny(404, "not found")
         return self._serve_app(path)           # else the keyless edge serves its own hash-routed static SPA
@@ -785,6 +849,28 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _live_activity(self):
+        """Live Control — GET the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``, incrementally via a ``since`` cursor. Like every customer read, the REQUESTER +
+        ORG come from the SERVER-side session, never the query (a query ``org_id`` is ignored); the query carries
+        ONLY the target ``host`` (the org's own proven target) and the ``since`` cursor. The provisioner resolves
+        the slug within the session org's own proven set and returns the fixed-field, customer-safe rows — no
+        secret, IP or target detail ever crosses the seam."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def _one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253),
+                                      "since": _one("since", 16), "ip": self._ip()}
+        c, r = self._provision("launch_activity", requester, payload)
         return self._json(r, c)
 
     def _proof_download(self):
@@ -1101,6 +1187,11 @@ class CustomerHandler(BaseHTTPRequestHandler):
 
     def _route_post(self):
         path = urlparse(self.path).path
+        # PR-H — the IdP's SAML ACS form POST (a foreign origin: Host-gated, bound by the single-use RelayState +
+        # the browser cookie instead) and SCIM (bearer-authenticated server-to-server, no cookie): ONLY while
+        # VIGIL_CUSTOMER_SSO is on, ahead of the cookie plane's Origin gate. Off ⇒ the unchanged 404 below.
+        if self._sso_handles_post(path):
+            return self._sso_post(path)
         if not path.startswith("/api/customer/"):
             return self._deny(404, "not found")
         if not self._origin_host_ok():                # CSRF/anti-rebind on EVERY customer mutation
@@ -1171,6 +1262,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
             return self._launch(action, body)
+        if action == "launch/instruct" and _live_control_on():        # Live Control mission steering (flag OFF -> 404)
+            return self._launch_instruct(body)
         if action == "retest" and _retest_on():                       # C1b (flag OFF -> unknown-action 404)
             return self._retest(body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
@@ -1193,6 +1286,10 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._onboarding(body)
         if action == "preferences" and _settings_on():               # save settings General prefs (OFF -> 404)
             return self._preferences(body)
+        if action == "authorizations/request" and _authorizations_on():   # S12 drop an owner-review request (OFF -> 404)
+            return self._authorization_request(body)
+        if action == "data-rights/request" and _data_rights_on():     # S3 close-account / deletion request (OFF -> 404)
+            return self._data_rights_request(body)
         if action in ("mfa/totp/enroll", "mfa/verify"):
             return self._mfa(action, body)
         if action == "mfa/totp/confirm" and _mfa_enroll_hardening_on():   # new route (flag OFF -> unknown-action 404)
@@ -1288,6 +1385,25 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
         else:
             return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _launch_instruct(self, body: dict):
+        """Live Control MISSION STEERING — forward ONE advisory instruction for the session org's running
+        engagement on ``host`` to the provisioner, which resolves the slug server-side (only for a host the org
+        has proven) and enqueues it on the offense-local advisory queue the engine drains. Like ``_launch``, the
+        acting REQUESTER + ORG come from the SERVER session — NEVER the body (tenant isolation at the edge): the
+        body carries ONLY the target ``host`` (the org's own proven target), the instruction ``text``, and a
+        client ``idem_key`` (so a double-click / reconnect is a no-op). ADVISORY-only: it fires no tool, relaxes
+        no scope, mints no fact; the engine folds it into its untrusted think context at the next loop top."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""),   # session org, never body-supplied
+                                      "host": body.get("host", ""), "text": body.get("text", ""),
+                                      "idem_key": body.get("idem_key", ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("launch_instruct", requester, payload)
         return self._json(r, c)
 
     def _retest(self, body: dict):
@@ -1486,6 +1602,52 @@ class CustomerHandler(BaseHTTPRequestHandler):
                                    {"preferences": prefs if isinstance(prefs, dict) else {}, "ip": self._ip()})
         return self._json(r, c)
 
+    def _authorization_request(self, body: dict):
+        """S12 — the Authorizations surface drops an UNSIGNED owner-review request to authorize an assessment of a host.
+        Org-scoped: the REQUESTER and the ORG come from the SERVER-side session, never a body field (a body
+        ``org_id``/``username`` is ignored); only the ``host`` and an optional ``note`` travel to the provisioner, which
+        enforces membership + that the org proven-owns the host. This mints NO authority and writes no signed record."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        host = body.get("host") if isinstance(body, dict) else ""
+        note = body.get("note") if isinstance(body, dict) else ""
+        c, r = self._provision("customer_authorization_request", requester,
+                               {"org_id": str(rec.get("org_id") or ""),
+                                "host": str(host or ""), "note": str(note or ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _data_rights_request(self, body: dict):
+        """S3 — record the SESSION account's data-rights request (a close-account / deletion request). Account-level
+        like the preferences save: the acting REQUESTER and the ORG come from the SERVER-side session, NEVER the body
+        (a body ``username``/``org_id`` is ignored); only the request's own ``kind`` and the client-chosen
+        ``request_id`` (the idempotency key) travel to the provisioner, which records one owner-signed append-only row.
+        A caller with no customer session (or no bound org) is refused before the hop fires."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),           # the session's bound org, never body-supplied
+                   "kind": str(body.get("kind") or ""), "request_id": str(body.get("request_id") or ""),
+                   "ip": self._ip()}
+        c, r = self._provision("data_rights_request", requester, payload)
+        return self._json(r, c)
+
+    def _seller_identity(self):
+        """The Seller identity screen's read (legal/governance S7): the PUBLISHED seller identity of the hosted VIGIL
+        service — SIGIL SARL's legal name, form, registered city/country, registration number, contact email, website
+        and governing law, from owner-reviewed CODE (the cockpit's ``ui/seller_identity.py``). GLOBAL, not per-tenant:
+        the SAME block for every account, so NO org travels and none is read from a query or body — the edge relays
+        only the session principal. Served to an authenticated session only (401 otherwise), exactly as the other
+        read-only customer screens. A pure READ: it mints nothing, mutates nothing, and never touches the signed
+        spine."""
+        rec = self._session()
+        if rec is None or not rec.get("username"):
+            return self._deny(401, "login required")
+        c, r = self._provision("seller_identity_get", str(rec.get("username") or ""), {"ip": self._ip()})
+        return self._json(r, c)
+
     def _security_status(self):
         """The Account security screen's read: which second factors the SESSION's account has (an authenticator app,
         its passkeys) — never a secret. Account-level like MFA: the REQUESTER is the server-side session username, never
@@ -1621,6 +1783,32 @@ def _settings_on() -> bool:
     return _config.customer_settings_enabled()
 
 
+def _authorizations_on() -> bool:
+    from .. import config as _config
+    return _config.customer_authorizations_enabled()
+
+
+def _privacy_center_on() -> bool:
+    # S2 — the same flag the cockpit privacy_center read re-checks, so the screen and its route are never out of step.
+    from .. import config as _config
+    return _config.customer_privacy_center_enabled()
+
+
+def _data_rights_on() -> bool:
+    from .. import config as _config
+    return _config.customer_data_rights_enabled()
+
+
+def _ai_governance_on() -> bool:
+    from .. import config as _config
+    return _config.customer_ai_governance_enabled()
+
+
+def _seller_identity_on() -> bool:
+    from .. import config as _config
+    return _config.customer_seller_identity_enabled()
+
+
 def _plain_body_refusal(e: Exception) -> str:
     """The settings shell's answer to a request body ``_read_body`` could not read, in plain words of its own: body
     bytes that are not text, the edge's own size / shape refusals as they are, and anything else the parser refused
@@ -1661,6 +1849,11 @@ def _launch_ui_on() -> bool:
 def _retest_on() -> bool:
     from .. import config as _config
     return _config.customer_retest_ui_enabled()
+
+
+def _live_control_on() -> bool:
+    from .. import config as _config
+    return _config.customer_live_control_enabled()
 
 
 def _posture_on() -> bool:

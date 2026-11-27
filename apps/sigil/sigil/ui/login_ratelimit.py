@@ -27,7 +27,8 @@ GUARD-AND-COUNT (`admit`, used by the customer checkout limiter): `locked()` + `
 separate steps and `record_failure` is best-effort, which is right for a login FAILURE counter but not for a
 limiter that must count every ATTEMPT across concurrent requests and processes. `admit()` checks and records in
 ONE step under that flock, and is fail-closed on BOTH legs: if the state cannot be locked, read, parsed, or
-durably written, the attempt is refused.
+durably written, the attempt is refused. `charge()` adds units to a key AFTER an admitted attempt turned out to cost
+more than one (a budget charged per unit of work, not per request): the next `admit` waits until it is repaid.
 
 Stdlib only — no framework/strix/vigil_core/sigil. Offense-free and plane-pure by construction.
 """
@@ -265,6 +266,57 @@ class LoginRateLimiter:
             if r is not None and (worst is None or r > worst):
                 worst = r
         return worst
+
+    def charge(self, key: str, units: int, *, now: "Optional[float]" = None) -> "Optional[float]":
+        """Count `units` MORE attempts for `key` in one step, after the fact: for a budget where one admitted request
+        turned out to cost more than the single unit `admit` counted for it. It never refuses (the work already
+        happened); it makes the NEXT `admit` wait for it. Below `max_fails` in the window the units simply join the
+        window; at or past it the key locks for as long as the budget takes to repay everything the window now holds
+        — `base_lock_s` per `max_fails` units, the rate `admit` enforces — counted from the end of any lock already
+        running. A request that cost N units therefore holds the key off for about N / `max_fails` lock periods
+        instead of costing one attempt. No escalation (`lock_count` is carried unchanged). Returns the seconds the
+        key is now locked for, else None.
+
+        FAIL-CLOSED: an existing marker that cannot be read or parsed is never trusted to lower the charge — it is
+        replaced by a `base_lock_s` lock. Serialized under the directory flock like `record_failure` (best effort if
+        the flock cannot be taken: the charge is still recorded, unserialized)."""
+        if not isinstance(key, str) or not key:
+            return None
+        n = int(units) if isinstance(units, int) and not isinstance(units, bool) else 0
+        if n <= 0:
+            return None
+        t = time.time() if now is None else float(now)
+        try:
+            fd: "Optional[int]" = self._lock()
+        except OSError:
+            fd = None
+        try:
+            marker = self._marker(key)
+            try:
+                rec = json.loads(marker.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                rec = {}
+            except (OSError, ValueError):
+                rec = None
+            if not isinstance(rec, dict):
+                self._write_atomic(marker, {"fails": [], "lock_count": 0, "lock_until": t + self.base_lock_s})
+                return self.base_lock_s
+            fails = self._recent_fails(rec, t)
+            lc = rec.get("lock_count", 0)
+            lock_count = int(lc) if isinstance(lc, (int, float)) and not isinstance(lc, bool) else 0
+            lu = rec.get("lock_until")
+            prev_lu = float(lu) if isinstance(lu, (int, float)) and not isinstance(lu, bool) else 0.0
+            total = len(fails) + n
+            per = max(1, self.max_fails)
+            if total < per:
+                self._write_atomic(marker, {"fails": fails + [t] * n, "lock_count": lock_count, "lock_until": prev_lu})
+                return None
+            until = max(prev_lu, t) + self.base_lock_s * total / per
+            self._write_atomic(marker, {"fails": [], "lock_count": lock_count, "lock_until": until})
+            return until - t
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     def admit(self, *keys: str, now: "Optional[float]" = None) -> "Optional[float]":
         """GUARD-AND-COUNT one attempt under EVERY key, atomically across threads AND processes. Returns None iff

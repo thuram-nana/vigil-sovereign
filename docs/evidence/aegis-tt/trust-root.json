@@ -1,0 +1,18 @@
+{
+  "schema": "vigil-aegis-tt-trust-root/1",
+  "environment": "staging",
+  "status": "unprovisioned",
+  "threshold": 1,
+  "authorizers": [],
+  "notes": [
+    "Trust root for AEGIS TT-STG DONE records (AS-25 / decision D33). A demonstration binding",
+    "(vigil-aegis-tt-demonstration-v1) verifies only under THIS non-production root.",
+    "The TT evidence key is a DEDICATED key held KMS-wrapped in the staging control plane; it is",
+    "NEVER a CI runner key and NEVER the production root (plan §13.3). Only its PUBLIC key is",
+    "committed here, by the AS-26 key ceremony, at which point `status` becomes `provisioned` and",
+    "`authorizers` carries the staging public key(s).",
+    "Until provisioned, this root is honestly empty: load_trust_root_doc returns trust_root=None and",
+    "the verifier fails closed (no record can verify), so an unprovisioned root can never be mistaken",
+    "for a usable one. A production environment value is refused by the verifier regardless."
+  ]
+}

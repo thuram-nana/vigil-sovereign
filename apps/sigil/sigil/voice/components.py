@@ -6,14 +6,21 @@ of mono 16-kHz audio (numpy int16/float32); the pipeline is frame-driven so full
 are testable without any audio hardware."""
 from __future__ import annotations
 
-from typing import Iterator, List, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Iterator, List, Protocol, runtime_checkable
 
-try:
+if TYPE_CHECKING:
+    # The type-checker always resolves the real import, so there is no soft-fallback assignment for it
+    # to flag (an `# type: ignore` on `np = None` is "used" where numpy is typed and "unused" where it is
+    # not, which diverges local vs CI — this split removes the divergence by never type-checking the fallback).
     import numpy as np
     Frame = "np.ndarray"
-except Exception:  # numpy is present in the venv, but keep the import soft
-    np = None  # type: ignore
-    Frame = object  # type: ignore
+else:  # at runtime keep the import soft — numpy is present in the venv, but never hard-require it
+    try:
+        import numpy as np
+        Frame = "np.ndarray"
+    except Exception:
+        np = None
+        Frame = object
 
 SAMPLE_RATE = 16000
 FRAME_MS = 20

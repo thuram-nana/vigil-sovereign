@@ -90,7 +90,7 @@
  * CONNECT. When the edge has the Connect screen on (data-connect="1", VIGIL_CUSTOMER_CONNECT — the same switch that serves
  * api/customer/connect), the top bar has Connect (#/connect): one place to prove a website (the method pre-selected, Copy
  * buttons, automatic re-checking until it is verified, a half-finished proof resumed from the server), connect GitHub,
- * and — with data-cloud-connect="1" too — connect an AWS account read-only. Off, there is no tab, #/connect is the home
+ * and — with data-cloud-connect="1" too — connect a cloud account (AWS, GCP, Azure or Cloudflare) read-only. Off, there is no tab, #/connect is the home
  * screen exactly as any unknown route, and no call or timer is made.
  */
 (function () {
@@ -180,11 +180,14 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
   var SECURITY_ON = !!(SECURITY && pageFlag("security"));
+  // ---- data rights (data_rights.js, legal/governance S3): the Settings sub-screen behind data-data-rights="1" -------
+  var DATA_RIGHTS = window.VIGIL_DATA_RIGHTS;
+  var DATA_RIGHTS_ON = !!(DATA_RIGHTS && pageFlag("dataRights"));
   // STEP-UP — the one name every screen uses for a sensitive action (buying credits, changing the team, turning
   // monitoring on, launching): withStepUp(action, where) runs action() — a function returning the promise of ONE
   // request — and settles with its answer. When the server refuses it with 401 {step_up_required: true}, a "Verify with
@@ -264,6 +267,7 @@
         h("button.cust-nav-link", { type: "button", text: "Create an account", onClick: function () { nav("#/signup"); } }),
       ]),
       passkeyBlock(),
+      ssoBlock(),
       h("div.row", {}, [
         h("button.cust-nav-link", { type: "button", text: "Forgot your password?", onClick: function () { nav("#/recover"); } }),
       ]),
@@ -306,6 +310,47 @@
     clearErr();
     if (handoffOn()) { startHandoff(); return; }
     location.assign(API + "/oidc/login");          // relative: the edge answers with the redirect to Google
+  }
+
+  // ---- Sign in with your company (enterprise SSO: SAML / per-org OIDC) -------------------------------
+  // Shown only while the edge has enterprise SSO on (data-sso="1", written at startup when VIGIL_CUSTOMER_SSO is
+  // on; off ⇒ the button is absent and every /api/customer/sso/* route 404s). The button reveals a workspace-id
+  // field — there is no email→org discovery, so the person names their workspace — and Continue is a top-level
+  // navigation to the edge's per-org SSO login route, which redirects to the org's IdP. The org value is
+  // URL-encoded and the route is same-origin (no open redirect); the edge validates the org (unknown ⇒ its own
+  // error). This page never sees an IdP assertion or token.
+  function ssoOn() { return pageFlag("sso"); }
+  function ssoBlock() {
+    if (!ssoOn()) return null;
+    var holder = h("div.cust-sso-block", {});
+    function go() {
+      var ws = val("sso-workspace");
+      if (!ws) { err("Enter your company or workspace ID."); return; }
+      var url;
+      try { url = API + "/sso/login?org=" + encodeURIComponent(ws); }   // encode: same-origin, no injection
+      catch (e) { err("Enter a valid company or workspace ID."); return; }  // malformed (e.g. lone surrogate) ⇒ no nav
+      location.assign(url);
+    }
+    function reveal() {
+      clearErr();
+      VUI.mount(holder, [
+        field("sso-workspace", "Company or workspace ID", "text"),
+        h("div.row", {}, [
+          h("button.btn.btn-primary.cust-sso-go", { type: "button", text: "Continue", onClick: go }),
+          h("button.cust-nav-link", { type: "button", text: "Cancel", onClick: collapse }),
+        ]),
+      ]);
+      var el = VUI.$("#sso-workspace");
+      if (el) { el.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); }); el.focus(); }
+    }
+    function collapse() {
+      clearErr();
+      VUI.mount(holder, [
+        h("button.btn.cust-sso", { type: "button", text: "Sign in with your company", onClick: reveal }),
+      ]);
+    }
+    collapse();
+    return holder;
   }
 
   // ---- Google sign-in inside the installed app: the hand-off ----------------------------------------------
@@ -1877,6 +1922,157 @@
     else if (here() === "#/assessments" && launchUi.data) loadLaunches();
   }
 
+  // ---- Live Control (#/live): watch VIGIL work + steer it mid-run (VIGIL_CUSTOMER_LIVE_CONTROL) -----------------
+  // Pure composition of ALREADY-PROVEN routes: the launches read (state + the signed lease for pause/resume), the
+  // advisory instruction POST, and the customer-safe live-activity feed (phase transitions, polled with a cursor).
+  var LIVE_ON = pageFlag("liveControl");
+  var LIVE_POLL_MS = 15000;
+  var LIVE_ICON = { started: "▸", completed: "✓", skipped: "–", failed: "✗", halted: "⏸" };
+  var live = { host: null, rows: [], cursor: -1, timer: null, gen: 0, sending: false, loading: false,
+               holder: null, feed: null };
+
+  function liveActive() {
+    return ((launchUi.data && launchUi.data.launches) || []).filter(function (l) {
+      return l && (l.state === "running" || l.state === "paused");
+    });
+  }
+  function liveRow(r) {
+    var t = (r && typeof r.ts === "number" && r.ts) ? new Date(r.ts * 1000).toLocaleTimeString() : "";
+    return h("li.live-step", {}, [
+      h("span.live-step-t", { text: t }),
+      h("span.live-step-i", { text: own(LIVE_ICON, r && r.status) || "•" }),
+      h("span.live-step-l", { text: (r && r.label) || (r && r.phase) || "" }),
+    ]);
+  }
+  function renderLiveFeed() {
+    if (!live.feed) return;
+    VUI.mount(live.feed, live.rows.length
+      ? h("ul.live-feed", {}, live.rows.map(liveRow))
+      : h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
+  }
+  async function loadLiveActivity() {
+    if (!live.host || live.loading) return;                   // one fetch at a time: no double-append on the cursor
+    live.loading = true;
+    var gen = live.gen, d = null, status = 0;
+    try {
+      d = await VUI.getJSON(API + "/live/activity?host=" + encodeURIComponent(live.host) + "&since=" + live.cursor);
+    } catch (e) { d = null; status = (e && e.status) || 0; }
+    live.loading = false;
+    if (gen !== live.gen || here() !== "#/live") return;      // navigated away / host switched: drop this answer
+    if (status === 401 || status === 404) {                   // session gone, or the screen was switched off: STOP
+      stopLivePoll();                                         // do not hammer the edge with a doomed poll forever
+      if (status === 401) { await refreshWho(); nav("#/login"); }
+      return;
+    }
+    if (d && d.rows && d.rows.length) {
+      live.rows = live.rows.concat(d.rows);
+      if (typeof d.cursor === "number") live.cursor = d.cursor;
+      renderLiveFeed();
+    }
+    scheduleLivePoll();
+  }
+  function scheduleLivePoll() {
+    if (live.timer || here() !== "#/live" || document.hidden || !live.host) return;
+    live.timer = setTimeout(function () { live.timer = null; loadLiveActivity(); }, LIVE_POLL_MS);
+  }
+  // Two ways to halt the loop. stopLivePoll ENDS it (leaving #/live, a host switch, a 401/404): it bumps `gen` so
+  // any in-flight answer is dropped. pauseLivePoll only HOLDS it (the tab hidden): it keeps `gen`, so an in-flight
+  // fetch still lands and reschedules when the tab is shown again — a pause must not strand the feed.
+  function stopLivePoll() { if (live.timer) { clearTimeout(live.timer); live.timer = null; } live.gen++; }
+  function pauseLivePoll() { if (live.timer) { clearTimeout(live.timer); live.timer = null; } }
+  async function sendInstruction(ta, note) {
+    var t = (ta && ta.value ? ta.value : "").trim();
+    if (live.sending || !live.host || !t) return;
+    live.sending = true;
+    var idem = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+    try {
+      await VUI.postJSON(API + "/launch/instruct", { host: live.host, text: t, idem_key: idem });
+      ta.value = "";
+      VUI.mount(note, h("span.cust-muted", { text: "✓ Sent — VIGIL will weigh this in its next step." }));
+    } catch (e) {
+      VUI.mount(note, h("span.cust-muted",
+        { text: "⚠ " + ((e && e.data && e.data.error) || "Could not send the instruction.") }));
+    }
+    live.sending = false;
+  }
+  async function liveLaunchAction(action, launch) {
+    var path = action === "pause" ? "/launch/pause" : "/launch/resume";
+    try { await VUI.postJSON(API + path, { lease: launch.lease }); } catch (e) { /* new state shows on reload */ }
+    var d = null;
+    try { d = await VUI.getJSON(API + "/launches"); } catch (e) { d = null; }
+    if (here() !== "#/live") return;
+    if (d) { launchUi.data = d; }
+    VUI.mount(live.holder, liveControlBody());
+    renderLiveFeed();
+  }
+  function liveControlBody() {
+    var running = liveActive();
+    if (!running.length) {
+      live.host = null;
+      return h("div.card.cust-soon", { text: "No assessment is running right now. Start one from Assessments, then "
+        + "come back here to watch VIGIL work and steer it." });
+    }
+    if (!live.host || !running.some(function (l) { return l.host === live.host; })) {
+      live.host = running[0].host; live.rows = []; live.cursor = -1;
+    }
+    var cur = running.filter(function (l) { return l.host === live.host; })[0] || running[0];
+    live.feed = h("div#live-feed", {}, h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
+    var ta = h("textarea.live-instruct", { rows: "2", maxlength: "4000",
+      placeholder: "Tell VIGIL what to focus on — e.g. \"concentrate on authentication\"" });
+    var note = h("div.live-note", {});
+    var controls = [];
+    var acts = (cur && cur.actions) || [];
+    if (acts.indexOf("pause") >= 0) {
+      controls.push(h("button.btn", { onClick: function () { liveLaunchAction("pause", cur); } }, "Pause"));
+    }
+    if (acts.indexOf("resume") >= 0) {
+      controls.push(h("button.btn", { onClick: function () { liveLaunchAction("resume", cur); } }, "Resume"));
+    }
+    return h("div.live", {}, [
+      h("div.live-head", {}, [
+        h("h2", { text: "Live Control" }),
+        h("p.cust-muted", { text: "VIGIL is assessing " + (cur.host || "") + " — "
+          + (own(STATE_LABELS, cur.state) || cur.state) + "." }),
+      ]),
+      controls.length ? h("div.live-controls", {}, controls) : null,
+      h("div.card", {}, [
+        h("h3", { text: "Live activity" }),
+        h("p.cust-muted", { text: "What VIGIL is doing now, step by step — no secrets or target detail." }),
+        live.feed]),
+      h("div.card", {}, [
+        h("h3", { text: "Steer the assessment" }),
+        h("p.cust-muted", { text: "An advisory nudge: VIGIL weighs it, then still passes every authorization and "
+          + "evidence check — it never expands scope." }),
+        ta,
+        h("div.live-send", {}, [h("button.btn",
+          { onClick: function () { sendInstruction(ta, note); } }, "Send to VIGIL")]),
+        note]),
+    ]);
+  }
+  function viewLiveControl() {
+    live.holder = h("div#live-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d = null;
+      try { d = await VUI.getJSON(API + "/launches"); }
+      catch (e) {
+        if (here() !== "#/live") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        d = null;
+      }
+      if (here() !== "#/live") return;
+      if (d) { launchUi.data = d; }
+      VUI.mount(live.holder, liveControlBody());
+      renderLiveFeed();
+      loadLiveActivity();
+    })();
+    return shell(h("div", {}, [live.holder]), "#/live");
+  }
+  function onLiveRoute() { if (here() !== "#/live") stopLivePoll(); }
+  function onLiveVisibility() {
+    if (document.hidden) pauseLivePoll();                     // hold, don't end: an in-flight answer still lands
+    else if (here() === "#/live" && live.host) loadLiveActivity();
+  }
+
   // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
   // launch, in credits) — never computed here. Shown for a COMPLETED launch whose statement has usage; asked once
   // per newly finished launch.
@@ -2399,6 +2595,10 @@
       if (x && x.host) { var r = row(String(x.host)); r.verified = true; r.expires_at = x.expires_at; }
     });
     (d.grants || []).forEach(function (g) { if (g && g.host) { row(String(g.host)).grant = g; } });
+    // AS-2g — the v2 origin-binding status (present only while the sovereign-v2 surface is on; absent otherwise,
+    // so nothing extra renders). A bound host shows its proven origin and a short binding-hash prefix — never a
+    // secret. The server decides bound/unbound by cross-checking the PUBLISHED grant + binding the defence reads.
+    (d.bindings || []).forEach(function (b) { if (b && b.host) { row(String(b.host)).binding = b; } });
     return out.sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
   }
   function monActive(d) { return (d.grants || []).filter(function (g) { return g && g.active; }).length; }
@@ -2444,6 +2644,17 @@
     else if (d.can_manage) {
       body.push(h("p.cust-muted", { text: "Its proof of control is not current: verify it again in Assets before "
         + "monitoring can be turned on." }));
+    }
+    // AS-2g — the v2 origin binding: whether AEGIS has a proven, published binding to this host's origin (the
+    // artifact the per-tenant defence cross-checks before it forwards). Shown only when the server sent it.
+    var b = r.binding;
+    if (b && b.origin_host) {
+      body.push(h("div.cust-asset-head", {}, [h("span", { text: "AEGIS origin" }),
+        b.bound ? h("span.cust-badge.cust-badge-on", { text: "Bound" })
+                : h("span.cust-badge.cust-badge-off", { text: "Unbound" })]));
+      body.push(kv("Origin", String(b.origin_host) + ":" + (parseInt(b.origin_port, 10) || 443)));
+      if (b.edge_chain) { body.push(kv("Edge", String(b.edge_chain))); }
+      if (b.binding_sha256_prefix) { body.push(kv("Binding", String(b.binding_sha256_prefix) + "…")); }
     }
     if (d.can_manage) {
       var actions = h("div.cust-mon-actions", {});
@@ -2585,11 +2796,13 @@
   //     hidden. A proof started earlier — on any device — is listed with "Continue": the challenge lives on the server,
   //     so a reload resumes exactly where it stopped.
   //   * CODE REPOSITORY — Connect GitHub (the Code screen's own install flow, codeConnect) and the connected repositories.
-  //   * CLOUD ACCOUNT (AWS) — the account id, then the exact trust policy to paste (VIGIL's principal + the external id),
-  //     AWS's read-only SecurityAudit policy, the role's ARN, Verify. VIGIL records a READ-ONLY connection only when the
-  //     role lands in that account AND refuses any other external id; nothing here runs a test. A connection started
-  //     earlier is listed as "Not finished" with Continue (the server hands back the SAME external id, so a role already
-  //     created keeps working) and Cancel; an expired one offers Connect again.
+  //   * CLOUD ACCOUNT (AWS / GCP / Azure / Cloudflare) — pick a provider, give the account id (validated with the SAME
+  //     rule the backend enforces), then the provider's own placement: AWS a trust policy + the role ARN; GCP a
+  //     service-account id to create + the SA email; Azure an admin-consent link + binding tag + the enterprise-app
+  //     Object ID; Cloudflare a read-only token to create + the token pasted ONCE (a secret, never shown back). VIGIL
+  //     records a READ-ONLY connection only when the provider's proof holds; nothing here runs a test. A connection
+  //     started earlier is listed as "Not finished" with Continue (the server hands back the SAME challenge, so access
+  //     already created keeps working) and Cancel; an expired one offers Connect again.
   // Nothing here shows a price, an estimate or a model name. A sensitive request goes through the step-up when this
   // build has it (withStepUp).
   var CONNECT_ON = pageFlag("connect");
@@ -2867,27 +3080,85 @@
     return h("div.card.cust-connect-tile", {}, body);
   }
 
-  // ---- the Cloud account tile (AWS) ----
+  // ---- the Cloud account tile (AWS / GCP / Azure / Cloudflare) ----
+  // Provider-driven: one picker, then the chosen provider's account-id input (pre-validated with the SAME rule the
+  // backend enforces), challenge steps that render exactly the fields THAT provider's challenge returns, and the
+  // reference the customer pastes — an AWS role ARN, a GCP service-account email, an Azure enterprise-app Object ID, or,
+  // for Cloudflare, the read-only API TOKEN itself (pasted once, treated as a secret: a password input, submitted
+  // through the existing connect POST, never shown back and never logged). AWS behaviour is unchanged.
+  var CLOUD_PROVIDERS = ["aws", "gcp", "azure", "cloudflare"];
+  var CLOUD_PROVIDER = {
+    aws: { name: "AWS", acctLabel: "AWS account ID (12 digits)", acctPlaceholder: "123456789012", inputmode: "numeric",
+           clean: function (s) { return String(s || "").replace(/[\s-]/g, ""); },
+           valid: function (a) { return /^[0-9]{12}$/.test(a); },
+           acctBad: "An AWS account ID is 12 digits.", refEmpty: "Paste the role's ARN." },
+    gcp: { name: "GCP", acctLabel: "GCP project ID", acctPlaceholder: "my-company-prod",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(a); },
+           acctBad: "A GCP project ID is 6 to 30 characters: a lowercase letter, then lowercase letters, digits or "
+             + "hyphens, with no trailing hyphen.", refEmpty: "Paste the service account's email." },
+    azure: { name: "Azure", acctLabel: "Azure tenant ID (a GUID)",
+           acctPlaceholder: "00000000-0000-0000-0000-000000000000",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(a); },
+           acctBad: "An Azure tenant ID is a lowercase GUID, for example 00000000-0000-0000-0000-000000000000.",
+           refEmpty: "Paste the enterprise application's Object ID." },
+    cloudflare: { name: "Cloudflare", acctLabel: "Cloudflare account ID (32 hex characters)",
+           acctPlaceholder: "0123456789abcdef0123456789abcdef",
+           clean: function (s) { return String(s || "").trim(); },
+           valid: function (a) { return /^[0-9a-f]{32}$/.test(a); },
+           acctBad: "A Cloudflare account ID is 32 lowercase hexadecimal characters.",
+           refEmpty: "Paste the API token." },
+  };
+  function cloudProvider(p) { return CLOUD_PROVIDER[String(p || "").toLowerCase()] || CLOUD_PROVIDER.aws; }
+  function cloudProviderName(p) {
+    var c = CLOUD_PROVIDER[String(p || "").toLowerCase()];
+    return c ? c.name : String(p || "").toUpperCase();
+  }
+  // Which providers the picker offers: those the server marks ready in available.cloud_providers, or — when the server
+  // sent no per-provider map — all four (the server refuses an unprovisioned provider anyway, so the picker is never a
+  // dead end). Never an empty picker.
+  function cloudProvidersOffered(av) {
+    var map = av && av.cloud_providers;
+    var ok = CLOUD_PROVIDERS.filter(function (p) {
+      return (map && typeof map === "object") ? !!map[p] : true;
+    });
+    return ok.length ? ok : CLOUD_PROVIDERS.slice();
+  }
+  // The server's own step strings, rendered verbatim as list items (never re-worded).
+  function cloudStepItems(steps) {
+    return (Array.isArray(steps) ? steps : []).map(function (s) { return h("li", {}, h("p", { text: String(s) })); });
+  }
+  // An https link to open (an external console page); anything not https falls back to plain copyable text.
+  function cloudLink(url, label) {
+    var u = String(url || "");
+    return /^https:\/\//.test(u)
+      ? h("a.cust-connect-link", { href: u, text: label, rel: "noopener noreferrer", target: "_blank" })
+      : connectCode(u);
+  }
   function connectCloudTile(d, av) {
     var accts = (Array.isArray(d.cloud) ? d.cloud : []).filter(function (c) { return c && c.account_id; });
     var body = [h("h3", { text: "Cloud account" }),
-      h("p.cust-muted", { text: "Give VIGIL read-only access to an AWS account through a role you create. VIGIL never "
-        + "changes anything in your account." })];
+      h("p.cust-muted", { text: "Give VIGIL read-only access to a cloud account — AWS, Google Cloud, Azure or "
+        + "Cloudflare — through access you create. VIGIL never changes anything in your account." })];
     if (accts.length) {
       body.push(h("div.cust-connect-list", {}, accts.map(function (c) { return connectCloudRow(c, av); })));
     } else {
       body.push(h("p.cust-muted", { text: "No cloud account connected yet." }));
     }
     body.push(av.cloud_connect
-      ? h("div.cust-mon-actions", {}, connectButton("Connect an AWS account", connectCloudFlow, "primary"))
+      ? h("div.cust-mon-actions", {}, connectButton("Connect a cloud account", function () { connectCloudFlow(av); },
+          "primary"))
       : h("p.cust-muted", { text: "Connecting a cloud account is not available on this deployment yet. Contact VIGIL." }));
     return h("div.card.cust-connect-tile", {}, body);
   }
-  // One account: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a connection started earlier
-  // and not finished (Continue + Cancel). Continue / Connect again ask the server for the connection's steps: it hands
-  // back the SAME external ID while the connection is outstanding, so a role already created keeps working.
+  // One account, labelled by its provider: CONNECTED (Disconnect), EXPIRED (Connect again + Disconnect) or PENDING — a
+  // connection started earlier and not finished (Continue + Cancel). Continue / Connect again ask the server for the
+  // connection's steps: it hands back the SAME challenge while the connection is outstanding, so access already created
+  // keeps working.
   function connectCloudRow(c, av) {
     var st = c.status === "connected" || c.status === "expired" ? c.status : "pending";
+    var name = cloudProviderName(c.provider);
     var foot = h("div.cust-mon-actions", {});
     function idle() {
       var acts = [];
@@ -2902,31 +3173,41 @@
     idle();
     var badge = { connected: ["verified", "✓ Connected (read-only)"], expired: ["expired", "⚠ Expired — connect again"],
       pending: ["pending", "… Not finished"] }[st];
-    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: "AWS " + String(c.account_id) }),
+    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: name + " " + String(c.account_id) }),
       h("span.cust-badge.cust-badge-" + badge[0], { text: badge[1] })])];
     if (st === "pending") {
       rows.push(h("p.cust-muted", { text: "You started connecting this account. Continue to see the same steps again." }));
     } else {
-      rows.push(kv("Role", c.role_ref), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
+      rows.push(cloudReference(c), kv(st === "connected" ? "Valid until" : "Expired", fmtDate(c.expires_at)));
     }
     rows.push(foot);
     return h("div.cust-connect-acct", {}, rows);
   }
+  // The reference line a connected / lapsed account shows, labelled by provider (what the grant RECORDS — never a
+  // secret): an AWS role ARN, a GCP service-account email, an Azure enterprise-app Object ID, or — for Cloudflare — the
+  // API token's PUBLIC id (the token itself is never stored, shown or returned).
+  function cloudReference(c) {
+    var p = String(c.provider || "").toLowerCase();
+    var label = p === "gcp" ? "Service account" : p === "azure" ? "Enterprise app (Object ID)"
+      : p === "cloudflare" ? "API token ID" : "Role";
+    return kv(label, c.role_ref);
+  }
   function connectCloudConfirm(c, foot, st, idle) {
     var pending = st === "pending";
+    var name = cloudProviderName(c.provider);
     VUI.mount(foot, [h("span.cust-muted", { text: pending
-        ? "Cancel connecting AWS " + c.account_id + "? The external ID VIGIL gave you stops working; starting again "
-          + "gives you a new one."
-        : "Disconnect AWS " + c.account_id + "? VIGIL stops using its role; delete the role in AWS to remove the "
-          + "access entirely." }),
+        ? "Cancel connecting " + name + " " + c.account_id + "? The external ID VIGIL gave you stops working; starting "
+          + "again gives you a new one."
+        : "Disconnect " + name + " " + c.account_id + "? VIGIL stops using the access you created; remove it in " + name
+          + " to revoke it entirely." }),
       connectButton(pending ? "Cancel connection" : "Disconnect", async function (b) {
         b.disabled = true;
         try {
-          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || "aws"),
+          await connectPost("/connect/cloud/disconnect", { provider: String(c.provider || ""),
             account_id: String(c.account_id) }, foot);
         } catch (e) { b.disabled = false; return connectFailed(e, pending ? "The connection was not cancelled"
           : "The account was not disconnected"); }
-        VUI.toast("AWS account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
+        VUI.toast(name + " account " + c.account_id + (pending ? ": connection cancelled" : " disconnected"));
         if (here() === "#/connect") render();
       }, "danger"),
       connectButton("Keep it", idle)]);
@@ -2937,7 +3218,7 @@
     btn.disabled = true;
     var r;
     try {
-      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || "aws"),
+      r = await connectPost("/connect/cloud/challenge", { provider: String(c.provider || ""),
         account_id: String(c.account_id) }, btn.parentNode);
     } catch (e) { btn.disabled = false; return connectFailed(e, "The connection could not be continued"); }
     btn.disabled = false;
@@ -2945,29 +3226,53 @@
     if (!box || here() !== "#/connect") return;
     VUI.mount(box, connectCloudSteps(r || {}));
   }
-  function connectCloudFlow() {
+  function connectCloudFlow(av) {
     stopConnectPoll();
     var box = connectFlowBox();
     if (!box) return;
-    var acct = h("input#connect-aws-account", { type: "text", inputmode: "numeric", autocomplete: "off",
-      placeholder: "123456789012" });
-    VUI.mount(box, h("div.card", {}, [h("h3", { text: "Connect an AWS account" }),
-      h("label", { for: "connect-aws-account", text: "AWS account ID (12 digits)" }), acct,
-      h("div.cust-mon-actions", {}, connectButton("Continue", function (b) { connectCloudStart(b, acct); }, "primary"))]));
+    var offered = cloudProvidersOffered(av || {});
+    var sel = h("select#connect-cloud-provider", { "aria-label": "Cloud provider" });
+    offered.forEach(function (p) { sel.appendChild(h("option", { value: p, text: cloudProviderName(p) })); });
+    var acctLabel = h("label", { for: "connect-cloud-account" });
+    var acct = h("input#connect-cloud-account", { type: "text", autocomplete: "off", spellcheck: "false" });
+    function apply() {
+      var cfg = cloudProvider(sel.value);
+      acctLabel.textContent = cfg.acctLabel;
+      acct.setAttribute("placeholder", cfg.acctPlaceholder);
+      if (cfg.inputmode) acct.setAttribute("inputmode", cfg.inputmode); else acct.removeAttribute("inputmode");
+    }
+    sel.addEventListener("change", apply);
+    apply();
+    var card = [h("h3", { text: "Connect a cloud account" })];
+    if (offered.length > 1) { card.push(h("label", { for: "connect-cloud-provider", text: "Cloud provider" }), sel); }
+    card.push(acctLabel, acct, h("div.cust-mon-actions", {},
+      connectButton("Continue", function (b) { connectCloudStart(b, sel, acct); }, "primary")));
+    VUI.mount(box, h("div.card", {}, card));
   }
-  async function connectCloudStart(btn, input) {
+  async function connectCloudStart(btn, sel, input) {
     clearErr();
-    var account = String(input.value || "").replace(/[\s-]/g, "");
-    if (!/^[0-9]{12}$/.test(account)) return err("An AWS account ID is 12 digits.");
+    var provider = String(sel.value);
+    var cfg = cloudProvider(provider);
+    var account = cfg.clean(input.value);
+    if (!cfg.valid(account)) return err(cfg.acctBad);
     btn.disabled = true;
     var r;
-    try { r = await connectPost("/connect/cloud/challenge", { provider: "aws", account_id: account }, btn.parentNode); }
+    try { r = await connectPost("/connect/cloud/challenge", { provider: provider, account_id: account }, btn.parentNode); }
     catch (e) { btn.disabled = false; return connectFailed(e, "The connection was not started"); }
     var box = connectFlowBox();
     if (!box || here() !== "#/connect") return;
     VUI.mount(box, connectCloudSteps(r || {}));
   }
+  // The challenge steps for the challenge's provider: AWS as it always was; GCP / Azure / Cloudflare each render exactly
+  // the fields their challenge returns.
   function connectCloudSteps(r) {
+    var p = String(r.provider || "").toLowerCase();
+    if (p === "gcp") return connectCloudStepsGcp(r);
+    if (p === "azure") return connectCloudStepsAzure(r);
+    if (p === "cloudflare") return connectCloudStepsCloudflare(r);
+    return connectCloudStepsAws(r);
+  }
+  function connectCloudStepsAws(r) {
     var hint = String(r.role_name_hint || "VigilSecurityAudit");
     var role = h("input#connect-aws-role", { type: "text", autocomplete: "off", spellcheck: "false",
       placeholder: "arn:aws:iam::" + String(r.account_id || "") + ":role/" + hint });
@@ -2991,16 +3296,86 @@
         + " and refuses any other external ID — to check that, it makes one attempt with a random external ID, which "
         + "your CloudTrail shows as denied. The connection is read-only and never runs a test by itself." })]));
   }
+  // GCP: service-account impersonation. The customer creates an SA whose id (sa_id) encodes the challenge, grants
+  // VIGIL's connector SA the token-creator role on it, and pastes the SA's email (sa_email) as the reference.
+  function connectCloudStepsGcp(r) {
+    var role = h("input#connect-cloud-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: String(r.sa_email || "") });
+    var lead = [h("h3", { text: "Connect Google Cloud project " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the service-account id and external "
+        + "ID are unchanged. If you already created the service account, just paste its email below." }));
+    }
+    var values = [connectCopyRow("Service account id", r.sa_id), connectCopyRow("Service account email", r.sa_email),
+      connectCopyRow("Connector", r.connector_sa), connectCopyRow("Role", r.token_creator_role)];
+    (Array.isArray(r.gcloud) ? r.gcloud : []).forEach(function (g) { values.push(connectCopyRow("gcloud", g)); });
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role", text: "Paste the service account's email, then verify:" }),
+        role, h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL connects the project only by impersonating exactly that service account with the "
+        + "external ID its name encodes. The connection is read-only and never runs a test by itself." })]));
+  }
+  // Azure: multi-tenant app-registration consent. A Global Admin admin-consents VIGIL's app and sets the binding tag
+  // (the external ID) on its enterprise application; the reference is that application's Object ID (a GUID).
+  function connectCloudStepsAzure(r) {
+    var role = h("input#connect-cloud-role", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "00000000-0000-0000-0000-000000000000" });
+    var lead = [h("h3", { text: "Connect Azure tenant " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the admin-consent URL and the "
+        + "binding tag (your external ID) are unchanged." }));
+    }
+    var values = [h("div.cust-connect-copy", {}, [h("span.k", { text: "Admin consent" }),
+        cloudLink(r.admin_consent_url, "Open the admin-consent page")]),
+      connectCopyRow("Binding tag", r.binding_tag),
+      connectCopyRow("Application (client) ID", r.client_id),
+      connectCopyRow("VIGIL reads", r.graph_read)];
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role",
+          text: "Paste the Object ID of VIGIL's enterprise application in your tenant, then verify:" }),
+        role, h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL confirms the admin consent and reads back its own service principal to check the "
+        + "binding tag equals your external ID. The connection is read-only and never runs a test by itself." })]));
+  }
+  // Cloudflare: a read-only, single-account API token. The reference IS the SECRET token, pasted once — a password
+  // input, submitted through the existing connect POST, never shown back and never logged. VIGIL records only the
+  // token's public id and a sha256; it does NOT store the token.
+  function connectCloudStepsCloudflare(r) {
+    var role = h("input#connect-cloud-role", { type: "password", autocomplete: "off", spellcheck: "false" });
+    var lead = [h("h3", { text: "Connect Cloudflare account " + String(r.account_id || "") })];
+    if (r.resumed === true) {
+      lead.push(h("p.cust-muted", { text: "Continuing the connection you started: the token name and account scope are "
+        + "unchanged. Create the token and paste it below." }));
+    }
+    var values = [connectCopyRow("Token name", r.token_name), connectCopyRow("Account", r.account_scope),
+      kv("Permissions (read-only)", (Array.isArray(r.permission_groups) ? r.permission_groups : []).join(", "))];
+    return h("div.card.cust-connect-proof", {}, lead.concat([
+      h("ol.cust-connect-steps", {}, cloudStepItems(r.steps)),
+      h("div.cust-connect-values", {}, values),
+      h("div", {}, [h("label", { for: "connect-cloud-role", text: "Paste the API token once, then verify:" }), role,
+        h("div.cust-mon-actions", {}, connectButton("Verify connection",
+          function (b) { connectCloudVerify(b, r, role); }, "primary"))]),
+      h("p.cust-muted", { text: "VIGIL verifies the token is read-only and scoped to this one account, records only its "
+        + "public id, and does NOT store the token. The connection is read-only and never runs a test by itself." })]));
+  }
   async function connectCloudVerify(btn, r, input) {
     clearErr();
-    var arn = String(input.value || "").trim();
-    if (!arn) return err("Paste the role's ARN.");
+    var p = String(r.provider || "").toLowerCase();
+    var cfg = cloudProvider(p);
+    var ref = String(input.value || "").trim();
+    if (!ref) return err(cfg.refEmpty);
     btn.disabled = true;
     try {
-      await connectPost("/connect/cloud/verify", { provider: "aws", account_id: String(r.account_id || ""),
-        role_ref: arn }, btn.parentNode);
+      await connectPost("/connect/cloud/verify", { provider: p, account_id: String(r.account_id || ""),
+        role_ref: ref }, btn.parentNode);
     } catch (e) { btn.disabled = false; return connectFailed(e, "The account was not connected"); }
-    VUI.toast("AWS account " + r.account_id + " connected (read-only)");
+    VUI.toast(cfg.name + " account " + String(r.account_id || "") + " connected (read-only)");
     if (here() === "#/connect") render();
   }
 
@@ -3136,6 +3511,12 @@
       h("div.cust-member-actions", {}, [add]),
     ]);
   }
+  function teamSeats(seats) {
+    var s = seats.limit === 1 ? "" : "s";
+    var t = seats.used + " of " + seats.limit + " member seat" + s + " used";
+    if (seats.used >= seats.limit) { t += " — remove a member, or add a seat, to add more"; }
+    return h("p.cust-muted.cust-team-seats", { role: "status", text: t });
+  }
   function viewTeam() {
     var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
     var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
@@ -3156,7 +3537,9 @@
         return;
       }
       if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
-      VUI.mount(holder, [teamMembers((d && d.members) || [], act), teamAddCard(act)]);
+      var parts = (d && d.seats) ? [teamSeats(d.seats)] : [];     // "used of M seats" only when seats are on
+      parts.push(teamMembers((d && d.members) || [], act), teamAddCard(act));
+      VUI.mount(holder, parts);
     }
     async function send(path, body, done, name, btn) {
       say("");
@@ -3851,6 +4234,35 @@
   }
   // ---- end of Plans, Reports and the standards mapping (PR-G) ------------------------------------------------------
 
+  // ---- AI governance (VIGIL_CUSTOMER_AI_GOVERNANCE): the AI / human-in-the-loop disclosure sub-screen (S5) ----------
+  // Shown only while the edge writes data-ai-governance="1" (AI_GOVERNANCE_ON, read in the Settings section). One read
+  // (api/customer/ai-governance) over the existing one-read helper (area6View): the server returns the fixed negating
+  // statement and the cited sections, and the screen shows exactly those words and their sources — no control, no
+  // estimate, no engine name, nothing it rewords. Linked from the Settings hub.
+  function viewAiGovernance() {
+    return area6View("#/ai-governance", "How VIGIL uses AI",
+      "How VIGIL uses AI across the Service, and the human oversight around it — drawn word for word from your "
+      + "Terms of Service, the README and the Safety & Authorization briefing, each cited so you can check it.",
+      API + "/ai-governance",
+      "Only members who can see this workspace's assessments can open this page.", aiGovernanceBody);
+  }
+  // The disclosure as the server sent it: the one negating statement, then each cited section. Every sentence is the
+  // server's own (ui/ai_governance), shown verbatim with its source; the screen invents nothing and offers no control.
+  function aiGovernanceBody(d) {
+    var head = [];
+    if (d && d.statement) { head.push(h("p.cust-aig-statement", { role: "note", text: String(d.statement) })); }
+    var sections = (d && Array.isArray(d.sections)) ? d.sections : [];
+    var cards = sections.map(function (s) {
+      var rows = [];
+      ((s && Array.isArray(s.points)) ? s.points : []).forEach(function (pt) {
+        rows.push(h("p.cust-aig-point", { text: String((pt && pt.text) || "") }));
+        if (pt && pt.source) { rows.push(h("p.cust-muted.cust-aig-cite", { text: "Source: " + String(pt.source) })); }
+      });
+      return VUI.card(String((s && s.title) || ""), null, rows);
+    });
+    return h("div.cust-ai-governance", {}, head.concat(cards));
+  }
+
   // ---- notification centre --------------------------------------------------------------------
   // A self-contained bell + unread badge + dropdown panel, fed by polling the tenant-scoped
   // GET api/customer/notifications (the server aggregates findings + billing standing + monitoring,
@@ -4050,6 +4462,17 @@
   // controls) and Billing (#/billing) — and adds NO new authority or money control of its own: roles are still changed
   // on #/team over the existing routes, and credits are still bought on #/billing.
   var SETTINGS_ON = pageFlag("settings");
+  // Legal/governance S12 — the read-only Authorizations surface (#/settings/authorizations), linked from this hub only
+  // while the edge writes data-authorizations="1". Off, the link is absent and the route is the home screen exactly as
+  // any unknown route (byte-identical). It only reads the owner-signed authorities and drops an unsigned owner-review
+  // request; it mints no authority and changes no scope (the gate stays the sole authority). The screen itself lives in
+  // its own block below (outside this hub's own code), so the hub still reaches the network through /preferences alone.
+  var AUTHZ_ON = pageFlag("authorizations");
+  // Legal/governance S5: the AI / human-in-the-loop governance disclosure sub-screen (data-ai-governance="1",
+  // VIGIL_CUSTOMER_AI_GOVERNANCE). Off, #/ai-governance is the home screen exactly as any unknown route, the settings
+  // hub shows no link to it, and nothing is fetched. A pure read: it shows statements drawn word for word from the
+  // Terms, the README and the Safety & Authorization briefing (cited), and offers no control.
+  var AI_GOVERNANCE_ON = pageFlag("aiGovernance");
   // The General tab's fields: [key, label, input type]. The key set is the SAME closed allowlist the server enforces
   // (ui/preferences_store.PREFERENCE_KEYS); the browser only sends these, and the server refuses anything else.
   var PREF_FIELDS = [
@@ -4062,7 +4485,8 @@
   ];
   // The hub links a screen only where this deployment shows it: routeShown (the guide's own test) and, for Account
   // security, its own switch — off, #/security is the home screen exactly as any unknown route, so no link leads there.
-  function settingsLinkShown(hash) { return routeShown(hash) && (hash !== "#/security" || SECURITY_ON); }
+  function settingsLinkShown(hash) { return routeShown(hash) && (hash !== "#/security" || SECURITY_ON)
+    && (hash !== "#/settings/authorizations" || AUTHZ_ON); }
   function settingsLink(label, hash) {
     if (!settingsLinkShown(hash)) { return null; }
     return h("div.row", {}, [h("button.btn.cust-settings-link",
@@ -4075,7 +4499,10 @@
       h("p.cust-muted", { text: "Manage the rest of your workspace on its own screens." }),
       settingsLink("Account security & sign-in", "#/security"),
       settingsLink("Authorized administrators", "#/team"),
+      settingsLink("Authorizations", "#/settings/authorizations"),
       settingsLink("Billing", "#/billing"),
+      settingsLink("Data rights", "#/data-rights"),
+      AI_GOVERNANCE_ON ? settingsLink("How VIGIL uses AI", "#/ai-governance") : null,   // S5: only while its flag is on
     ]);
   }
   // The General tab: the profile fields, pre-filled from what the server stored, with one Save. `shown` keeps each
@@ -4176,6 +4603,7 @@
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(LIVE_ON ? [navLink("Live Control", "#/live")] : [])
         .concat(pageFlag("posture") ? [navLink("Fix first", "#/fix-first")] : [])      // PR-B: the Fix-first screen
         .concat(ATTACK_PATH_ON ? [navLink("Attack path", "#/attack-path")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
@@ -4183,6 +4611,8 @@
         .concat(pageFlag("plans") ? [navLink("Plans", "#/plans")] : [])
         .concat(pageFlag("reportExport") || pageFlag("compliance") ? [navLink("Reports", "#/reports")] : [])
         .concat(SETTINGS_ON ? [navLink("Settings", "#/settings")] : [])
+        .concat(PRIVACY_CENTER_ON ? [navLink("Privacy", "#/privacy")] : [])      // legal/governance S2
+        .concat(SELLER_IDENTITY_ON ? [navLink("Seller identity", "#/seller-identity")] : [])   // legal/governance S7
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
     var right = authed()
@@ -4233,12 +4663,251 @@
     }
   }
 
+  // ---- Authorizations (VIGIL_CUSTOMER_AUTHORIZATIONS): the read-only trust surface -------------------------------
+  // A disclosure, never a control: it READS the owner-signed engagement authorities on record for this workspace's own
+  // proven-owned hosts (scope, validity window, GET-only / non-destructive) and lets a workspace REQUEST authorization
+  // of a host — which drops an UNSIGNED owner-review request only (POST /authorizations/request). It MINTS NO authority
+  // and widens no scope: VIGIL's launch/conjunctive gate stays the sole authority and refuses a forged, expired or
+  // out-of-scope authority independently of this page. The screen reaches the network through /authorizations and
+  // /authorizations/request alone.
+  function authzDate(iso) { return String(iso || "").split("T")[0] || String(iso || ""); }
+  function authzStateLabel(a) {
+    if (!a.authorized) { return "Not authorized"; }
+    if (!a.verified || !a.trusted) { return "On record — not verified"; }   // present but not owner-signed/verifiable
+    if (a.active) { return "Active"; }
+    return "Expired or not yet valid";
+  }
+  // The disclosure card: what VIGIL is authorized to test, and that the GATE (not this page) enforces R1/R2/R3. The
+  // formal authorization terms are owner/counsel input — a placeholder stands in until they are provided (never
+  // invented legal text).
+  function authorizationsIntro() {
+    return h("div.card.cust-authz-intro", {}, [
+      h("h3", { text: "What VIGIL is authorized to test" }),
+      h("p.cust-muted", { text: "VIGIL assesses only the hosts your organization has authorized through an "
+        + "owner-signed engagement authority. This page shows those authorities, read-only." }),
+      h("ul.cust-authz-rules", {}, [
+        h("li", { text: "Scope: each authority names exactly the host(s) in scope; every other host is out of scope." }),
+        h("li", { text: "Validity window: an authority applies only between its start and end — outside it, or once "
+          + "revoked, it authorizes nothing." }),
+        h("li", { text: "New-host / out-of-scope refusal: VIGIL's gate refuses any redirect or new host that is not in "
+          + "a signed scope." }),
+      ]),
+      h("p.cust-authz-disclaim", { text: "This page discloses what the gate enforces — it does not itself grant, widen "
+        + "or enforce anything. Issuing or changing an authority is an owner-signed action in the VIGIL cockpit." }),
+      h("p.cust-authz-terms", { text: "«AUTHORIZATION TERMS — PENDING OWNER/COUNSEL»" }),
+    ]);
+  }
+  function authzRow(a, requested) {
+    var rows = [h("h3", { text: String(a.host || "") }),
+      h("p.cust-authz-state", { text: "Status: " + authzStateLabel(a) })];
+    if (a.authorized) {
+      rows.push(h("p.cust-muted", { text: "In scope: " + ((a.scope || []).join(", ") || String(a.host || "")) }));
+      rows.push(h("p.cust-muted", { text: "Out of scope: every other host (a run against a host not in scope is "
+        + "refused by VIGIL's gate, not by this page)." }));
+      rows.push(h("p.cust-muted", { text: "Valid " + authzDate(a.not_before) + " – " + authzDate(a.not_after) }));
+      rows.push(h("p.cust-muted", { text: a.allow_destructive ? "Includes destructive actions."
+        : "Read-only / non-destructive (GET-only): no write or change is authorized." }));
+      if (a.environment) { rows.push(h("p.cust-muted", { text: "Environment: " + String(a.environment) })); }
+    } else {
+      rows.push(h("p.cust-muted", { text: "No assessment of this host is authorized yet." }));
+    }
+    // the request action is offered only where the host is NOT actively authorized; it drops an unsigned owner-review
+    // request (it mints no authority — the owner signs in the cockpit).
+    if (!a.active) {
+      if ((requested || []).indexOf(a.host) >= 0) {
+        rows.push(h("p.cust-authz-requested", { text: "Authorization requested — pending owner review." }));
+      }
+      rows.push(h("div.row", {}, [h("button.btn.cust-authz-request",
+        { type: "button", text: "Request authorization", onClick: function () { return requestAuthorization(a.host); } })]));
+    }
+    return h("div.card.cust-authz-row", {}, rows);
+  }
+  function authorizationsBody(r) {
+    var auths = (r && Array.isArray(r.authorities)) ? r.authorities : [];
+    var requested = (r && Array.isArray(r.requested)) ? r.requested : [];
+    var cards = [authorizationsIntro()];
+    if (!auths.length) {
+      cards.push(h("div.card.cust-authz-empty", {}, [h("p.cust-muted",
+        { text: "No hosts are on record for your workspace yet. Prove ownership of a host on the Connect or Assets "
+          + "screen; once it is owner-verified it appears here." })]));
+    } else {
+      auths.forEach(function (a) { cards.push(authzRow(a, requested)); });
+    }
+    return h("div.cust-authz-list", {}, cards);
+  }
+  // A read that failed for any reason but sign-in: an honest card with Try again (never a half-rendered list).
+  function authorizationsUnavailable(holder) {
+    return h("div.card.cust-authz-unavailable", {}, [
+      h("p.cust-settings-error", { role: "alert", text: "Could not load your authorizations right now. Nothing was "
+        + "changed." }),
+      h("div.row", {}, [h("button.btn.cust-authz-retry", { type: "button", text: "Try again",
+        onClick: function () { return loadAuthorizations(holder); } })])]);
+  }
+  async function loadAuthorizations(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/authorizations"); }
+    catch (e) {
+      if (here() !== "#/settings/authorizations") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, authorizationsUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/settings/authorizations") { return; }
+    VUI.mount(holder, (r && typeof r === "object") ? authorizationsBody(r) : authorizationsUnavailable(holder));
+  }
+  // Drop an UNSIGNED owner-review request to authorize an assessment of `host`. It mints no authority and changes no
+  // scope; the owner signs the real authority in the cockpit. Only the host travels (the org is the server session).
+  async function requestAuthorization(host) {
+    try {
+      await VUI.postJSON(API + "/authorizations/request", { host: host });
+      if (here() !== "#/settings/authorizations") { return; }
+      VUI.toast("Authorization requested");
+      var holder = VUI.$("#cust-authorizations");
+      if (holder) { loadAuthorizations(holder); }                   // re-read so the pending-review note shows
+    } catch (e) {
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      err("Your authorization request could not be sent. Please try again.");
+    }
+  }
+  function viewAuthorizations() {
+    var holder = h("div#cust-authorizations");
+    loadAuthorizations(holder);
+    return shell(h("div", {}, [h("h2", { text: "Authorizations" }), holder]), "#/settings/authorizations");
+  }
+
+  // ---- Privacy centre (VIGIL_CUSTOMER_PRIVACY_CENTER) ----------------------------------------------
+  // A read-only screen (legal/governance S2) that SURFACES the privacy information this deployment has already
+  // published: the strictly-necessary cookie inventory, the subprocessor list, and links to the full pages. It renders
+  // the EXISTING canonical text the server reads from the public pages (never a reworded copy) and links out to them;
+  // it adds NO authority or money control and makes NO write — the one read, api/customer/privacy, is all it does. Off,
+  // #/privacy is the home screen exactly as any unknown route is (byte-identical), and no privacy read is made.
+  var PRIVACY_CENTER_ON = pageFlag("privacyCenter");
+  // The published pages' links as the server returns them (their canonical public-site paths): an anchor, or nothing.
+  function privacyLink(label, href) {
+    if (!href) { return null; }
+    return h("p.cust-privacy-link", {}, [h("a", { href: String(href), text: label + " →" })]);
+  }
+  // "3 strictly-necessary session cookies, 0 optional — nothing to consent to", from the server's own counts.
+  function cookieCountLine(summary) {
+    var s = Number(summary.strictly_necessary) || 0, o = Number(summary.optional) || 0;
+    return s + " strictly-necessary session cookie" + (s === 1 ? "" : "s") + ", " + o + " optional"
+      + (o === 0 ? " — nothing to consent to." : ".");
+  }
+  // One subprocessor, rendered as the published page words it: the bolded provider name, then the rest of its line.
+  function privacySub(sub) {
+    var name = String(sub.name || ""), detail = String(sub.detail || "");
+    var rest = (detail.indexOf(name) === 0) ? detail.slice(name.length)
+      : (detail && detail !== name ? " — " + detail : "");
+    return h("li.cust-privacy-sub", {}, [h("strong", { text: name }), rest ? h("span", { text: rest }) : null]);
+  }
+  function privacyBody(d) {
+    d = d || {};
+    var cookies = Array.isArray(d.cookies) ? d.cookies : [];
+    var subs = Array.isArray(d.subprocessors) ? d.subprocessors : [];
+    var summary = d.cookie_summary || {}, links = d.links || {};
+    var cookieTable = cookies.length ? h("table.cust-table.cust-privacy-cookies", {}, [
+      h("thead", {}, [h("tr", {}, [h("th", { scope: "col", text: "Cookie" }),
+        h("th", { scope: "col", text: "Purpose" }), h("th", { scope: "col", text: "Category" })])]),
+      h("tbody", {}, cookies.map(function (c) {
+        return h("tr", {}, [h("th", { scope: "row", text: String(c.name || "") }),
+          h("td", { text: String(c.purpose || "") }), h("td", { text: String(c.category || "") })]);
+      }))]) : null;
+    var cookieCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Cookies & local data" }),
+      summary.note ? h("p.cust-muted", { text: String(summary.note) }) : null,
+      h("p.cust-privacy-count", { text: cookieCountLine(summary) }),
+      cookieTable,
+      privacyLink("Full cookie notice", links.cookies),
+    ]);
+    var subCard = h("div.card.cust-privacy-section", {}, [
+      h("h3", { text: "Subprocessors" }),
+      h("p.cust-muted", { text: "The providers that process data for the hosted service." }),
+      subs.length ? h("ul.cust-privacy-subs", {}, subs.map(privacySub)) : null,
+      privacyLink("Full privacy policy", links.privacy),
+    ]);
+    return h("div", {}, [cookieCard, subCard]);
+  }
+  // The read, the loading holder, the honest "could not load" and the shell/heading are the shared area6View — the
+  // same read-only pattern the Reports screen uses, not a second copy.
+  function viewPrivacy() {
+    return area6View("#/privacy", "Privacy", "The cookies and subprocessors this service uses, and the full privacy "
+      + "policy — exactly as published.", API + "/privacy", "You do not have access to this screen.", privacyBody);
+  }
+
+  // ---- Seller identity (VIGIL_CUSTOMER_SELLER_IDENTITY): a READ-ONLY display of who provides the hosted service ------
+  // Shown only while the edge writes data-seller-identity="1". Off, #/seller-identity is the home screen exactly as any
+  // unknown route, and no seller-identity call is made. A PURE DISPLAY: it reads the published seller-identity block
+  // (GET api/customer/seller-identity) and renders it — SIGIL SARL's legal name, form, registered office, registration
+  // number, contact email, website and governing law. It has NO control of its own (no button in the happy path, no
+  // form, no POST): it mints nothing, mutates nothing, and changes no authority or money. The values are the SAME
+  // published facts the public Terms and Privacy pages carry; the screen renders them, it never restates them.
+  var SELLER_IDENTITY_ON = pageFlag("sellerIdentity");
+  // The fields the screen shows, in order: [key, label]. The server sends exactly these keys (ui/seller_identity.py);
+  // the browser renders what it is sent, it never invents a value.
+  var SELLER_FIELDS = [
+    ["legal_name", "Legal name"],
+    ["legal_name_expansion", "In full"],
+    ["legal_form", "Legal form"],
+    ["registered_city", "Registered in"],
+    ["registered_country", "Country"],
+    ["registration_number", "Registration number"],
+    ["contact_email", "Contact email"],
+    ["website", "Website"],
+    ["governing_law", "Governing law"],
+  ];
+  function sellerCard(s) {
+    var rows = [h("h3", { text: "Who provides this service" }),
+      h("p.cust-muted", { text: "The hosted VIGIL service is provided by this company. These are its published details." })];
+    SELLER_FIELDS.forEach(function (f) { rows.push(kv(f[1], s ? s[f[0]] : "")); });
+    return h("div.card", {}, rows);
+  }
+  // A read that failed for any reason but sign-in leaves the details unknown here: the screen says so and offers Try
+  // again — never a half-empty card. (The block is a global constant, so this is only ever a transient read failure.)
+  function sellerUnavailable(holder) {
+    return h("div.card", {}, [h("h3", { text: "Who provides this service" }),
+      h("p.cust-settings-error", { role: "alert", text: "The seller details could not be loaded right now." }),
+      h("div.row", {}, [h("button.btn", { type: "button", text: "Try again",
+        onClick: function () { return loadSeller(holder); } })])]);
+  }
+  async function loadSeller(holder) {
+    VUI.mount(holder, loadingHolder("Loading…"));
+    var r;
+    try { r = await VUI.getJSON(API + "/seller-identity"); }
+    catch (e) {
+      if (here() !== "#/seller-identity") { return; }
+      if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+      VUI.mount(holder, sellerUnavailable(holder));
+      return;
+    }
+    if (here() !== "#/seller-identity") { return; }
+    var s = r && r.seller;
+    VUI.mount(holder, (s && typeof s === "object" && !Array.isArray(s)) ? sellerCard(s) : sellerUnavailable(holder));
+  }
+  function viewSellerIdentity() {
+    var holder = h("div#cust-seller-identity");
+    loadSeller(holder);                        // the loader at once, then the published details (or why they could not load)
+    return shell(h("div", {}, [h("h2", { text: "Seller identity" }), holder]), "#/seller-identity");
+  }
+
   // ---- misc ---------------------------------------------------------------------------------------
   function clearErr() { if (VUI.clearErrorBanner) VUI.clearErrorBanner(); }   // kit API takes no arg
   function authMsg(e, fallback) {
     if (e && e.data && e.data.error) return String(e.data.error);
     if (e && e.status === 429) return "Too many attempts — wait a moment and try again.";
     return fallback;
+  }
+
+  // ---- Data rights (data_rights.js, VIGIL_CUSTOMER_DATA_RIGHTS): a Settings sub-screen --------------------------
+  // Shown only while the edge writes data-data-rights="1" (DATA_RIGHTS_ON) and data_rights.js is on the page. It states
+  // the rights in VIGIL's published words, names the 30-day SLA and the contact, and offers the own-data export and the
+  // close-account / deletion request. app.js adds the <h2> and the shell; the module renders the body (and fires its one
+  // read, GET api/customer/data-rights, on arrival). No new authority or money control.
+  function viewDataRightsScreen() {
+    return shell(h("div", {}, [h("h2", { text: "Data rights" }),
+      DATA_RIGHTS.viewDataRights({ h: h, VUI: VUI, api: API, nav: nav, loading: loadingHolder, here: here,
+        onAuthLost: function () { refreshWho().then(function () { nav("#/login"); }); } })]),
+    "#/data-rights");
   }
 
   // ---- router -------------------------------------------------------------------------------------
@@ -4258,6 +4927,8 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
+    "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
     "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
@@ -4273,6 +4944,16 @@
     "#/security": function () { return authed() ? (SECURITY_ON ? viewSecurityScreen() : viewDashboard()) : viewLogin(); },
     // the settings shell off: #/settings is the home screen, exactly as any unknown route is
     "#/settings": function () { return authed() ? (SETTINGS_ON ? viewSettings() : viewDashboard()) : viewLogin(); },
+    // S12 Authorizations off: #/settings/authorizations is the home screen, exactly as any unknown route is
+    "#/settings/authorizations": function () { return authed() ? (AUTHZ_ON ? viewAuthorizations() : viewDashboard()) : viewLogin(); },
+    // the Privacy centre off: #/privacy is the home screen, exactly as any unknown route is (legal/governance S2)
+    "#/privacy": function () { return authed() ? (PRIVACY_CENTER_ON ? viewPrivacy() : viewDashboard()) : viewLogin(); },
+    // the data-rights screen off: #/data-rights is the home screen, exactly as any unknown route is
+    "#/data-rights": function () { return authed() ? (DATA_RIGHTS_ON ? viewDataRightsScreen() : viewDashboard()) : viewLogin(); },
+    // S5 off: #/ai-governance is the home screen, exactly as any unknown route is
+    "#/ai-governance": function () { return authed() ? (AI_GOVERNANCE_ON ? viewAiGovernance() : viewDashboard()) : viewLogin(); },
+    // the Seller identity screen off: #/seller-identity is the home screen, exactly as any unknown route is
+    "#/seller-identity": function () { return authed() ? (SELLER_IDENTITY_ON ? viewSellerIdentity() : viewDashboard()) : viewLogin(); },
   };
   // The hash is user-controlled, so it never becomes the lookup key: routeFor() returns OUR OWN route name that
   // equals the hash's path (else home). Only a constant from this table ever indexes ROUTES, so a hostile hash
@@ -4319,6 +5000,11 @@
   }
   // monitoring on: the events stop refreshing while the page is hidden, and refresh at once when it is back in view
   if (MONITORING_ON) { document.addEventListener("visibilitychange", onMonVisibility); }
+  // Live Control on: the activity feed stops polling off-screen/off-route and resumes when the page is back in view
+  if (LIVE_ON) {
+    window.addEventListener("hashchange", onLiveRoute);
+    document.addEventListener("visibilitychange", onLiveVisibility);
+  }
   state.sub(render);
 
   // ---- boot ---------------------------------------------------------------------------------------

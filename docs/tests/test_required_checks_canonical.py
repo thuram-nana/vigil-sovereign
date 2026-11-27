@@ -137,6 +137,27 @@ KNOWN_ADVISORY: dict[str, str] = {
         "ALSO run as integration/tests/test_vscp_isolation.py in the REQUIRED 'integration two-env boundary "
         "(P5)' job."
     ),
+    "AEGIS TT distinct-uid isolation (root container)": (
+        "ci.yml (AS-1a red-pen) — a root `container:` leg that RUNS the distinct-OS-uid tenant-isolation "
+        "tests (integration/tests/IT/test_aegis_tt_rig.py's test_observe_acceptance_distinct_uids and "
+        "test_cli_require_uids_runs_distinct) that SKIP as the non-root `runner` user in every other leg; "
+        "a JUnit guard (.github/scripts/assert_tt_uid_isolation_ran.py) fails it if either is skipped "
+        "rather than run. Advisory because it is a NEW check whose promotion to a merge blocker needs the "
+        "operator's tools/governance/require-checks.sh --apply (a GitHub-admin action); it reports red on "
+        "the PR when cross-tenant isolation regresses."
+    ),
+    "aegis-infra (CFN analyzers + Z3R relay guards, advisory)": (
+        "aegis-infra.yml (AS-26 OPS-1) — runs cfn-lint over the AEGIS staging CloudFormation templates plus "
+        "the two OFFLINE layers this slice ships: the deterministic Z3R relay guards "
+        "(integration/tests/test_aegis_relay_guard.py) and the AS-26 CFN posture analyzer "
+        "(integration/tests/test_aegis_infra_posture.py — IMDSv2, disjoint EIPs, MFA roots, keyless relay, "
+        "paging, drift). Advisory because the live AWS staging stack cannot be applied in CI (no live "
+        "staging account in the merge pipeline), so the job proves only what is provable offline and stays "
+        "non-blocking while the live stack and its sign-in / page-delivery / live-drift checks are a staging "
+        "operator step; its promotion to a required check would need tools/governance/require-checks.sh "
+        "--apply. The relay-guard and posture tests ALSO run in the required 'integration two-env boundary "
+        "(P5)' job, so the offline guarantees are not lost by leaving this advisory."
+    ),
 }
 
 # Jobs that never run on a pull_request at all (push/tag or schedule/dispatch only) and so CANNOT be a PR

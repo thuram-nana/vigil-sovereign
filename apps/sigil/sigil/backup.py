@@ -61,6 +61,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator, NoReturn
 
+from vigil_core.aegis_seam import (
+    AEGIS_SEAM_SUBDIR,
+    MONITORING_AUTHORITY_SUBDIR,
+    REPORT_SECRETS_SUBDIR,
+)
 from vigil_core.sealing import SealError, seal, unseal
 
 from .reuse import KeyPair, canonical_json, sha256_hex, sign, verify_one
@@ -138,9 +143,14 @@ _STATE_DIRS = ("qdrant", "graph",
                # registered address, contractual + emergency contacts). The customer typed it and NOTHING regenerates
                # it, so a restore must bring it back; it is contact data, so it is restored owner-only
                # (see _PRIVATE_STATE_DIRS).
-               "customer_preferences")
+               "customer_preferences",
+               # legal/governance S3: the customer data-rights request ledger (ui/data_rights_store.py — one
+               # owner-signed append-only row per close-account / deletion request). The customer recorded it and
+               # nothing regenerates it, and it is the durable item the owner's documented process acts on, so a
+               # restore must bring it back; it names the account, so it is restored owner-only (_PRIVATE_STATE_DIRS).
+               "customer_data_rights")
 # State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
-_PRIVATE_STATE_DIRS = ("customer_preferences",)
+_PRIVATE_STATE_DIRS = ("customer_preferences", "customer_data_rights")
 # State subtrees a live process writes by temp-file-then-rename (spine.atomicio.atomic_write_text) while a backup may
 # be running — the customer profile is saved from the cockpit, the very process that also serves the in-browser backup.
 # An atomic write's temp file (spine.consistent_copy.transient) is never state: it exists only while that save is in
@@ -166,6 +176,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "graph",                    # graph memory mirror
     "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
     "customer_preferences",     # legal/governance S1: the customer-entered General profile (0600/0700 on restore)
+    "customer_data_rights",     # legal/governance S3: the customer data-rights request ledger (0600/0700 on restore)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",
@@ -203,6 +214,14 @@ _EXCLUSION_REASONS: dict[str, str] = {
                 "same host supersedes it and `ops-sweep reservations` releases it). The settings shell's General "
                 "profile is NOT here: the customer typed it and nothing regenerates it, so it is its own top-level "
                 "`customer_preferences`, captured",
+    "customer_authorization_requests": "legal/governance S12: the UNSIGNED owner-review requests a customer drops from "
+                                       "the read-only Authorizations surface (\"please authorize host X\"). An "
+                                       "operational owner-review queue, not an authority and not money — it mints "
+                                       "nothing and is never owner-signed. EXCLUDED: a restore drops any pending "
+                                       "request and the customer re-requests; the AUTHORITATIVE owner-signed "
+                                       "EngagementAuthorities live on the authority seam (the offense leg's to "
+                                       "capture), and the settings General profile (customer-typed, nothing "
+                                       "regenerates it) is the one captured customer_* top-level — this queue is not it",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
@@ -226,6 +245,24 @@ _EXCLUSION_REASONS: dict[str, str] = {
                     "the OFFENSE leg's to capture (`vigil backup --base-dir` = that dir); the sovereign process "
                     "must never package it (FATAL-2: it would carry offense private keys), and two legs "
                     "restoring the same tree from different instants would clobber newer settlement markers",
+    AEGIS_SEAM_SUBDIR: (
+        # AS-2i. The AEGIS tenant-MONITORING seam subtree (``<seam>/aegis/`` — the published owner-signed
+        # monitoring authorities + the per-(org,host) report secrets). By default it sits UNDER the cross-plane
+        # seam (``credit-lease``, already excluded above), so this top-level entry only appears — and this
+        # reason only bites — when an override (VIGIL_MONITORING_PUBLISH_DIR / VIGIL_MONITORING_SECRETS_DIR, or
+        # VIGIL_BASE_DIR pointed AT SIGIL_HOME) places ``aegis/`` directly under SIGIL_HOME. EXCLUDED either
+        # way, fail-closed: the published authorities MIRROR the ``governor.monitoring_authority`` spine-of-
+        # record (captured) and the report secrets are re-provisionable, so a restore must leave AEGIS Off and
+        # resurrect nothing (acceptance: nothing inspected). The sovereign re-derives + re-publishes under fresh
+        # consent after a restore (full restore drill = legal-gov S1). The OFFENSE leg captures the seam, so its
+        # backup drops the SAME ``aegis/`` subtree UNCONDITIONALLY (a safety exclusion, not opt-in).
+        f"AS-2i: the AEGIS tenant-monitoring seam subtree (<seam>/{AEGIS_SEAM_SUBDIR}/"
+        f"{MONITORING_AUTHORITY_SUBDIR} published authorities + {REPORT_SECRETS_SUBDIR}). By default it lives "
+        f"UNDER the cross-plane seam (credit-lease, excluded above); this entry covers an override that places "
+        f"it directly under SIGIL_HOME. Never sovereign recovery state: the authorities mirror the "
+        f"governor.monitoring_authority spine (captured) and the report secrets are re-provisionable, so a "
+        f"restore leaves AEGIS Off and resurrects nothing. The offense leg captures the seam and drops the same "
+        f"monitoring subtree unconditionally"),
     "billing-spool": "the money-IN billing-webhook spool at the GO-LIVE runbook path ($SIGIL_HOME/billing-spool, "
                      "the vigil-billing-drain default) — EXCLUDED for the same reason as `spool`: pending signals "
                      "whose non-atomic capture could tear exactly-once; losing them fails SAFE (re-deliverable / "

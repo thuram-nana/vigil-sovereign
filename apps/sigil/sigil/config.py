@@ -222,6 +222,27 @@ CUSTOMER_ONBOARDING_DIR = _customer / "onboarding"
 # operational markers a backup excludes): it is its own top-level directory, which the backup captures
 # (backup._STATE_DIRS) and a restore brings back.
 CUSTOMER_PREFERENCES_DIR = SIGIL_HOME / "customer_preferences"
+# Legal/governance S12 — the owner-review requests a customer drops from the read-only Authorizations surface
+# (ui/authorization_requests_store.py): "please authorize an assessment of host X". It is NOT an authority and NOT
+# money — it mints nothing and is never owner-signed; the owner still signs the real EngagementAuthority in the cockpit
+# (ui/target_authorization.py). An UNSIGNED, off-spine per-org queue (one hashed-name JSON file per org), written only
+# while VIGIL_CUSTOMER_AUTHORIZATIONS is on. It is an operational owner-review queue: a restore drops any pending
+# request (the customer re-requests; the authoritative authorities live owner-signed on the authority seam), so the
+# backup EXCLUDES it with a documented reason (backup._EXCLUSION_REASONS).
+CUSTOMER_AUTHORIZATION_REQUESTS_DIR = SIGIL_HOME / "customer_authorization_requests"
+# Legal/governance S3 — the customer data-rights request ledger (ui/data_rights_store.py): one owner-signed,
+# append-only record per deletion / close-account request a customer records from the Data-rights screen. It is a
+# DURABLE record of what the owner must act on, not money and not authority — it unlocks nothing by itself and never
+# touches the hot signed spine. Its own top-level directory (the customer recorded it and nothing regenerates it), so
+# the backup captures it (backup._STATE_DIRS) and a restore brings it back; written only while
+# VIGIL_CUSTOMER_DATA_RIGHTS is on.
+CUSTOMER_DATA_RIGHTS_DIR = SIGIL_HOME / "customer_data_rights"
+# Legal/governance S3 — the OWNER DECISION wired into the Data-rights screen: VIGIL responds to a data-rights request
+# (access / correction / deletion / export) within this many days (GDPR-standard), and the published data-subject
+# contact is this mailbox (as stated in the Privacy notice and Terms of Service). Single-sourced here so the screen,
+# the recorded request and the owner notification all state the same figures.
+CUSTOMER_DATA_RIGHTS_SLA_DAYS = 30
+CUSTOMER_DATA_RIGHTS_CONTACT = "info@sigilsovereign.com"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -285,12 +306,53 @@ MONITORING_WINDOW_SECONDS = _int_env("VIGIL_MONITORING_WINDOW_SECONDS", 30 * 24 
 # (already inert, clamped-to-period_end) grants this long so a late renewal can re-mint them; then it retires.
 MONITORING_RENEWAL_GRACE_SECONDS = _int_env("VIGIL_MONITORING_RENEWAL_GRACE_SECONDS", 72 * 3600)
 
+# PL01 CHK-1b — how long PAST period_end the "org already holds a live plan" double-bill guard keeps refusing a
+# SECOND plan of that kind, so one is never sold in the window where the FIRST can still produce a charge (which
+# would double-bill). SPLIT by subscription status, because the two gaps differ by orders of magnitude:
+#   * ACTIVE: a successful auto-renewal webhook lands within minutes, so a SHORT grace covers the stale-period_end
+#     window between the paid month ending and the renewal landing.
+#   * PAST_DUE: Stripe keeps RETRYING (Smart Retries) for its whole dunning window (~2-3 weeks) and a late
+#     success RE-ACTIVATES the subscription with a pushed-forward period_end — so a second plan sold anywhere in
+#     that window double-bills. Keep the guard on for the full dunning deadline; after it the plan is presumed
+#     dead (no terminal-cancel webhook is wired yet) and a fresh purchase is allowed. Tune to the configured
+#     Stripe retry horizon if it differs.
+PLAN_RENEWAL_GRACE_SECONDS = _int_env("VIGIL_PLAN_RENEWAL_GRACE_SECONDS", 72 * 3600)           # active renewal gap
+PLAN_PAST_DUE_GRACE_SECONDS = _int_env("VIGIL_PLAN_PAST_DUE_GRACE_SECONDS", 30 * 24 * 3600)     # past_due dunning window
+
 
 def customer_monitoring_enabled() -> bool:
     """True iff the customer monitoring-authority routes are ON (`VIGIL_CUSTOMER_MONITORING_ENABLED`
     affirmative). OFF by default: the edge routes and provisioner actions are absent (404) exactly as an
     unknown route, and nothing is minted or published."""
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# AEGIS AS-2f — the SOVEREIGN v2 authority surface (grant/revoke/renew over the AS-2a authority-v2 contracts).
+# STRICT, default-OFF. A SECOND, independent gate on top of `customer_monitoring_enabled`: the v2 provisioner
+# actions (`monitor_authorize_v2` / `monitor_revoke_v2` / `monitor_renew`) are ABSENT (404 exactly as an unknown
+# route) unless BOTH flags are affirmative, and nothing v2 is minted or published. With it off the build is
+# byte-identical to before (the v1 AE-1 path is untouched). Tenant origins stay OUT (deferred to AS-2g).
+def aegis_sovereign_v2_enabled() -> bool:
+    """True iff the AEGIS sovereign-v2 authority surface is ON (`VIGIL_AEGIS_SOVEREIGN_V2` affirmative). Read at
+    call time; fail-safe default OFF."""
+    return (os.environ.get("VIGIL_AEGIS_SOVEREIGN_V2") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# The short-lived v2 LEASE window (§4.7 proposed 1 h): the TIGHT end-to-end liveness bound inside the grant's
+# outer window. A lapsed lease degrades the data plane to uninspected pass-through (R16), so a grant is renewed
+# (`monitor_renew`) well before it lapses. Clamped to never exceed the grant window.
+MONITORING_LEASE_SECONDS = _int_env("VIGIL_MONITORING_LEASE_SECONDS", 3600)
+
+
+def monitoring_v2_publish_dir() -> Path:
+    """Where owner-signed v2 monitoring authorities + epoch statements are published for the KEYLESS AEGIS
+    gateway (AS-2c reads, verify-only). `VIGIL_MONITORING_V2_PUBLISH_DIR` overrides; default a dedicated `v2`
+    subtree under the v1 publish dir so v1 and v2 artifacts never share a file (distinct, content-addressed
+    names). Only signed public artifacts land here — never private material."""
+    override = (os.environ.get("VIGIL_MONITORING_V2_PUBLISH_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return monitoring_publish_dir() / "v2"
 
 
 def redpen_enabled() -> bool:
@@ -458,6 +520,59 @@ def apex_autonomous_enabled() -> bool:
     reads the SAME env var directly (it never imports sigil). Even ON, every probe is still re-gated fail-
     closed (kill-switch → scope → budget → egress) and a finding is minted only when the oracle fires."""
     return (os.environ.get("VIGIL_APEX_AUTONOMOUS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+def customer_sso_enabled() -> bool:
+    """True iff the consumer SSO / SCIM surfaces are ON (`VIGIL_CUSTOMER_SSO` affirmative). OFF by default
+    (mirrors `redpen_enabled`): with it off EVERY SSO/SCIM route / action is absent (404 exactly as an unknown
+    route), the edge serves no SAML ACS / enterprise-OIDC callback / SCIM endpoint, the provisioner's `sso_*` /
+    `scim_*` dispatch returns None, no SSO config is read and no membership is ever provisioned from an IdP — so
+    the server is byte-identical to a build without SSO. The master flag over the whole PR-H pipeline
+    (`governor.sso_config`, `governor.scim`, `ui.saml`, `ui.scim`). Read at call time.
+
+    Even when ON, every leg still fails closed unless the OWNER has signed a per-org SSO config
+    (`governor.sso_config`): SSO proves identity, the owner-signed config supplies the (ceiling-capped) role, and
+    SCIM/SAML/OIDC can provision ONLY `viewer`/`analyst`/`org_admin` — never `operator`/`founder`/`owner` or any
+    money/offense authority, which stay owner-signed. SAML signature verification additionally requires a vetted
+    XML-DSig backend (`ui.saml.signxml_sig_verifier`); absent it, SAML login fails closed (enterprise-OIDC does
+    not need it). Set the SAME value in customer.env and cockpit.env: the edge serves the routes, the cockpit
+    dispatches the actions (a value on one side only fails closed)."""
+    return (os.environ.get("VIGIL_CUSTOMER_SSO") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# Consumer PR-H — the provisioner-side SSO/SCIM ledgers (written only while VIGIL_CUSTOMER_SSO is on): the durable
+# single-use SAML assertion-ID ledger (replay guard), the per-(org, client IP) failed-SCIM-authentication limiter
+# and the per-org SCIM write budget (VIGIL_SCIM_OPS_PER_MIN spine records per org per minute: a write is admitted
+# while the org is within budget and then charged one unit per record it appended — bounds how fast even a valid
+# token can grow the spine; see ui.sso_provision for the per-request bounds). The default, 1800 records a minute, keeps a
+# first user sync at about 600 users a minute (a user create writes 3 records: user, audit, grant). The per-org SCIM
+# READ budget (VIGIL_SCIM_READS_PER_MIN reads per org per minute, guard-and-count) bounds how much spine folding one
+# org's token can ask for; its default matches a first sync's "does this user exist?" lookup before each create.
+CUSTOMER_SAML_REPLAY_DIR = _customer / "sso_saml_replay"
+SCIM_AUTH_RATELIMIT_DIR = _customer / "scim_auth_ratelimit"
+SCIM_WRITE_RATELIMIT_DIR = _customer / "scim_write_ratelimit"
+SCIM_READ_RATELIMIT_DIR = _customer / "scim_read_ratelimit"
+SCIM_OPS_PER_MIN = _int_env("VIGIL_SCIM_OPS_PER_MIN", 1800)
+SCIM_READS_PER_MIN = _int_env("VIGIL_SCIM_READS_PER_MIN", 1800)
+# The per-org DEPROVISIONING cap (VIGIL_SCIM_DEPROVISIONS_PER_MIN units per org per minute; a deprovisioning request
+# costs the records it appended, at least one): a request that can only take privilege away skips the write budget,
+# and this is its own, much higher, count bound. Never refuses while the org is under it, and even an org over it
+# gets one deprovisioning admitted per minute, so an offboarding always makes progress.
+SCIM_DEPROV_RATELIMIT_DIR = _customer / "scim_deprov_ratelimit"
+SCIM_DEPROVISIONS_PER_MIN = _int_env("VIGIL_SCIM_DEPROVISIONS_PER_MIN", 6000)
+# The per-org enterprise sign-in budget (VIGIL_SSO_SIGNINS_PER_MIN VERIFIED sign-ins per org per minute, beside the
+# per-client-IP limiter): an org's own IdP can mint valid assertions without limit and from any address, and each
+# resolved sign-in folds the spine.
+SSO_SIGNIN_RATELIMIT_DIR = _customer / "sso_signin_ratelimit"
+SSO_SIGNINS_PER_MIN = _int_env("VIGIL_SSO_SIGNINS_PER_MIN", 600)
+# Every UNAUTHENTICATED SSO leg (sign-in start, SAML ACS, OIDC callback) is guard-and-counted per client IP,
+# successes included (VIGIL_SSO_REQUESTS_PER_IP_PER_MIN, default 300 a minute: a sign-in is two legs, and a company
+# behind one NAT address signs many people in), and at most VIGIL_SSO_CONCURRENCY of them do CPU work at once in the
+# provisioner (default 4; over it, a short wait, then 503 + Retry-After). The per-IP count is kept in the provisioner
+# process's memory (`ui.sso_provision._LegCounter`).
+SSO_REQUESTS_PER_IP_PER_MIN = _int_env("VIGIL_SSO_REQUESTS_PER_IP_PER_MIN", 300)
+SSO_CONCURRENCY = _int_env("VIGIL_SSO_CONCURRENCY", 4)
+# ... of which ONE org may hold at most VIGIL_SSO_ORG_CONCURRENCY at once (default 1: its further legs wait in its own
+# queue, never in another org's share).
+SSO_ORG_CONCURRENCY = _int_env("VIGIL_SSO_ORG_CONCURRENCY", 1)
 
 
 def apex_impact_enabled() -> bool:
@@ -499,6 +614,16 @@ def customer_pause_resume_enabled() -> bool:
     substrate stays INERT until the owner turns this on. Pausing moves NO money (it is money-doctrine-neutral);
     this flag gates only the CUSTOMER-facing ability to record/clear a reversible pause on their own lease."""
     return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_live_control_enabled() -> bool:
+    """True iff the customer Live Control routes are ON (`VIGIL_CUSTOMER_LIVE_CONTROL` affirmative). OFF by
+    default: the edge route /api/customer/launch/instruct + its provisioner action `launch_instruct` and the
+    #/live SPA screen are all absent (404 / tab hidden) exactly as an unknown route, so the whole mission-
+    steering surface stays INERT until the owner turns this on. A customer instruction is ADVISORY ONLY — it is
+    folded into the running engine's untrusted think context (it fires no tool, relaxes no scope, mints no
+    fact); this flag gates only the CUSTOMER-facing ability to enqueue such guidance for THEIR own engagement."""
+    return (os.environ.get("VIGIL_CUSTOMER_LIVE_CONTROL") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def trial_preview_enabled() -> bool:
@@ -671,6 +796,12 @@ CLOUD_CONNECT_RATELIMIT_DIR = _customer / "cloud_connect_ratelimit"
 # request, never a URL — so the customer can never steer this egress anywhere.
 AWS_STS_EGRESS_ALLOWLIST = frozenset({"sts.amazonaws.com"})
 
+# The ONLY host the CLOUDFLARE cloud-connect fetcher (`ui.cloudflare_fetch`) may reach, enforced BEFORE any socket
+# opens (mirrors AWS_STS_EGRESS_ALLOWLIST). No endpoint override: the token-bearing egress can only ever reach the
+# Cloudflare API. A customer supplies only a bearer token (an Authorization HEADER, never a URL) and the account id;
+# the token id placed in a URL path is format-checked (32 hex) first, so the customer can never steer this egress.
+CLOUDFLARE_API_EGRESS_ALLOWLIST = frozenset({"api.cloudflare.com"})
+
 # VIGIL's connector principal (an IAM role or user in the aws partition) — the exact `Principal` a customer's
 # read-only role trusts. Validated so a malformed value can never be printed into a customer's trust policy.
 _AWS_PRINCIPAL_ARN_RE = re.compile(r"arn:aws:iam::[0-9]{12}:(?:role|user)/[A-Za-z0-9+=,.@_/-]{1,512}")
@@ -701,6 +832,99 @@ def cloud_connect_fetcher():
     return AwsStsConnectFetcher(access_key_id=key_id, secret_access_key=secret, session_token=token)
 
 
+# --- GCP OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) ---------------------------
+# The ONLY hosts the GCP cloud-connect fetcher (`ui.cloud_fetch.GcpImpersonationConnectFetcher`) may reach, enforced
+# per-endpoint BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): the OAuth2 token endpoint (the connector
+# SA assertion exchange) and IAM Credentials (generateAccessToken on the challenge-named SA). No endpoint override:
+# the credential-holding egress can only ever reach these two Google hosts. The target SA email is VIGIL-COMPUTED
+# from the project id + the issued external id (never customer-supplied as a URL), so the customer can never steer
+# this egress anywhere.
+GCP_EGRESS_ALLOWLIST = frozenset({"oauth2.googleapis.com", "iamcredentials.googleapis.com"})
+
+# VIGIL's connector SERVICE-ACCOUNT email — the member a customer grants roles/iam.serviceAccountTokenCreator on
+# their target SA (analog to the AWS connector principal). Validated so a malformed value is never shown to a customer.
+_GCP_CONNECTOR_SA_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
+
+
+def cloud_connect_gcp_connector_sa() -> str:
+    """VIGIL's GCP connector SA email (`VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA`), format-checked, or "" when
+    unset/malformed (the GCP leg then offers nothing — fail closed, never placement naming a bad connector SA)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_CONNECTOR_SA") or "").strip()
+    return raw if _GCP_CONNECTOR_SA_RE.fullmatch(raw) else ""
+
+
+def cloud_connect_gcp_fetcher():
+    """The live GCP cloud-connect fetcher (``ui.cloud_fetch.GcpImpersonationConnectFetcher``: sign the connector SA
+    assertion, impersonate the customer's target SA, bind its description to the external id, and run the same-shape
+    negative control) when the cloud leg is ON and the owner has provisioned VIGIL's connector SA email + its RSA
+    private key, else None (fail closed: the provisioner then offers and verifies nothing for GCP). The private key
+    PEM comes from `VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY` (the owner-provisioned secret, analog to the AWS secret key).
+    Lazily imports the fetcher so `config` stays import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_gcp_connector_sa():
+        return None
+    pem = (os.environ.get("VIGIL_CLOUD_CONNECT_GCP_PRIVATE_KEY") or "").strip()
+    if not pem:
+        return None
+    from .ui.cloud_fetch import GcpImpersonationConnectFetcher
+    return GcpImpersonationConnectFetcher(connector_email=cloud_connect_gcp_connector_sa(), private_key_pem=pem)
+
+
+# --- AZURE OUTBOUND egress for the cloud-connect proof (PR-C — SHIPPED OFF BY DEFAULT) -------------------------
+# The ONLY hosts the Azure cloud-connect fetcher (`ui.cloud_fetch.AzureConsentConnectFetcher`) may reach, enforced
+# BEFORE any socket opens (mirrors AWS_STS_EGRESS_ALLOWLIST): Microsoft Entra ID (the client-credentials token
+# endpoint) and Microsoft Graph (the admin-set external-id binding read). No endpoint override — the credential-
+# holding egress can only ever reach these two. A customer supplies only a tenant id + the enterprise-app Object ID
+# (PATH segments of host-pinned requests, never a host), so the customer can never steer this egress anywhere.
+AZURE_CLOUD_CONNECT_EGRESS_ALLOWLIST = frozenset({"login.microsoftonline.com", "graph.microsoft.com"})
+
+# VIGIL's multi-tenant Azure AD app-registration client id (a GUID) — the tenant-agnostic application a customer's
+# Global Admin admin-consents into their tenant (the Azure analog of the AWS connector principal). Validated so a
+# malformed value can never be printed into a customer's admin-consent URL.
+_AZURE_CLIENT_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def cloud_connect_azure_client_id() -> str:
+    """VIGIL's Azure connector app (client) id (`VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID`), format-checked, or "" when
+    unset/malformed (the Azure cloud leg then offers nothing — fail closed, never an admin-consent URL naming a bad
+    client id)."""
+    raw = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ID") or "").strip()
+    return raw if _AZURE_CLIENT_ID_RE.fullmatch(raw) else ""
+
+
+def azure_connect_fetcher():
+    """The live Azure cloud-connect fetcher (``ui.cloud_fetch.AzureConsentConnectFetcher``: a client-credentials
+    token against the customer's tenant proves admin consent, a Microsoft Graph read confirms the admin-set
+    external-id binding, and the same-shape negative control proves the result is tenant-specific) when the cloud leg
+    is ON and the owner has provisioned VIGIL's Azure app (client id + a client secret OR a client assertion/cert),
+    else None (fail closed: the provisioner then offers and verifies no Azure flow). Credentials:
+    `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET` OR `VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION` — an app whose only
+    consented permission is a read-only Graph read. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled() or not cloud_connect_azure_client_id():
+        return None
+    secret = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_SECRET") or "").strip()
+    assertion = (os.environ.get("VIGIL_CLOUD_CONNECT_AZURE_CLIENT_ASSERTION") or "").strip()
+    if not secret and not assertion:
+        return None
+    from .ui.cloud_fetch import AzureConsentConnectFetcher
+    return AzureConsentConnectFetcher(client_id=cloud_connect_azure_client_id(), client_secret=secret,
+                                      client_assertion=assertion)
+
+
+def cloud_connect_cloudflare_fetcher():
+    """The live Cloudflare cloud-connect fetcher (``ui.cloudflare_fetch.CloudflareTokenConnectFetcher``: verify the
+    customer's read-only API token, read its own definition to bind the challenge and confirm read-only +
+    single-account) when the cloud leg is ON, else None (fail closed: the provisioner then offers and verifies
+    nothing for Cloudflare). Unlike AWS, VIGIL holds NO Cloudflare credential of its own — the customer's token is
+    the only secret and it travels per-verify, read once and never stored — so this fetcher needs no owner-provisioned
+    connector identity, only the cloud leg's flag. Lazily imports the stdlib-only fetcher so `config` stays
+    import-light."""
+    if not customer_cloud_connect_enabled():
+        return None
+    from .ui.cloudflare_fetch import CloudflareTokenConnectFetcher
+    return CloudflareTokenConnectFetcher()
+
+
 def customer_posture_enabled() -> bool:
     """True iff the customer app's Fix-first screen is on (`VIGIL_CUSTOMER_POSTURE` affirmative; APEX consumer PR-B,
     Area 1's UI half): the 0-100 security posture, its trend over the last twelve weeks, and the worst-first list of
@@ -719,6 +943,22 @@ def customer_posture_enabled() -> bool:
     every request for the routes — set the SAME value in customer.env and cockpit.env."""
     return ((os.environ.get("VIGIL_CUSTOMER_POSTURE") or "").strip().lower() in _OIDC_AFFIRMATIVE
             and presentation_enabled())
+
+
+def customer_seats_enabled() -> bool:
+    """True iff per-workspace member SEAT limits are enforced (``VIGIL_CUSTOMER_SEATS`` affirmative). OFF by
+    default: no limit is applied and ``add_member`` / ``grant_member`` behave byte-identically. When ON, a NEW
+    member is refused once the workspace already holds ``customer_default_seats()`` members; a role change for
+    an existing member consumes no seat and is never limited. A later slice resolves the allowance per plan
+    from the owner catalog (mirroring ``monitor_hosts``)."""
+    return (os.environ.get("VIGIL_CUSTOMER_SEATS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_default_seats() -> int:
+    """The flat per-workspace member seat allowance enforced while ``customer_seats_enabled()``
+    (``VIGIL_CUSTOMER_DEFAULT_SEATS``, default 5). Read live so the owner can tune it at deploy; a later slice
+    resolves the allowance per plan from the owner catalog."""
+    return _int_env("VIGIL_CUSTOMER_DEFAULT_SEATS", 5)
 
 
 def customer_team_ui_enabled() -> bool:
@@ -743,6 +983,86 @@ def customer_settings_enabled() -> bool:
     route, and no preferences call is made). The edge reads it at startup (it is written into the page) and on each
     request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
     return (os.environ.get("VIGIL_CUSTOMER_SETTINGS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_authorizations_enabled() -> bool:
+    """True iff the customer app shows its read-only Authorizations surface (`VIGIL_CUSTOMER_AUTHORIZATIONS`
+    affirmative; legal/governance S12): the #/settings/authorizations screen that DISCLOSES to a workspace, read-only,
+    the owner-signed EngagementAuthorities on record for its OWN proven-owned hosts — scope, validity window,
+    environment and the GET-only / non-destructive flags — plus a "request authorization" action that drops an UNSIGNED
+    owner-review request only (it mints NO authority; the owner still signs in the cockpit via ui/target_authorization.py).
+    It is a DISCLOSURE of the enforced gate (scope/exclusions R1, expiry R2, out-of-scope/new-host refusal R3), never a
+    second enforcement path and never a widening one: the launch gate (`ui/launch_gate._has_verified_authority`) and the
+    conjunctive gate chain stay the sole authority and are byte-identical when this is off. The edge's
+    ``api/customer/authorizations`` read + ``authorizations/request`` action and the cockpit's
+    ``customer_authorizations_list`` / ``customer_authorization_request`` actions exist only while this is on.
+    OFF by default: the app is exactly as before (no Authorizations screen, its routes 404, and nothing is read or
+    dropped). The edge reads it at startup (it is written into the page) and on each request; the cockpit reads it on
+    each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_AUTHORIZATIONS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_privacy_center_enabled() -> bool:
+    """True iff the customer app shows its Privacy centre (`VIGIL_CUSTOMER_PRIVACY_CENTER` affirmative; legal/governance
+    S2): a #/privacy screen that SURFACES, for the signed-in customer, the privacy information this deployment has already
+    PUBLISHED — the strictly-necessary cookie inventory (``public_site/cookies``), the subprocessor list
+    (``public_site/privacy``) and a link to the full privacy policy. It renders the EXISTING canonical text (read from
+    the packaged public pages at request time — one source of truth, never a reworded copy) and links out to those
+    pages; it adds NO new authority or money control and makes NO mutation (a pure read of published, org-independent
+    facts — the same for every workspace). The edge route ``GET api/customer/privacy`` and the cockpit's
+    ``privacy_center`` read exist only while this is on. OFF by default: the app is exactly as before (no Privacy tab,
+    #/privacy is the home screen exactly as any unknown route, and no privacy read is made). The edge reads it at
+    startup (it is written into the page) and on each request; the cockpit reads it on each request — set the SAME value
+    in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_PRIVACY_CENTER") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_data_rights_enabled() -> bool:
+    """True iff the customer app shows its Data-rights screen (`VIGIL_CUSTOMER_DATA_RIGHTS` affirmative; legal/governance
+    S3): a settings sub-screen that states the customer's data rights (access / correction / deletion / export) in the
+    EXISTING published words of the Privacy notice and Terms of Service, names the 30-day response SLA
+    (``CUSTOMER_DATA_RIGHTS_SLA_DAYS``) and the data-subject contact (``CUSTOMER_DATA_RIGHTS_CONTACT``), lets a customer
+    EXPORT their own org's non-secret records (the same tenant-scoped, redacted invoices / usage / findings reads the
+    other screens use — no new authority, no mutation), and RECORD a close-account / deletion request (one owner-signed
+    append-only row in ``ui/data_rights_store.py``, idempotent per request_id; it does NOT auto-wipe the immutable spine
+    — that is the owner-gated hard-prune / VAULT-PRUNE path — and unlocks nothing by itself).
+    The edge's ``GET api/customer/data-rights`` + ``GET api/customer/data-rights/export`` + ``POST
+    api/customer/data-rights/request`` routes, and the cockpit's ``data_rights_overview`` / ``data_rights_export`` /
+    ``data_rights_request`` actions, exist only while this is on. OFF by default: the app is exactly as before (no
+    Data-rights link, #/data-rights is the home screen exactly as any unknown route, and no data-rights call is made).
+    The edge reads it at startup (it is written into the page) and on each request; the cockpit reads it on each
+    request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_DATA_RIGHTS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_ai_governance_enabled() -> bool:
+    """True iff the customer app shows its AI / human-in-the-loop GOVERNANCE disclosure (`VIGIL_CUSTOMER_AI_GOVERNANCE`
+    affirmative; legal/governance S5): a settings sub-screen (#/ai-governance, linked from the #/settings hub) that
+    STATES how VIGIL uses AI and the human oversight around it. It is a pure READ — the statements are SYNTHESISED from
+    the published Terms (§11 AI-assisted features, §12 data), the README's governing invariant (the AI only proposes;
+    four separate authorities run the system and none is the AI) and the Safety & Authorization briefing (the AI-free
+    danger-tier classifier; "AI proposes, the oracle disposes"), each cited on the screen. It adds NO new authority or
+    money control, mints nothing and mutates nothing.
+    OFF by default: the app is exactly as before (no #/ai-governance link, the route is the home screen exactly as any
+    unknown route, and no disclosure call is made). The edge's ``api/customer/ai-governance`` route and the cockpit's
+    ``ai_governance_disclosure`` action exist only while this is on. The edge reads it at startup (it is written into the
+    page) and on each request; the cockpit reads it on each request — set the SAME value in customer.env and cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_AI_GOVERNANCE") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_seller_identity_enabled() -> bool:
+    """True iff the customer app shows its Seller identity screen (`VIGIL_CUSTOMER_SELLER_IDENTITY` affirmative;
+    legal/governance S7): the #/seller-identity screen, a READ-ONLY display of the legally-required seller identity of
+    the hosted VIGIL service — SIGIL SARL's published legal name, legal form, registered city/country, registration
+    number, contact email, website and governing law. The block is a GLOBAL owner-reviewed CODE constant
+    (``ui/seller_identity.py``), the SAME trust root as the catalog, served through ``GET api/customer/seller-identity``
+    (``seller_identity_get``) — never a per-tenant wire field and never an invented value. It adds no new authority or
+    money control: a pure display read, nothing minted, nothing mutated, off the signed spine.
+    OFF by default: the app is exactly as before (no Seller identity tab, #/seller-identity is the home screen exactly
+    as any unknown route, and no seller-identity call is made). The edge reads it at startup (it is written into the
+    page) and on each request; the cockpit reads it on each request — set the SAME value in customer.env and
+    cockpit.env."""
+    return (os.environ.get("VIGIL_CUSTOMER_SELLER_IDENTITY") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_overview_enabled() -> bool:
@@ -1012,20 +1332,30 @@ def monitoring_publish_dir() -> Path:
     """Where owner-signed monitoring authorities are published for the KEYLESS AEGIS gateway (AE-2 reads,
     verify-only). `VIGIL_MONITORING_PUBLISH_DIR` overrides; default under the live data dir
     (`VIGIL_BASE_DIR`, else `.vigil-live`). Only signed public artifacts land here — never private material."""
-    override = (os.environ.get("VIGIL_MONITORING_PUBLISH_DIR") or "").strip()
+    from vigil_core.aegis_seam import (
+        AEGIS_SEAM_SUBDIR,
+        MONITORING_AUTHORITY_SUBDIR,
+        MONITORING_PUBLISH_DIR_ENV,
+    )
+    override = (os.environ.get(MONITORING_PUBLISH_DIR_ENV) or "").strip()
     if override:
         return Path(override)
-    return Path(_seam_base()) / "aegis" / "monitoring_authority"
+    return Path(_seam_base()) / AEGIS_SEAM_SUBDIR / MONITORING_AUTHORITY_SUBDIR
 
 
 def monitoring_secrets_dir() -> Path:
     """Where the sovereign keeps the per-(org, host) AEGIS-SaaS monitoring REPORT secrets (AE-6). These are
     shared HMAC secrets (one copy goes to that tenant's managed gateway as a 0600 file); never published.
     `VIGIL_MONITORING_SECRETS_DIR` overrides; default under the live data dir."""
-    override = (os.environ.get("VIGIL_MONITORING_SECRETS_DIR") or "").strip()
+    from vigil_core.aegis_seam import (
+        AEGIS_SEAM_SUBDIR,
+        MONITORING_SECRETS_DIR_ENV,
+        REPORT_SECRETS_SUBDIR,
+    )
+    override = (os.environ.get(MONITORING_SECRETS_DIR_ENV) or "").strip()
     if override:
         return Path(override)
-    return Path(_seam_base()) / "aegis" / "report_secrets"
+    return Path(_seam_base()) / AEGIS_SEAM_SUBDIR / REPORT_SECRETS_SUBDIR
 
 
 def _bool_env(name: str, default: bool = False) -> bool:

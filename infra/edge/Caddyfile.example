@@ -13,13 +13,21 @@
 # --- the public / marketing site -> pubui (:8735) ---
 vigil.example.com {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8735
+	reverse_proxy 127.0.0.1:8735 {
+		header_up X-Real-IP {remote_host}   # real visitor IP for per-IP signup limits (see the app block below)
+	}
 }
 
 # --- the customer app -> custui (:8734) ---
 app.vigil.example.com {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8734
+	reverse_proxy 127.0.0.1:8734 {
+		# Hand the loopback app the REAL visitor IP. The app trusts X-Real-IP ONLY from this loopback hop and
+		# overwrites any client-sent value with {remote_host}, so a client cannot spoof it — and WITHOUT this the
+		# app sees every request as 127.0.0.1, collapsing per-IP login/signup rate limits across all customers
+		# (one visitor's 5 wrong passwords would lock everyone out). Behind Cloudflare use the nginx setup instead.
+		header_up X-Real-IP {remote_host}
+	}
 }
 
 # --- the operator console -> vigil-up (:8770). Owner control plane: restrict by source IP. ---
@@ -28,7 +36,9 @@ console.vigil.example.com {
 	# Replace with YOUR office / VPN CIDR(s). Everything else gets a flat 403 before it reaches the console.
 	@blocked not remote_ip 203.0.113.0/24
 	respond @blocked "forbidden" 403
-	reverse_proxy 127.0.0.1:8770
+	reverse_proxy 127.0.0.1:8770 {
+		header_up X-Real-IP {remote_host}   # real owner IP for the console's own audit/limits (see the app block)
+	}
 }
 
 # --- the payment webhooks -> the `vigil up` proxy's webhook routes (:8770), and NOTHING else ---

@@ -39,8 +39,9 @@ PER-ORG for orgs and PER-(org_id, username) for memberships, so the LWW state of
 `_fold_memberships` seed them from the committed `spine.snapshot.SnapshotState` (which now carries org +
 membership rows) exactly as `accounts._fold` does, and `spine.prune` refuses any prune that would strand an
 active org/membership the seed does not carry — so a prune below a revoked grant can NOT reset the high-water
-and re-open the replay. (Reactivation is handled too: `revoke_org` cascade-revokes the org's memberships, so
-re-creating a decommissioned org_id does not restore prior members without a fresh owner-signed grant.)
+and re-open the replay. (Reactivation is handled too: `revoke_org` cascade-revokes the org's memberships —
+and, per Slice AS-2l, its asset-ownership proofs and monitoring authorities — so re-creating a decommissioned
+org_id does not restore prior members, proven hosts, or monitoring grants without a fresh owner-signed grant.)
 
 OWNER-KEY SUCCESSION: the fold authenticates each `active` grant under the owner pubkey valid AT ITS SEQ
 (`key_history.key_resolver(...).at(seq)`), identical to `accounts._fold`. With no rotation this is a single
@@ -378,6 +379,9 @@ class OrgRegistry:
         self.store = store
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        # True ⇒ every read goes through the verified incremental fold cache even while VIGIL_FOLD_CACHE_ENABLED is off
+        # (`fold_read.cached_read(force=True)`): the SSO / SCIM provisioner paths set it
+        self.force_cache = False
 
     # -- owner mutations: orgs ----------------------------------------------------------------------
     def create_org(self, org_id: str, name: str, *, owner: str, issued_at: float) -> int:
@@ -405,13 +409,34 @@ class OrgRegistry:
         member is admitted again ONLY after a FRESH owner-signed grant with a strictly-greater issued_at. The
         org revoke is appended FIRST (see below) and its seq is returned (the primary record).
 
+        PROOF + AUTHORITY CASCADE (Slice AS-2l — the SAME reactivation guard for the asset layer): the org
+        decommission ALSO revokes every monitoring authority AND every asset-ownership PROOF of the org. Both
+        `monitoring_authority.active_at` / `owned_at` and `asset_ownership.has_current_proof` gate only on
+        THEIR fold, never on the org's active state, so without the proof cascade a `revoke_org`→`create_org`
+        on the same org_id would resurrect the decommissioned org's proven hosts (and the monitoring grants
+        minted on them) in the new incarnation. Each is a safe-direction revoke that leaves the record in the
+        `revoked` LWW state (durable across a hard prune via each module's snapshot seed), so a re-created org
+        starts with NO proofs and NO authorities — a host is proven/monitored again only after a FRESH
+        owner-signed grant with a strictly-greater issued_at. These cascades land AFTER the org revoke (same
+        fail-safe ordering) and their seqs are not returned (the org revoke is the primary record).
+
         ORDERING — the org revoke lands BEFORE the membership cascade so the fail-SAFE direction can never be
         gated on the cascade succeeding: a corrupt/hand-signed folded membership (one the fold accepts but the
         binding-time `_check_member_username` would reject — only reachable via a direct owner-signed append,
         the API refuses it) must not abort the org decommission. This mirrors `_derive_tenant_id`'s
         defence-in-depth against a replayed/corrupt grant; "gating the fail-safe direction would make it fail
         OPEN" is the same doctrine as the asymmetric-auth note above. The cascade then revokes each member by
-        its RAW folded username (never re-validated) so no single record can break it. NOTE: this compound
+        its RAW folded username (never re-validated) so no single record can break it.
+
+        CASCADE ISOLATION (AS-2l red-pen MEDIUM) — ordering keeps the org revoke itself fail-safe, but the three
+        DEPENDENT cascades (membership, monitoring-authority, proof) must ALSO be isolated FROM EACH OTHER: the
+        monitoring-authority cascade is NOT itself fail-safe (its `revoke` unpublishes to the edge, which can
+        raise), so running them in one unguarded sequence let a raising monitoring cascade SKIP the proof cascade
+        entirely — leaving the org's ownership proofs ACTIVE for a re-created org_id to inherit, the very
+        resurrection this slice closes. So each cascade runs in its own try/except; a failing one can never skip
+        the others, every revoke is ATTEMPTED, and any failures are collected and re-raised AFTER all cascades
+        run (the caller still learns it failed — aggregated, never swallowed). Re-running completes a partial
+        decommission idempotently (every step is the replay-safe safe direction). NOTE: this compound
         mutation is not serialized against a concurrent caller — the store serializes a single append, not the
         whole op; when concurrent org wiring (CLI/proxy `do_action`) lands, wrap this body AND
         `grant_membership`'s gate-then-append in one operation-level lock keyed on the store."""
@@ -421,17 +446,68 @@ class OrgRegistry:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto", "reason": f"org {oid} REVOKED (governed latch)"}
         seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        # CASCADE ISOLATION (AS-2l red-pen MEDIUM fix): the org revoke above has ALREADY landed (fail-safe
+        # ordering), so the tenant admits no one from here on regardless of what the dependent cascades do.
+        # Those cascades (memberships, monitoring authorities, asset-ownership proofs) are each a SAFE-direction
+        # revoke, and NONE may be SKIPPED because a PRECEDING one raised. Earlier they ran sequentially with no
+        # isolation, so the monitoring-authority cascade — which is NOT itself fail-safe (its `revoke`
+        # unpublishes to the edge, which can raise) — could abort the whole op and SKIP the proof cascade,
+        # leaving the org's ownership proofs ACTIVE; a later re-created org_id would then inherit them, defeating
+        # the AS-2l "re-created org has no proofs" guard on exactly the partial-failure path the cascade exists
+        # to handle. So EACH cascade is wrapped in its own try/except: one failing cascade can never skip the
+        # others, every revoke is ATTEMPTED, and the failures are collected and re-raised AFTER all cascades run
+        # (the caller still learns it failed — never silently swallowed — but the decommission is as complete as
+        # possible, and re-running finishes it idempotently since every step is the replay-safe safe direction).
+        # Still revoke-only (never an unsigned grant) and no wallclock / RNG (fixed issued_at 0.0) on any path.
+        from .asset_ownership import AssetOwnershipRegistry
+        from .monitoring_authority import MonitoringAuthorityRegistry
+
+        failures: list[tuple[str, BaseException]] = []
+
         # Cascade-revoke every CURRENT member so reactivating the org_id cannot resurrect them. Enumeration
         # uses the current fold (not org-gated); each revoke is the idempotent + replay-safe safe direction,
         # appended by raw folded username so a corrupt member cannot abort the cascade. (A member granted
         # while the org is revoked is impossible — grant_membership refuses a non-active org — so this set is
         # complete.)
-        for _m in self.memberships(oid):
-            self._append_revoked_membership(oid, _m.username)
-        # Offboarding also revokes + unpublishes every monitoring authority of the org (safe direction).
-        from .monitoring_authority import MonitoringAuthorityRegistry
-        MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
-                                    trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
+        try:
+            for _m in self.memberships(oid):
+                self._append_revoked_membership(oid, _m.username)
+        except Exception as e:  # noqa: BLE001 — isolate: a failed membership cascade must not skip the rest
+            failures.append(("membership", e))
+
+        # Offboarding also revokes + unpublishes every monitoring authority of the org (safe direction). This
+        # cascade is NOT fail-safe in isolation (its `revoke` unpublishes to the edge, which can raise), so it
+        # is isolated below so a failure here can no longer skip the proof cascade.
+        try:
+            MonitoringAuthorityRegistry(self.store, owner_key=self.owner_key,
+                                        trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
+        except Exception as e:  # noqa: BLE001 — isolate so the proof cascade still runs
+            failures.append(("monitoring_authority", e))
+
+        # AS-2l PROOF CASCADE: revoke every asset-ownership proof of the org so a re-created org_id starts
+        # with NO proofs (no resurrection — `asset_ownership.has_current_proof` gates only on the proof fold,
+        # not on org state). Runs AFTER the monitoring revoke so a proven host's monitoring grant is already
+        # retired; revoking the proof additionally makes any surviving grant inert at read time. Safe
+        # direction, fixed issued_at 0.0 (no clock on this path), durable across a hard prune. Mirrors the
+        # membership cascade's robustness (revoked by raw folded host, so one corrupt proof cannot abort).
+        try:
+            AssetOwnershipRegistry(self.store, owner_key=self.owner_key,
+                                   trusted_pubkey=self.trusted_pubkey).revoke_org(oid)
+        except Exception as e:  # noqa: BLE001 — isolate so any subsequent cascade still runs
+            failures.append(("proof", e))
+
+        if failures:
+            # Surface the failure so the caller learns the decommission was incomplete (never swallow it), but
+            # only AFTER every cascade was attempted. One failure is re-raised as-is (type + traceback preserved
+            # for callers / tests that match on it); several are aggregated into one error that chains the first.
+            if len(failures) == 1:
+                raise failures[0][1]
+            names = ", ".join(name for name, _ in failures)
+            raise RuntimeError(
+                f"org {oid} revoke_org cascades failed ({names}); the org revoke landed and every cascade was "
+                f"attempted — re-run to complete it idempotently: "
+                + "; ".join(f"{name}: {exc!r}" for name, exc in failures)
+            ) from failures[0][1]
         return seq
 
     # -- owner mutations: memberships ---------------------------------------------------------------
@@ -527,7 +603,7 @@ class OrgRegistry:
             return _OrgsView(org_seed, mem_seed), since
 
         return cached_read(_ORGS_FOLD, self.store, trusted_pubkey=self.trusted_pubkey, seed=seed,
-                           reader=reader)
+                           reader=reader, force=bool(getattr(self, "force_cache", False)))
 
     def _fold_orgs(self) -> dict[str, Org]:
         """Fold the spine into {org_id: Org} for orgs whose latest state is active. Each `active` grant is
@@ -587,6 +663,11 @@ class OrgRegistry:
         fold = self._fold_memberships()
         keys = sorted(fold) if org_id is None else sorted(k for k in fold if k[0] == org_id)
         return [fold[k] for k in keys]
+
+    def member_count(self, org_id: str) -> int:
+        """The number of ACTIVE members of ``org_id`` — the seat-accounting unit (V12). Counts granted
+        memberships; the trust-root owner key-holder is not a membership and is not counted."""
+        return len(self.memberships(org_id))
 
     def membership_role(self, username: str, org_id: str) -> Optional[str]:
         """The per-org role `username` holds in `org_id`, or None (fail-closed) when the user is NOT an active

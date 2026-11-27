@@ -15,6 +15,8 @@ Invariants pinned here:
 from __future__ import annotations
 
 import itertools
+import json
+import re
 import tempfile
 
 import pytest
@@ -193,12 +195,38 @@ def test_overview_cloud_leg_marks_expired_and_hides_the_secret():
     assert "EXT-" not in json.dumps(out)                        # no external-id secret in any leg
 
 
+# Engine/model/currency NAMES count as a customer-facing leak only when they appear as WHOLE WORDS:
+# the same letters buried inside a high-entropy identifier (a random site-verification nonce, an
+# opaque cust_<hash> slug) are not a mention, and scanning for them as raw substrings makes this
+# check flaky (a random token can contain "gpt"/"usd" by chance). The "$" cost sigil is matched
+# literally — it never occurs inside an alphanumeric identifier.
+_BANNED_NAMES = ("claude", "gpt", "opus", "sonnet", "anthropic", "openai", "usd", "estimate")
+_BANNED_NAME_RE = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in _BANNED_NAMES) + r")\b")
+
+
+def _banned_mentions(overview: dict) -> list[str]:
+    """Banned engine/model/cost tokens that leak as customer-facing text in ``overview`` — names as
+    whole words, ``$`` literal. Sorted and de-duplicated; an empty list means clean."""
+    blob = json.dumps(overview).lower()
+    hits = set(_BANNED_NAME_RE.findall(blob))
+    if "$" in blob:
+        hits.add("$")
+    return sorted(hits)
+
+
 def test_overview_contains_no_engine_or_model_name_or_cost():
-    import json
     s = _store()
     _prove_host(s, "acme", "apme.cm", now=100.0)
     ConnectedRepoRegistry(s).connect("acme", 42, "github.com/acme/widgets", monthly_limit_credits=250, issued_at=_issue())
     _grant_cloud(s, "acme", ACCT, now=100.0)
-    blob = json.dumps(connect.connect_overview(s, "acme", now=200.0)).lower()
-    for banned in ("claude", "gpt", "opus", "sonnet", "anthropic", "openai", "$", "usd", "estimate"):
-        assert banned not in blob, banned
+    assert _banned_mentions(connect.connect_overview(s, "acme", now=200.0)) == []
+
+
+def test_banned_mention_scan_catches_real_leaks_but_not_nonce_substrings():
+    # Real engine / model / currency mentions ARE leaks (whole word, or split by a separator):
+    assert _banned_mentions({"model": "gpt-4o", "plan": "Opus tier"}) == ["gpt", "opus"]
+    assert _banned_mentions({"price": "12 USD"}) == ["usd"]
+    assert _banned_mentions({"cost": "$0.03 estimate"}) == ["$", "estimate"]
+    # ...but the SAME letters buried inside a random nonce / opaque slug are NOT (the flake this guards):
+    nonce = "vigil-site-verification=gki7gvbrvovl5tdpklbpugptihuf1lbidohzlr85taq"  # contains 'gpt'
+    assert _banned_mentions({"sites": [{"marker": nonce}], "repos": [{"slug": "cust_ab0pusddeadbeef"}]}) == []

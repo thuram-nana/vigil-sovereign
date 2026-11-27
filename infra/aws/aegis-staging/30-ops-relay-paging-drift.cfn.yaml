@@ -1,0 +1,351 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AEGIS AS-26 (OPS-1) staging operations: the Z3R KEYLESS relay role (R3 — the relay holds nothing and
+  cannot decrypt the owner vault), the egress-broker denylist pin (the broker refuses to start without it),
+  SNS PAGING (D32), CloudFormation DRIFT detection (AWS Config managed rule) routed to paging, CloudWatch
+  alarms for relay staleness and the deploy-time ledger check (AS-7a), and a STAGING-ONLY continuous-
+  delivery OIDC role (SSM SendCommand against the staging bringup document only). STAGING-ONLY, merged-not-
+  applied: the stack is a declaration; applying it, and the live Config recorder it needs, is a staging
+  operator step. Long-form intrinsics only.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: thuram-nana/vigil-sovereign
+    Description: owner/repo whose staging branch may assume the staging CD role.
+  GitHubStagingRef:
+    Type: String
+    Default: refs/heads/main
+    Description: the git ref (OIDC sub) allowed to drive the staging CD role.
+  ExistingOIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: ARN of the account GitHub OIDC provider (reuses the one 00/deploy created; empty disables CD).
+  PagingEmail:
+    Type: String
+    Default: ""
+    Description: optional email subscribed to the paging topic (D32). Empty leaves the topic with no sub.
+  StagingBringupDocumentName:
+    Type: String
+    Default: aegis-staging-bringup
+    Description: name of the SSM command document (10-keys-roles-ssm) the CD role may SendCommand.
+
+Conditions:
+  CdEnabled:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ExistingOIDCProviderArn
+          - ""
+  HasPagingEmail:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: PagingEmail
+          - ""
+
+Resources:
+  # --------------------------------------------------------------------------------------------------
+  # Z3R keyless relay role. The relay pulls reports to landing dirs and pushes grants to read-only per-
+  # tenant dirs (spec §5). It holds NOTHING (R3): no owner key, no KMS decrypt on any zone key. This role
+  # grants only CloudWatch metric/log write + the staleness heartbeat — never kms:Decrypt on the Z3 KEK.
+  # --------------------------------------------------------------------------------------------------
+  Z3RRelayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-z3r-relay
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: relay-telemetry-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: HeartbeatAndLogs
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Sid: NeverTheOwnerVault
+                Effect: Deny
+                Action:
+                  - "kms:Decrypt"
+                  - "kms:GenerateDataKey"
+                  - "secretsmanager:GetSecretValue"
+                Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z3r-relay
+        - Key: vigil:keyless
+          Value: "true"
+
+  Z3RRelayInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aegis-staging-z3r-relay
+      Roles:
+        - Ref: Z3RRelayRole
+
+  # --------------------------------------------------------------------------------------------------
+  # Egress-broker denylist pin. The per-host egress broker refuses to start without vigil_gateway.denylist
+  # (egress_pin.py). Shipped as a plain SSM String parameter (the denylist is not secret).
+  # --------------------------------------------------------------------------------------------------
+  BrokerDenylistParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /aegis-staging/broker/denylist
+      Type: String
+      Value: "169.254.169.254,metadata.google.internal,100.100.100.200"
+      Description: Egress-broker floor denylist (metadata/link-local); the broker refuses to start without it.
+      Tags:
+        vigil:component: egress-broker
+
+  # --------------------------------------------------------------------------------------------------
+  # Paging (D32). SNS topic; optional email subscription. Config drift and the relay/ledger alarms page here.
+  # --------------------------------------------------------------------------------------------------
+  PagingTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: aegis-staging-paging
+      DisplayName: AEGIS staging paging (D32)
+
+  PagingEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasPagingEmail
+    Properties:
+      TopicArn:
+        Ref: PagingTopic
+      Protocol: email
+      Endpoint:
+        Ref: PagingEmail
+
+  PagingTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Ref: PagingTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: PagingTopic
+          - Sid: AllowCloudWatchAlarmsPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: PagingTopic
+
+  # --------------------------------------------------------------------------------------------------
+  # CloudWatch alarms -> paging. Relay staleness (reports age) and the deploy-time ledger check (AS-7a).
+  # The metrics are emitted by the relay heartbeat and the staging CD; the alarms page on breach.
+  # --------------------------------------------------------------------------------------------------
+  RelayStalenessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: aegis-staging-relay-stale
+      AlarmDescription: Z3R report age exceeded the freshness budget (relay delayed -> STALE).
+      Namespace: Vigil/AEGIS
+      MetricName: RelayReportAgeSeconds
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Ref: PagingTopic
+
+  LedgerCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: aegis-staging-ledger-check-failed
+      AlarmDescription: Deploy-time licence/ledger check failed (AS-7a) -> page and hold the rollout.
+      Namespace: Vigil/AEGIS
+      MetricName: LedgerCheckFailed
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Ref: PagingTopic
+
+  # --------------------------------------------------------------------------------------------------
+  # Drift detection. AWS Config records the stack resources; the managed CLOUDFORMATION_STACK_DRIFT rule
+  # flags a drifted stack; an EventBridge rule routes a NON_COMPLIANT change to paging. A manual edge
+  # change at the live edge thus pages (T-INS). The Config recorder must be ON in the account (operator).
+  # --------------------------------------------------------------------------------------------------
+  ConfigBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: "aegis-staging-config-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      VersioningConfiguration:
+        Status: Enabled
+
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-staging-config
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+      Policies:
+        - PolicyName: config-s3-delivery
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource:
+                  Fn::Sub: "${ConfigBucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:GetBucketAcl
+                Resource:
+                  Fn::GetAtt:
+                    - ConfigBucket
+                    - Arn
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: aegis-staging-recorder
+      RoleARN:
+        Fn::GetAtt:
+          - ConfigRole
+          - Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: false
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: aegis-staging-delivery
+      S3BucketName:
+        Ref: ConfigBucket
+
+  StackDriftRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: aegis-staging-cfn-stack-drift
+      Description: Flags an AEGIS staging CloudFormation stack that has drifted from its template.
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::CloudFormation::Stack
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUDFORMATION_STACK_DRIFT_DETECTION_CHECK
+
+  DriftPagingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: aegis-staging-drift-to-paging
+      Description: Route a Config NON_COMPLIANT (drift) change to the paging topic (D32).
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - Config Rules Compliance Change
+        detail:
+          newEvaluationResult:
+            complianceType:
+              - NON_COMPLIANT
+      State: ENABLED
+      Targets:
+        - Id: paging
+          Arn:
+            Ref: PagingTopic
+
+  # --------------------------------------------------------------------------------------------------
+  # STAGING-ONLY continuous delivery. GitHub-OIDC role scoped to SSM SendCommand against the staging
+  # bringup document only — no SSH, no long-lived keys, no other action. Inert unless the OIDC provider
+  # ARN parameter is set (CdEnabled). The staging CD workflow assumes this role.
+  # --------------------------------------------------------------------------------------------------
+  StagingDeployRole:
+    Type: AWS::IAM::Role
+    Condition: CdEnabled
+    Properties:
+      RoleName:
+        Fn::Sub: "aegis-staging-cd-${AWS::Region}"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                Ref: ExistingOIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  Fn::Sub: "repo:${GitHubRepo}:ref:${GitHubStagingRef}"
+      Policies:
+        - PolicyName: staging-cd-ssm-sendcommand
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${StagingBringupDocumentName}"
+                  - Fn::Sub: "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/vigil:environment: staging
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+
+Outputs:
+  PagingTopicArn:
+    Description: SNS paging topic (D32).
+    Value:
+      Ref: PagingTopic
+  Z3RRelayRoleArn:
+    Description: Keyless Z3R relay role ARN.
+    Value:
+      Fn::GetAtt:
+        - Z3RRelayRole
+        - Arn
+  StagingDeployRoleArn:
+    Condition: CdEnabled
+    Description: Staging-only CD role ARN (set the staging CD workflow variable to this).
+    Value:
+      Fn::GetAtt:
+        - StagingDeployRole
+        - Arn

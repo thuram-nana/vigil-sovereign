@@ -1,0 +1,85 @@
+# AS-26 (OPS-1) — ADVISORY aegis-infra job.
+#
+# It runs the IaC analyzers over the AEGIS staging CloudFormation templates (cfn-lint) PLUS the two offline
+# posture/guard layers this slice ships: the deterministic Z3R relay guards and the AS-26 CFN posture
+# analyzer. It is GREEN on the current tree by construction — every template is cfn-lint clean, the posture
+# analyzer passes, and the relay-guard tests pass.
+#
+# ADVISORY, NOT REQUIRED. The live AWS staging stack cannot be applied in CI (there is no live staging
+# account in the merge pipeline), so this job proves what is provable OFFLINE and stays non-blocking while
+# the staging account and its live checks (MFA sign-in, the delivered edge page, live drift detection) are
+# an operator step. It is deliberately NOT in .github/required-status-checks.txt and is enumerated with its
+# reason in KNOWN_ADVISORY of docs/tests/test_required_checks_canonical.py, so it never blocks a PR.
+name: aegis-infra advisory (AS-26)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aegis-infra-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  aegis-infra:
+    name: aegis-infra (CFN analyzers + Z3R relay guards, advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: install the pinned CI toolchain (ruff/pytest) + cfn-lint
+        run: |
+          # ruff/pytest from the committed hash lock (the same lock the W2-2 lint job uses); cfn-lint is
+          # version-pinned (it is the IaC analyzer, not in the core CI lock). cfn-lint pulls PyYAML, which
+          # the posture analyzer uses to read the templates.
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+          pip install "cfn-lint==1.61.0"
+          # The Z3R relay guard + CFN posture analyzer import the vigil_core integrity substrate
+          # (Signature / TrustRoot / evidence_signing_bytes / verify_threshold). Install it the same way
+          # every other CI job does: the hash-pinned runtime lock FIRST (it carries pydantic + the other
+          # vigil_core runtime deps), THEN vigil_core editable --no-deps. The runtime lock was missing here,
+          # so the analyzer and the offline tests died at import with ModuleNotFoundError (first on
+          # 'vigil_core', and — once that was on the path — on 'pydantic'), i.e. the advisory checks never ran.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+
+      - name: cfn-lint — every AEGIS staging template (BLOCKING within this advisory job)
+        run: |
+          cfn-lint infra/aws/aegis-staging/*.cfn.yaml infra/aws/github-oidc-deploy-role.cfn.yaml
+
+      - name: AS-26 CFN posture analyzer (IMDSv2, disjoint EIPs, MFA roots, keyless relay, paging, drift)
+        run: |
+          PYTHONPATH=integration python -m vigil_integration.aegis_infra_lint \
+            infra/aws/aegis-staging/*.cfn.yaml
+
+      - name: Z3R relay guards + CFN posture — offline tests
+        run: |
+          PYTHONPATH=integration:gateway python -m pytest -q \
+            integration/tests/test_aegis_relay_guard.py \
+            integration/tests/test_aegis_infra_posture.py
+
+      - name: Z3R relay wrapper — dry-run smoke (validates the pinned argv; refuses a vault source)
+        run: |
+          set -e
+          Z3R_DRY_RUN=1 Z3R_LANDING_DIR=/tmp/z3r-land bash tools/z3r/z3r-relay.sh pull /srv/aegis/outbound/reports/
+          if Z3R_DRY_RUN=1 bash tools/z3r/z3r-relay.sh pull /var/lib/vigil/vault/owner.key; then
+            echo "relay failed to refuse a vault source" >&2
+            exit 1
+          fi
+          echo "relay dry-run smoke: pinned argv validated and vault source refused."
+
+      - name: ruff — the AS-26 Python (guard + analyzer + tests)
+        run: |
+          ruff check --no-cache --config integration/pyproject.toml \
+            integration/vigil_integration/aegis_relay_guard.py \
+            integration/vigil_integration/aegis_infra_lint.py \
+            integration/tests/test_aegis_relay_guard.py \
+            integration/tests/test_aegis_infra_posture.py

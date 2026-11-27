@@ -3613,8 +3613,11 @@
       "label": "Finding soundness (oracle sole authority)",
       "objective": "A FACT is minted only by a deterministic oracle re-executing over retained evidence; an AI judgement, a tool's bytes, or an unproven lead can never be laundered into a FACT.",
       "residual_limitations": [
+        "AS1B-live-fire-tt-stg",
+        "LIMIT-aegis-staging-stack-not-applied",
         "LIMIT-audit-package-reproduction",
         "LIMIT-cloud-exploit-fixture-proven",
+        "LIMIT-cloudflare-live-r2-api",
         "LIMIT-customer-cloud-posture-run",
         "LIMIT-dns-oob-proves-resolution-not-completed-connection",
         "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
@@ -3622,6 +3625,7 @@
         "LIMIT-dns-oob-token-cleartext-broadcast",
         "LIMIT-favicon-fingerprint-stub",
         "LIMIT-field-record-accrual",
+        "LIMIT-invgraph-s2-evidence-join-callsite-wiring",
         "LIMIT-llm-redteam-tools-deferred",
         "LIMIT-posture-no-structured-findings",
         "LIMIT-profile-packs-incremental",
@@ -3698,9 +3702,11 @@
       "label": "Cryptography & key management",
       "objective": "Signing keys are handled fail-closed (hardware backend, m-of-n quorum, escrow at threshold, crypto-shred erasure); keys are passed in, never provisioned by the tool (FATAL-2).",
       "residual_limitations": [
+        "LIMIT-aegis-jobs-runtime-isolation",
         "LIMIT-attest-tee-hardware",
         "LIMIT-capture-attestation-offense-plane",
-        "LIMIT-evidence-producer-refs-unique"
+        "LIMIT-evidence-producer-refs-unique",
+        "LIMIT-invgraph-s4-lifecycle-local-verify-path"
       ]
     },
     {
@@ -3774,16 +3780,23 @@
       "label": "Assurance governance & documentation honesty",
       "objective": "Every product claim resolves to an enforcing symbol and a proving test in a required CI job; limitations are code-grounded and never worded as completeness (claim discipline).",
       "residual_limitations": [
+        "AS2D-live-broker-transport",
         "LIMIT-a11y-capture-unwired",
+        "LIMIT-aegis-edge-automation-deploy-gated",
+        "LIMIT-aegis-sealing-delivery-deferred",
+        "LIMIT-aegis-staging-cd-inert",
         "LIMIT-agent-body-scaffold",
-        "LIMIT-cloud-connect-gcp-azure-verdict",
+        "LIMIT-cloud-connect-azure-live-fire",
+        "LIMIT-cloud-connect-cloudflare-livefire",
+        "LIMIT-cloud-connect-gcp-livefire",
         "LIMIT-consumer-shard-on-signup-ops",
         "LIMIT-external-audit-team",
         "LIMIT-frontc-shard-cross-host-deploy",
         "LIMIT-gesture-native-inject-unwired",
         "LIMIT-report-pdf-renderer-unprovisioned",
         "LIMIT-restore-hard-pruned-spine",
-        "LIMIT-sigil-voice-probe-egress-not-gatewayed"
+        "LIMIT-sigil-voice-probe-egress-not-gatewayed",
+        "LIMIT-sso-saml-xmldsig-backend-unprovisioned"
       ]
     }
   ],

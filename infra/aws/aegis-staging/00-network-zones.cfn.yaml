@@ -1,0 +1,505 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AEGIS AS-26 (OPS-1) staging — zone network layout and DISJOINT EIP sets (spec §4.1 zones, boundary B-5).
+  One VPC per VIGIL zone in its own subnet + SG: Z2E enforcement, Z2W workers, Z2X actuation, Z3 control,
+  Z4 offense. Z4 egress is DISJOINT from the defense NAT egress (own EIP, subnet, route table, NAT), so an
+  offensive probe never appears to originate from a defense address. STAGING-ONLY, merged-not-applied: a
+  deployment declaration, analyzer-clean and posture-checked offline, not applied by CI (no live staging
+  account in the merge pipeline). See infra/aws/aegis-staging/README.md. Long-form intrinsics only, so
+  check-yaml parses it as plain YAML.
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: "10.80.0.0/16"
+    Description: CIDR for the staging VPC. The /16 is carved into one /24 per zone-subnet below.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+Resources:
+  # --------------------------------------------------------------------------------------------------
+  # VPC + IGW
+  # --------------------------------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Ref: VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: aegis-staging
+        - Key: vigil:environment
+          Value: staging
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: aegis-staging-igw
+
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: Vpc
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  # --------------------------------------------------------------------------------------------------
+  # Public subnets (NAT gateways live here; no instance is placed here). Two AZs for the defense NAT.
+  # The literal per-zone /24s keep the zone boundaries auditable by eye; they all sit inside 10.80.0.0/16.
+  # --------------------------------------------------------------------------------------------------
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.0.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-public-a
+        - Key: vigil:zone
+          Value: public-nat
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.1.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-public-b
+        - Key: vigil:zone
+          Value: public-nat
+
+  Z2ESubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.10.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2e-a
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2ESubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.11.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2e-b
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.20.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2w
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.30.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2x
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.40.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z3
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock: "10.80.90.0/24"
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z4
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # DISJOINT EIP sets (B-5). Defense NAT EIPs (set "defense") and Z4 EIPs (set "z4-offense") never
+  # overlap — two NAT gateways in two subnets with two separate allocation sets. aegis_infra_lint.py
+  # asserts the two tagged sets share no allocation.
+  # --------------------------------------------------------------------------------------------------
+  DefenseNatEipA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-defense-nat-a
+        - Key: vigil:eip-set
+          Value: defense
+
+  DefenseNatEipB:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-defense-nat-b
+        - Key: vigil:eip-set
+          Value: defense
+
+  Z4Eip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z4-nat
+        - Key: vigil:eip-set
+          Value: z4-offense
+
+  DefenseNatA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - DefenseNatEipA
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: aegis-staging-defense-nat-a
+        - Key: vigil:eip-set
+          Value: defense
+
+  DefenseNatB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - DefenseNatEipB
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: aegis-staging-defense-nat-b
+        - Key: vigil:eip-set
+          Value: defense
+
+  # Z4 gets its OWN NAT gateway in its OWN subnet with its OWN EIP — a disjoint egress path (B-5).
+  Z4Nat:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - Z4Eip
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z4-nat
+        - Key: vigil:eip-set
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # Route tables. Public → IGW. Defense zones → defense NAT. Z4 → Z4 NAT (never the defense NAT).
+  # --------------------------------------------------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId:
+        Ref: InternetGateway
+
+  PublicAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetA
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PublicAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetB
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  DefenseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-defense-rt
+        - Key: vigil:eip-set
+          Value: defense
+
+  DefenseDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: DefenseRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId:
+        Ref: DefenseNatA
+
+  Z2EAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z2ESubnetA
+      RouteTableId:
+        Ref: DefenseRouteTable
+
+  Z2EAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z2ESubnetB
+      RouteTableId:
+        Ref: DefenseRouteTable
+
+  Z2WAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z2WSubnet
+      RouteTableId:
+        Ref: DefenseRouteTable
+
+  Z2XAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z2XSubnet
+      RouteTableId:
+        Ref: DefenseRouteTable
+
+  Z3Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z3Subnet
+      RouteTableId:
+        Ref: DefenseRouteTable
+
+  # Z4 route table → the Z4 NAT only (disjoint egress).
+  Z4RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z4-rt
+        - Key: vigil:eip-set
+          Value: z4-offense
+
+  Z4DefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: Z4RouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId:
+        Ref: Z4Nat
+
+  Z4Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Z4Subnet
+      RouteTableId:
+        Ref: Z4RouteTable
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-zone security groups. Each zone admits only what the request path (spec §5) requires. No SG
+  # here opens 0.0.0.0/0 ingress; the viewer path enters only through CloudFront (template 20).
+  # --------------------------------------------------------------------------------------------------
+  Z2ESecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Z2E enforcement units (front + gateway). Ingress admits only the internal ALB target-group traffic
+        (template 20 attaches the ALB rule); egress to the broker/NAT only.
+      VpcId:
+        Ref: Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Ref: VpcCidr
+          Description: in-VPC TLS to the broker
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2e-sg
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Z2W workers (ingest receiver, detection jobs, Suricata). Pushes land here via the receiver own
+        distribution (template 20), never on the cockpit uiproxy (B-6).
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2w-sg
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Z2X actuation (credential broker, defensive executor). Only Z2X writes to provider APIs (B-9); it
+        holds the KMS-sealed provider credentials and nothing else may assume its role.
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z2x-sg
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Z3 control plane (custui, provisioner, spine, drains, reconciler, verifier judge, Z3R relay). Holds
+        the owner key. Z2 never initiates connections to Z3 (B-1); Z3 pulls/pushes via the relay only.
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z3-sg
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Z4 offensive sandbox. Shares no host, image, role, key, subnet or egress with any other zone (B-5).
+        All payload-bearing probes run here and nowhere else (B-4).
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: aegis-staging-z4-sg
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # IAM Access Analyzer (B-5 artefact-side check: no external principal reaches an in-scope resource).
+  # The Reachability-Analyzer run that proves Z4→defense has NO network path is a live operator step
+  # (deploy-gated; it needs live ENIs), documented in the README.
+  # --------------------------------------------------------------------------------------------------
+  AccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      Type: ACCOUNT
+      AnalyzerName: aegis-staging-access-analyzer
+      Tags:
+        - Key: vigil:environment
+          Value: staging
+
+Outputs:
+  VpcId:
+    Description: The staging VPC id.
+    Value:
+      Ref: Vpc
+  DefenseEipSet:
+    Description: Defense NAT EIP set (disjoint from the Z4 set, B-5).
+    Value:
+      Fn::Sub: "${DefenseNatEipA},${DefenseNatEipB}"
+  Z4EipSet:
+    Description: Z4 offense EIP set (disjoint from the defense set, B-5).
+    Value:
+      Ref: Z4Eip
+  Z2ESecurityGroupId:
+    Description: Security group for the Z2E enforcement units (ALB target).
+    Value:
+      Ref: Z2ESecurityGroup
+  Z2ESubnets:
+    Description: Z2E subnets across two AZs (for the Defend-mode ×2 placement).
+    Value:
+      Fn::Sub: "${Z2ESubnetA},${Z2ESubnetB}"

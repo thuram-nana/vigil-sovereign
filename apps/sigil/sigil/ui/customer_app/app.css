@@ -261,6 +261,12 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 /* legal/governance S1 — the Settings hub (only while the edge has VIGIL_CUSTOMER_SETTINGS on): the General tab (its
    labelled fields, its Save, the notice when the details could not be loaded) and the card linking the other screens */
 #cust-settings-general { margin-bottom: 16px; }
+/* S5 — the AI / human-in-the-loop governance disclosure (#/ai-governance): a read-only screen of cited statements */
+.cust-ai-governance { display: grid; gap: 14px; max-width: 760px; }
+.cust-aig-statement { margin: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg-1); font-weight: 600; }
+.cust-aig-point { margin: 0 0 4px; }
+.cust-aig-cite { margin: 0 0 10px; font-size: 0.8rem; font-style: italic; }
 .cust-settings-general-form, .cust-settings-links { display: grid; gap: 6px; max-width: 640px; }
 .cust-settings-general-form h3, .cust-settings-general-form p,
 .cust-settings-links h3, .cust-settings-links p { margin: 0 0 6px; }
@@ -276,6 +282,33 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-settings-error { color: var(--st-blocked, #e2776c); font-weight: 600; }
 .cust-settings-links .row { margin: 0; }
 .cust-settings-link { width: 100%; justify-content: flex-start; text-align: left; }
+
+/* S12 — the read-only Authorizations surface (#/settings/authorizations): a disclosure of the owner-signed engagement
+   authorities + a "request authorization" action that drops an unsigned owner-review request. */
+.cust-authz-list { display: grid; gap: 12px; max-width: 760px; }
+.cust-authz-intro, .cust-authz-row, .cust-authz-empty, .cust-authz-unavailable { display: grid; gap: 6px; }
+.cust-authz-intro h3, .cust-authz-row h3, .cust-authz-intro p, .cust-authz-row p { margin: 0 0 4px; }
+.cust-authz-rules { margin: 0 0 6px; padding-left: 18px; display: grid; gap: 4px; opacity: 0.85; }
+.cust-authz-state { font-weight: 600; }
+.cust-authz-requested { color: var(--st-progress, #d9a441); font-weight: 600; }
+.cust-authz-disclaim { opacity: 0.7; font-size: 0.85rem; }
+.cust-authz-terms { opacity: 0.6; font-size: 0.8rem; font-style: italic; }
+.cust-authz-request, .cust-authz-retry { min-width: 10rem; justify-content: center; }
+.cust-authz-row .row, .cust-authz-unavailable .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+
+/* legal/governance S2 — the Privacy centre (only while the edge has VIGIL_CUSTOMER_PRIVACY_CENTER on): the published
+   cookie inventory and subprocessor list the server reads from the public pages, plus the links out to those pages */
+.cust-privacy-section { display: grid; gap: 8px; max-width: 760px; margin-bottom: 16px; }
+.cust-privacy-section h3 { margin: 0; }
+.cust-privacy-section p { margin: 0; }
+.cust-privacy-count { font-weight: 600; }
+.cust-privacy-cookies { margin-top: 4px; }
+.cust-privacy-subs { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; }
+.cust-privacy-sub strong { font-weight: 600; }
+.cust-privacy-sub span { opacity: 0.8; }
+.cust-privacy-link { margin-top: 2px; }
+.cust-privacy-link a { color: var(--accent, #6ea8fe); text-decoration: none; font-weight: 600; }
+.cust-privacy-link a:hover { text-decoration: underline; }
 
 /* "A new version of VIGIL is available — Refresh" (pwa.js): one notice, pinned until the person refreshes */
 #vigil-update {
@@ -454,6 +487,8 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .cust-connect-steps { display: grid; gap: 12px; padding-left: 1.2rem; margin: 0; }
 .cust-connect-status { margin: 0; min-height: 1.4em; }
 .cust-connect-authz { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.5rem 0; }
+.cust-connect-values { display: grid; gap: 4px; margin: 6px 0; }
+.cust-connect-link { overflow-wrap: anywhere; word-break: break-all; }
 .cust-copy { padding-inline: 10px; }
 
 /* PR-I — the "Independently verifiable" proof badge and its verify-it-yourself panel (shown only while the edge has
@@ -517,3 +552,40 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
   background: var(--st-running, #5b9bd5); }
 .cust-chain-step-main { display: grid; gap: 2px; font-size: 0.86rem; }
 .cust-chain-step-main .cust-muted { font-size: 0.76rem; }
+
+/* Data rights (data_rights.js, VIGIL_CUSTOMER_DATA_RIGHTS): the Settings sub-screen — rights, SLA, export, request */
+.cust-data-rights { display: grid; gap: 16px; max-width: 720px; }
+.cust-data-rights-rights, .cust-data-rights-sla, .cust-data-rights-actions,
+.cust-data-rights-history { display: grid; gap: 8px; }
+.cust-data-rights-rights h3, .cust-data-rights-sla h3, .cust-data-rights-actions h3,
+.cust-data-rights-history h3 { margin: 0 0 4px; }
+.cust-data-rights-quote { margin: 0; display: grid; gap: 4px; padding: 10px 12px;
+  border-left: 3px solid var(--border-strong, #384050); background: var(--bg-2); border-radius: var(--r-1, 8px); }
+.cust-data-rights-quote blockquote { margin: 0; }
+.cust-data-rights-sla-line { font-weight: 600; }
+.cust-data-rights-contact { color: var(--st-running, #5b9bd5); }
+.cust-data-rights-actions .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.cust-data-rights-export, .cust-data-rights-delete,
+.cust-data-rights-delete-confirm, .cust-data-rights-delete-cancel { min-width: 0; }
+.cust-data-rights-confirm, .cust-data-rights-export-out { display: grid; gap: 8px; }
+.cust-data-rights-confirm-box { display: grid; gap: 8px; margin-top: 8px; padding: 10px 12px;
+  background: var(--bg-2); border: 1px solid var(--border, #2a2a2a); border-radius: var(--r-1, 8px); }
+.cust-data-rights-export-text { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem;
+  background: var(--bg-2); border-radius: var(--r-1, 8px); padding: 8px 10px; max-height: 240px; overflow: auto; }
+.cust-data-rights-recorded { font-weight: 600; }
+.cust-data-rights-requests { display: grid; gap: 6px; }
+.cust-data-rights-request-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.cust-data-rights-request { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.cust-data-rights-request-kind { font-weight: 600; }
+
+/* Live Control (#/live) — the live-engagement activity timeline + steering box */
+.live-head h2 { margin-bottom: 4px; }
+.live-controls { display: flex; gap: 8px; margin: 8px 0 16px; }
+.live-instruct { width: 100%; box-sizing: border-box; resize: vertical; min-height: 3em; margin-bottom: 8px; font: inherit; }
+.live-note { min-height: 1.2em; }
+.live-feed { list-style: none; margin: 0; padding: 0; }
+.live-step { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-top: 1px solid var(--border, #eee); }
+.live-step:first-child { border-top: 0; }
+.live-step-t { font-family: var(--font-mono, monospace); font-size: var(--fs-sm, 0.85em); color: var(--muted, #888); min-width: 6.5em; }
+.live-step-i { width: 1.2em; text-align: center; }
+.live-step-l { flex: 1; }

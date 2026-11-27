@@ -45,6 +45,37 @@ from .certify import (
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .audit_package import build_audit_package, write_package
+from .aegis_tt import (
+    AegisTtDemonstration,
+    BuildRef,
+    DemonstrationVerification,
+    RequiredCases,
+    SignedDemonstration,
+    SubjectRef,
+    TopologyRef,
+    TrustRootDoc,
+    UiLeg,
+    CAPABILITY_STATES,
+    build_demonstration,
+    load_trust_root_doc,
+    load_trust_root_doc_file,
+    manifest_digest,
+    project_state,
+    sign_demonstration,
+    verify_demonstration,
+)
+from .aegis_tt_run import (
+    TtStgGate,
+    TtStgRecord,
+    TtStgRunResult,
+    build_tt_stg_demonstration,
+    derive_required_cases,
+    gate_tt_stg_run,
+    iac_topology_digest,
+    junit_passed_case_nodes,
+    record_tt_stg_run,
+    subject_digest,
+)
 
 __all__ = [
     "build_audit_package", "write_package",
@@ -58,4 +89,14 @@ __all__ = [
     "build_certificate", "build_path_certificate", "sign_certificate",
     "verify_certificate", "verify_bundle",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
+    # AEGIS TT-STG DONE record (AS-25 / D33)
+    "AegisTtDemonstration", "SignedDemonstration", "DemonstrationVerification",
+    "UiLeg", "RequiredCases", "BuildRef", "TopologyRef", "SubjectRef", "TrustRootDoc",
+    "build_demonstration", "sign_demonstration", "verify_demonstration",
+    "manifest_digest", "load_trust_root_doc", "load_trust_root_doc_file",
+    "project_state", "CAPABILITY_STATES",
+    # AEGIS TT-STG run orchestration (AS-1b)
+    "TtStgGate", "TtStgRunResult", "TtStgRecord",
+    "gate_tt_stg_run", "build_tt_stg_demonstration", "record_tt_stg_run",
+    "derive_required_cases", "iac_topology_digest", "subject_digest", "junit_passed_case_nodes",
 ]

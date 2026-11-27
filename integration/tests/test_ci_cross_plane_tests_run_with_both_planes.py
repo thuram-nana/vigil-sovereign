@@ -66,6 +66,7 @@ REQUIRED_PLANES = frozenset({"vigil_integration", "vigil_gateway", "framework", 
 HOME_PLANES: dict[str, frozenset[str]] = {
     "engine/crucible": frozenset({"framework", "vigil_core"}),      # crucible-core: cwd engine/crucible
     "apps/sigil": frozenset({"sigil", "vigil_integration", "vigil_core"}),
+    "apps/aegis-ingest": frozenset(),    # no dedicated home job; its one framework-needing smoke test runs in the P5 offense leg
     "packages/core": frozenset({"vigil_core"}),
     "gateway": frozenset({"vigil_gateway", "vigil_core"}),           # PYTHONPATH=gateway only
     "vendor/strix": frozenset({"strix"}),

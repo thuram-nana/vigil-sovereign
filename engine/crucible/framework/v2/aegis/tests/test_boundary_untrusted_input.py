@@ -72,6 +72,35 @@ def test_ip_coarsening_and_keyed_hmac():
     assert hmac_id("203.0.113.0/24", secret="k1") != hmac_id("203.0.113.0/24", secret="k2")
 
 
+# A fixed 32-byte RAW RANDOM secret (what `head -c 32 /dev/urandom` yields, per the AS-2j deployment
+# runbook). 0xff and lone continuation bytes (0x80-0x85) make it never valid UTF-8 — the exact input the
+# pre-fix `secret.encode("utf-8")` path could not key off.
+_NON_UTF8_SECRET = b"\xff\xfe\x80\x81\x82\x83\x84\x85" * 4
+
+
+def test_hmac_id_keys_off_raw_non_utf8_bytes_secret():
+    # REGRESSION (AS-2j N-A): the deployment secret is provisioned as RAW RANDOM BYTES, which are not valid
+    # UTF-8. hmac_id must key off those raw bytes exactly like the sibling report secret — NOT re-encode a str.
+    assert len(_NON_UTF8_SECRET) == 32
+    with pytest.raises(UnicodeDecodeError):             # proves the bytes are non-UTF-8 (the pre-fix crash path)
+        _NON_UTF8_SECRET.decode("utf-8")
+    h = hmac_id("203.0.113.0/24", secret=_NON_UTF8_SECRET)
+    assert h and h == hmac_id("203.0.113.0/24", secret=_NON_UTF8_SECRET)     # deterministic, non-empty, no crash
+    assert h != hmac_id("203.0.113.0/24", secret=b"\x00" * 32)               # keyed (differs across keys)
+    # a str secret and its byte-identical form yield the SAME pseudonym (consistency / determinism).
+    assert hmac_id("alice", secret="deployment-key") == hmac_id("alice", secret=b"deployment-key")
+
+
+def test_ingest_pseudonymises_under_a_raw_bytes_deployment_secret():
+    # End-to-end: a config whose deployment_secret is raw random bytes pseudonymises actor identifiers without
+    # crashing — the documented provisioning path, now identical to the monitoring report secret.
+    cfg = AegisConfig(deployment_secret=_NON_UTF8_SECRET, max_envelope_bytes=4096, max_depth=6)
+    env = ingest({"surface": "llm", "seq": 0, "actor": {"principal": "alice", "session": "s1"},
+                  "llm": {"user_input": "hi", "llm_output": "ok"}}, cfg)
+    assert env.actor.principal and env.actor.principal != "alice"    # no raw principal survives
+    assert env.actor.session and env.actor.session != "s1"           # no raw session survives
+
+
 def test_actor_identifiers_are_pseudonymised():
     red = redact_actor(ActorRef(ip="203.0.113.7", session="sess-42", principal="alice"), secret="k")
     assert red.ip and red.ip != "203.0.113.7"          # no raw IP survives

@@ -105,9 +105,15 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/team": ("Team", ("api/customer/members",)),
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/settings": ("Settings", ("api/customer/preferences",)),
+    "#/settings/authorizations": ("Authorizations", ("api/customer/authorizations",)),   # legal/governance S12
+    "#/privacy": ("Privacy", ("api/customer/privacy",)),                           # legal/governance S2
+    "#/data-rights": ("Data rights", ("api/customer/data-rights",)),             # legal/governance S3
+    "#/ai-governance": ("How VIGIL uses AI", ("api/customer/ai-governance",)),      # legal/governance S5
+    "#/seller-identity": ("Seller identity", ("api/customer/seller-identity",)),      # legal/governance S7
     "#/guide": ("Guide", ()),
     "#/plans": ("Plans", ("api/customer/billing/plans",)),                       # PR-G (Area 6)
     "#/reports": ("Reports", ("api/customer/compliance",)),                       # PR-G: the download is a click
@@ -131,17 +137,29 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/team": {"Add member": 1, "Change role": 1, "Remove": 1},     # cust_ben (the founder's row is read-only)
     # Website: Continue a half-finished proof, Prove again a lapsed one, Connect a website; Code repository: Connect
     # GitHub, Open Code; Cloud account: Cancel / Continue a connection not finished, Connect again / Disconnect a lapsed
-    # one, Disconnect a connected one, Connect an AWS account
+    # one, Disconnect a connected one, Connect a cloud account
     "#/connect": {"Continue": 2, "Prove again": 1, "Connect a website": 1, "Connect GitHub": 1, "Open Code": 1,
-                  "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect an AWS account": 1},
+                  "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
+    # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
+    # The activity feed rows are <li> steps, not buttons.
+    "#/live": {"Pause": 1, "Send to VIGIL": 1},
     "#/attack-path": {"View findings": 1},                          # F1's one chain card (its steps unlisted)
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
+                   "Authorizations": 1,                             # S12: the hub's link to the Authorizations screen
+                   "Data rights": 1,                                # S3: the hub's Data-rights link
+                   "How VIGIL uses AI": 1,                          # S5: the hub's link to the AI-governance sub-screen
                    "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
+    # S12 Authorizations: the representative data has one active authority (no button), one expired authority and one
+    # not-authorized host — each non-active host offers a "Request authorization" (the expired one + the pending one).
+    "#/settings/authorizations": {"Request authorization": 2},
+    "#/data-rights": {"Export my data": 1,                          # S3: the own-data export and the deletion request
+                      "Request account deletion": 1},
     "#/guide": {"Replay the welcome tour": 1,
-                "Mark as done": 6},                                 # the open chapter, Get started: its six steps
+                "Mark as done": 7},   # the open chapter, Get started: six steps + the onlyIfShown Authorizations
+                                      # step (listed here because the gate enables VIGIL_CUSTOMER_AUTHORIZATIONS)
     "#/plans": {"Upgrade": 1, "Downgrade": 1, "Cancel plan": 1, "Buy credits on Billing": 1},
     "#/reports": {"Download report": 1, "Download PDF": 1},
     # signed out, the top bar's own Sign in is on every one of these, so the sign-in screen shows that label twice
@@ -167,20 +185,22 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
-               "settings": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
-               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three
+               "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
+               "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
 # The server switches that serve those screens' routes on the real edge (Part B). Checkout serves billing/offers
 # (the Buy section): Gate 5 buys credits, so the gate's configuration has it on. VIGIL_CUSTOMER_CONNECT serves
 # api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
 # writes data-cloud-connect="1" only with both on). Fix first (PR-B) is served only with its own switch AND its
 # master switch, VIGIL_APEX_PRESENTATION.
-_GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
+_GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LIVE_CONTROL", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
-              "VIGIL_CUSTOMER_SETTINGS")
+              "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
+              "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS",   # + S2, S3 (legal/governance)
+              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY")   # + S5, S7 (legal/governance)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -336,6 +356,7 @@ def _connect_challenge(host: str, token: str) -> dict:
 # figure for what an assessment costs anywhere.
 _FAKE_SERVER = {
     "api/customer/onboarding": {"ok": True, "state": "done"},
+    "api/customer/data-rights": {"ok": True, "sla_days": 30, "contact": "info@sigilsovereign.com", "requests": []},
     "api/customer/notifications": {"notifications": [], "count": 0},
     "api/customer/billing": {"org_id": "org_acme", "active": False, "subscription": None,
                              "credits": {"available": 12, "persistent": 10, "plan_live": 2},
@@ -372,11 +393,16 @@ _FAKE_SERVER = {
                              "canary": "a1b2c3d4e5f6", "received_at": 1700000000,
                              "receipt_digest": "sha256:9c1e4f2a7b8d"}}]},
     "api/customer/launches": {"org_id": "org_acme", "pause_resume": True,
-                              "launches": [{"slug": "cust_b", "launch": "n1", "state": "running", "depth": "quick",
-                                            "actions": ["pause"], "lease": {}}],
+                              "launches": [{"slug": "cust_b", "host": "b.example", "launch": "n1", "state": "running",
+                                            "depth": "quick", "actions": ["pause"], "lease": {}}],
                               "finished": [{"slug": "cust_a", "launch": "n0", "state": "completed", "ended_at": 10}],
                               "choices": [{"product_id": "vigil_launch_quick", "depth": "quick"},
                                           {"product_id": "vigil_launch_deep", "depth": "deep"}]},
+    # Live Control's customer-safe activity feed for the running engagement (cust_b): phase transitions only, no secrets
+    # or target detail. The screen reads this on arrival for the running host (query-stripped key matches any ?host=…).
+    "api/customer/live/activity": {"ok": True, "slug": "cust_b", "cursor": 1, "rows": [
+        {"seq": 0, "ts": 1700000000.0, "phase": "scan", "label": "Scanning the surface", "status": "started"},
+        {"seq": 1, "ts": 1700000001.0, "phase": "scan", "label": "Scanning the surface", "status": "completed"}]},
     "api/customer/members": {"org_id": "org_acme", "members": [
         {"username": "cust_ana", "email": "ana@acme.com", "role": "founder"},
         {"username": "cust_ben", "email": "ben@acme.com", "role": "analyst", "since": 1700000000}]},
@@ -417,6 +443,40 @@ _FAKE_SERVER = {
         "legal_entity_name": "Acme SAS", "registered_address": "1 Example Street, Example City",
         "contractual_contact_email": "legal@acme.com", "emergency_contact_name": "Dana Ops",
         "emergency_contact_phone": "+1 555 0100", "emergency_contact_email": "soc@acme.com"}},
+    # S12 the read-only Authorizations surface: one ACTIVE owner-signed authority (no button), one EXPIRED and one
+    # NOT-authorized host — so two hosts offer "Request authorization"; one of them already has an open review request.
+    "api/customer/authorizations": {"org_id": "org_acme", "can_request": True, "requested": ["p.example"], "authorities": [
+        {"host": "a.example", "slug": "cust_a1", "authorized": True, "bound": True, "verified": True, "trusted": True,
+         "active": True, "scope": ["a.example"], "environment": "live", "not_before": "2024-01-01T00:00:00+00:00",
+         "not_after": "2099-01-01T00:00:00+00:00", "allow_destructive": False, "live_destructive_acknowledged": False,
+         "issued_by": "customer:org_acme", "note": ""},
+        {"host": "c.example", "slug": "cust_c1", "authorized": True, "bound": True, "verified": True, "trusted": True,
+         "active": False, "scope": ["c.example"], "environment": "live", "not_before": "2024-01-01T00:00:00+00:00",
+         "not_after": "2024-02-01T00:00:00+00:00", "allow_destructive": False, "live_destructive_acknowledged": False,
+         "issued_by": "customer:org_acme", "note": ""},
+        {"host": "p.example", "slug": "cust_p1", "authorized": False, "active": False}]},
+    # the Privacy centre (legal/governance S2): the published cookie inventory, subprocessor list and the links to the
+    # full pages, exactly as privacy_center_store reads them from the public pages (org-independent, read-only).
+    "api/customer/privacy": {"ok": True,
+        "cookies": [{"name": "sigil_session", "purpose": "Operator/owner console session", "category": "Strictly necessary"},
+                    {"name": "vigil_customer_session", "purpose": "Customer-plane session (hosted mode)", "category": "Strictly necessary"},
+                    {"name": "OIDC binding cookie", "purpose": "Binds a sign-in flow to your browser (anti-CSRF), short-lived", "category": "Strictly necessary"}],
+        "cookie_summary": {"strictly_necessary": 3, "optional": 0,
+                           "note": "Short version: the product uses only strictly-necessary session cookies, so there's nothing to consent to."},
+        "subprocessors": [{"name": "Amazon Web Services (AWS)", "detail": "Amazon Web Services (AWS), eu-west-1 (Ireland) — hosting, encrypted backups, and account email."},
+                          {"name": "Cloudflare", "detail": "Cloudflare — DNS, content delivery and DDoS protection."},
+                          {"name": "Stripe", "detail": "Stripe — card payments in US dollars."},
+                          {"name": "Google", "detail": "Google — sign-in, only if you choose Continue with Google."},
+                          {"name": "GitHub", "detail": "GitHub — only if you connect a repository for code review."},
+                          {"name": "Anthropic", "detail": "Anthropic (Claude API) — the AI features."}],
+        "links": {"cookies": "/cookies", "privacy": "/privacy", "trust": "/trust"}},
+    # the Seller identity screen (legal/governance S7): the GLOBAL published seller-identity block (ui/seller_identity.py)
+    "api/customer/seller-identity": {"ok": True, "seller": {
+        "legal_name": "SIGIL SARL", "legal_name_expansion": "Sovereign Integrity Governance Infrastructure Labs",
+        "legal_form": "Société à responsabilité limitée (SARL)", "registered_city": "Buea",
+        "registered_country": "Cameroon", "registration_number": "RCCM RC.BUA.2026.B.0190",
+        "contact_email": "info@sigilsovereign.com", "website": "sigilsovereign.com",
+        "governing_law": "the laws of the Republic of Cameroon, including the applicable OHADA Uniform Acts"}},
     # PR-B Fix first: one verified host tested — two open findings worst first (the critical one with its signed
     # plain-language parts and fix), one a retest proved fixed, the first six weeks not measured yet. The scores are the
     # server's own arithmetic over these severities (100 x 100 // (100 + 45 + 22 [+ 9 while the medium was open])).
@@ -481,6 +541,17 @@ _FAKE_SERVER = {
                         "controls": [{"id": "A03:2021", "name": "Injection", "status": "weakness_proven",
                                       "findings": [{"finding_ref": "f1", "title": "SQL injection",
                                                     "host": "a.example", "retest": None}]}]}]},
+    # S5: the AI / human-in-the-loop governance disclosure (ui/ai_governance) — the fixed statement and the cited
+    # sections. A pure display: no control, so the screen adds no button to the census.
+    "api/customer/ai-governance": {
+        "ok": True, "org_id": "org_acme",
+        "statement": "VIGIL uses AI to assist and advise — never as an authority.",
+        "sections": [{"title": "What AI does",
+                      "points": [{"text": "Parts of the Service use AI models to plan and prioritise testing.",
+                                  "source": "Terms of Service, §11"}]},
+                     {"title": "What AI never does",
+                      "points": [{"text": "AI never decides what you are charged or which hosts you may test.",
+                                  "source": "Terms of Service, §11"}]}]},
 }
 
 
@@ -875,9 +946,11 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
+        for p in ("members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
-                  "preferences"):
+                  "preferences", "authorizations", "privacy",   # + S12, S2
+                  "data-rights", "data-rights/export",   # + S3
+                  "ai-governance", "seller-identity"):                                   # + S5, S7
             assert _get(_opener(), ep, "/api/customer/" + p)[0] == 404, p
     finally:
         sov.shutdown(); edge.shutdown()

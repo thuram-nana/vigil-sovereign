@@ -90,12 +90,19 @@ def redact_text(s: str, *, max_chars: int) -> str:
 # --- keyed identifier pseudonymisation (PR2) ------------------------------------------
 
 
-def hmac_id(value: str, *, secret: str) -> str:
+def hmac_id(value: str, *, secret: str | bytes) -> str:
     """Keyed HMAC-SHA256 of an identifier (truncated) — pseudonymous UNDER the key, not a
-    brute-forceable bare hash. Empty in → empty out."""
+    brute-forceable bare hash. Empty in → empty out.
+
+    The key is used as RAW BYTES, exactly like the sibling monitoring REPORT secret
+    (``monitoring_report.seal_report``). A ``bytes`` secret — e.g. the ``head -c 32 /dev/urandom``
+    the deployment runbook provisions — keys the HMAC directly, so random-byte provisioning can
+    never crash or silently mangle on a UTF-8 round-trip. A ``str`` secret is UTF-8-encoded, so a
+    text secret and its byte-identical form yield the SAME pseudonym (determinism preserved)."""
     if not value:
         return ""
-    return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    key = secret if isinstance(secret, (bytes, bytearray)) else secret.encode("utf-8")
+    return hmac.new(bytes(key), value.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 def coarsen_ip(ip: str) -> str:
@@ -110,7 +117,7 @@ def coarsen_ip(ip: str) -> str:
     return str(ipaddress.ip_network(f"{addr}/48", strict=False))
 
 
-def redact_actor(actor: ActorRef, *, secret: str) -> ActorRef:
+def redact_actor(actor: ActorRef, *, secret: str | bytes) -> ActorRef:
     """Return a pseudonymised ActorRef: the IP coarsened-then-HMAC'd, session/principal
     HMAC'd (PR2). Deterministic under the deployment key."""
     ip_net = coarsen_ip(actor.ip)
@@ -121,7 +128,7 @@ def redact_actor(actor: ActorRef, *, secret: str) -> ActorRef:
     )
 
 
-def pseudonymize_source(value: str, *, secret: str) -> str:
+def pseudonymize_source(value: str, *, secret: str | bytes) -> str:
     """Pseudonymise an auth-event source identifier (PR2): coarsen to its /24 (v4) / /48 (v6)
     network then keyed-HMAC if it parses as an IP — so a NAT/CGNAT egress collapses to ONE
     pseudonym (the benign twin's shared source) — else HMAC the raw token (a session/device id).

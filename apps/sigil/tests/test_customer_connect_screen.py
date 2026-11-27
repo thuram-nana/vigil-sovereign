@@ -13,9 +13,13 @@
       flips the site to Verified with no reload, and stops on Verified, on any refusal, when the screen is left and
       after its cap (then "Check again"), and waits — uncounted — while the page is hidden;
     - CODE REPOSITORY: the Code screen's own GitHub install, offered only to someone the server says may manage code;
-    - CLOUD ACCOUNT (only with the cloud leg on): the exact trust policy verbatim; Verify sends only the provider, the
-      account and the role ARN; a connection started earlier is "Not finished" with Continue (the server's resumed
-      steps) and Cancel; an expired one offers Connect again; Disconnect and Cancel ask first.
+    - CLOUD ACCOUNT (only with the cloud leg on): a provider picker (AWS / GCP / Azure / Cloudflare, offered per
+      available.cloud_providers), the chosen provider's account-id input pre-validated with the backend's own rule, and
+      the provider's own placement verbatim (AWS a trust policy; GCP a service-account id + email + gcloud; Azure an
+      admin-consent link + binding tag; Cloudflare a read-only token name + the token pasted ONCE as a SECRET). Verify
+      sends only the provider, the account and the role_ref; a connection started earlier is "Not finished" with
+      Continue (the server's resumed steps for THAT provider) and Cancel; an expired one offers Connect again;
+      Disconnect and Cancel ask first and label by provider.
 * The copy follows the product rules: no model or engine name, no price, no estimate.
 
 app.js's own code is extracted verbatim and run on the customer UI kit (ui.js) and the guide (guide.js) with a minimal
@@ -36,6 +40,11 @@ Mutation-verify targets (each neuter reds a NAMED test here):
                                                               -> test_the_cloud_steps_show_the_exact_policy_and_verify_sends_only_its_fields
   * a half-finished connection cannot be continued            -> test_a_half_finished_cloud_connection_continues_with_the_same_steps
   * Disconnect / Cancel sends without asking                  -> test_disconnect_and_cancel_ask_first_and_keep_it_sends_nothing
+  * the picker offers a provider the deployment cannot finish  -> test_the_cloud_picker_offers_every_available_provider
+  * a non-AWS flow posts "aws" / renders AWS-shaped fields     -> test_connecting_{gcp,azure,cloudflare}_*
+  * the Cloudflare token is echoed back or not sent as secret  -> test_connecting_cloudflare_posts_cloudflare_and_pastes_the_secret_token_once
+  * a connected non-AWS row mislabels its provider / reference -> test_a_connected_non_aws_row_labels_and_renders_by_its_provider
+  * resuming a non-AWS connection falls back to AWS steps      -> test_resuming_a_non_aws_connection_shows_that_providers_steps
 """
 from __future__ import annotations
 
@@ -103,7 +112,7 @@ _VIEWS = ("viewDashboard", "viewLogin", "viewSignup", "viewRecover", "viewGoogle
 # ATTACK_PATH_ON / BLIND_VULN_ON are PR-L's (Area 11) flags: the extracted shell + route table read ATTACK_PATH_ON.
 _OTHER_FLAGS_OFF = ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
                     "LAUNCH_ON = false, CODE_ON = false, ATTACK_PATH_ON = false, BLIND_VULN_ON = false, "
-                    "SETTINGS_ON = false;")
+                    "SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false, LIVE_ON = false;")
 
 
 def _wiring(flag: str, script: str) -> dict:
@@ -241,7 +250,8 @@ def _screen_app(flag: str, cloud: str, code_on: bool) -> str:
                       "const ROUTES = {\n" + _line(src, r'^    "#/connect": function .*,$') + "\n};"])
 
 
-_AV = {"site_check": True, "site_auto_recheck": True, "repos": True, "repo_connect": True, "cloud_connect": True}
+_AV = {"site_check": True, "site_auto_recheck": True, "repos": True, "repo_connect": True, "cloud_connect": True,
+       "cloud_providers": {"aws": True, "gcp": True, "azure": True, "cloudflare": True}}
 _POLICY = json.dumps({"Version": "2012-10-17", "Statement": [
     {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::111122223333:role/vigil-connector"},
      "Action": "sts:AssumeRole", "Condition": {"StringEquals": {"sts:ExternalId": "EXT-abc_123"}}}]}, indent=2)
@@ -265,6 +275,58 @@ _PENDING = {"org_id": "org_a", "host": "acme.io", "status": "pending", "selected
 _CHALLENGE = {"provider": "aws", "account_id": "123456789012", "external_id": "EXT-abc_123", "resumed": False,
               "principal_arn": "arn:aws:iam::111122223333:role/vigil-connector", "trust_policy": _POLICY,
               "permissions_policy_arn": "arn:aws:iam::aws:policy/SecurityAudit", "role_name_hint": "VigilSecurityAudit"}
+# The other three providers' challenge shapes, exactly as provision.cloud_connect_challenge returns them (the common
+# {provider, account_id, external_id, resumed} merged with the provider's placement — gcp_placement / azure_placement /
+# cloudflare_placement). The SA email / Object ID / token the customer pastes back is the provider's role_ref.
+_GCP_PROJECT = "my-company-prod"
+_GCP_SA_ID = "vgl-0123456789abcdef0123"
+_GCP_SA_EMAIL = _GCP_SA_ID + "@" + _GCP_PROJECT + ".iam.gserviceaccount.com"
+_GCP_CONNECTOR_SA = "vigil-connect@vigil-prod.iam.gserviceaccount.com"
+_GCP_CHALLENGE = {
+    "provider": "gcp", "account_id": _GCP_PROJECT, "external_id": "EXT-gcp_1", "resumed": False,
+    "connector_sa": _GCP_CONNECTOR_SA, "token_creator_role": "roles/iam.serviceAccountTokenCreator",
+    "sa_id": _GCP_SA_ID, "sa_email": _GCP_SA_EMAIL,
+    "steps": [("In GCP project " + _GCP_PROJECT + ", create a service account with EXACTLY this id (its name encodes "
+               "your connection — do not change it): " + _GCP_SA_ID),
+              ("Grant VIGIL's connector service account the Service Account Token Creator role ON that service account "
+               "(resource-scoped; a project-wide grant also works but is broader than needed).")],
+    "gcloud": [('gcloud iam service-accounts create ' + _GCP_SA_ID + ' --project=' + _GCP_PROJECT
+                + ' --display-name="VIGIL connect"'),
+               ('gcloud iam service-accounts add-iam-policy-binding ' + _GCP_SA_EMAIL + ' --project=' + _GCP_PROJECT
+                + ' --member="serviceAccount:' + _GCP_CONNECTOR_SA + '" --role="roles/iam.serviceAccountTokenCreator"')]}
+_AZURE_TENANT = "00000000-0000-0000-0000-000000000000"
+_AZURE_CLIENT = "11111111-2222-3333-4444-555555555555"
+_AZURE_OBJECT_ID = "99999999-8888-7777-6666-555555555555"
+_AZURE_CHALLENGE = {
+    "provider": "azure", "account_id": _AZURE_TENANT, "external_id": "EXT-az_1", "resumed": False,
+    "client_id": _AZURE_CLIENT,
+    "admin_consent_url": "https://login.microsoftonline.com/" + _AZURE_TENANT + "/adminconsent?client_id=" + _AZURE_CLIENT,
+    "binding_tag": "EXT-az_1",
+    "graph_read": ("GET https://graph.microsoft.com/v1.0/servicePrincipals(appId='" + _AZURE_CLIENT
+                   + "')?$select=appId,id,tags"),
+    "steps": [("As a Global Administrator of tenant " + _AZURE_TENANT + ", open the admin-consent URL and grant VIGIL's "
+               "app admin consent (read-only application permissions)."),
+              ("In Microsoft Entra ID -> Enterprise applications -> VIGIL -> Properties, add the binding tag shown (the "
+               "external id) as a tag, then Save."),
+              ("Return here and verify: VIGIL reads its own service principal back over Microsoft Graph and confirms "
+               "the tag equals the external id.")]}
+_CF_ACCOUNT = "0123456789abcdef0123456789abcdef"
+_CF_TOKEN_NAME = "vigil-verify-EXT-cf_1"
+_CF_GROUPS = ["Account Settings Read", "Zone Read", "User API Tokens Read"]
+_CF_CHALLENGE = {
+    "provider": "cloudflare", "account_id": _CF_ACCOUNT, "external_id": "EXT-cf_1", "resumed": False,
+    "token_name": _CF_TOKEN_NAME, "permission_groups": _CF_GROUPS, "account_scope": _CF_ACCOUNT, "read_only": True,
+    "steps": ["In the Cloudflare dashboard open My Profile -> API Tokens -> Create Token -> Create Custom Token.",
+              ("Name the token EXACTLY " + _CF_TOKEN_NAME + " — the name proves this request is yours; a different name "
+               "is rejected."),
+              ("Under Permissions add ONLY Read permissions (set each to Read, never Edit/Write): "
+               + ", ".join(_CF_GROUPS) + ". A token carrying any write/edit permission is refused."),
+              ("Under Account Resources choose Include -> a specific account -> " + _CF_ACCOUNT + " (NOT 'All "
+               "accounts'); keep any Zone Resources scoped within that same account only. A token that can reach more "
+               "than this one account is refused."),
+              "Leave Client IP Address Filtering and TTL at their defaults, create the token, and copy it.",
+              ("Paste the token into the connect screen once. VIGIL verifies it and does NOT store it — only the "
+               "token's public id and a sha256 are kept.")]}
 
 
 def _screen(server: "dict | None" = None, then: str = "", *, flag: str = "1", cloud: str = "1", code_on: bool = True,
@@ -477,11 +539,12 @@ def test_the_cloud_steps_show_the_exact_policy_and_verify_sends_only_its_fields(
     out = _screen({"POST api/customer/connect/cloud/challenge": {"data": _CHALLENGE},
                    "POST api/customer/connect/cloud/verify": {"data": {"provider": "aws", "account_id": "123456789012",
                                                                        "access": "read-only"}}}, r"""
-await press(tile("Cloud account"), "Connect an AWS account");
-flowBox().querySelector("#connect-aws-account").value = "12345";
+await press(tile("Cloud account"), "Connect a cloud account");
+flowBox().querySelector("#connect-cloud-provider").value = "aws";
+flowBox().querySelector("#connect-cloud-account").value = "12345";
 await press(flowBox(), "Continue");
 out.bad = [errs.slice(), posts().length];
-flowBox().querySelector("#connect-aws-account").value = " 1234-5678 9012 ";
+flowBox().querySelector("#connect-cloud-account").value = " 1234-5678 9012 ";
 await press(flowBox(), "Continue");
 out.challenge = posts().slice();
 out.policy = text(flowBox().querySelector("pre.cust-connect-policy"));
@@ -555,6 +618,213 @@ out.toasts = toasts;
     assert out["cancelSent"] == [["POST", "api/customer/connect/cloud/disconnect",
                                   {"provider": "aws", "account_id": "333333333333"}]]
     assert out["toasts"] == ["AWS account 111111111111 disconnected", "AWS account 333333333333: connection cancelled"]
+
+
+# --- the provider picker and the three non-AWS flows (AWS stays exactly as above) ------------------------------------
+def test_the_cloud_picker_offers_every_available_provider():
+    opts = r"""
+await press(tile("Cloud account"), "Connect a cloud account");
+out.options = flowBox().querySelector("select#connect-cloud-provider").querySelectorAll("option")
+  .map(o => [o.value, o.textContent]);
+"""
+    out = _screen(then=opts)
+    assert out["options"] == [["aws", "AWS"], ["gcp", "GCP"], ["azure", "Azure"], ["cloudflare", "Cloudflare"]]
+    # only the providers the server marks ready in available.cloud_providers are offered
+    some = dict(_OVERVIEW, available=dict(_AV, cloud_providers={"aws": True, "gcp": False, "azure": True,
+                                                                "cloudflare": False}))
+    out = _screen(overview=some, then=opts)
+    assert out["options"] == [["aws", "AWS"], ["azure", "Azure"]]
+    # with no per-provider map at all the picker falls back to offering all four (the server still refuses an
+    # unprovisioned provider with its own error, so the picker is never a dead end)
+    nomap = dict(_OVERVIEW, available={k: v for k, v in _AV.items() if k != "cloud_providers"})
+    out = _screen(overview=nomap, then=opts)
+    assert out["options"] == [["aws", "AWS"], ["gcp", "GCP"], ["azure", "Azure"], ["cloudflare", "Cloudflare"]]
+
+
+def test_connecting_gcp_posts_gcp_and_renders_the_service_account_fields():
+    out = _screen({"POST api/customer/connect/cloud/challenge": {"data": _GCP_CHALLENGE},
+                   "POST api/customer/connect/cloud/verify": {"data": {"provider": "gcp", "account_id": _GCP_PROJECT,
+                                                                       "access": "read-only"}}}, r"""
+await press(tile("Cloud account"), "Connect a cloud account");
+const prov = flowBox().querySelector("#connect-cloud-provider"); prov.value = "gcp"; prov.dispatch("change");
+out.label = flowBox().querySelectorAll("label").map(l => text(l));
+flowBox().querySelector("#connect-cloud-account").value = "sh0rt";
+await press(flowBox(), "Continue");
+out.bad = [errs.slice(), posts().length];
+flowBox().querySelector("#connect-cloud-account").value = "  my-company-prod  ";
+await press(flowBox(), "Continue");
+out.challenge = posts().slice();
+out.header = text(flowBox().querySelector("h3"));
+out.steps = flowBox().querySelector("ol.cust-connect-steps").querySelectorAll("li").map(li => text(li));
+out.values = flowBox().querySelectorAll("div.cust-connect-copy").map(r => [text(r.querySelector("span.k")),
+  r.querySelector("code") ? text(r.querySelector("code")) : null]);
+flowBox().querySelector("#connect-cloud-role").value = "  " + __SA__ + "  ";
+await press(flowBox(), "Verify connection");
+out.verify = posts().slice(1);
+out.after = [toasts.slice(), renders];
+""".replace("__SA__", json.dumps(_GCP_SA_EMAIL)))
+    assert out["label"] == ["Cloud provider", "GCP project ID"]
+    assert out["bad"] == [[("A GCP project ID is 6 to 30 characters: a lowercase letter, then lowercase letters, digits "
+                            "or hyphens, with no trailing hyphen.")], 0]
+    assert out["challenge"] == [["POST", "api/customer/connect/cloud/challenge",
+                                 {"provider": "gcp", "account_id": "my-company-prod"}]]
+    assert out["header"] == "Connect Google Cloud project my-company-prod"
+    assert out["steps"] == _GCP_CHALLENGE["steps"]                      # the server's own steps, verbatim
+    vals = {k: v for k, v in out["values"]}
+    assert vals["Service account id"] == _GCP_SA_ID and vals["Service account email"] == _GCP_SA_EMAIL
+    assert vals["Connector"] == _GCP_CONNECTOR_SA and vals["Role"] == "roles/iam.serviceAccountTokenCreator"
+    assert [v for k, v in out["values"] if k == "gcloud"] == _GCP_CHALLENGE["gcloud"]
+    assert out["verify"] == [["POST", "api/customer/connect/cloud/verify",
+                              {"provider": "gcp", "account_id": "my-company-prod", "role_ref": _GCP_SA_EMAIL}]]
+    assert out["after"] == [["GCP account my-company-prod connected (read-only)"], 1]
+
+
+def test_connecting_azure_posts_azure_and_renders_the_consent_fields():
+    out = _screen({"POST api/customer/connect/cloud/challenge": {"data": _AZURE_CHALLENGE},
+                   "POST api/customer/connect/cloud/verify": {"data": {"provider": "azure", "account_id": _AZURE_TENANT,
+                                                                       "access": "read-only"}}}, r"""
+await press(tile("Cloud account"), "Connect a cloud account");
+const prov = flowBox().querySelector("#connect-cloud-provider"); prov.value = "azure"; prov.dispatch("change");
+out.label = flowBox().querySelectorAll("label").map(l => text(l));
+flowBox().querySelector("#connect-cloud-account").value = "not-a-guid";
+await press(flowBox(), "Continue");
+out.bad = [errs.slice(), posts().length];
+flowBox().querySelector("#connect-cloud-account").value = "  " + __T__ + "  ";
+await press(flowBox(), "Continue");
+out.challenge = posts().slice();
+out.header = text(flowBox().querySelector("h3"));
+out.steps = flowBox().querySelector("ol.cust-connect-steps").querySelectorAll("li").map(li => text(li));
+out.href = flowBox().querySelector("a.cust-connect-link").getAttribute("href");
+out.linkText = text(flowBox().querySelector("a.cust-connect-link"));
+out.values = flowBox().querySelectorAll("div.cust-connect-copy").map(r => [text(r.querySelector("span.k")),
+  r.querySelector("code") ? text(r.querySelector("code")) : null]);
+flowBox().querySelector("#connect-cloud-role").value = "  " + __OID__ + "  ";
+await press(flowBox(), "Verify connection");
+out.verify = posts().slice(1);
+out.after = [toasts.slice(), renders];
+""".replace("__T__", json.dumps(_AZURE_TENANT)).replace("__OID__", json.dumps(_AZURE_OBJECT_ID)))
+    assert out["label"] == ["Cloud provider", "Azure tenant ID (a GUID)"]
+    assert out["bad"] == [[("An Azure tenant ID is a lowercase GUID, for example "
+                            "00000000-0000-0000-0000-000000000000.")], 0]
+    assert out["challenge"] == [["POST", "api/customer/connect/cloud/challenge",
+                                 {"provider": "azure", "account_id": _AZURE_TENANT}]]
+    assert out["header"] == "Connect Azure tenant " + _AZURE_TENANT
+    assert out["steps"] == _AZURE_CHALLENGE["steps"]
+    assert out["href"] == _AZURE_CHALLENGE["admin_consent_url"]         # admin_consent_url rendered as a link
+    assert out["linkText"] == "Open the admin-consent page"
+    vals = {k: v for k, v in out["values"] if v is not None}
+    assert vals["Binding tag"] == "EXT-az_1" and vals["Application (client) ID"] == _AZURE_CLIENT
+    assert vals["VIGIL reads"] == _AZURE_CHALLENGE["graph_read"]
+    assert out["verify"] == [["POST", "api/customer/connect/cloud/verify",
+                              {"provider": "azure", "account_id": _AZURE_TENANT, "role_ref": _AZURE_OBJECT_ID}]]
+    assert out["after"] == [["Azure account " + _AZURE_TENANT + " connected (read-only)"], 1]
+
+
+def test_connecting_cloudflare_posts_cloudflare_and_pastes_the_secret_token_once():
+    secret = "cf-SECRET-tokenvalue-never-echoed-0001"
+    out = _screen({"POST api/customer/connect/cloud/challenge": {"data": _CF_CHALLENGE},
+                   "POST api/customer/connect/cloud/verify": {"data": {"provider": "cloudflare",
+                                                                       "account_id": _CF_ACCOUNT,
+                                                                       "access": "read-only"}}}, r"""
+await press(tile("Cloud account"), "Connect a cloud account");
+const prov = flowBox().querySelector("#connect-cloud-provider"); prov.value = "cloudflare"; prov.dispatch("change");
+out.label = flowBox().querySelectorAll("label").map(l => text(l));
+flowBox().querySelector("#connect-cloud-account").value = "NOTHEX";
+await press(flowBox(), "Continue");
+out.bad = [errs.slice(), posts().length];
+flowBox().querySelector("#connect-cloud-account").value = "  " + __ACCT__ + "  ";
+await press(flowBox(), "Continue");
+out.challenge = posts().slice();
+out.header = text(flowBox().querySelector("h3"));
+out.steps = flowBox().querySelector("ol.cust-connect-steps").querySelectorAll("li").map(li => text(li));
+const role = flowBox().querySelector("#connect-cloud-role");
+out.inputType = role.getAttribute("type"); out.placeholder = role.getAttribute("placeholder");
+out.copyRows = flowBox().querySelectorAll("div.cust-connect-copy").map(r => [text(r.querySelector("span.k")),
+  text(r.querySelector("code"))]);
+out.perm = flowBox().querySelector("div.cust-kv").querySelectorAll("span").map(text);
+role.value = __SECRET__;
+await press(flowBox(), "Verify connection");
+out.verify = posts().slice(1);
+out.after = [toasts.slice(), renders];
+out.codes = flowBox().querySelectorAll("code").map(text);
+""".replace("__ACCT__", json.dumps(_CF_ACCOUNT)).replace("__SECRET__", json.dumps(secret)))
+    assert out["label"] == ["Cloud provider", "Cloudflare account ID (32 hex characters)"]
+    assert out["bad"] == [["A Cloudflare account ID is 32 lowercase hexadecimal characters."], 0]
+    assert out["challenge"] == [["POST", "api/customer/connect/cloud/challenge",
+                                 {"provider": "cloudflare", "account_id": _CF_ACCOUNT}]]
+    assert out["header"] == "Connect Cloudflare account " + _CF_ACCOUNT
+    assert out["steps"] == _CF_CHALLENGE["steps"]
+    assert out["inputType"] == "password" and out["placeholder"] is None   # a secret: masked, never pre-filled
+    cr = {k: v for k, v in out["copyRows"]}
+    assert cr["Token name"] == _CF_TOKEN_NAME and cr["Account"] == _CF_ACCOUNT
+    assert out["perm"] == ["Permissions (read-only)", ", ".join(_CF_GROUPS)]
+    # the SECRET token is submitted once through the existing connect POST as role_ref
+    assert out["verify"] == [["POST", "api/customer/connect/cloud/verify",
+                              {"provider": "cloudflare", "account_id": _CF_ACCOUNT, "role_ref": secret}]]
+    assert out["after"] == [["Cloudflare account " + _CF_ACCOUNT + " connected (read-only)"], 1]
+    # and NEVER echoed back: not in a toast, not in a rendered code cell
+    assert secret not in " ".join(out["after"][0]) and secret not in " ".join(out["codes"])
+
+
+_MULTI_OVERVIEW = {
+    "org_id": "org_a", "available": _AV, "sites": [], "repos": [],
+    "cloud": [{"provider": "gcp", "account_id": _GCP_PROJECT, "role_ref": _GCP_SA_EMAIL,
+               "verified_at": 1.79e9, "expires_at": 1.8e9, "access": "read-only", "status": "connected"},
+              {"provider": "azure", "account_id": _AZURE_TENANT, "role_ref": _AZURE_OBJECT_ID,
+               "verified_at": 1.79e9, "expires_at": 1.8e9, "access": "read-only", "status": "connected"},
+              {"provider": "cloudflare", "account_id": _CF_ACCOUNT, "role_ref": "fedcba9876543210fedcba9876543210",
+               "verified_at": 1.6e9, "expires_at": 1.65e9, "access": "read-only", "status": "expired"}]}
+
+
+def test_a_connected_non_aws_row_labels_and_renders_by_its_provider():
+    out = _screen(server={"POST api/customer/connect/cloud/disconnect": {"data": {"disconnected": True}}},
+                  overview=_MULTI_OVERVIEW, then=r"""
+const acct = host => tile("Cloud account").querySelectorAll("div.cust-connect-acct")
+  .filter(a => text(a.querySelector("span.host")) === host)[0];
+out.rows = tile("Cloud account").querySelectorAll("div.cust-connect-acct").map(a => [
+  text(a.querySelector("span.host")), text(a.querySelector("span.cust-badge")),
+  a.querySelectorAll("div.cust-kv").map(k => k.querySelectorAll("span").map(text)), buttons(a)]);
+await press(acct("GCP " + __P__), "Disconnect");
+out.confirm = text(acct("GCP " + __P__).querySelector("div.cust-mon-actions"));
+await press(acct("GCP " + __P__), "Disconnect");
+out.sent = posts();
+out.toasts = toasts.slice();
+""".replace("__P__", json.dumps(_GCP_PROJECT)))
+    assert out["rows"][0] == ["GCP " + _GCP_PROJECT, "✓ Connected (read-only)",
+                              [["Service account", _GCP_SA_EMAIL], ["Valid until", "2027-01-15"]], ["Disconnect"]]
+    assert out["rows"][1] == ["Azure " + _AZURE_TENANT, "✓ Connected (read-only)",
+                              [["Enterprise app (Object ID)", _AZURE_OBJECT_ID], ["Valid until", "2027-01-15"]],
+                              ["Disconnect"]]
+    assert out["rows"][2] == ["Cloudflare " + _CF_ACCOUNT, "⚠ Expired — connect again",
+                              [["API token ID", "fedcba9876543210fedcba9876543210"], ["Expired", "2022-04-15"]],
+                              ["Connect again", "Disconnect"]]
+    assert "Disconnect GCP " + _GCP_PROJECT + "?" in out["confirm"] and "remove it in GCP" in out["confirm"]
+    assert out["sent"] == [["POST", "api/customer/connect/cloud/disconnect",
+                            {"provider": "gcp", "account_id": _GCP_PROJECT}]]
+    assert out["toasts"] == ["GCP account " + _GCP_PROJECT + " disconnected"]
+
+
+@pytest.mark.parametrize("challenge, header, note, field", [
+    (_GCP_CHALLENGE, "Connect Google Cloud project " + _GCP_PROJECT, "service-account id and external", _GCP_SA_ID),
+    (_AZURE_CHALLENGE, "Connect Azure tenant " + _AZURE_TENANT, "admin-consent URL and the", _AZURE_CLIENT),
+    (_CF_CHALLENGE, "Connect Cloudflare account " + _CF_ACCOUNT, "token name and account scope", _CF_TOKEN_NAME)])
+def test_resuming_a_non_aws_connection_shows_that_providers_steps(challenge, header, note, field):
+    resumed = dict(challenge, resumed=True)
+    pending = {"org_id": "org_a", "available": _AV, "sites": [], "repos": [],
+               "cloud": [{"provider": challenge["provider"], "account_id": challenge["account_id"],
+                          "access": "read-only", "status": "pending"}]}
+    out = _screen(server={"POST api/customer/connect/cloud/challenge": {"data": resumed}}, overview=pending, then=r"""
+await press(tile("Cloud account").querySelectorAll("div.cust-connect-acct")[0], "Continue");
+out.sent = posts();
+out.header = text(flowBox().querySelector("h3"));
+out.text = text(flowBox());
+out.steps = flowBox().querySelector("ol.cust-connect-steps").querySelectorAll("li").length;
+""")
+    assert out["sent"] == [["POST", "api/customer/connect/cloud/challenge",
+                            {"provider": challenge["provider"], "account_id": challenge["account_id"]}]]
+    assert out["header"] == header                                      # the resumed steps label by provider
+    assert note in out["text"] and field in out["text"]                # the resumed note + a real provider field
+    assert out["steps"] == len(challenge["steps"])
 
 
 def test_the_repo_tile_uses_the_code_screens_own_install():

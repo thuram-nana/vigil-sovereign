@@ -152,7 +152,8 @@ class UIServer(GracefulMixin, ThreadingHTTPServer):
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
                  extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None,
-                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None):
+                 customer_oidc_http_post=None, customer_oidc_jwks_fetcher=None,
+                 sso_oidc_http_post=None, sso_oidc_jwks_fetcher=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -203,6 +204,10 @@ class UIServer(GracefulMixin, ThreadingHTTPServer):
         # egress; a test injects both (a fake IdP) so the edge OIDC round-trip never touches the network.
         self.customer_oidc_http_post = customer_oidc_http_post
         self.customer_oidc_jwks_fetcher = customer_oidc_jwks_fetcher
+        # Consumer PR-H — the SAME hooks for the per-org ENTERPRISE-OIDC sign-in (VIGIL_CUSTOMER_SSO). Both None
+        # (production) ⇒ the egress is pinned to each org's owner-signed oidc_egress_hosts; a test injects both.
+        self.sso_oidc_http_post = sso_oidc_http_post
+        self.sso_oidc_jwks_fetcher = sso_oidc_jwks_fetcher
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -1528,7 +1533,7 @@ class Handler(BaseHTTPRequestHandler):
         this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
         proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
         from .. import config as _config
-        from .provision import (ProvisionDenied, ProvisionError, ProvisionRateLimited,
+        from .provision import (ProvisionBusy, ProvisionDenied, ProvisionError, ProvisionRateLimited,
                                 ProvisionStepUpRequired, build_provisioner)
         action = path[len("/api/provision/"):]
         principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
@@ -1536,7 +1541,7 @@ class Handler(BaseHTTPRequestHandler):
         sig = self.headers.get("X-VIGIL-Provision-Sig", "") or ""
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length > self._MAX_BODY:
+            if length > self._provision_body_cap(action):
                 return self._deny(413, "body too large")
             raw = self.rfile.read(length) if length else b""
         except (ValueError, OSError) as e:
@@ -1561,9 +1566,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(400, f"bad request: {str(e)[:200]}")
         p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens(),
                               customer_oidc_http_post=self.server.customer_oidc_http_post,
-                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher)
+                              customer_oidc_jwks_fetcher=self.server.customer_oidc_jwks_fetcher,
+                              sso_oidc_http_post=self.server.sso_oidc_http_post,
+                              sso_oidc_jwks_fetcher=self.server.sso_oidc_jwks_fetcher)
         try:
             result = self._provision_dispatch(p, action, principal, body)
+        except ProvisionBusy as e:
+            return self._deny(503, f"busy; retry after {e.retry_after:.0f}s")
         except ProvisionRateLimited as e:
             return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
         except ProvisionStepUpRequired as e:
@@ -1652,6 +1661,42 @@ class Handler(BaseHTTPRequestHandler):
                 return p.preferences_get(requester)
             prefs = body.get("preferences")
             return p.preferences_set(requester, prefs if isinstance(prefs, dict) else {})
+        # The Privacy centre's read (legal/governance S2): the deployment's PUBLISHED privacy facts (cookie inventory,
+        # subprocessors, the published pages' links), read from the canonical public pages — org-independent, read-only.
+        # requester is the hop principal, never a body field. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_PRIVACY_CENTER is on, the same flag that gates the edge route.
+        if action == "privacy_center":
+            from .. import config as _config
+            if not _config.customer_privacy_center_enabled():
+                return None
+            return p.privacy_center(requester, str(body.get("org_id", "")), ip=ip)
+        # Legal/governance S3 — the customer Data-rights screen: the account's rights statement + SLA + recorded
+        # requests (data_rights_overview), a tenant-scoped read-only export of the session org's own non-secret records
+        # (data_rights_export), and recording an owner-signed close-account / deletion request (data_rights_request).
+        # Absent (unknown action -> 404) unless VIGIL_CUSTOMER_DATA_RIGHTS is on, the same flag that gates the edge
+        # routes. Requester is the hop principal and the org is the edge SESSION org (never a free body field); a body
+        # `username`/`org_id` is ignored — only the request's own `kind`/`request_id` travel.
+        if action in ("data_rights_overview", "data_rights_export", "data_rights_request"):
+            from .. import config as _config
+            if not _config.customer_data_rights_enabled():
+                return None
+            if action == "data_rights_overview":
+                return p.data_rights_overview(requester, ip=ip)
+            if action == "data_rights_export":
+                return p.data_rights_export(requester, str(body.get("org_id", "")), ip=ip)
+            return p.data_rights_request(requester, str(body.get("org_id", "")),
+                                         kind=str(body.get("kind") or ""),
+                                         request_id=str(body.get("request_id") or ""), ip=ip)
+        # The Seller identity screen's read (legal/governance S7): the PUBLISHED seller identity of the hosted VIGIL
+        # service — a GLOBAL owner-reviewed CODE block, identical for every account, so the body is ignored entirely
+        # (no org, no tenant data). Account-level like the reads above: requester is the hop principal, never a body
+        # field. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_SELLER_IDENTITY is on, the same flag that gates
+        # the edge route. A pure read: off the signed spine, never audited.
+        if action == "seller_identity_get":
+            from .. import config as _config
+            if not _config.customer_seller_identity_enabled():
+                return None
+            return p.seller_identity_get(requester)
         # The Account security screen's read: the requesting account's own second factors (never a secret).
         # Account-level like MFA: requester is the hop principal, never a body field. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_SECURITY_UI is on, the same flag that gates the edge route.
@@ -1727,6 +1772,26 @@ class Handler(BaseHTTPRequestHandler):
                                       mfa_at=body.get("mfa_at"))
             return p.launch_resume(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip,
                                    mfa_at=body.get("mfa_at"))
+        # Live Control MISSION STEERING — enqueue ONE advisory instruction for the session org's running
+        # engagement on `host`. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_LIVE_CONTROL is on (the same
+        # flag that gates the edge route); requester is the hop principal, org from the edge SESSION, the host
+        # validated sovereign-side against the org's own proven set. Advisory-only: fires no tool, relaxes no scope.
+        if action == "launch_instruct":
+            from .. import config as _config
+            if not _config.customer_live_control_enabled():
+                return None
+            return p.launch_instruct(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
+                                     text=str(body.get("text", "")), idem_key=str(body.get("idem_key", "")),
+                                     ip=ip, mfa_at=body.get("mfa_at"))
+        # Live Control READ — the customer-safe live activity (phase transitions) of the session org's running
+        # engagement on `host`, incrementally via a `since` cursor. Absent (404) unless VIGIL_CUSTOMER_LIVE_CONTROL
+        # is on; org from the edge SESSION, host validated sovereign-side against the org's own proven set.
+        if action == "launch_activity":
+            from .. import config as _config
+            if not _config.customer_live_control_enabled():
+                return None
+            return p.launch_activity(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
+                                     since=str(body.get("since", "")), ip=ip)
         # C1a — the session org's launches for the customer app's Assessments screen. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_LAUNCH_UI is on, the same flag that gates the edge route; org from the edge SESSION.
         if action == "launch_list":
@@ -1761,6 +1826,37 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # AEGIS AS-2f — SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a contracts). Absent (unknown
+        # action -> 404) unless BOTH the monitoring master flag AND the strict v2 flag are ON; requester is the
+        # hop principal, org from the edge SESSION (never a free body field), step-up stamp from the session.
+        if action in ("monitor_authorize_v2", "monitor_revoke_v2", "monitor_renew", "monitor_binding_list"):
+            from .. import config as _config
+            if not (_config.customer_monitoring_enabled() and _config.aegis_sovereign_v2_enabled()):
+                return None
+            org = str(body.get("org_id", ""))
+            host = str(body.get("host", ""))
+            if action == "monitor_binding_list":
+                return p.monitor_binding_list(requester, org, ip=ip)
+            if action == "monitor_authorize_v2":
+                # AS-2g binding seam: when origin_host is given, the sovereign owner-signs + publishes the origin
+                # binding and mints the grant BOUND to it. origin_secret_sha256 is the AS-2h sealed-secret
+                # commitment the custody layer computed (never a plaintext secret). All default-empty => unbound.
+                _port = body.get("origin_port", 443)                    # a JSON number; anything else => default 443
+                return p.monitor_authorize_v2(requester, org, host, capabilities=body.get("capabilities"),
+                                              window_s=body.get("window_s"),
+                                              instance_id=str(body.get("instance_id", "default")),
+                                              origin_host=str(body.get("origin_host", "")),
+                                              origin_port=_port if isinstance(_port, int) and not isinstance(
+                                                  _port, bool) else 443,
+                                              edge_chain=str(body.get("edge_chain", "shared_actor")),
+                                              origin_secret_sha256=str(body.get("origin_secret_sha256", "")),
+                                              ip=ip, mfa_at=body.get("mfa_at"))
+            if action == "monitor_renew":
+                return p.monitor_renew(requester, org, host,
+                                       instance_id=str(body.get("instance_id", "default")),
+                                       window_s=body.get("window_s"), ip=ip, mfa_at=body.get("mfa_at"))
+            return p.monitor_revoke_v2(requester, org, host,
+                                       instance_id=str(body.get("instance_id", "default")), ip=ip)
         # APEX consumer PR-B — the Fix-first screen's reads: the posture + worst-first list + trend, and the trend alone
         # (the Overview's Posture card). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_POSTURE is on together
         # with its master flag VIGIL_APEX_PRESENTATION; requester = the hop principal, org = the edge SESSION's.
@@ -1780,6 +1876,15 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.redpen_enabled():
                 return None
             return self._redpen_dispatch(p, action, requester, body, ip)
+        # Consumer PR-H — enterprise SSO sign-in + SCIM provisioning. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_SSO is on, the same master flag that gates the edge routes. These are session-less
+        # bootstrap actions (no requester): the org selects WHICH owner-signed config the proof must verify under —
+        # the IdP assertion/id_token bound to the login the edge's server-side state names, or the org's bearer.
+        if action.startswith(("sso_", "scim_")):
+            from .. import config as _config
+            if not _config.customer_sso_enabled():
+                return None
+            return self._sso_dispatch(p, action, body, ip)
         # Front B CHK-1 — customer hosted checkout. Absent (unknown action -> 404) unless the flag is ON; requester
         # is the hop principal, org from the edge SESSION, price_id (a catalog id, never an amount) from the body.
         if action == "billing_checkout":
@@ -1879,10 +1984,31 @@ class Handler(BaseHTTPRequestHandler):
                                            engagement_slug=str(body.get("engagement_slug") or ""),
                                            cert_digest=str(body.get("cert_digest") or ""), ip=ip)
 
+        # Legal/governance S12 — the read-only Authorizations surface. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_AUTHORIZATIONS is on (the same flag that gates the edge routes); org from the edge SESSION, never
+        # a body field. The list READS owner-signed authorities (discloses the gate, mints nothing); the request DROPS an
+        # unsigned owner-review note (no authority, no spine write).
+        if action in ("customer_authorizations_list", "customer_authorization_request"):
+            from .. import config as _config
+            if not _config.customer_authorizations_enabled():
+                return None
+            if action == "customer_authorizations_list":
+                return p.customer_authorizations_list(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_authorization_request(requester, str(body.get("org_id", "")),
+                                                    str(body.get("host") or ""), note=str(body.get("note") or ""), ip=ip)
+
         if action == "assets_overview":
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        # Legal/governance S5 — the AI / human-in-the-loop governance disclosure (read-only). Org from the edge
+        # SESSION; absent (unknown action -> 404) unless VIGIL_CUSTOMER_AI_GOVERNANCE is on, the same flag that serves
+        # its edge route.
+        if action == "ai_governance_disclosure":
+            from .. import config as _config
+            if not _config.customer_ai_governance_enabled():
+                return None
+            return p.customer_ai_governance(requester, str(body.get("org_id", "")), ip=ip)
         # PR-G (Area 6) — Plans + plan change, the report export, the compliance view. Each absent (unknown action ->
         # 404) unless its own flag is on (the same flag that serves its edge route); org from the edge SESSION.
         if action in self._AREA6_ACTIONS:
@@ -1947,6 +2073,38 @@ class Handler(BaseHTTPRequestHandler):
             return p.redpen_fix_this(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
         if action == "redpen_retest":
             return p.redpen_retest(requester, org, s("repo"), s("finding_ref"), ip=ip, mfa_at=mfa_at)
+        return None
+
+    # The largest hop body each SSO/SCIM action may carry while VIGIL_CUSTOMER_SSO is on (a signed SAML Response is
+    # tens of KiB; a SCIM group PUT can name a thousand members). Every other action keeps the 64 KiB cap.
+    _SSO_BODY_CAPS = {"sso_saml_acs": 768 * 1024, "scim_request": 1536 * 1024}
+
+    def _provision_body_cap(self, action: str) -> int:
+        """The body cap for a provision action: the larger SSO/SCIM caps apply ONLY while the flag is on (off ⇒ the
+        64 KiB cap for every action, exactly as before)."""
+        if action in self._SSO_BODY_CAPS:
+            from .. import config as _config
+            if _config.customer_sso_enabled():
+                return self._SSO_BODY_CAPS[action]
+        return self._MAX_BODY
+
+    @staticmethod
+    def _sso_dispatch(p, action: str, body: dict, ip: str):
+        """Consumer PR-H — the SSO / SCIM provisioner actions over a CLOSED exact-match set (unknown → None → 404).
+        Called only while VIGIL_CUSTOMER_SSO is on. String fields are read as ``str(x or "")`` (absent/null ⇒ empty
+        ⇒ fail-closed in the provisioner); the SCIM request body is relayed as the JSON value the IdP sent."""
+        def s(k: str) -> str:
+            return str(body.get(k) or "")
+        if action == "sso_login_start":
+            return p.sso_login_start(s("org_id"), ip=ip)
+        if action == "sso_saml_acs":
+            return p.sso_saml_acs(s("org_id"), s("saml_response"), request_id=s("request_id"), ip=ip)
+        if action == "sso_oidc_finish":
+            return p.sso_oidc_finish(s("org_id"), code=s("code"), code_verifier=s("code_verifier"),
+                                     nonce=s("nonce"), ip=ip)
+        if action == "scim_request":
+            return p.scim_request(s("org_id"), method=s("method"), path=s("path"), query=s("query"),
+                                  body=body.get("body"), authorization=s("authorization"), ip=ip)
         return None
 
     def _durability_post(self, path):
@@ -2155,7 +2313,8 @@ class Handler(BaseHTTPRequestHandler):
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
                  allowed_hosts=(), allowed_origins=(), oidc_http_post=None,
                  oidc_jwks_fetcher=None, customer_oidc_http_post=None,
-                 customer_oidc_jwks_fetcher=None) -> UIServer:
+                 customer_oidc_jwks_fetcher=None, sso_oidc_http_post=None,
+                 sso_oidc_jwks_fetcher=None) -> UIServer:
     """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
     ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
     ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist.
@@ -2173,7 +2332,8 @@ def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine
                     extra_hosts=allowed_hosts, extra_origins=allowed_origins,
                     oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher,
                     customer_oidc_http_post=customer_oidc_http_post,
-                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher)
+                    customer_oidc_jwks_fetcher=customer_oidc_jwks_fetcher,
+                    sso_oidc_http_post=sso_oidc_http_post, sso_oidc_jwks_fetcher=sso_oidc_jwks_fetcher)
 
 
 def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,

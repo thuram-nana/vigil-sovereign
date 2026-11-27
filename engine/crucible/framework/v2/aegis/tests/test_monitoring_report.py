@@ -87,6 +87,38 @@ def test_reporter_spools_confirmed_and_lead_but_not_clear(tmp_path):
     assert stat.S_IMODE((tmp_path / "incoming").stat().st_mode) == 0o700
 
 
+# ---- AS-3a strict-domain routing (opt-in, default-OFF) --------------------------------------------------
+def test_domain_slug_is_pinned_and_non_aliasing():
+    # the pinned vector (asserted equal sovereign-side) binds the two planes; the length-prefix means distinct
+    # (org, host) pairs can NEVER collapse into one slug.
+    assert R.domain_slug("org_a", "apme.cm") == "3b47c421ee2b04ed814c44a99213f64c"
+    assert R.domain_slug("ab", "c") != R.domain_slug("a", "bc")
+    assert len(R.domain_slug("x", "y")) == 32 and set(R.domain_slug("x", "y")) <= set("0123456789abcdef")
+
+
+def test_reporter_strict_domain_routes_into_its_own_slug_subtree(tmp_path):
+    rp = R.SpoolReporter(tmp_path, org_id="org_a", host="apme.cm", secret=SECRET, now_fn=lambda: 100.0,
+                         strict_domain=True)
+    rp(_v("confirmed"))
+    slug = R.domain_slug("org_a", "apme.cm")
+    # the sealed report lands under incoming/<slug>/, NOT flat in incoming/ — so a strict drain reads it from
+    # that tenant's own subtree in isolation.
+    assert list((tmp_path / "incoming").iterdir()) == [tmp_path / "incoming" / slug]
+    files = list((tmp_path / "incoming" / slug).glob("*.json"))
+    assert len(files) == 1 and rp.written == 1
+    env = json.loads(files[0].read_bytes())
+    assert _mac_ok(env) and json.loads(env["body"])["org_id"] == "org_a"
+
+
+def test_reporter_default_is_flat_incoming_byte_identical(tmp_path):
+    rp = R.SpoolReporter(tmp_path, org_id="org_a", host="apme.cm", secret=SECRET, now_fn=lambda: 100.0)
+    assert rp.strict_domain is False
+    rp(_v("confirmed"))
+    # default (strict_domain OFF): flat incoming/*.json, no domain subtree — unchanged from pre-AS-3a.
+    assert sorted(p.name for p in (tmp_path / "incoming").iterdir()) and \
+        all(p.is_file() for p in (tmp_path / "incoming").iterdir())
+
+
 def test_reporter_rate_cap_drops_and_counts(tmp_path):
     rp = R.SpoolReporter(tmp_path, org_id="o", host="h", secret=SECRET, max_per_minute=3, now_fn=lambda: 60.0)
     for _ in range(10):
@@ -178,6 +210,43 @@ def test_authorized_tenant_gateway_spools_a_sealed_report(up, pub, tmp_path):
     body = json.loads(env["body"])
     assert body["org_id"] == "org_a" and body["host"] == "apme.cm" and body["decision"] == "confirmed"
     assert "etc/passwd" not in files[0].read_text()
+
+
+def _hit_emit_v2(up, spool):
+    gw = serve_gateway(f"http://127.0.0.1:{up}", config=AegisConfig(deployment_secret="k", mode="enforce"),
+                       host="127.0.0.1", port=0, saas_tenant="org_a", saas_host="apme.cm",
+                       monitoring_spool=str(spool), monitoring_secret=SECRET, emit_v2=True)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", gw.server_address[1], timeout=5)
+        c.request("GET", "/d?file=" + urllib.parse.quote("../../../../etc/passwd"))
+        c.getresponse().read()
+        c.close()
+    finally:
+        gw.shutdown()
+
+
+def test_emit_v2_additive_v1_unchanged_and_v2_is_hygienic(up, pub, tmp_path):
+    """AS-3b: an authorized tenant gateway with emit_v2 ON ADDITIONALLY spools an AS-2b aegis_event v2 record
+    into a DISTINCT incoming_v2/ subtree — while the v1 incoming/ report is byte-unchanged (additive), the v2
+    record conforms to the schema, and neither leaks the request path (hygiene)."""
+    from vigil_core.aegis_schemas import EVENT_V2_SCHEMA, AegisEventV2
+
+    from framework.v2.aegis import monitoring_event_v2 as EV2
+    _grant(pub, "observe")
+    spool = tmp_path / "spool"
+    _hit_emit_v2(up, spool)
+    # v1 path: byte-unchanged — the legacy report still lands flat in incoming/.
+    v1 = list((spool / "incoming").glob("*.json"))
+    assert v1, "emit_v2 must not suppress the v1 monitoring report (additive)"
+    # v2 path: a sealed aegis_event v2 in the sibling incoming_v2/ the v1 drain never reads.
+    v2 = list((spool / EV2.V2_INCOMING).glob("*.json"))
+    assert v2, "emit_v2 must spool an aegis_event v2 record"
+    env = json.loads(v2[0].read_bytes())
+    assert env["schema"] == EVENT_V2_SCHEMA
+    ev = AegisEventV2.parse(json.loads(env["body"]))           # conforms to the shared AS-2b schema
+    assert ev.org_id == "org_a" and ev.host == "apme.cm" and ev.decision == "confirmed"
+    assert "etc/passwd" not in v2[0].read_text() and ev.instance_id == "gw"
 
 
 def test_unauthorized_tenant_gateway_spools_nothing(up, pub, tmp_path):

@@ -38,6 +38,16 @@ def _ui_safe_verdict(v: object) -> dict:
     return d
 
 
+def _log_verdict(v: object) -> None:
+    """The DEFAULT on-verdict sink: a UI-SAFE line to stderr/journald (AS-2e). Projects through
+    ``_ui_safe_verdict`` so the certificate's ``oracle_context`` (matched-span PLAINTEXT + sentinel) never reaches
+    journald, and the full verdict is NEVER dumped. Fail-open: a serialization error logs nothing, never raises."""
+    try:
+        sys.stderr.write(json.dumps(_ui_safe_verdict(v), ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _make_file_verdict_sink(path: str):
     """A thread-safe ``on_verdict`` appending one UI-safe JSON verdict per line. The gateway calls the
     sink from MANY threads, so the append is serialised under a lock; a stamped monotonic counter + a
@@ -118,10 +128,20 @@ def _gateway_snapshot(httpd: object) -> dict:
     --status-out writer and the self-registration (registry) writer. Reads the ActorGraph under the
     belief lock (consistent). The HONEST enforce snapshot carries downgraded/downgrade_reason so the
     console renders a 'requested enforce, running observe BECAUSE …' state, never a silent read-only mode."""
+    from .boundary import pseudonymize_source
     from .response_policy import graduated_action
     s = httpd.settings  # type: ignore[attr-defined]
+    # AS-2e: an actor id is ``session:<raw-client-ip>``; a raw (or /24-recoverable) IP must NEVER reach a
+    # --status-out or registry snapshot (acceptance: "no raw IPs in snapshots"). Keyed-HMAC pseudonymize it under
+    # the per-deployment secret — coarsen-then-HMAC — so the id stays stable + correlatable for the UI but carries
+    # no raw address. Non-``session:`` ids (if any) are HMAC'd whole.
+    _sec = s.config.deployment_secret
+
+    def _pseud_id(aid: str) -> str:
+        pre, sep, rest = str(aid).partition(":")
+        return f"{pre}:{pseudonymize_source(rest, secret=_sec)}" if sep else pseudonymize_source(str(aid), secret=_sec)
     with s._belief_lock:
-        actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
+        actors = [{"id": _pseud_id(aid), "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
                    "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
     es = s.enforcement_status() if hasattr(s, "enforcement_status") else {}
     return {"ts": time.time(),
@@ -265,7 +285,33 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         return 2
     mode = os.environ.get("AEGIS_GW_MODE") or args.mode
     slug = os.environ.get("AEGIS_GW_SLUG") or args.slug
-    secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or _DEMO_SECRET
+    # AS-2j (N-A fix): prefer a 0600 FILE / systemd credential for the deployment secret so it is never in the
+    # process environment (/proc/<pid>/environ). Default-OFF: with no file source the legacy env/arg path below
+    # is byte-identical to before. The report-secret loader's fail-closed rule (regular file, O_NOFOLLOW,
+    # owner-only, bounded, >=16 bytes) is reused verbatim — the two secrets have the same handling requirement.
+    # The loaded secret is kept as RAW BYTES (never UTF-8-decoded), exactly like the report secret: the runbook
+    # provisions it with `head -c 32 /dev/urandom`, and random bytes are not valid UTF-8 — decoding would crash
+    # the documented provisioning path. hmac_id keys off the raw bytes (a str env secret is UTF-8-encoded there,
+    # so a text secret and its byte-identical file produce the same pseudonym).
+    deployment_secret_file = (os.environ.get("AEGIS_GW_SECRET_FILE")
+                              or getattr(args, "deployment_secret_file", None))
+    secret: str | bytes
+    if deployment_secret_file:
+        try:
+            secret = load_monitoring_secret(str(deployment_secret_file))
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"aegis gateway: cannot load --deployment-secret-file: {e}\n")
+            return 2
+    else:
+        secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or ""
+    # AS-2e: a gateway must NEVER run under the built-in demo secret (a world-known key makes every actor
+    # pseudonym trivially reversible) nor with no secret at all. Refuse FAIL-CLOSED — the demo secret is for the
+    # `aegis demo` subcommand only. Covers both the --deployment-secret-file and the env/--secret resolution paths.
+    _sec_bytes = bytes(secret) if isinstance(secret, (bytes, bytearray)) else str(secret).encode("utf-8")
+    if not _sec_bytes or _sec_bytes == _DEMO_SECRET.encode("utf-8"):
+        sys.stderr.write("aegis gateway: refusing to run without a real per-deployment secret (the built-in demo "
+                         "secret is for `aegis demo` only). Set AEGIS_GW_SECRET_FILE / AEGIS_GW_SECRET / --secret.\n")
+        return 2
     honeypots = list(args.honeypot or ())
     _hp_env = os.environ.get("AEGIS_GW_HONEYPOTS")
     if _hp_env:
@@ -281,12 +327,6 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
                          honeypot_paths=honeypots,
                          oob_canary=args.oob_canary,
                          canary=canary)
-
-    def _log_verdict(v: object) -> None:
-        try:
-            sys.stderr.write(v.model_dump_json() + "\n")  # type: ignore[attr-defined]
-        except Exception:
-            pass
 
     # A live-UI deployment (`--verdicts-out`) streams browser-safe verdicts to a JSONL the loopback
     # console tails; otherwise the classic stderr log. `--status-out` publishes a periodic status snapshot.
@@ -311,6 +351,11 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         saas_kw = {k: v for k, v in (("saas_tenant", saas_tenant), ("saas_host", saas_host),
                                      ("monitoring_spool", monitoring_spool),
                                      ("monitoring_secret", monitoring_secret)) if v is not None}
+        # AS-3b (opt-in, DEFAULT-OFF): additionally emit AS-2b aegis_event v2 records. Env or flag. Only passed
+        # when ENABLED, so a deployment that does not opt in calls serve_gateway byte-identically to before.
+        if (os.environ.get("AEGIS_GW_EMIT_V2", "").strip() not in ("", "0", "false", "False")
+                or bool(getattr(args, "emit_v2", False))):
+            saas_kw["emit_v2"] = True
         httpd = serve_gateway(upstream, config=config, host=host, port=port,
                               slug=slug, on_verdict=on_verdict, **saas_kw)
     except ValueError as e:
@@ -388,6 +433,36 @@ def _cmd_demo(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _env_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cmd_tt_acceptance(args: argparse.Namespace) -> int:
+    """Run the AEGIS Test-Tenant (TT) CI Observe acceptance (slice AS-1a): two isolated tenants over
+    real loopback — TT-A under a small attack corpus, TT-B the cross-tenant control. Proves the
+    attack event is visible to TT-A, a same-shape benign baseline is recorded, and TT-B sees nothing.
+
+    This is the ``vigil tt-acceptance``-style entry; it lives with the gateway it drives (engine
+    plane) so it never co-loads the sovereign plane (FATAL-2). ``--require-uids`` (or the
+    ``VIGIL_REQUIRE_TT_UIDS`` env) runs each tenant in its OWN process under a DISTINCT uid; if those
+    uids cannot be provisioned it FAILS (exit 2), never silently skips."""
+    import tempfile
+    from .tt_rig import TTUidsUnavailable, run_tt_acceptance  # lazy: off the gate path
+
+    require = bool(args.require_uids) or _env_truthy(os.environ.get("VIGIL_REQUIRE_TT_UIDS"))
+    root = args.root or tempfile.mkdtemp(prefix="aegis-tt-")
+    try:
+        result = run_tt_acceptance(root, require_distinct_uids=require)
+    except TTUidsUnavailable as exc:
+        sys.stderr.write(
+            f"aegis tt-acceptance: distinct uids REQUIRED but unavailable (FAIL, not skip): {exc}\n")
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    ok = bool(result.get("ok"))
+    sys.stderr.write("aegis tt-acceptance: " + ("PASS\n" if ok else "FAIL\n"))
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # argv is None only when invoked as a console-script entry point (`aegis ...`);
     # argparse then reads sys.argv[1:] itself. Existing callers (`__main__._aegis`)
@@ -460,10 +535,31 @@ def main(argv: list[str] | None = None) -> int:
                         "--monitoring-secret-file and --saas-tenant)")
     g.add_argument("--monitoring-secret-file", default=None, metavar="PATH",
                    help="AEGIS-SaaS: 0600 file holding the per-(tenant, host) report secret (never on argv)")
+    g.add_argument("--emit-v2", action="store_true",
+                   help="AEGIS-SaaS (AS-3b): ADDITIONALLY emit each verdict as an AS-2b aegis_event v2 record "
+                        "into a distinct incoming_v2/ subtree of --monitoring-spool (hygiene-clean, "
+                        "deterministic). Default-OFF. Also settable via AEGIS_GW_EMIT_V2=1.")
+    g.add_argument("--deployment-secret-file", default=None, metavar="PATH",
+                   help="AEGIS-SaaS (AS-2j N-A fix): read the deployment (pseudonymization) secret from a "
+                        "0600 FILE / systemd credential instead of AEGIS_GW_SECRET in the environment, so it "
+                        "never lands in /proc/<pid>/environ. Default-OFF: absent => the AEGIS_GW_SECRET env "
+                        "path is used unchanged. Also settable via AEGIS_GW_SECRET_FILE.")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")
     demo.set_defaults(func=_cmd_demo)
+
+    tt = sub.add_parser("tt-acceptance",
+                        help="run the Test-Tenant CI Observe acceptance (AS-1a): TT-A sees the "
+                             "attack event, a benign baseline is recorded, TT-B sees nothing")
+    tt.add_argument("--root", default=None, metavar="DIR",
+                    help="the test root the per-tenant upstreams/gateways/feeds live under "
+                         "(default: a fresh temp dir)")
+    tt.add_argument("--require-uids", action="store_true",
+                    help="run each tenant in its own process under a DISTINCT uid; if uids cannot be "
+                         "provisioned, FAIL (exit 2) rather than skip. Also enabled by "
+                         "VIGIL_REQUIRE_TT_UIDS in the environment.")
+    tt.set_defaults(func=_cmd_tt_acceptance)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

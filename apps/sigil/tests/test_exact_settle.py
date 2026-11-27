@@ -404,7 +404,7 @@ def test_the_snapshot_carries_the_usage_total():
         assert _settle(g, r)["ok"]
     pub = ensure_owner_keypair().public_key_b64
     snap = build(list(s.iter_records()), trusted_pubkey=pub, base_seq=0, snapshot_seq=-1)
-    assert snap.schema_version == 12 and snap.wallet_usage_map() == {ORG: 3001}
+    assert snap.schema_version == 13 and snap.wallet_usage_map() == {ORG: 3001}
     (d, _d2) = _decisions(s)
     _replay(s, d)                                                  # replayed: still counted once in a fresh build
     assert build(list(s.iter_records()), trusted_pubkey=pub, base_seq=0,

@@ -66,11 +66,11 @@ def _callee_name(node: ast.Call) -> str:
     return ""
 
 
-def _index_file(path: Path, rel: str) -> tuple[list[Symbol], str | None]:
-    try:
-        source = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        return [], f"{rel}: read error {e}"
+def symbols_from_source(source: str, rel: str) -> tuple[list[Symbol], str | None]:
+    """The stdlib-``ast`` -> ``Symbol`` walk over already-read ``source`` (``rel`` labels the path). Returns
+    ``(symbols, error|None)`` — a syntax error yields ``([], "<rel>: syntax error …")``. This is the shared
+    kernel behind both :func:`build_symbol_index` (reads files from disk) and the Python ``LanguagePlugin``'s
+    ``parse_symbols`` (gets source text directly), so the two can never drift and stay byte-identical."""
     try:
         tree = ast.parse(source)
     except SyntaxError as e:
@@ -104,6 +104,14 @@ def _index_file(path: Path, rel: str) -> tuple[list[Symbol], str | None]:
             if name:
                 symbols.append(Symbol(kind="call", name=name, path=rel, line=node.lineno))
     return symbols, None
+
+
+def _index_file(path: Path, rel: str) -> tuple[list[Symbol], str | None]:
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return [], f"{rel}: read error {e}"
+    return symbols_from_source(source, rel)
 
 
 def build_symbol_index(target: AnalysisTarget) -> SymbolIndex:

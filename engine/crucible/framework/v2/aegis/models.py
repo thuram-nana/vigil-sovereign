@@ -221,7 +221,7 @@ class AegisConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    deployment_secret: str = Field(min_length=1, description="Per-deployment HMAC key for identifier pseudonymisation (PR2).")
+    deployment_secret: str | bytes = Field(min_length=1, description="Per-deployment HMAC key for identifier pseudonymisation (PR2). Keyed off RAW BYTES like the monitoring report secret: a str is UTF-8-encoded, raw bytes (e.g. `head -c 32 /dev/urandom`, per the runbook) are used directly — so random-byte provisioning never crashes on a UTF-8 round-trip.")
     upstream_ca_bundle: str | None = Field(
         default=None,
         description="Path to a CA bundle (PEM file or dir) for verifying an HTTPS upstream whose cert chains "

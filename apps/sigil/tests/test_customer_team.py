@@ -191,6 +191,110 @@ def test_add_member_refuses_an_email_with_no_account_and_records_nothing(tmp_pat
     assert "stranger" not in json.dumps([r.payload for r in s.iter_records()])   # ... and no third party's email
 
 
+# --- V12 seats: per-workspace member limit (VIGIL_CUSTOMER_SEATS, default OFF) --------------------------------------
+def test_seats_off_by_default_imposes_no_member_limit(tmp_path, monkeypatch):
+    # VIGIL_CUSTOMER_SEATS unset (the default) -> add_member/grant_member behave exactly as before, no cap,
+    # even with a tiny VIGIL_CUSTOMER_DEFAULT_SEATS set (the flag, not the number, is what gates enforcement).
+    monkeypatch.delenv("VIGIL_CUSTOMER_SEATS", raising=False)
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "1")
+    p, s = _prov(tmp_path)
+    _team(p)                                                             # org_a already has 5 members
+    for i in range(4):
+        p.customers.create(f"extra{i}@acme.io", issued_at=float(next(_clock)), username=f"cust_x{i}")
+        assert p.add_member("cust_ad", "org_a", f"extra{i}@acme.io", "viewer")["username"] == f"cust_x{i}"
+    assert p.orgs.member_count("org_a") == 9
+
+
+def test_seats_limit_refuses_a_new_member_at_capacity(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_SEATS", "1")
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "6")
+    p, s = _prov(tmp_path)
+    _team(p)                                                             # 5 members, limit 6
+    p.customers.create("sixth@acme.io", issued_at=float(next(_clock)), username="cust_six")
+    p.customers.create("seventh@acme.io", issued_at=float(next(_clock)), username="cust_sev")
+    assert p.add_member("cust_ad", "org_a", "sixth@acme.io", "viewer")["username"] == "cust_six"   # 6th fits
+    assert p.orgs.member_count("org_a") == 6
+    n = s.count()
+    with pytest.raises(ProvisionDenied, match="member limit"):                                     # 7th refused
+        p.add_member("cust_ad", "org_a", "seventh@acme.io", "viewer")
+    assert s.count() == n                                               # fail-closed: nothing written, no audit
+    assert p.orgs.membership_role("cust_sev", "org_a") is None
+
+
+def test_seats_limit_never_blocks_a_role_change_only_new_members(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_SEATS", "on")
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "5")              # org_a is exactly at the limit
+    p, s = _prov(tmp_path)
+    _team(p)
+    assert p.orgs.member_count("org_a") == 5
+    # a role change for an EXISTING member consumes no seat -> allowed even at capacity
+    assert p.grant_member("cust_ad", "org_a", "cust_vi", "analyst")["role"] == "analyst"
+    assert p.orgs.member_count("org_a") == 5
+    # but adding a NEW member via grant_member is refused at capacity
+    p.customers.create("nm@acme.io", issued_at=float(next(_clock)), username="cust_nm")
+    with pytest.raises(ProvisionDenied, match="member limit"):
+        p.grant_member("cust_ad", "org_a", "cust_nm", "viewer")
+    assert p.orgs.membership_role("cust_nm", "org_a") is None
+
+
+def test_seats_revoking_a_member_frees_a_seat(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CUSTOMER_SEATS", "yes")
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "5")
+    p, s = _prov(tmp_path)
+    _team(p)                                                            # full at 5
+    p.customers.create("nm@acme.io", issued_at=float(next(_clock)), username="cust_nm")
+    with pytest.raises(ProvisionDenied, match="member limit"):
+        p.add_member("cust_ad", "org_a", "nm@acme.io", "viewer")
+    p.revoke_member("cust_ad", "org_a", "cust_vi")                      # free one seat (viewer, not last admin)
+    assert p.orgs.member_count("org_a") == 4
+    assert p.add_member("cust_ad", "org_a", "nm@acme.io", "viewer")["username"] == "cust_nm"
+    assert p.orgs.member_count("org_a") == 5
+
+
+def test_team_read_reports_seat_usage_only_when_seats_on(tmp_path, monkeypatch):
+    p, s = _prov(tmp_path)
+    _team(p)                                                            # org_a has 5 members
+    monkeypatch.delenv("VIGIL_CUSTOMER_SEATS", raising=False)           # flag off -> no seats key (byte-identical)
+    assert "seats" not in p.customer_members("cust_ad", "org_a")
+    monkeypatch.setenv("VIGIL_CUSTOMER_SEATS", "1")                     # flag on -> usage reported
+    monkeypatch.setenv("VIGIL_CUSTOMER_DEFAULT_SEATS", "8")
+    got = p.customer_members("cust_ad", "org_a")
+    assert got["count"] == 5 and got["seats"] == {"used": 5, "limit": 8}
+
+
+def test_the_team_screen_shows_seat_usage_when_seats_are_on():
+    out = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 4, limit: 8 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+out.hasAdd = !!root.querySelector(".cust-team-add");
+""")
+    assert out["seat"] == "4 of 8 member seats used" and out["hasAdd"] is True
+
+
+def test_the_team_seat_line_hints_when_full_and_is_absent_when_seats_off():
+    full = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 8, limit: 8 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+""")
+    assert "8 of 8 member seats used" in full["seat"] and "add a seat" in full["seat"]
+    one = _node(_app() + r"""
+VUI.getJSON = async p => { calls.push(["GET", p]);
+  return { org_id: "org_a", members: members, count: members.length, seats: { used: 1, limit: 1 } }; };
+show(); await tick();
+out.seat = text(root.querySelector(".cust-team-seats"));
+""")
+    assert "1 of 1 member seat used" in one["seat"]          # singular "seat" when limit == 1
+    off = _node(_app() + r"""
+show(); await tick();
+out.absent = root.querySelector(".cust-team-seats") === null;
+""")
+    assert off["absent"] is True
+
+
 def test_add_member_never_changes_a_current_members_role(tmp_path):
     p, s = _prov(tmp_path)
     _team(p)

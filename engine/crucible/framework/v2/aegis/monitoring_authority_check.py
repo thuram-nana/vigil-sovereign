@@ -61,8 +61,9 @@ def published_dir() -> Path:
     override = (os.environ.get(PUBLISH_DIR_ENV) or "").strip()
     if override:
         return Path(override)
+    from vigil_core.aegis_seam import AEGIS_SEAM_SUBDIR, MONITORING_AUTHORITY_SUBDIR
     from vigil_core.seam_base import resolve_seam_base
-    return Path(resolve_seam_base()) / "aegis" / "monitoring_authority"
+    return Path(resolve_seam_base()) / AEGIS_SEAM_SUBDIR / MONITORING_AUTHORITY_SUBDIR
 
 
 def normalize_host(raw: str) -> Optional[str]:
