@@ -38,6 +38,16 @@ def _ui_safe_verdict(v: object) -> dict:
     return d
 
 
+def _log_verdict(v: object) -> None:
+    """The DEFAULT on-verdict sink: a UI-SAFE line to stderr/journald (AS-2e). Projects through
+    ``_ui_safe_verdict`` so the certificate's ``oracle_context`` (matched-span PLAINTEXT + sentinel) never reaches
+    journald, and the full verdict is NEVER dumped. Fail-open: a serialization error logs nothing, never raises."""
+    try:
+        sys.stderr.write(json.dumps(_ui_safe_verdict(v), ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _make_file_verdict_sink(path: str):
     """A thread-safe ``on_verdict`` appending one UI-safe JSON verdict per line. The gateway calls the
     sink from MANY threads, so the append is serialised under a lock; a stamped monotonic counter + a
@@ -118,10 +128,20 @@ def _gateway_snapshot(httpd: object) -> dict:
     --status-out writer and the self-registration (registry) writer. Reads the ActorGraph under the
     belief lock (consistent). The HONEST enforce snapshot carries downgraded/downgrade_reason so the
     console renders a 'requested enforce, running observe BECAUSE …' state, never a silent read-only mode."""
+    from .boundary import pseudonymize_source
     from .response_policy import graduated_action
     s = httpd.settings  # type: ignore[attr-defined]
+    # AS-2e: an actor id is ``session:<raw-client-ip>``; a raw (or /24-recoverable) IP must NEVER reach a
+    # --status-out or registry snapshot (acceptance: "no raw IPs in snapshots"). Keyed-HMAC pseudonymize it under
+    # the per-deployment secret — coarsen-then-HMAC — so the id stays stable + correlatable for the UI but carries
+    # no raw address. Non-``session:`` ids (if any) are HMAC'd whole.
+    _sec = s.config.deployment_secret
+
+    def _pseud_id(aid: str) -> str:
+        pre, sep, rest = str(aid).partition(":")
+        return f"{pre}:{pseudonymize_source(rest, secret=_sec)}" if sep else pseudonymize_source(str(aid), secret=_sec)
     with s._belief_lock:
-        actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
+        actors = [{"id": _pseud_id(aid), "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
                    "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
     es = s.enforcement_status() if hasattr(s, "enforcement_status") else {}
     return {"ts": time.time(),
@@ -283,7 +303,15 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
             sys.stderr.write(f"aegis gateway: cannot load --deployment-secret-file: {e}\n")
             return 2
     else:
-        secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or _DEMO_SECRET
+        secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or ""
+    # AS-2e: a gateway must NEVER run under the built-in demo secret (a world-known key makes every actor
+    # pseudonym trivially reversible) nor with no secret at all. Refuse FAIL-CLOSED — the demo secret is for the
+    # `aegis demo` subcommand only. Covers both the --deployment-secret-file and the env/--secret resolution paths.
+    _sec_bytes = bytes(secret) if isinstance(secret, (bytes, bytearray)) else str(secret).encode("utf-8")
+    if not _sec_bytes or _sec_bytes == _DEMO_SECRET.encode("utf-8"):
+        sys.stderr.write("aegis gateway: refusing to run without a real per-deployment secret (the built-in demo "
+                         "secret is for `aegis demo` only). Set AEGIS_GW_SECRET_FILE / AEGIS_GW_SECRET / --secret.\n")
+        return 2
     honeypots = list(args.honeypot or ())
     _hp_env = os.environ.get("AEGIS_GW_HONEYPOTS")
     if _hp_env:
@@ -299,12 +327,6 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
                          honeypot_paths=honeypots,
                          oob_canary=args.oob_canary,
                          canary=canary)
-
-    def _log_verdict(v: object) -> None:
-        try:
-            sys.stderr.write(v.model_dump_json() + "\n")  # type: ignore[attr-defined]
-        except Exception:
-            pass
 
     # A live-UI deployment (`--verdicts-out`) streams browser-safe verdicts to a JSONL the loopback
     # console tails; otherwise the classic stderr log. `--status-out` publishes a periodic status snapshot.
