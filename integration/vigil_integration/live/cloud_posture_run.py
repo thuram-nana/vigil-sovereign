@@ -1,22 +1,27 @@
-"""cloud_posture_run — Wave B.2: the FIRST real AWS end-to-end, as pure GLUE over already-merged seams.
+"""cloud_posture_run — Wave B.2/B.3: the real multi-provider cloud end-to-end, as pure GLUE over merged seams.
 
-The one orchestration home that strings together the four seams Wave B.1 (and earlier) already landed, with
-NO new oracle / sensor / evidence / report / mint logic of its own:
+The one orchestration home that strings together the seams Wave B.1 (and earlier) already landed, with
+NO new oracle / sensor / evidence / report / mint logic of its own — only a PROVIDER DISPATCH over the
+already-merged collectors:
 
     minted read-only customer session (DATA)
-        -> the VIGIL-owned read-only collector (``sensors.cloud_live.CloudLiveSensor``) captures the real
-           inventory as THAT identity (never VIGIL's ambient one — ``require_injected_credentials=True``)
-        -> the EXISTING ``cloud_live_verify`` D5-scope-gates the capture and re-fires the deterministic
-           ``cloud_posture`` + ``policy_path`` oracles over the RETAINED export, minting a signed FACT per
-           confirmed insecure subject (the collector's say-so is never trusted — criterion 6)
+        -> DISPATCH on ``session_data.provider``: the VIGIL-owned read-only collector
+           (``aws`` -> ``sensors.cloud_live.CloudLiveSensor``; ``gcp`` -> ``sensors.gcp_live.GcpLiveSensor``)
+           captures the real inventory as THAT identity (never VIGIL's ambient one —
+           ``require_injected_credentials=True``)
+        -> the EXISTING provider-GENERIC ``cloud_live_verify`` D5-scope-gates the capture and re-fires the
+           deterministic ``cloud_posture`` + ``policy_path`` oracles over the RETAINED export, minting a signed
+           FACT per confirmed insecure subject (the collector's say-so is never trusted — criterion 6)
         -> a tiny report-line adapter renders each FACT through the EXISTING report grounding + renderer.
 
-CONSUMES THE SESSION AS DATA. ``session_data`` is a DUCK-TYPED object (``provider`` / ``access_key_id`` /
-``secret_access_key`` / ``session_token`` / ``region`` / ``account_id``) — the shape a
-``vigil_core.cloud_session.MintedSession`` satisfies. This module NEVER imports the mint: the real
-sovereign-subprocess + spool crossing of a minted session is DEFERRED to a later wave, and is modelled
-in-process here by any object with those attributes (a fake duck-typed session in tests). Handing the
-collector DATA, never a governor object, is the FATAL-2 boundary.
+CONSUMES THE SESSION AS DATA. ``session_data`` is a DUCK-TYPED object whose shape a
+``vigil_core.cloud_session.MintedSession`` satisfies: always ``provider`` / ``account_id`` (the account for
+AWS, the PROJECT for GCP), plus the provider's credential parts — AWS ``access_key_id`` /
+``secret_access_key`` / ``session_token`` (+ optional ``region``), or GCP ``bearer_token`` (a short-lived
+OAuth2 access token). This module NEVER imports the mint: the real sovereign-subprocess + spool crossing of a
+minted session is DEFERRED to a later wave, and is modelled in-process here by any object with those
+attributes (a fake duck-typed session in tests). Handing the collector DATA, never a governor object, is the
+FATAL-2 boundary.
 
 FATAL-2. Every ``framework`` import is FUNCTION-LOCAL (mirrors ``cloud_live_posture`` and
 ``cloud_live.py``'s module docstring "every framework import is FUNCTION-LOCAL"); the module imports NO
@@ -47,27 +52,30 @@ def run_cloud_posture_live(
 ) -> CloudLivePostureResult:
     """Collect LIVE cloud posture as the minted customer identity and re-derive signed FACTs over it.
 
-    Builds :class:`~framework.v2.sensors.cloud_live.CloudLiveSensor` scoped to the injected
-    ``session_data`` (``require_injected_credentials=True`` — the collector FAILS CLOSED rather than fall
-    back to VIGIL's ambient boto3 identity), runs it THROUGH the gated ``invoke_tool`` chain (kill-switch /
-    entitlement / charter scope / egress allowlist + the audit spine — a bare call is still fully gated;
-    pass ``sink`` for the audit spine and ``tool_context`` for the engagement's posture), then hands the
-    collector's retained native export (``output['export']``, ``format='native'``) to the EXISTING
-    :func:`cloud_live_posture.cloud_live_verify` verbatim — which D5-scope-gates the capture against the
-    signed charter and mints a signed FACT per confirmed insecure subject. Returns the
-    :class:`CloudLivePostureResult`.
+    DISPATCHES the collector on ``session_data.provider`` — ``aws`` ->
+    :class:`~framework.v2.sensors.cloud_live.CloudLiveSensor` (STS temporary credentials); ``gcp`` ->
+    :class:`~framework.v2.sensors.gcp_live.GcpLiveSensor` (a short-lived OAuth2 bearer) — each scoped to the
+    injected ``session_data`` with ``require_injected_credentials=True`` (the collector FAILS CLOSED rather than
+    fall back to VIGIL's ambient identity — never AWS's ambient boto3 chain, never GCP's ambient ADC). The
+    chosen collector is run THROUGH the gated ``invoke_tool`` chain (kill-switch / entitlement / charter scope /
+    egress allowlist + the audit spine — a bare call is still fully gated; pass ``sink`` for the audit spine and
+    ``tool_context`` for the engagement's posture), then its retained native export (``output['export']``,
+    ``format='native'``) is handed to the EXISTING provider-GENERIC :func:`cloud_live_posture.cloud_live_verify`
+    verbatim — which D5-scope-gates the capture against the signed charter and mints a signed FACT per confirmed
+    insecure subject. Returns the :class:`CloudLivePostureResult`.
 
     ``provider`` / ``account`` are read off the session (``session_data.provider`` /
-    ``session_data.account_id``) — the FACT's tenant identity, matched EXACTLY by the scope gate. A
-    collector that could not run to completion (no identity substitution, account-drift refusal, or boto3
-    absent) yields a no-FACT, INCONCLUSIVE result carrying the collector's reason — never a clean negative.
+    ``session_data.account_id``) — the FACT's tenant identity, matched EXACTLY by the scope gate (for GCP the
+    ``account`` IS the project id). A collector that could not run to completion (no identity substitution,
+    account/project-drift refusal, or the cloud SDK absent) yields a no-FACT, INCONCLUSIVE result carrying the
+    collector's reason — never a clean negative.
 
     ``capture_time_epoch`` (optional, extends the brief for determinism): an OPERATOR-supplied capture time
     bound into the signed certificate as evidence. It is never a wall-clock read here; pass a fixed value
     for byte-reproducible signed bytes, or leave it ``None`` (no capture time bound). The oracle's own
     signal confidence — never a hand-set value — backs every FACT (``cloud_live_verify`` is the authority).
 
-    FATAL-2: the only ``framework`` symbols (the gated-invocation chain + ``CloudLiveSensor``) are
+    FATAL-2: the only ``framework`` symbols (the gated-invocation chain + the dispatched collector) are
     imported function-locally.
     """
     from framework.v2.agents.tools import (  # noqa: PLC0415 (FATAL-2: function-local)
@@ -75,20 +83,35 @@ def run_cloud_posture_live(
         ToolRegistry,
         invoke_tool,
     )
-    from framework.v2.sensors.cloud_live import CloudLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
 
     provider = str(getattr(session_data, "provider", "") or "")
     account = str(getattr(session_data, "account_id", "") or "")
+
+    # PROVIDER DISPATCH — the ONLY provider-specific seam. The collector is provider-specific; everything
+    # downstream (the gated ``invoke_tool`` chain, ``cloud_live_verify``, the report adapter) is provider-
+    # GENERIC. ``aws`` -> ``CloudLiveSensor`` (STS temporary credentials); ``gcp`` ->
+    # ``GcpLiveSensor`` (a short-lived OAuth2 bearer, the GCP twin of Wave B.1). BOTH consume the minted session
+    # as DATA with ``require_injected_credentials=True`` (the collector FAILS CLOSED rather than fall back to
+    # VIGIL's ambient identity — never AWS's ambient boto3 chain, never GCP's ambient ADC), expose the SAME
+    # gated-tool contract (``name`` / ``run`` / ``egress_hosts`` / ``capability=ACTIVE_RECON``), and emit the
+    # SAME ``{export, format:'native'}`` the downstream verify + report consume. For GCP, ``account`` IS the
+    # project id (``session_data.account_id``), matched EXACTLY by the D5 scope gate. FATAL-2: each sensor
+    # import is function-local (no offense engine co-loads at module scope).
+    if provider == "gcp":
+        from framework.v2.sensors.gcp_live import GcpLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
+        sensor: Any = GcpLiveSensor(credentials=session_data, require_injected_credentials=True)
+    else:
+        from framework.v2.sensors.cloud_live import CloudLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
+        sensor = CloudLiveSensor(credentials=session_data, require_injected_credentials=True)
 
     # GATE + AUDIT the live collection through the W1.4 fail-closed chain (kill-switch / entitlement /
     # charter scope / destructive / egress allowlist) and the event spine — NEVER call ``sensor.run()``
     # directly: that would reach the customer's cloud control plane ungated (a tripped kill-switch could not
     # abort it; a missing ACTIVE_RECON entitlement or an un-allowlisted control-plane host would not stop it)
-    # and unrecorded. ``invoke_tool`` runs every gate BEFORE the collector touches boto3, refuses fail-closed,
-    # and records tool_call / tool_result / refusal. ``ctx.slug`` is authoritative for gating; the
+    # and unrecorded. ``invoke_tool`` runs every gate BEFORE the collector touches the cloud SDK, refuses
+    # fail-closed, and records tool_call / tool_result / refusal. ``ctx.slug`` is authoritative for gating; the
     # engagement's spine sink + posture (prompt_callback / dry_run / world) are inherited from
     # ``tool_context`` when the caller supplies one (a bare call is still fully gated, just unaudited).
-    sensor = CloudLiveSensor(credentials=session_data, require_injected_credentials=True)
     registry = ToolRegistry()
     registry.register(sensor)
     if isinstance(tool_context, ToolContext):
