@@ -37,6 +37,7 @@ non-blocking advisories and are discharged in the distribution slices (NOTICE / 
 | Artefact | Kind | Licence | Notes |
 |---|---|---|---|
 | `vigil-aegis-gateway` | engine | PolyForm-Noncommercial-1.0.0 | first-party AEGIS gateway; commercial terms under D10 |
+| `aegis-siem-notify-connector` | engine | PolyForm-Noncommercial-1.0.0 | AS-20 first-party outbound SIEM/notify emitter (broker-sealed credential, AS-9a); service-use only, commercial terms under D10 |
 | `coraza-v3` | engine | Apache-2.0 | front WAF engine (DetectionOnly) |
 | `caddy` | engine | Apache-2.0 | front reverse proxy (pin [U]) |
 | `coreruleset-crs-4x` | rule | Apache-2.0 | CRS 4.x rule corpus, gated for tenants |

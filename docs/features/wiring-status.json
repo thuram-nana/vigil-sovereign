@@ -1418,6 +1418,18 @@
       "rationale": "Phase 4. The gateway always streams verdicts to the UI/stderr; `aegis gateway --verdict-webhook URL [--verdict-sink webhook|slack]` (and console aegis_setup body verdict_webhook/verdict_sink) ADDITIONALLY POSTs each verdict to an operator SIEM/webhook/Slack via the bounded, redirects-disabled report.push.push_via_urllib. Off by default. Browser-safe body (no oracle-context), auth from AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env (not argv), fail-open (never perturbs the data plane); notification only — orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate. Claim PHASE4-1."
     },
     {
+      "id": "aegis.notify_connector",
+      "name": "AEGIS broker-sealed SIEM/notify connector (AS-20)",
+      "surface": "subsystem",
+      "status": "GATED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/notify.py",
+        "symbol": "ConnectorNotifier"
+      },
+      "check": "symbol-exists",
+      "rationale": "AS-20. The broker-sealed upgrade of the crude verdict-webhook: an on_verdict sink (`aegis gateway --notify-connector ID --notify-url URL [--notify-format webhook|slack]`, composed into on_verdict via serve_gateway(notify_notifier=...)) that pushes each confirmed/lead verdict to an operator SIEM/notification channel authenticated by a ROTATED, REGISTERED connector credential STAMPED via the AS-9a ConnectorSecretBroker (HMAC_SIGNATURE/BEARER/HEADER_KEY) — the secret never lands on argv/env. Metadata-only + AS-2e hygiene-clean body (reuses monitoring_event_v2.build_event_v2/is_hygiene_clean); bounded POST via report.push.push_via_urllib (redirects DISABLED, http(s) only, no SSRF), FAIL-OPEN on delivery. GATED behind an active MonitoringAuthorityV2 grant (tenant isolation + lease) and DEFAULT-OFF behind VIGIL_AEGIS_NOTIFY (+ the broker's own VIGIL_AEGIS_CONNECTOR_BROKER before any plaintext). Adds NO OracleKind and opens NO serve route; notification only, orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate."
+    },
+    {
       "id": "governor.eval-capability-grant",
       "name": "EvalCapabilityGrant \"eval button\" (sigil eval-grant arm|revoke|status)",
       "surface": "subsystem",

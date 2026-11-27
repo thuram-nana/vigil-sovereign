@@ -74,6 +74,33 @@ locks shut.)
 | `crucible imports` | Import external scan outputs / artifacts into the engine. |
 | `crucible status` | One-shot environment summary: reachable backends, resolved paths, installed optional deps. |
 
+### A.1 `crucible aegis gateway` — outbound verdict sinks (SIEM / notify)
+
+The AEGIS gateway streams every verdict to the UI/stderr; two OPT-IN, DEFAULT-OFF sinks ADDITIONALLY push
+each confirmed/lead verdict to an operator-configured SIEM / notification channel. Both use the bounded,
+redirects-DISABLED, http(s)-only `report.push.push_via_urllib` (no redirect-to-internal SSRF, hard timeout)
+and are FAIL-OPEN — a send fault never perturbs the data plane. The body is metadata-only and AS-2e
+hygiene-clean (no raw client IP / certificate oracle-context / sentinel / actor identity leaves the host).
+
+| Flag / env | What it does |
+|---|---|
+| `--verdict-webhook URL` + `--verdict-sink webhook\|slack` | The crude precursor: POST each verdict to `URL`. Auth is a raw header from the `AEGIS_VERDICT_WEBHOOK_AUTHORIZATION` env (kept off argv). |
+| `--notify-connector ID` + `--notify-url URL` + `--notify-format webhook\|slack` | **AS-20** the broker-sealed upgrade: push each confirmed/lead verdict to `URL` authenticated by a ROTATED, REGISTERED connector credential STAMPED via the AS-9a connector-secrets broker (`HMAC_SIGNATURE` ⇒ `X-Vigil-Signature: v1=<hmac over the exact body>`; `BEARER` for Splunk HEC; `HEADER_KEY` for an API-key SIEM). The secret NEVER lands on argv/env — it is sealed and brokered. `--notify-connector` requires `--notify-url` (fail-closed). Env equivalents: `AEGIS_GW_NOTIFY_CONNECTOR` / `AEGIS_GW_NOTIFY_URL` / `AEGIS_GW_NOTIFY_FORMAT`. |
+
+**Arm flags (strict, fail-closed, DEFAULT-OFF — only `1\|true\|yes\|on` arms):**
+
+- `VIGIL_AEGIS_NOTIFY` — arms the AS-20 `ConnectorNotifier`. OFF ⇒ the notifier is INERT (builds nothing,
+  opens no secret, sends no outbound request).
+- `VIGIL_AEGIS_CONNECTOR_BROKER` — additionally arms the broker's credential-materialisation plane: with it
+  unset, `broker.authorize` refuses fail-closed BEFORE opening any plaintext, so an un-armed build never
+  touches a sealed secret.
+
+The live `ConnectorNotifier` holds only a value-free `ConnectorHandle` (issued under an active, tenant-bound
+`MonitoringAuthorityV2` grant), never a credential. The broker + grant are supplied by the managed control
+plane; a bare `aegis gateway` records the `--notify-*` intent and arm state and the notifier is wired
+out-of-band. AS-20 adds NO OracleKind and opens NO customer-facing serve route — it is an outbound push
+client riding the existing `on_verdict` seam.
+
 ## B. CRUCIBLE subsystems (the importable sub-packages of `framework/v2`)
 
 Some of these are the module behind a subcommand above; others are internal seams a reader still needs

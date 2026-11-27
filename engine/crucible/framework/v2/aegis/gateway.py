@@ -1064,7 +1064,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   instance_id: str = "gw", replica_index: int = 0, saas_v2_dir: "str | None" = None,
                   now_fn: "Callable[[], datetime] | None" = None,
                   monotonic_fn: "Callable[[], float] | None" = None,
-                  on_authority_event: "Callable[[Any], None] | None" = None) -> ThreadingHTTPServer:
+                  on_authority_event: "Callable[[Any], None] | None" = None,
+                  notify_notifier: "Callable[[Verdict], None] | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -1115,4 +1116,15 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                 monitoring_spool, org_id=st.saas_tenant, host=st.saas_host, instance_id=st.instance_id,
                 secret=monitoring_secret, epoch_fn=_authority_epoch, redact_literals=_canaries)
             st.on_verdict = compose_sinks(st.on_verdict, st.event_v2_reporter)
+    # AS-20 (opt-in, DEFAULT-OFF): ADDITIONALLY push each confirmed/lead verdict to an operator SIEM /
+    # notification channel, authenticated by a broker-sealed connector credential (aegis.notify.ConnectorNotifier,
+    # built by the managed control plane with the AS-9a broker + grant and injected here). Composed via the same
+    # isolated compose_sinks fan-out as the file/spool/v2 sinks, so a notify fault is contained to its own sink
+    # and never perturbs the request path. Inert unless VIGIL_AEGIS_NOTIFY arms the notifier. The notifier adds
+    # NO OracleKind and opens no serve route — it is a push CLIENT riding the existing on_verdict seam.
+    if notify_notifier is not None:
+        from .monitoring_report import compose_sinks
+        st2 = httpd.settings  # type: ignore[attr-defined]
+        st2.notify_notifier = notify_notifier
+        st2.on_verdict = compose_sinks(st2.on_verdict, notify_notifier)
     return httpd
