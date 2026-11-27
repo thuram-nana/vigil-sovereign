@@ -2444,6 +2444,10 @@
       if (x && x.host) { var r = row(String(x.host)); r.verified = true; r.expires_at = x.expires_at; }
     });
     (d.grants || []).forEach(function (g) { if (g && g.host) { row(String(g.host)).grant = g; } });
+    // AS-2g — the v2 origin-binding status (present only while the sovereign-v2 surface is on; absent otherwise,
+    // so nothing extra renders). A bound host shows its proven origin and a short binding-hash prefix — never a
+    // secret. The server decides bound/unbound by cross-checking the PUBLISHED grant + binding the defence reads.
+    (d.bindings || []).forEach(function (b) { if (b && b.host) { row(String(b.host)).binding = b; } });
     return out.sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
   }
   function monActive(d) { return (d.grants || []).filter(function (g) { return g && g.active; }).length; }
@@ -2489,6 +2493,17 @@
     else if (d.can_manage) {
       body.push(h("p.cust-muted", { text: "Its proof of control is not current: verify it again in Assets before "
         + "monitoring can be turned on." }));
+    }
+    // AS-2g — the v2 origin binding: whether AEGIS has a proven, published binding to this host's origin (the
+    // artifact the per-tenant defence cross-checks before it forwards). Shown only when the server sent it.
+    var b = r.binding;
+    if (b && b.origin_host) {
+      body.push(h("div.cust-asset-head", {}, [h("span", { text: "AEGIS origin" }),
+        b.bound ? h("span.cust-badge.cust-badge-on", { text: "Bound" })
+                : h("span.cust-badge.cust-badge-off", { text: "Unbound" })]));
+      body.push(kv("Origin", String(b.origin_host) + ":" + (parseInt(b.origin_port, 10) || 443)));
+      if (b.edge_chain) { body.push(kv("Edge", String(b.edge_chain))); }
+      if (b.binding_sha256_prefix) { body.push(kv("Binding", String(b.binding_sha256_prefix) + "…")); }
     }
     if (d.can_manage) {
       var actions = h("div.cust-mon-actions", {});
