@@ -43,10 +43,31 @@ _n = itertools.count(1)
 
 
 def _engine_available() -> bool:
-    return (_ROOT / "engine/crucible/framework/v2/aegis/receiver.py").is_file()
+    """True iff the engine-leg receiver can actually START here: the module file exists AND its runtime
+    dependencies import in a clean ENGINE-PYTHONPATH subprocess. The sovereign CI leg installs NO engine
+    runtime (e.g. ``structlog``, which the receiver pulls via ``connector_secrets`` -> ``common.logging``), so
+    the receiver subprocess cannot run there — this cross-plane round-trip SKIPS in that leg rather than failing
+    on a missing engine dep (mirroring ``test_cloud_fetch.py`` skipping without ``botocore``). The receiver's own
+    correctness is covered by ``framework/v2/aegis/tests/test_receiver.py`` in the engine leg, which HAS those
+    deps; this round-trip runs wherever the engine runtime is present. The probe is a SUBPROCESS, so THIS
+    (sovereign) process still imports no ``framework.*``."""
+    if not (_ROOT / "engine/crucible/framework/v2/aegis/receiver.py").is_file():
+        return False
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = _ENGINE_PYTHONPATH
+    try:
+        proc = subprocess.run([sys.executable, "-c", f"import {_RECEIVER_MODULE}"],
+                              capture_output=True, text=True, cwd=str(_ROOT), env=env, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
 
 
-pytestmark = pytest.mark.skipif(not _engine_available(), reason="engine-leg receiver not present in this checkout")
+pytestmark = pytest.mark.skipif(
+    not _engine_available(),
+    reason="engine-leg receiver cannot start here — its runtime deps (e.g. structlog) are not installed in this "
+           "sovereign leg; the round-trip runs where the engine runtime is present, and receiver correctness is "
+           "covered by framework/v2/aegis/tests/test_receiver.py")
 
 
 def _store() -> SpineStore:
