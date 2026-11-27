@@ -137,11 +137,14 @@ distribution, with caps and authenticated transport.
 |------|------|:---:|
 | Finding receiver (offense spine; DM-signer extends it) | `apps/sigil/sigil/inbound/finding_receiver.py` | yes |
 | AEGIS ingest service (own distribution; caps; HMAC/mTLS) | `apps/aegis-ingest/` **(to build — AS-9b)** | — |
-| Connector secrets broker | `connector_secrets.py` **(to build — AS-9a, on consumer registry)** | — |
+| Connector secrets broker | `connector_secrets.py` **(AS-9a, on consumer registry)** | yes |
+| SIEM/notify connector emitter (the broker CONSUMER side) | `notify.py` **(AS-20 — outbound SIEM/notify push client)** | yes |
 
 - **Hot set:** SPOOL (receiver shares the spool chain tail).
-- **Slices:** AS-9a broker · AS-9b receiver · AS-31 Detection Mirror (DM-signer, cert
-  v2 defense delegation at `finding_receiver.py`).
+- **Slices:** AS-9a broker · AS-9b receiver · AS-20 notify/SIEM emitter (the connector
+  CONSUMER — reuses the AS-9a broker to STAMP an outbound credential; adds no OracleKind,
+  opens no serve route) · AS-31 Detection Mirror (DM-signer, cert v2 defense delegation at
+  `finding_receiver.py`).
 
 ## Domain 6 — Benchmark (scorecard engine for comparative claims)
 
