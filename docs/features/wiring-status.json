@@ -1515,6 +1515,30 @@
       },
       "check": "symbol-exists",
       "rationale": "The AS-17b engine-leg AWS CloudTrail provider reader: normalizes a CloudTrail delivery (defender.logsource.parse_cloudtrail, additive + gated detect_format), optionally AS-17a Sigma-evaluates it, and pushes INERT metadata-only LEAD findings through the AS-9b IngestReceiver, tamper-evidencing each ingested record with AS-9c anchor-1. OPT-IN: the ACTIVE pull/receiver-push path is DEFAULT-OFF behind the strict VIGIL_AEGIS_CLOUDTRAIL flag (credential materialisation independently gated by VIGIL_AEGIS_CONNECTOR_BROKER); off => inert (pulls nothing, reads no credential, pushes nothing). The pure parse_cloudtrail normalizer + the new 'cloudtrail' --format choice on `defender sigma` are additive and byte-identical on the default path. Pushes through the existing framework.v2.aegis.receiver entrypoint, so no new Gate-5 customer route and no AS-28 closure entrypoint; reuses the LEAD-tier intel vocabulary, so no new IntelSourceKind."
+    },
+    {
+      "id": "aegis.idp_source",
+      "name": "IdP (Okta System Log) telemetry source (AS-17c)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/idp_source.py",
+        "symbol": "IdpSource"
+      },
+      "check": "symbol-exists",
+      "rationale": "The AS-17c engine-leg identity-provider (Okta System Log) sign-in/audit provider reader — the sibling of the AS-17b CloudTrail source for IdP telemetry. Normalizes an IdP delivery (defender.logsource.parse_idp, additive + gated detect_format), optionally AS-17a Sigma-evaluates it, and pushes INERT metadata-only LEAD findings through the AS-9b IngestReceiver, tamper-evidencing each ingested record with AS-9c anchor-1. OPT-IN: the ACTIVE pull/receiver-push path is DEFAULT-OFF behind the strict VIGIL_AEGIS_IDP flag (credential materialisation independently gated by VIGIL_AEGIS_CONNECTOR_BROKER); off => inert (pulls nothing, reads no credential, pushes nothing). The pure parse_idp normalizer + the new 'idp' --format choice on `defender sigma` are additive and byte-identical on the default path. Pushes through the existing framework.v2.aegis.receiver entrypoint, so no new Gate-5 customer route and no AS-28 closure entrypoint; reuses the LEAD-tier intel vocabulary, so no new IntelSourceKind."
+    },
+    {
+      "id": "aegis.provider_runtime",
+      "name": "AEGIS telemetry-provider runtime (AS-10a)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/provider_runtime.py",
+        "symbol": "ProviderRuntime"
+      },
+      "check": "symbol-exists",
+      "rationale": "The AS-10a telemetry-provider runtime: the generic home the concrete AEGIS telemetry sources (EDR AS-10b, CloudTrail AS-17b, IdP AS-17c) plug into. build_provider_runtime_registry APPENDS the EDR/CloudTrail/IdP ProviderDescriptors (each class-5 detected_without_enforcement / reported — observes, never prevents, never independently verified) onto the AS-1a baseline provider registry (append-only; the AS-4b baseline golden is unchanged). ProviderRuntime holds the source adapters and runs each ARMED one, returning a unified value-free report; a single source's systemic fault is CONTAINED to that provider so the others still run. OPT-IN: the active fan-out is DEFAULT-OFF behind the strict VIGIL_AEGIS_PROVIDER_RUNTIME flag (each source is additionally gated by its own flag, and credential materialisation by VIGIL_AEGIS_CONNECTOR_BROKER); off => inert (runs no source, opens nothing). The pure inventory build needs no flag. Adds NO fleet WorkerKind and NO OracleKind; the sources push through the existing framework.v2.aegis.receiver entrypoint, so no new Gate-5 customer route and no AS-28 closure entrypoint."
     }
   ]
 }

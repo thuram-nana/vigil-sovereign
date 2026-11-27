@@ -856,7 +856,7 @@ def logsource_channels(logsource: object) -> "frozenset[str] | None":
 _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "CommandLine": ("CommandLine", "cmdline", "command_line", "exe"),
     "Image": ("Image", "image", "process", "proc", "exe"),
-    "User": ("User", "user", "username", "suser", "account"),
+    "User": ("User", "user", "username", "suser", "account", "actor.alternateId", "actor.displayName"),
     "DestinationIp": ("DestinationIp", "dst", "dest_ip", "dst_ip", "dstip"),
     "SourceIp": ("SourceIp", "src", "src_ip", "source_ip", "srcip"),
     "EventID": ("EventID", "event_id", "eventid", "cef_signature_id"),
@@ -869,6 +869,14 @@ _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "sourceIPAddress": ("sourceIPAddress", "SourceIp", "src_ip"),
     "UserAgent": ("UserAgent", "userAgent", "http_user_agent"),
     "AccountId": ("AccountId", "recipientAccountId", "userIdentity.accountId"),
+    # AS-17c — IdP (Okta System Log): the normalized ``idp`` event keeps Okta's own dotted field names
+    # (``eventType``/``outcome.result``/``actor.alternateId``/``client.ipAddress`` …), so a standard Okta
+    # Sigma rule matches directly; these rows are the pure, ADDITIVE fallbacks for a rule that spells the
+    # SAME datum differently (a direct field hit always wins, so they can only ever ADD a match, never suppress).
+    # The ``User`` row above is likewise extended with the Okta actor aliases — purely additive.
+    "ClientIP": ("ClientIP", "client.ipAddress", "SourceIp", "src_ip"),
+    "DisplayMessage": ("DisplayMessage", "displayMessage"),
+    "Outcome": ("Outcome", "outcome.result"),
 }
 
 
