@@ -797,6 +797,22 @@
    "w16_issue": null
   },
   {
+   "id": "LIMIT-aegis-edge-automation-deploy-gated",
+   "title": "AEGIS AS-6c edge automation needs an owner-provided AWS edge control plane + secret store",
+   "summary": "AS-6c ships the declarative edge reconciler (framework.v2.aegis.aegis_edge.EdgeReconciler): over the AS-6a FleetState it provisions/rotates the per-(org,host) edge secret and binds each tenant CloudFront distribution's origin at the gateway unit AS-6a has proven HEALTHY, with no operator step, idempotently and fail-closed (an unproven/unhealthy backing unit refuses the bind; a secret that cannot be provisioned refuses the open; a rollout binds the new origin before draining the old; a retire drains before teardown). That reconcile LOGIC is exercised offline, deterministically, against injected in-memory EdgeControlPlane / EdgeSecretStore doubles. The residual is that the real AWS edge control plane (the CloudFront distribution/origin update and the ALB target-group register/deregister with connection draining) and the real edge-secret store (AWS Secrets Manager / SSM, matching the AS-26 aegis-staging/edge/<tenant> secrets) are owner-provided and deploy-gated: with the VIGIL_AEGIS_EDGE flag off the reconciler is inert and binds/retires nothing, and without the edge-secret store wired it refuses every bind (edge_secret_unavailable, fail-closed — the origin is never opened without a provisioned secret), until the owner wires the live edge plane, whose end-to-end acceptance is AS-1b's TT-STG staging runs, not this slice.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/aegis_edge.py",
+    "symbol": "EdgeControlPlane"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "infra/aws/aegis-staging/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "LIMIT-cloud-connect-azure-live-fire",
    "title": "Azure customer cloud-connect is proven offline in full; the live Entra/Graph round-trip is an owner-provisioned residual",
    "summary": "The Azure cloud-connect proof (ui/cloud_fetch.py::AzureConsentConnectFetcher: a client-credentials token against the customer tenant proving admin consent, the token tid decode, the Microsoft Graph service-principal binding read, and the same-shape negative control against a derived control tenant) and its deterministic verdict (governor/cloud_connect.py::cloud_grant_refusal azure branch) are covered OFFLINE in full by apps/sigil/tests/test_cloud_fetch_azure.py / test_cloud_connect_azure.py / test_connect_provision_azure.py, with a fake Entra+Graph transport that routes by tenant and answers the binding read through the same egress guard. What stays a residual: the real round-trip to live Microsoft Entra ID and Graph is a deploy-gated live-fire, exercised only once the owner provisions VIGIL's multi-tenant Azure app (client id + secret/cert) and a customer's Global Admin admin-consents it and sets the external-id tag - there is no live AAD in CI, and (unlike the AWS SigV4 signer) no in-repo reference implementation to pin the live protocol against. Default-OFF behind VIGIL_CUSTOMER_CLOUD_CONNECT: byte-identical when off, a grant authorizes no offense.",
