@@ -914,7 +914,15 @@ class MonitoringSpoolWatcher:
         body = "".join(json.dumps([o, r], separators=(",", ":")) + "\n" for (o, r) in tail)
         tmp = self.spool / (_DEDUP_FILE + ".tmp-" + str(os.getpid()))
         try:
-            tmp.write_text(body, encoding="utf-8")
+            # The dedup window is a CORRECTNESS oracle (at-most-once), not a fairness hint like the DRR cursor:
+            # a lost entry means a re-delivery double-drains. So fsync the temp file before the atomic rename —
+            # the SAME durability the gateway gives its own spool write (monitoring_report._write) — so the
+            # window survives power loss / OS crash, not merely a clean drainer restart.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.spool / _DEDUP_FILE)
         except OSError:
             try:
