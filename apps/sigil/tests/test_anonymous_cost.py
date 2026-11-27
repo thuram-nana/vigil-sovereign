@@ -440,10 +440,16 @@ def test_an_idle_server_still_writes_the_count_when_each_window_ends():
     time.sleep(0.15)
     for _ in range(2):                                   # a second group, ending later than the first
         c.record(st, "authn.login.failure", source="203.0.113.2", method="bearer", reason="invalid_token")
-    want = [("203.0.113.1", None), ("203.0.113.2", None), ("203.0.113.1", 3), ("203.0.113.2", 1)]
+    # Each client writes an opening record (coalesced=None) and, when its window ends, one summary (the count of the
+    # failures coalesced into it): .1 -> 3, .2 -> 1. These four (client, coalesced) pairs are what an idle server must
+    # write with no further request. Their INTERLEAVING is not fixed: .1's 0.3s window can end during the sleep(0.15)
+    # (scheduler jitter on a loaded runner), so .1's summary may land before .2's opening record. Compare as a SET of
+    # the four distinct pairs -- full coverage (a writer that never flushes a summary still fails), no order flake.
+    want = {("203.0.113.1", None), ("203.0.113.2", None), ("203.0.113.1", 3), ("203.0.113.2", 1)}
     deadline = time.monotonic() + 10
+    got: "set[tuple[object, object]]" = set()
     while time.monotonic() < deadline:
-        got = [(r.payload.get("client"), r.payload.get("coalesced")) for r in SpineStore(p).iter_records()]
+        got = {(r.payload.get("client"), r.payload.get("coalesced")) for r in SpineStore(p).iter_records()}
         if got == want:
             break
         time.sleep(0.05)
