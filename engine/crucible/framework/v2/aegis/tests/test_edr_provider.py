@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from vigil_core.aegis_anchors import ProducerAnchor, verify_producer_anchor
+from vigil_core.aegis_anchors import ProducerAnchor, produce_producer_anchor, verify_producer_anchor
 from vigil_core.aegis_sealing import SecretKind, seal_secret
 from vigil_core.authority_v2 import (
     AuthoritySubject,
@@ -300,11 +300,14 @@ def test_write_leg_runs_in_a_separate_engine_process_and_anchor_verifies():
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out["outcome"] == "spooled" and out["report_id"]
     assert (Path(spool) / "incoming" / domain_slug(ORG, HOST) / out["filename"]).is_file()
-    # re-verify the anchor the separate process minted: rebuild the record locally, verify the printed tag.
+    # Re-verify the anchor the separate process minted. The CLI self-verified it in-process (anchor_verified);
+    # here we rebuild the record locally and independently recompute + verify the anchor from the known secret,
+    # so no secret-derived material has to cross the process boundary on stdout.
     record = E.build_canonical_record(E.map_edr_alert(alert, org=ORG, host=HOST), instance_id=INSTANCE, epoch=1)
     assert record.digest() == out["record_digest"]
-    anchor = ProducerAnchor(org=ORG, connector_id=ANCHOR_CONN, epoch=out["anchor_epoch"],
-                            secret_ref=out["anchor_secret_ref"], tag_hex=out["anchor_tag_hex"])
+    assert out["anchor_verified"] is True
+    assert out["anchor_connector_id"] == ANCHOR_CONN and out["anchor_epoch"] == 1
+    anchor = produce_producer_anchor(record, org=ORG, connector_id=ANCHOR_CONN, epoch=1, secret=ANCHOR_SECRET)
     ok, reason = verify_producer_anchor(record, anchor, secret=ANCHOR_SECRET)
     assert ok, reason
 
@@ -319,7 +322,6 @@ def test_same_alert_byte_identical_record_anchor_and_filename():
     r1 = E.build_canonical_record(f1, instance_id=INSTANCE, epoch=1)
     r2 = E.build_canonical_record(f2, instance_id=INSTANCE, epoch=1)
     assert r1.canonical_bytes() == r2.canonical_bytes() and r1.event_id == r2.event_id
-    from vigil_core.aegis_anchors import produce_producer_anchor
     a1 = produce_producer_anchor(r1, org=ORG, connector_id=ANCHOR_CONN, epoch=1, secret=ANCHOR_SECRET)
     a2 = produce_producer_anchor(r2, org=ORG, connector_id=ANCHOR_CONN, epoch=1, secret=ANCHOR_SECRET)
     assert a1.tag_hex == a2.tag_hex

@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol, runtime_checkable
 
-from vigil_core.aegis_anchors import ProducerAnchor, produce_producer_anchor
+from vigil_core.aegis_anchors import ProducerAnchor, produce_producer_anchor, verify_producer_anchor
 from vigil_core.aegis_schemas import AegisEventV2, OutcomeClass
 from vigil_core.aegis_sealing import SealedSecret, open_secret
 from vigil_core.canonical import canonical_json, sha256_hex
@@ -747,8 +747,12 @@ def _run_cli(argv: "list[str]") -> int:
         return 0
     epoch = int(job.get("anchor_epoch", 1))
     record = build_canonical_record(finding, instance_id=job["instance_id"], epoch=epoch)
+    anchor_secret = bytes.fromhex(job["anchor_secret_hex"])
     anchor = produce_producer_anchor(record, org=org, connector_id=job["anchor_connector_id"], epoch=epoch,
-                                     secret=bytes.fromhex(job["anchor_secret_hex"]))
+                                     secret=anchor_secret)
+    # Self-verify the anchor in THIS engine-leg process; the secret and the anchor tag never leave it. The
+    # caller re-derives the anchor itself from the known secret, so stdout carries no secret-derived material.
+    anchor_ok, _ = verify_producer_anchor(record, anchor, secret=anchor_secret)
     receiver = IngestReceiver(job["spool"], org_id=org, host=host,
                               report_secret=bytes.fromhex(job["report_secret_hex"]),
                               require_mtls_or_hmac=False, enabled=True)
@@ -757,9 +761,8 @@ def _run_cli(argv: "list[str]") -> int:
     print(json.dumps({
         "outcome": res.outcome, "http_status": res.http_status, "report_id": res.report_id,
         "filename": res.filename, "detail": res.detail, "event_id": record.event_id,
-        "record_digest": record.digest(), "anchor_tag_hex": anchor.tag_hex,
-        "anchor_secret_ref": anchor.secret_ref, "anchor_connector_id": anchor.connector_id,
-        "anchor_epoch": anchor.epoch,
+        "record_digest": record.digest(), "anchor_verified": bool(anchor_ok),
+        "anchor_connector_id": anchor.connector_id, "anchor_epoch": anchor.epoch,
     }))
     return 0
 
