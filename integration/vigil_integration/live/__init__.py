@@ -9,3 +9,9 @@ and only the egress gate (pinned to loopback for validation) lets traffic out.
 Exports are wired by the unified engine (§12 WS-2) after each binder lands; importing a specific binder
 directly (``from vigil_integration.live.executor import ...``) always works.
 """
+
+# Wave B.2 — the FIRST real AWS end-to-end orchestration home. Framework-clean at module scope (its only
+# framework import is function-local — FATAL-2), so this export co-loads no offense engine.
+from .cloud_posture_run import run_cloud_posture_live
+
+__all__ = ["run_cloud_posture_live"]
