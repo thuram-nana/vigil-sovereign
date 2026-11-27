@@ -1456,6 +1456,19 @@
       "rationale": "K4-5c customer credit-launch-lease seam poller (sibling of webhook-drain): enqueues one SecurityJob per currently-valid published owner-signed lease after the keyless verify_customer_launch_lease(consume=False) pre-check; enqueue-only, never executes here (the authorized runner is the sole executor). Native verb dispatched in-process; parser registered and _cmd_launch_drain resolves."
     },
     {
+      "id": "cli.launch-run",
+      "name": "vigil launch-run",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "launch-run",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_launch_run"
+      },
+      "check": "cli-native-verb",
+      "rationale": "The EXECUTE half of the customer-launch pipeline (sibling of launch-drain, which only enqueues): drains the customer SecurityJob queue and runs each job through the ONE authorized runner, make_engage_scan_runner(queue_root, base_dir).drain(); execution authority is solely the runner's. Without it, launch-drain's enqueued customer launches never execute. Native verb dispatched in-process; parser registered and _cmd_launch_run resolves."
+    },
+    {
       "id": "ui.billing",
       "name": "UI screen — Billing Admin",
       "surface": "ui-screen",

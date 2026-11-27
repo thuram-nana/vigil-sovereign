@@ -86,10 +86,12 @@ def _idem_lookup(slug: str, key: str) -> Optional[int]:
         return None
     for r in rows if isinstance(rows, list) else []:
         if isinstance(r, dict) and r.get("key") == key:
-            try:
-                return int(r.get("seq"))
-            except (TypeError, ValueError):
-                return None
+            seq = r.get("seq")
+            if isinstance(seq, (int, str)):
+                try:
+                    return int(seq)
+                except (TypeError, ValueError):
+                    return None
     return None
 
 
