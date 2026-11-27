@@ -3,7 +3,8 @@
   "slice": "AS-28",
   "entrypoints": [
     "framework.v2.aegis.cli",
-    "framework.v2.aegis.gateway"
+    "framework.v2.aegis.gateway",
+    "framework.v2.aegis.receiver"
   ],
   "denied_third_party": [
     "agents",
