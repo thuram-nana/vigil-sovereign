@@ -412,7 +412,7 @@ def _wiring(flags: dict, script: str) -> dict:
         "function ntfWidget() { return null; }\nasync function doLogout() {}",
         'function viewSoon(t) { return "viewSoon:" + t; }',
         ("var GUIDE = null, GUIDE_ON = false, SECURITY_ON = false, TEAM_ON = false, MONITORING_ON = false, "
-         "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;")]
+         "LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false, LIVE_ON = false;")]
         + [f"function {v}() {{ return {json.dumps(v)}; }}" for v in _VIEWS])
     # PR-L (Area 11): the shell also reads ATTACK_PATH_ON, so app.js's own flag line rides in beside PR-G's (read from
     # the page dataset like theirs: none of these flag sets names attackPath, so the shell shows no Attack-path link).
@@ -487,7 +487,8 @@ def test_the_guide_walks_through_plans_and_reports():
     gated = sorted([f"{ch['id']}/{st['id']}" for ch in out["chapters"] for st in ch["steps"] if st.get("when")]
                    + [f"faq/{f['q']}" for f in out["faq"] if f.get("when")]
                    + [f"{ch['id']}/{st['id']}:alt" for ch in out["chapters"] for st in ch["steps"] if st.get("alt")])
-    assert gated == ["assess/fixfirst", "assess/report", "assess/standards", "credits/compare", "credits/plans:alt",
+    assert gated == ["assess/fixfirst", "assess/pause", "assess/report", "assess/standards", "assess/steer",
+                     "assess/watch", "credits/compare", "credits/plans:alt",
                      "faq/Can I give our results to an auditor or a customer?", "workspace/ai_governance",
                      "workspace/datarights", "workspace/organization", "workspace/organization:alt",
                      "workspace/privacy", "workspace/seller"]
@@ -509,7 +510,7 @@ def test_the_guide_walks_through_plans_and_reports():
 # as it was before them — so the two renders can be compared.
 _GUIDE_RENDER = r"""
 Object.assign(document.body.dataset, %(flags)s);
-var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;
+var MONITORING_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false, LIVE_ON = false;
 %(page_flag)s
 %(route_shown)s
 const G = window.VIGIL_GUIDE;

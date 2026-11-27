@@ -472,6 +472,7 @@ jobs:
               --ignore=integration/tests/test_brain_engine.py \
               --ignore=integration/tests/test_sovereignty_governs_llm_egress.py \
               --ignore=integration/tests/test_live_executor_report_builders.py \
+              --ignore=integration/tests/test_cli_launch_run.py \
               --junit-xml="${RUNNER_TEMP:-/tmp}/sovereign-junit.xml" -q -m "not volume"
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
@@ -566,6 +567,7 @@ jobs:
               integration/tests/test_reconciliation.py \
               integration/tests/test_launch_trigger.py \
               integration/tests/test_launch_drain.py \
+              integration/tests/test_cli_launch_run.py \
               integration/tests/test_engage_runner.py \
               integration/tests/test_engage_worker_metered.py \
               integration/tests/test_engage_worker_heartbeat.py \
