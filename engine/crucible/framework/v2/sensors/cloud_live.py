@@ -468,12 +468,22 @@ class CloudLiveSensor:
     # a very large account degrades to the first N rather than making an unbounded number of calls.
     _MAX_BUCKETS = 500
 
-    def __init__(self, *, endpoint_url: str | None = None, region: str | None = None) -> None:
+    def __init__(self, *, endpoint_url: str | None = None, region: str | None = None,
+                 credentials: Any = None, require_injected_credentials: bool = False) -> None:
+        # An injected ``credentials`` object scopes this run to EXACTLY one customer identity. It is duck-typed
+        # (``access_key_id`` / ``secret_access_key`` / ``session_token`` / optional ``region`` / optional
+        # ``account_id``) so a ``vigil_core.cloud_session.MintedSession`` satisfies it with no import here (the
+        # sovereign mint hands the collector DATA, never a governor object — the FATAL-2 boundary). When present,
+        # the ambient boto3 credential chain is NEVER consulted. ``require_injected_credentials`` makes a CUSTOMER
+        # run FAIL CLOSED rather than silently fall back to VIGIL's own ambient identity (the no-substitution guard
+        # — the single most important invariant of a customer cloud-posture run).
+        self._credentials = credentials
+        self._require_injected = bool(require_injected_credentials)
         self._endpoint_url = (
             endpoint_url if endpoint_url is not None
             else (os.environ.get("CRUCIBLE_AWS_ENDPOINT_URL")
                   or os.environ.get("AWS_ENDPOINT_URL") or ""))
-        self._region = (region or os.environ.get("AWS_REGION")
+        self._region = (region or str(getattr(credentials, "region", "") or "") or os.environ.get("AWS_REGION")
                         or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
         if self._endpoint_url:
             host = urlsplit(self._endpoint_url).hostname or ""
@@ -582,25 +592,65 @@ class CloudLiveSensor:
             return inconclusive_result("cloud_live", missing="boto3", detail=(
                 "boto3 not installed — live AWS collection unavailable (fail-closed no-op). "
                 "Install it (`pip install boto3`) to enable live cloud posture."))
-        try:
-            session = boto3.Session(region_name=self._region)
-            creds = session.get_credentials()
-        except Exception as e:
-            return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
-                f"could not initialise an AWS session (fail-closed): {e}"))
-        if creds is None:
-            return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
-                "no ambient AWS credentials discoverable (environment / shared config / SSO "
-                "cache / instance-profile / task-role / IRSA) — fail-closed no-op. Configure the HOST's "
-                "read-only AWS identity; VIGIL discovers and uses it — you need not hand credentials over."))
+        injected = self._credentials
+        if injected is not None:
+            # SCOPED customer identity: build the session ONLY from COMPLETE AWS read-only credentials. boto3's
+            # Session skips set_credentials when every aws_* arg is falsy and then LAZILY resolves the ambient
+            # default chain — so an empty/partial credential, or a non-AWS session (a GCP/Azure MintedSession
+            # whose aws_* fields are empty), would silently run as VIGIL's OWN ambient identity. Reject it here
+            # and fail closed: a customer run never reaches AWS as VIGIL (the no-substitution invariant — and the
+            # ``is not None`` ``require_injected`` branch below cannot catch a non-None-but-empty object).
+            provider = str(getattr(injected, "provider", "aws") or "aws")
+            akid = str(getattr(injected, "access_key_id", "") or "")
+            secret = str(getattr(injected, "secret_access_key", "") or "")
+            token = str(getattr(injected, "session_token", "") or "")
+            if provider != "aws" or not (akid and secret and token):
+                return inconclusive_result("cloud_live", missing="a complete AWS scoped read-only session", detail=(
+                    "the injected session is not a complete AWS read-only session (a missing STS credential part "
+                    "or a non-AWS provider) — refusing to fall back to VIGIL's ambient identity (fail-closed, no "
+                    "identity substitution)."))
+            try:
+                session = boto3.Session(aws_access_key_id=akid, aws_secret_access_key=secret,
+                                        aws_session_token=token, region_name=self._region)
+            except Exception as e:
+                return inconclusive_result("cloud_live", missing="a usable injected read-only session", detail=(
+                    f"could not initialise the scoped AWS session from the minted credentials (fail-closed): {e}"))
+        elif self._require_injected:
+            # A CUSTOMER run must NEVER fall back to VIGIL's ambient identity (no identity substitution).
+            return inconclusive_result("cloud_live", missing="an injected customer read-only session", detail=(
+                "this run requires an explicitly-minted, customer-scoped read-only session; refusing to fall "
+                "back to VIGIL's own ambient AWS identity (fail-closed — no identity substitution)."))
+        else:
+            try:
+                session = boto3.Session(region_name=self._region)
+                creds = session.get_credentials()
+            except Exception as e:
+                return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
+                    f"could not initialise an AWS session (fail-closed): {e}"))
+            if creds is None:
+                return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
+                    "no ambient AWS credentials discoverable (environment / shared config / SSO "
+                    "cache / instance-profile / task-role / IRSA) — fail-closed no-op. Configure the HOST's "
+                    "read-only AWS identity; VIGIL discovers and uses it — you need not hand credentials over."))
         kw = self._client_kwargs()
         try:
             ident = session.client("sts", **kw).get_caller_identity()
             account = str(ident.get("Account") or "")
         except Exception as e:
             return inconclusive_result("cloud_live", missing="valid, reachable AWS credentials", detail=(
-                f"STS get-caller-identity failed — the ambient credentials are invalid/expired "
+                f"STS get-caller-identity failed — the credentials are invalid/expired "
                 f"or the endpoint is unreachable (fail-closed): {e}"))
+        # Collection-time account-drift guard (defence in depth over the sovereign mint's own drift check): a
+        # scoped run MUST POSITIVELY confirm it landed in EXACTLY the account the grant claimed. An empty claimed
+        # id, an unresolved landed account (STS Account ""), or a mismatch is a fail-CLOSED refusal — never a
+        # skipped check — so even a mis-minted or re-pointed session can never read another customer's cloud, and
+        # an unverifiable one is never read at all.
+        if injected is not None:
+            claimed = str(getattr(injected, "account_id", "") or "")
+            if not claimed or not account or claimed != account:
+                return inconclusive_result("cloud_live", missing="a confirmed scoped account match", detail=(
+                    "could not confirm the scoped session landed in the AWS account the grant claimed — refusing "
+                    "to collect (fail-closed, no cross-account or unverified read)."))
         try:
             buckets = self._collect_s3(session.client("s3", **kw))
         except Exception:
