@@ -1,4 +1,4 @@
-"""member_invites_store -- the PENDING team invitations a workspace admin raises for a person who does NOT yet
+"""member_invites_store -- the PENDING team invitations a workspace admin raises for a person who does not already
 have a VIGIL account, kept SERVER-SIDE, keyed by the single-use token (never the token itself).
 
 The Team feature (VIGIL_CUSTOMER_TEAM_UI) can today add an EXISTING VIGIL account by email. An INVITE covers the
