@@ -137,9 +137,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/team": {"Add member": 1, "Change role": 1, "Remove": 1},     # cust_ben (the founder's row is read-only)
     # Website: Continue a half-finished proof, Prove again a lapsed one, Connect a website; Code repository: Connect
     # GitHub, Open Code; Cloud account: Cancel / Continue a connection not finished, Connect again / Disconnect a lapsed
-    # one, Disconnect a connected one, Connect an AWS account
+    # one, Disconnect a connected one, Connect a cloud account
     "#/connect": {"Continue": 2, "Prove again": 1, "Connect a website": 1, "Connect GitHub": 1, "Open Code": 1,
-                  "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect an AWS account": 1},
+                  "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.

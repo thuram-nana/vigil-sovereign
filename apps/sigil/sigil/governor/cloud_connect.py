@@ -21,9 +21,10 @@ customer's account through VIGIL (the confused-deputy hole the external id exist
 assumes the SAME role with a FRESH RANDOM external id, and the verdict holds only if that control was explicitly
 DENIED. A role that admits an arbitrary external id is refused, for every tenant, with a message naming the fix.
 
-PROVIDERS: the proof is wired for AWS (above), for GCP and for Azure; the observation shape differs per provider, the
-verdict (``cloud_grant_refusal``) has a branch per wired provider, and the registry below is provider-agnostic.
-Cloudflare remains unwired and fails closed at the first step (``_VERIFIABLE_PROVIDERS``).
+PROVIDERS: the proof is wired for AWS (above), for GCP, for Azure and for Cloudflare; the observation shape differs per
+provider, the verdict (``cloud_grant_refusal``) has a branch per wired provider, and the registry below is
+provider-agnostic. Cloudflare is wired like the others (its bearer-token trust model is described above);
+``_VERIFIABLE_PROVIDERS`` includes all four.
 
 GCP (service-account IMPERSONATION, NAME-bound): the customer creates a service account whose ID encodes the
 unguessable external id, and VIGIL's connector SA mints a token AS exactly that SA under a project-admin-only
