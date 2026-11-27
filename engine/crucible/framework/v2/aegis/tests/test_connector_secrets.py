@@ -228,6 +228,32 @@ def test_crlf_credential_is_refused_header_injection_guard():
         broker.authorize(handle, now=NOW)
 
 
+def test_non_utf8_credential_refused_without_leaking_plaintext_via_exception_chain():
+    # A non-UTF-8 BEARER/HEADER_KEY credential makes the header-value decode fail. UnicodeDecodeError.object
+    # is a FRESH full plaintext copy of the credential; binding (``as exc``) or chaining (``from exc`` — and
+    # even ``from None`` leaves ``__context__``) that exception would smuggle the plaintext out of authorize's
+    # zeroising frame via ``__cause__``/``__context__``/``.args``. The refusal must carry NONE of it.
+    secret = bytes([0xff, 0xfe, 0x00, 0x80]) + secrets.token_bytes(20)   # >=16 bytes, invalid UTF-8
+    for scheme, header in ((ConnectorScheme.BEARER, "Authorization"),
+                           (ConnectorScheme.HEADER_KEY, "X-Api-Key")):
+        broker, *_ = _fixture(scheme, header=header, credential=secret)
+        handle = broker.issue(_grant(), org=ORG_A, connector_id=CONN, now=NOW)
+        with pytest.raises(ConnectorBrokerRefused) as ei:
+            broker.authorize(handle, now=NOW)
+        exc = ei.value
+        assert "utf-8" in str(exc)
+        # the raised refusal AND its whole reachable exception chain expose the secret through nothing —
+        # not str(), not .args, not a UnicodeDecodeError.object left dangling on __cause__/__context__.
+        for e in (exc, exc.__cause__, exc.__context__):
+            if e is None:
+                continue
+            assert secret not in str(e).encode(errors="ignore")
+            for a in getattr(e, "args", ()):
+                assert not (isinstance(a, (bytes, bytearray)) and secret in bytes(a))
+            obj = getattr(e, "object", None)
+            assert not (isinstance(obj, (bytes, bytearray)) and secret in bytes(obj))
+
+
 # --------------------------------------------------------------------------------------------------
 # NO-SECRET-LEAK: ConnectorAuth is self-redacting, single-use, non-serialisable
 # --------------------------------------------------------------------------------------------------

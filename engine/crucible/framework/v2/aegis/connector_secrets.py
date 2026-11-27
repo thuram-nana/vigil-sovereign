@@ -517,11 +517,21 @@ class ConnectorSecretBroker:
             if not isinstance(body, (bytes, bytearray)):
                 raise ConnectorBrokerRefused("HMAC_SIGNATURE body must be bytes")
             return "v1=" + hmac.new(plain, bytes(body), hashlib.sha256).hexdigest()
+        # Validate UTF-8 WITHOUT letting the failure capture the plaintext. ``bytes.decode`` raises
+        # ``UnicodeDecodeError`` whose ``.object`` is a FRESH, un-zeroisable copy of the WHOLE credential;
+        # if that exception is bound (``as exc``) or chained (``from exc`` — and even ``from None`` leaves
+        # ``__context__`` pointing at it), the raised refusal carries the plaintext out of ``authorize``'s
+        # zeroising frame. So catch it UNBOUND and raise the plaintext-free refusal OUTSIDE the handler, so
+        # no exception chain (``__cause__``/``__context__``) retains the decode error or its captured bytes.
+        decoded: "str | None" = None
         try:
-            value = plain.decode("utf-8")
-        except UnicodeDecodeError as exc:
+            decoded = plain.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        if decoded is None:
             raise ConnectorBrokerRefused(
-                "connector credential is not valid utf-8 for a header value (fail-closed)") from exc
+                "connector credential is not valid utf-8 for a header value (fail-closed)")
+        value = decoded
         if "\r" in value or "\n" in value:
             # A credential value with CR/LF would allow header-injection into the outbound request.
             raise ConnectorBrokerRefused("connector credential contains a CR/LF (header-injection guard)")
