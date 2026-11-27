@@ -43,7 +43,7 @@ import secrets
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, TypeGuard
 
 try:
     import fcntl
@@ -155,7 +155,7 @@ class MemberInviteLedger:
         exp = rec.get("expires_at") if isinstance(rec, dict) else None
         return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
 
-    def _live(self, rec: "Optional[dict]", now: float) -> bool:
+    def _live(self, rec: "Optional[dict]", now: float) -> "TypeGuard[dict]":
         """A pending, unexpired, well-formed invite record."""
         if not isinstance(rec, dict) or rec.get("status") != STATUS_PENDING:
             return False
