@@ -1,5 +1,5 @@
 /* ==========================================================================
-   VIGIL public site — marketing-component layer on top of tokens.css.
+   VIGIL public site: marketing-component layer on top of tokens.css.
    The kit's components.css is dashboard chrome; marketing needs its own thin
    layer (hero, feature grid, comparison matrix, tool cards, footer). Built only
    on the design tokens so the public site reads as one system with the cockpit.
@@ -67,6 +67,42 @@ code, kbd, pre { font-family: var(--font-mono); }
 .hero .btn-row { margin-top: var(--sp-5); }
 @media (max-width: 640px) { .hero h1 { font-size: var(--fs-2xl); } }
 
+/* -- home hero: layered, living background (CSS only, CSP-clean) ------------- */
+.hero--home { position: relative; isolation: isolate; overflow: hidden;
+  padding: calc(var(--sp-8) + var(--sp-4)) 0 var(--sp-8); }
+.hero--home .hero__content { position: relative; z-index: 1; }
+.hero--home .chip { margin-bottom: var(--sp-4); }
+.hero--home .hero__title { font-size: clamp(2.2rem, 1.35rem + 3.3vw, 3.75rem); line-height: 1.04;
+  letter-spacing: -.03em; margin: var(--sp-2) 0 var(--sp-4); max-width: 20ch; color: var(--text-0); }
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .hero--home .hero__title {
+    background: linear-gradient(176deg, var(--text-0) 54%, color-mix(in srgb, var(--text-0) 58%, var(--text-1)));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent; }
+}
+.hero--home .lede { max-width: 58ch; font-size: clamp(1rem, .96rem + .4vw, 1.18rem); }
+
+/* a faint grid, masked so it dissolves into the page */
+.hero--home::before { content: ""; position: absolute; inset: -2px; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--border) 72%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--border) 72%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(135% 92% at 50% -8%, #000 32%, transparent 76%);
+          mask-image: radial-gradient(135% 92% at 50% -8%, #000 32%, transparent 76%);
+  opacity: .55; }
+/* a slow, breathing glow in the FACT green with a restrained cool companion */
+.hero--home::after { content: ""; position: absolute; z-index: 0; pointer-events: none;
+  top: -26%; left: 50%; width: min(1180px, 132%); aspect-ratio: 2 / 1; transform: translateX(-50%);
+  background:
+    radial-gradient(42% 56% at 50% 42%, color-mix(in srgb, var(--st-confirmed) 28%, transparent), transparent 70%),
+    radial-gradient(56% 64% at 64% 30%, color-mix(in srgb, var(--st-running) 15%, transparent), transparent 72%);
+  filter: blur(16px); opacity: .9;
+  animation: hero-glow 15s ease-in-out infinite; }
+@keyframes hero-glow {
+  0%, 100% { opacity: .76; transform: translateX(-50%) translateY(0) scale(1); }
+  50%      { opacity: 1;   transform: translateX(-50%) translateY(10px) scale(1.06); } }
+
 /* -- generic grid + cards --------------------------------------------------- */
 .grid { display: grid; gap: var(--sp-4); }
 .grid--3 { grid-template-columns: repeat(3, 1fr); }
@@ -82,14 +118,26 @@ code, kbd, pre { font-family: var(--font-mono); }
 .card__more { color: var(--text-0); font-weight: 600; font-size: var(--fs-sm); margin-top: var(--sp-3);
   display: inline-block; }
 
-/* -- the ★ proof list (feature rows) --------------------------------------- */
-.proofs { display: grid; gap: var(--sp-4); }
-.proof { display: grid; grid-template-columns: auto 1fr; gap: var(--sp-4); align-items: start;
-  padding: var(--sp-4) 0; border-top: 1px solid var(--border); }
-.proof__k { font-size: var(--fs-micro); letter-spacing: var(--tracking-label); text-transform: uppercase;
-  color: var(--st-confirmed); font-weight: 700; padding-top: 3px; white-space: nowrap; }
-.proof h3 { margin: 0 0 4px; font-size: var(--fs-lg); }
+/* -- the proof list (clean feature cards) ----------------------------------- */
+.proofs { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-4); }
+@media (max-width: 760px) { .proofs { grid-template-columns: 1fr; } }
+.proof { position: relative; background: var(--bg-1); border: 1px solid var(--border);
+  border-radius: var(--r-3); padding: var(--sp-5);
+  transition: border-color .18s ease, transform .18s ease, background .18s ease; }
+.proof::before { content: ""; position: absolute; left: 0; top: var(--sp-5); bottom: var(--sp-5);
+  width: 2px; border-radius: 0 2px 2px 0; background: var(--st-confirmed);
+  opacity: 0; transition: opacity .18s ease; }
+.proof:hover { transform: translateY(-3px); border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg-2) 72%, var(--bg-1)); }
+.proof:hover::before { opacity: .85; }
+.proof__k { display: inline-flex; align-items: center; font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--st-confirmed);
+  font-weight: 700; padding: 4px 11px; border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--st-confirmed) 42%, var(--border));
+  background: color-mix(in srgb, var(--st-confirmed) 11%, transparent); }
+.proof h3 { margin: var(--sp-3) 0 var(--sp-2); font-size: var(--fs-lg); letter-spacing: -.01em; }
 .proof p { margin: 0; color: var(--text-1); font-size: var(--fs-sm); }
+.proof p .chip { vertical-align: baseline; }
 .proof .bound { color: var(--text-2); font-style: italic; }
 
 /* -- comparison matrix (/vs) ------------------------------------------------ */
@@ -147,3 +195,114 @@ code, kbd, pre { font-family: var(--font-mono); }
 .skip { position: absolute; left: -9999px; }
 .skip:focus { left: var(--sp-4); top: var(--sp-3); background: var(--bg-2); padding: 8px 14px;
   border-radius: var(--r-1); z-index: 50; }
+
+/* ==========================================================================
+   HOME: marketing flourishes (scoped with --home / --scope modifiers so the
+   shared .hero / .stats / .band / .card on other pages are untouched).
+   ========================================================================== */
+
+/* -- home stat strip: one bordered panel, dividers, hover accent ----------- */
+.stats--home { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  border: 1px solid var(--border); border-radius: var(--r-3); background: var(--bg-1); overflow: hidden; }
+.stats--home .stat { position: relative; padding: var(--sp-5); border-left: 1px solid var(--border);
+  transition: background .18s ease; }
+.stats--home .stat:first-child { border-left: 0; }
+.stats--home .stat::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, var(--st-confirmed), transparent);
+  transform: scaleX(0); transform-origin: left; transition: transform .24s ease; }
+.stats--home .stat:hover { background: var(--bg-2); }
+.stats--home .stat:hover::before { transform: scaleX(1); }
+.stats--home .stat .n { font-size: clamp(1.7rem, 1.2rem + 1.3vw, 2.1rem); }
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .stats--home .stat .n {
+    background: linear-gradient(180deg, var(--text-0), color-mix(in srgb, var(--text-0) 60%, var(--text-1)));
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
+}
+@media (max-width: 760px) {
+  .stats--home { grid-template-columns: repeat(2, 1fr); }
+  .stats--home .stat:nth-child(odd) { border-left: 0; }
+  .stats--home .stat:nth-child(n+3) { border-top: 1px solid var(--border); }
+}
+@media (max-width: 440px) {
+  .stats--home { grid-template-columns: 1fr; }
+  .stats--home .stat { border-left: 0; }
+  .stats--home .stat:nth-child(n+2) { border-top: 1px solid var(--border); }
+}
+
+/* -- scope cards: top accent that draws in on hover, clean lift ------------ */
+.card--scope { position: relative; overflow: hidden;
+  transition: border-color .18s ease, transform .18s ease, background .18s ease; }
+.card--scope::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, var(--st-confirmed), color-mix(in srgb, var(--st-running) 65%, transparent));
+  transform: scaleX(0); transform-origin: left; transition: transform .25s ease; }
+.card--scope:hover { transform: translateY(-4px); border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg-2) 62%, var(--bg-1)); }
+.card--scope:hover::before { transform: scaleX(1); }
+.card--scope h3 { margin-top: 0; }
+
+/* -- CTA band: soft FACT-green wash + a hairline top ring ------------------- */
+.band--home { position: relative; overflow: hidden; border-color: var(--border-strong);
+  background:
+    radial-gradient(120% 150% at 50% -30%, color-mix(in srgb, var(--st-confirmed) 13%, transparent), transparent 58%),
+    var(--bg-1); }
+.band--home::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--st-confirmed) 48%, var(--border)), transparent 62%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude; }
+.band--home > * { position: relative; }
+
+/* -- small layout utilities (replace the old inline styles) ---------------- */
+.section__h2 { font-size: var(--fs-2xl); letter-spacing: -.02em; margin: 0 0 var(--sp-5); }
+.section__h2--narrow { max-width: 24ch; }
+.section__note { margin-top: var(--sp-4); font-size: var(--fs-xs); }
+.hero__note { margin-top: var(--sp-5); font-size: var(--fs-xs); }
+.btn-row--center { justify-content: center; }
+.footer__brand { margin-bottom: var(--sp-3); }
+.footer__tagline { font-size: var(--fs-sm); max-width: 34ch; margin: 0; }
+
+/* ==========================================================================
+   MOTION: all CSS, every animated thing has a visible resting state, and the
+   whole layer is stood down under prefers-reduced-motion.
+   ========================================================================== */
+
+/* status dot: a gentle pulse ring (resting = a solid dot, no ring) */
+@media (prefers-reduced-motion: no-preference) {
+  .dot--pulse { animation: dot-pulse 2.4s ease-in-out infinite; }
+}
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); }
+  70%      { box-shadow: 0 0 0 6px transparent; }
+}
+
+/* home hero: a one-time staggered rise on load (resting = fully shown) */
+@media (prefers-reduced-motion: no-preference) {
+  .hero--home .hero__content > * { animation: rise-in .72s cubic-bezier(.16, .84, .44, 1) both; }
+  .hero--home .hero__content > :nth-child(1) { animation-delay: .04s; }
+  .hero--home .hero__content > :nth-child(2) { animation-delay: .11s; }
+  .hero--home .hero__content > :nth-child(3) { animation-delay: .18s; }
+  .hero--home .hero__content > :nth-child(4) { animation-delay: .25s; }
+  .hero--home .hero__content > :nth-child(5) { animation-delay: .32s; }
+}
+@keyframes rise-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+/* reveal-on-scroll: resting state is ALWAYS visible; the entrance only exists
+   where the browser supports scroll-driven timelines AND motion is welcome. */
+.reveal { opacity: 1; }
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .reveal { animation: reveal-rise linear both; animation-timeline: view();
+      animation-range: entry 0% entry 60%; }
+  }
+}
+@keyframes reveal-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+
+/* respect the user's setting: no motion, nothing left hidden */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important;
+  }
+  .reveal, .hero--home .hero__content > * { opacity: 1 !important; transform: none !important; }
+}

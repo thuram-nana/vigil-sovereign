@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VIGIL — sovereign, proof-carrying offensive security</title>
-<meta name="description" content="VIGIL is a source-available, self-hostable autonomous offensive-security engine. Every finding is a signed, oracle-confirmed FACT you can re-verify offline — zero false positives by construction. Your keys, your hardware, your LLM.">
+<title>VIGIL: sovereign, proof-carrying offensive security</title>
+<meta name="description" content="VIGIL is a source-available, self-hostable autonomous offensive-security engine. Every finding is a signed, oracle-confirmed FACT you can re-verify offline, with zero false positives by construction. Your keys, your hardware, your LLM.">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
@@ -34,26 +34,26 @@
 
 <main id="main">
 
-  <section class="hero">
-    <div class="wrap">
-      <span class="chip chip--fact"><i class="dot"></i>Prove, don't guess</span>
-      <h1>Offensive security that proves every finding.</h1>
+  <section class="hero hero--home">
+    <div class="wrap hero__content">
+      <span class="chip chip--fact"><i class="dot dot--pulse"></i>Prove, don't guess</span>
+      <h1 class="hero__title">Offensive security that proves every finding.</h1>
       <p class="lede">VIGIL is a source-available, self-hostable autonomous pentesting engine. It doesn't
-        hand you a list of maybes — it mints a <strong>signed, oracle-confirmed FACT</strong> only when an
+        hand you a list of maybes. It mints a <strong>signed, oracle-confirmed FACT</strong> only when an
         exploit actually fires, and that proof re-verifies <strong>offline, with zero VIGIL code installed</strong>.
         Your keys, your hardware, your choice of LLM.</p>
       <div class="btn-row">
         <a class="btn btn--primary" href="/support">Request access</a>
         <a class="btn btn--ghost" href="/vs">How VIGIL compares</a>
       </div>
-      <p class="muted" style="margin-top:var(--sp-5); font-size:var(--fs-xs)">
+      <p class="muted hero__note">
         Source-available (PolyForm Noncommercial + Commercial). Self-hosted and air-gappable. No telemetry.</p>
     </div>
   </section>
 
   <section class="section--tight">
     <div class="wrap">
-      <div class="stats">
+      <div class="stats stats--home reveal">
         <div class="stat"><div class="n">0</div><div class="l">False positives by construction</div></div>
         <div class="stat"><div class="n">Offline</div><div class="l">Re-verifiable signed proof</div></div>
         <div class="stat"><div class="n">4</div><div class="l">Enforced sovereignty tiers</div></div>
@@ -64,60 +64,47 @@
 
   <section class="section">
     <div class="wrap">
-      <p class="eyebrow">Why VIGIL is different</p>
-      <h2 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-5); max-width:24ch">
-        AI proposes. The oracle disposes.</h2>
+      <p class="eyebrow reveal">Why VIGIL is different</p>
+      <h2 class="section__h2 section__h2--narrow reveal">AI proposes. The oracle disposes.</h2>
       <div class="proofs">
-        <div class="proof">
-          <div class="proof__k">Proof</div>
-          <div>
-            <h3>A FACT re-verifies offline — by a third party, with nothing of ours installed</h3>
-            <p>Every confirmed finding ships as a proof-carrying certificate. Re-run the check from the
-              evidence alone and get the same verdict. No trust in our dashboard required.</p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Proof</span>
+          <h3>A FACT re-verifies offline, by a third party, with nothing of ours installed</h3>
+          <p>Every confirmed finding ships as a proof-carrying certificate. Re-run the check from the
+            evidence alone and get the same verdict. No trust in our dashboard required.</p>
         </div>
-        <div class="proof">
-          <div class="proof__k">Zero FP</div>
-          <div>
-            <h3>Zero false positives by construction</h3>
-            <p>No deterministic oracle fires, no FACT is minted — the model is never trusted for a verdict.
-              Unproven observations are labelled <span class="chip chip--lead"><i class="dot"></i>LEAD</span>,
-              never dressed up as confirmed.</p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Zero FP</span>
+          <h3>Zero false positives by construction</h3>
+          <p>No deterministic oracle fires, no FACT is minted, and the model is never trusted for a verdict.
+            Unproven observations are labelled <span class="chip chip--lead"><i class="dot"></i>LEAD</span>,
+            never dressed up as confirmed.</p>
         </div>
-        <div class="proof">
-          <div class="proof__k">Sovereign</div>
-          <div>
-            <h3>Self-hostable, air-gappable, BYO-LLM</h3>
-            <p>Run it on your own hardware with your own model keys (Ollama, vLLM, Bedrock, Vertex, Azure,
-              Mistral). The owner holds the only signing keys. <span class="bound">A deployment tier is not,
-              by itself, a network control — pair it with your firewall.</span></p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Sovereign</span>
+          <h3>Self-hostable, air-gappable, BYO-LLM</h3>
+          <p>Run it on your own hardware with your own model keys (Ollama, vLLM, Bedrock, Vertex, Azure,
+            Mistral). The owner holds the only signing keys. <span class="bound">A deployment tier is not,
+            by itself, a network control. Pair it with your firewall.</span></p>
         </div>
-        <div class="proof">
-          <div class="proof__k">Offense + Defense</div>
-          <div>
-            <h3>Attack and provable defense on one control plane</h3>
-            <p>The same engine that proves an exploit can stand an inline, provable firewall in front of it —
-              not an offense-only point tool.</p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Offense + Defense</span>
+          <h3>Attack and provable defense on one control plane</h3>
+          <p>The same engine that proves an exploit can stand an inline, provable firewall in front of it,
+            not an offense-only point tool.</p>
         </div>
-        <div class="proof">
-          <div class="proof__k">Isolated</div>
-          <div>
-            <h3>A two-plane boundary the key-holder can't cross</h3>
-            <p>The sovereign, key-holding governor carries no offensive capability and cannot even load
-              offense code — a formally-stated, test-enforced separation.</p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Isolated</span>
+          <h3>A two-plane boundary the key-holder can't cross</h3>
+          <p>The sovereign, key-holding governor carries no offensive capability and cannot even load
+            offense code, a formally-stated, test-enforced separation.</p>
         </div>
-        <div class="proof">
-          <div class="proof__k">Honest</div>
-          <div>
-            <h3>Radical honesty as a verifiable control</h3>
-            <p>Every public claim traces to source, an enforcing mechanism, and a test. We say
-              <em>source-available</em> — the precise license — and never claim a credential, badge, or
-              attestation we don't actually hold.</p>
-          </div>
+        <div class="proof reveal">
+          <span class="proof__k">Honest</span>
+          <h3>Radical honesty as a verifiable control</h3>
+          <p>Every public claim traces to source, an enforcing mechanism, and a test. We say
+            <em>source-available</em>, the precise license, and never claim a credential, badge, or
+            attestation we don't actually hold.</p>
         </div>
       </div>
     </div>
@@ -125,29 +112,28 @@
 
   <section class="section">
     <div class="wrap">
-      <p class="eyebrow">Scope</p>
-      <h2 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-5)">
-        One engine across your attack surface</h2>
+      <p class="eyebrow reveal">Scope</p>
+      <h2 class="section__h2 reveal">One engine across your attack surface</h2>
       <div class="grid grid--3">
-        <div class="card"><h3>Web &amp; API</h3><p>Deep REST and GraphQL testing, business-logic and
-          multi-hop access-control chains — with first-class injection oracles, not pattern-matching.</p></div>
-        <div class="card"><h3>Cloud &amp; Kubernetes</h3><p>S3 exposure, IAM privilege-escalation paths and
-          achieved-state exploitation, plus Kubernetes and service-mesh posture — proven, not just flagged.</p></div>
-        <div class="card"><h3>Source &amp; CI/CD</h3><p>Diff-scoped code scanning and pull-request review,
+        <div class="card card--scope reveal"><h3>Web &amp; API</h3><p>Deep REST and GraphQL testing, business-logic and
+          multi-hop access-control chains, with first-class injection oracles, not pattern-matching.</p></div>
+        <div class="card card--scope reveal"><h3>Cloud &amp; Kubernetes</h3><p>S3 exposure, IAM privilege-escalation paths and
+          achieved-state exploitation, plus Kubernetes and service-mesh posture, proven, not just flagged.</p></div>
+        <div class="card card--scope reveal"><h3>Source &amp; CI/CD</h3><p>Diff-scoped code scanning and pull-request review,
           SARIF 2.1.0 export, and verified fix suggestions on the findings we can prove.</p></div>
       </div>
-      <p class="muted" style="margin-top:var(--sp-4); font-size:var(--fs-xs)">
-        VIGIL drives 30+ industry scanners and proves their output — we don't ask you to replace your toolchain.</p>
+      <p class="muted section__note reveal">
+        VIGIL drives 30+ industry scanners and proves their output, so you keep the toolchain you already run.</p>
     </div>
   </section>
 
   <section class="section">
     <div class="wrap">
-      <div class="band">
+      <div class="band band--home reveal">
         <h2>See a finding prove itself.</h2>
-        <p>Request access for a walkthrough, or read exactly how a VIGIL proof re-verifies offline — no
+        <p>Request access for a walkthrough, or read exactly how a VIGIL proof re-verifies offline. No
           account, no “free trial” theatre, no data leaving your machine.</p>
-        <div class="btn-row" style="justify-content:center">
+        <div class="btn-row btn-row--center">
           <a class="btn btn--primary" href="/support">Request access</a>
           <a class="btn btn--ghost" href="/trust">How the proof works</a>
         </div>
@@ -161,10 +147,10 @@
   <div class="wrap">
     <div class="footer__cols">
       <div>
-        <div class="brand" style="margin-bottom:var(--sp-3)">
+        <div class="brand footer__brand">
           <img class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL" width="99" height="22">
         </div>
-        <p style="font-size:var(--fs-sm); max-width:34ch; margin:0">Sovereign, proof-carrying offensive
+        <p class="footer__tagline">Sovereign, proof-carrying offensive
           security. Prove, don't guess.</p>
       </div>
       <div><h4>Product</h4><ul>
@@ -191,7 +177,7 @@
     </div>
     <div class="footer__legal">
       <span>© VIGIL</span>
-      <span>Source-available — PolyForm Noncommercial 1.0.0 + Commercial (public-sector excluded from the free grant)</span>
+      <span>Source-available: PolyForm Noncommercial 1.0.0 + Commercial (public-sector excluded from the free grant)</span>
       <span>No telemetry · self-hosted</span>
     </div>
   </div>
