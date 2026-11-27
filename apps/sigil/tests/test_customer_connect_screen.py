@@ -85,6 +85,9 @@ def _last_fn(src: str, name: str) -> str:
 
 # --- the edge flags ------------------------------------------------------------------------------------------------------
 def test_the_edge_writes_both_connect_flags_into_the_page(tmp_path, monkeypatch):
+    # VIGIL_CUSTOMER_CONNECT is now DEFAULT-ON, so the off baseline FORCES it off with the explicit =0 override;
+    # the loop below re-checks that every non-affirmative value (and the cloud flag alone) serves that same page.
+    monkeypatch.setenv("VIGIL_CUSTOMER_CONNECT", "0")
     off, build_off = _page_and_build(tmp_path / "a")
     assert 'data-connect="0"' in off and 'data-cloud-connect="0"' in off
     assert "__VIGIL_CONNECT__" not in off and "__VIGIL_CLOUD_CONNECT__" not in off

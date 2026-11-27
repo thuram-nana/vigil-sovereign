@@ -2,8 +2,9 @@
 
 ``LaunchGate.pause_launch``/``resume_launch`` record/clear the ``(slug, nonce)`` pause marker UNDER the spine
 lock (the PR-1 caller-serialization); ``provision.launch_pause``/``launch_resume`` gate them
-(``customer_pause_resume_enabled`` default-OFF + ``admit_customer(run_engagement)`` + tenant-bind + step-up,
-identical to ``launch_cancel``/``launch_start``).
+(``customer_pause_resume_enabled`` now DEFAULT-ON for the hosted deployment but forced OFF here with the explicit
+``=0`` override + ``admit_customer(run_engagement)`` + tenant-bind + step-up, identical to
+``launch_cancel``/``launch_start``).
 
 The money-safety the recorded marker drives — HELD at every window (queued / in-flight / gate→arm) → RE-ADMITS
 on resume → settles EXACTLY once, never stranded / double-charged / free-run — is the already-merged PR-2..PR-4a
@@ -292,9 +293,10 @@ def _provisioner(monkeypatch):
 
 
 def test_launch_pause_is_denied_when_the_flag_is_off(monkeypatch):
-    # DEFAULT-OFF: the action is refused BEFORE any admit/lease work — the whole pause substrate stays inert.
+    # DEFAULT-ON now: FORCE the explicit operator override (=0) and the action is refused BEFORE any admit/lease
+    # work; the whole pause substrate stays inert, byte-identical to the feature not existing.
     from sigil.ui.provision import ProvisionDenied
-    monkeypatch.delenv("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", raising=False)
+    monkeypatch.setenv("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", "0")
     p, admin, org = _provisioner(monkeypatch)
     with pytest.raises(ProvisionDenied, match="not enabled"):
         p.launch_pause(admin, org, None)

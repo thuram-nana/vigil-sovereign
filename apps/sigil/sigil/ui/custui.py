@@ -1276,6 +1276,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._connect(_CLOUD_CONNECT_ACTIONS[action], body)
         if action == "assistant/ask" and _assistant_on():            # PR-J assistant (flag OFF -> unknown-action 404)
             return self._assistant(body)
+        if action == "assistant/command" and _assistant_on():        # B2 deterministic command box (OFF -> 404)
+            return self._command(body)
+        if action == "customer/flow" and _assistant_on():            # B3 engagement flow machine (OFF -> 404)
+            return self._flow(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1539,6 +1543,42 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
                                       "question": body.get("question", "")}   # the question only, from the body
         c, r = self._provision("assistant_ask", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _command(self, body: dict):
+        """B2 - relay ONE typed box line to the DETERMINISTIC (model-free) command interpreter. REQUESTER + ORG come
+        from the SERVER session, never the body (a body org_id is ignored): a customer drives only THEIR bound org.
+        Only the typed ``line`` travels. The sovereign classifies it over a closed verb allowlist and, for an advice
+        intent, answers through the grounded read-only assistant, never an action, never a mint. The box drives any
+        non-advice intent through ``customer/flow`` (behind the explicit affirm/confirm gates)."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "line": body.get("line", "")}   # the typed line only, from the body
+        c, r = self._provision("customer_command", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _flow(self, body: dict):
+        """B3 - advance the per-(org, session) ENGAGEMENT FLOW by one step. REQUESTER + ORG + the E3c step-up stamp
+        come from the SERVER session, NEVER the body (tenant isolation + money doctrine at the edge: a body
+        org_id/requester/mfa_at is ignored). The body carries ONLY the flow signal: the classified ``intent``, the
+        target ``host`` (the org's own proven target), the chosen ``depth``/``product_id``, the EXPLICIT
+        ``authorized`` affirmation (verify) and ``confirm`` spend signal (launch), the steer ``text``, a control
+        ``idem_key`` and the activity ``since`` cursor. The affirmation and the confirm are the customer's OWN
+        statements, so they legitimately ride the body; the sovereign requires each fail-closed before it mints an
+        authority (verify) or reserves credits (launch)."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {
+            "org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+            "mfa_at": rec.get("mfa_at"),                 # E3c step-up stamp from the SESSION, never body
+            "intent": body.get("intent", ""), "host": body.get("host", ""), "depth": body.get("depth", ""),
+            "product_id": body.get("product_id", ""), "method": body.get("method", ""),
+            "authorized": bool(body.get("authorized")), "confirm": bool(body.get("confirm")),
+            "text": body.get("text", ""), "idem_key": body.get("idem_key", ""), "since": body.get("since", "")}
+        c, r = self._provision("customer_flow_step", str(rec.get("username") or ""), payload)
         return self._json(r, c)
 
     def _code_connected(self):

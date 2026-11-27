@@ -282,7 +282,12 @@ def test_config_builds_the_azure_fetcher_only_when_fully_provisioned(monkeypatch
     assert isinstance(config.azure_connect_fetcher(), AzureConsentConnectFetcher)
     assert config.cloud_connect_azure_client_id() == CLIENT_ID
     for missing in env:
-        monkeypatch.delenv(missing)
+        # VIGIL_CUSTOMER_CONNECT is now DEFAULT-ON, so FORCE it off (=0) to prove the master still gates the
+        # fetcher; every other required piece is removed by unsetting it.
+        if missing == "VIGIL_CUSTOMER_CONNECT":
+            monkeypatch.setenv(missing, "0")
+        else:
+            monkeypatch.delenv(missing)
         assert config.azure_connect_fetcher() is None, missing
         monkeypatch.setenv(missing, env[missing])
     # a client assertion (cert path) in place of a secret also builds the fetcher

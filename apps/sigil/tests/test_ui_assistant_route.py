@@ -1,8 +1,9 @@
 """PR-J route wiring — the flag-gated dispatch (byte-identical when OFF), the provisioner gate + per-turn grant mint,
 and a provisioner-level END-TO-END through the REAL model gateway (a fake model behind it — never a real provider).
 
-Byte-identical when off: with ``VIGIL_CUSTOMER_ASSISTANT`` unset, dispatching ``assistant_ask`` returns None (handled
-as an unknown action → 404), exactly as before this feature existed. Nothing is minted, no grant, no model request.
+Byte-identical when off: ``VIGIL_CUSTOMER_ASSISTANT`` is now DEFAULT-ON for the hosted deployment, so forcing the
+explicit operator override (``=0``) makes dispatching ``assistant_ask`` return None (handled as an unknown action →
+404), exactly as before this feature existed. Nothing is minted, no grant, no model request.
 """
 from __future__ import annotations
 
@@ -71,7 +72,7 @@ class _RecP:
 
 
 def test_dispatch_is_absent_when_the_flag_is_off(monkeypatch):
-    monkeypatch.delenv("VIGIL_CUSTOMER_ASSISTANT", raising=False)
+    monkeypatch.setenv("VIGIL_CUSTOMER_ASSISTANT", "0")   # DEFAULT-ON now: FORCE the explicit operator override off
     p = _RecP()
     body = {"org_id": "acme", "question": "hi", "ip": "1.2.3.4"}
     # unbound call with a bare self (the method uses self only for the redpen_ branch, never reached here)
@@ -91,6 +92,8 @@ def test_dispatch_relays_when_the_flag_is_on(monkeypatch):
 def test_edge_flag_helper_tracks_the_config(monkeypatch):
     from sigil.ui.custui import _assistant_on
     monkeypatch.delenv("VIGIL_CUSTOMER_ASSISTANT", raising=False)
+    assert _assistant_on() is True                        # DEFAULT-ON: unset ⇒ enabled for the hosted deployment
+    monkeypatch.setenv("VIGIL_CUSTOMER_ASSISTANT", "0")   # the explicit operator override forces it off
     assert _assistant_on() is False
     monkeypatch.setenv("VIGIL_CUSTOMER_ASSISTANT", "1")
     assert _assistant_on() is True

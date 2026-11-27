@@ -281,7 +281,10 @@ def test_target_challenge_gated_on_run_engagement_and_bound_to_session_org(tmp_p
         reg = AssetOwnershipRegistry(sov.store())
         assert reg.challenge(oid, "apme.cm") is not None          # recorded under the SESSION org
         assert reg.challenge("org_EVIL", "apme.cm") is None       # never the body-supplied org (isolation)
-        # verify is fail-closed while ownership verification is disabled (no fetcher configured)
+        # verify is fail-closed while ownership verification is disabled: VIGIL_OWNERSHIP_VERIFY is now DEFAULT-ON,
+        # so force the explicit operator override off to exercise the no-fetcher fail-closed path (the provisioner is
+        # built per request, so the next POST sees it disabled).
+        monkeypatch.setenv("VIGIL_OWNERSHIP_VERIFY", "0")
         c, r = _post(op, ep, "/api/customer/target/verify", {"host": "apme.cm", "method": "well-known"})
         assert c == 400, (c, r)                                   # fail-closed through the edge
     finally:

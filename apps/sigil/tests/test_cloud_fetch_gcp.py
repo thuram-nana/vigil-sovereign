@@ -321,7 +321,12 @@ def test_config_builds_the_fetcher_only_when_the_gcp_leg_is_fully_provisioned(mo
     assert isinstance(config.cloud_connect_gcp_fetcher(), GcpImpersonationConnectFetcher)
     assert config.cloud_connect_gcp_connector_sa() == CONNECTOR_SA
     for missing in env:
-        monkeypatch.delenv(missing)
+        # VIGIL_CUSTOMER_CONNECT is now DEFAULT-ON, so FORCE it off (=0) to prove the master still gates the
+        # fetcher; every other required piece is removed by unsetting it.
+        if missing == "VIGIL_CUSTOMER_CONNECT":
+            monkeypatch.setenv(missing, "0")
+        else:
+            monkeypatch.delenv(missing)
         assert config.cloud_connect_gcp_fetcher() is None, missing
         monkeypatch.setenv(missing, env[missing])
     for bad in ("vigil-connector", "vigil-connector@proj.example.com", "vigil@x.iam.gserviceaccount.com y",

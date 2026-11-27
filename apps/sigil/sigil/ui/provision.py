@@ -4390,6 +4390,141 @@ class Provisioner:
                            not_after=now + 300.0, issued_at=now)
         return encode_token(grant, owner_key.private_key_b64)
 
+    # ---- the chat-driven engagement control surface (B2/B3) --------------------------------------------------------
+    # One box drives a whole engagement. ``customer_command`` interprets a typed line DETERMINISTICALLY
+    # (``assistant_command.classify`` - model-free); only an ADVICE intent reaches the model (the grounded, read-only
+    # ``customer_assistant_ask``), so the box can never be prompt-injected into launching. ``customer_flow_step`` is
+    # the per-(org, session) state machine (``engagement_flow``): each transition calls an EXISTING, already-gated
+    # provisioner action, the signed lease is persisted between reserve and start by the existing
+    # ``customer_launches`` cache, the "I am authorized to test this asset" affirmation on verify is collected
+    # EXPLICITLY (never inferred), and a launch stops at awaiting_confirm until an EXPLICIT spend confirm. Both are
+    # behind VIGIL_CUSTOMER_ASSISTANT (the dispatch 404s when off; each refuses here too, defence in depth) and take
+    # requester + org + mfa_at from the SERVER session only.
+    def customer_command(self, requester: str, requester_org_id: str, line: str, *, ip: str = "") -> dict:
+        """B2 - interpret ONE typed box line and route it. The line is classified DETERMINISTICALLY (model-free,
+        ``assistant_command.classify``) over the closed verb allowlist. An ``advice`` intent hands off to the
+        grounded, read-only ``customer_assistant_ask`` (the ONLY path to the model); every other intent is RETURNED
+        as a plan only - nothing is launched, reserved or minted here (the box advances it through
+        ``customer_flow_step``, which still gates the explicit affirmation on verify and the explicit spend confirm
+        on launch). requester / org are the hop-bound session principal, never a body field. Behind
+        VIGIL_CUSTOMER_ASSISTANT (refused here too, defence in depth under the dispatch 404)."""
+        from .. import config
+        if not config.customer_assistant_enabled():
+            raise ProvisionDenied("the chat engagement surface is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            self._audit("customer_command", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not use the engagement box for this org (view_assessments)")
+        from . import assistant_command as _cmd
+        parsed = _cmd.classify(str(line or ""))
+        intent = str(parsed.get("intent") or "advice")
+        if intent == "advice":
+            # the ONLY branch that reaches a model - grounded, read-only, minting nothing (customer_assistant_ask
+            # has no action/mint path); the deterministic layer never lets an advice line become an action.
+            advice = self.customer_assistant_ask(requester, requester_org_id, str(parsed.get("text") or ""), ip=ip)
+            return {"intent": "advice", "advice": advice}
+        self._audit("customer_command", requester=requester, org_id=requester_org_id,
+                    target=str(parsed.get("host") or ""), outcome=intent)
+        return {"intent": intent, "host": str(parsed.get("host") or ""),
+                "depth": str(parsed.get("depth") or ""), "text": str(parsed.get("text") or "")}
+
+    def customer_flow_step(self, requester: str, requester_org_id: str, *, intent: str = "", host: str = "",
+                           depth: str = "", product_id: str = "", method: str = "", authorized: bool = False,
+                           confirm: bool = False, text: str = "", idem_key: str = "", since: str = "",
+                           ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """B3 - advance the per-(org, session) ENGAGEMENT FLOW by one transition. The current state is derived from
+        the org's OWN live ownership (``customer_assets``) + launch reads (``customer_launches``); the signal's
+        ``intent`` (from the deterministic classifier) decides the next step, and that step calls an EXISTING,
+        already-gated provisioner action (``target_challenge`` / ``target_verify`` / ``launch_reserve`` +
+        ``launch_start`` / ``launch_instruct`` / ``launch_pause|resume|cancel`` / ``launch_activity``). This method
+        mints nothing itself - it is the hands; ``engagement_flow`` is the brain.
+
+        Money / safety doctrine, enforced here: a launch NEVER reserves on the typed command alone - it stops at
+        ``awaiting_confirm`` carrying the server-decided depth/product (``_launch_choices``; a depth, never an
+        amount) until an EXPLICIT ``confirm is True``; the "I am authorized to test this asset" affirmation on verify
+        is passed to ``target_verify`` ONLY when ``authorized is True`` (never inferred); and a control is forwarded
+        ONLY after the box's host is matched to an active lease the org holds. requester / org / mfa_at come from the
+        SERVER session only (never a body field). Behind VIGIL_CUSTOMER_ASSISTANT (refused here too, defence in
+        depth under the dispatch 404)."""
+        from .. import config
+        if not config.customer_assistant_enabled():
+            raise ProvisionDenied("the chat engagement surface is not enabled")
+        t = self._now() if now is None else float(now)
+        # admit the session org for the READ tier first (tenant-safe; the action methods re-admit run_engagement).
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            self._audit("customer_flow_step", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not drive the engagement flow for this org (view_assessments)")
+        from ..governor import asset_ownership as _own
+        from . import customer_launches as _cl
+        from . import engagement_flow as _flow
+        h = str(host or "").strip().lower()
+        control = self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement")
+        assets = _own.assets_overview(self.store, requester_org_id, now=t).get("assets", [])
+        launches = _cl.launches(self.store, requester_org_id, now=t,
+                                trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None),
+                                control=control, pause_resume=config.customer_pause_resume_enabled(),
+                                choices=self._launch_choices(requester_org_id) if control else [])
+        derived = _flow.derive_state(assets, launches, h)
+        signal = {"intent": str(intent or ""), "method": str(method or ""),
+                  "authorized": authorized is True, "confirm": confirm is True}
+        plan = _flow.decide(signal, derived)
+        action = str(plan["action"])
+        active = derived.get("active")
+        out: "dict[str, Any]" = {"intent": signal["intent"], "host": h, "state": plan["state"],
+                                 "blocked": plan["blocked"], "need": plan["need"],
+                                 "status": derived.get("status", ""),
+                                 "choices": list(launches.get("choices", []))}
+        if active is not None:                        # surface the active launch WITHOUT its signed lease
+            out["launch"] = {k: active.get(k) for k in ("slug", "launch", "state", "depth") if k in active}
+
+        if action == "assets":
+            out["assets"] = assets                     # the org's own ownership status rows (tenant-scoped)
+        elif action == "challenge":
+            out["challenge"] = self.target_challenge(requester, requester_org_id, h, ip=ip, now=t)
+        elif action == "verify":
+            # the explicit "I am authorized to test this asset" affirmation is REQUIRED and NEVER inferred: decide()
+            # withheld this transition unless the signal carried authorized=True, which we now pass straight through.
+            out["verified"] = self.target_verify(requester, requester_org_id, h, str(method or ""),
+                                                  authorized=True, ip=ip, mfa_at=mfa_at, now=t)
+            out["state"] = _flow.READY
+        elif action == "reserve_start":
+            # the EXPLICIT spend confirm was required by decide(); reserve (keeps the signed lease via the existing
+            # _keep_launch) THEN start (publishes + forgets it via _drop_launch) - the lease persists between the two.
+            pid = _flow.resolve_product_id(launches.get("choices", []), product_id=product_id, depth=depth)
+            reserved = self.launch_reserve(requester, requester_org_id, h, product_id=pid, ip=ip,
+                                           mfa_at=mfa_at, now=t)
+            out["reserved"] = {k: reserved.get(k) for k in ("slug", "units_reserved", "nonce", "product_id")
+                               if k in reserved}
+            out["started"] = self.launch_start(requester, requester_org_id, reserved["lease"], ip=ip,
+                                               mfa_at=mfa_at, now=t)
+            out["state"] = _flow.RUNNING
+        elif action == "instruct":
+            if config.customer_live_control_enabled():
+                out["instructed"] = self.launch_instruct(requester, requester_org_id, host=h, text=str(text or ""),
+                                                          idem_key=str(idem_key or ""), ip=ip, mfa_at=mfa_at)
+            else:
+                out["blocked"] = "live control is not enabled on this deployment"
+        elif action in ("pause", "resume", "cancel"):
+            lease = (active or {}).get("lease")          # host↔lease match: the lease of THIS host's active launch
+            if lease is None:
+                raise ProvisionDenied("no controllable launch for this host")
+            meth = {"pause": self.launch_pause, "resume": self.launch_resume, "cancel": self.launch_cancel}[action]
+            out["control"] = meth(requester, requester_org_id, lease, ip=ip, mfa_at=mfa_at, now=t)
+        elif action == "activity":
+            # B4a - step-by-step progress is the EXISTING customer-safe launch_activity read (no new backend, no
+            # allowlist change). Only a run_engagement member with live control on can read it; else nothing to show.
+            if control and config.customer_live_control_enabled():
+                try:
+                    out["activity"] = self.launch_activity(requester, requester_org_id, host=h, since=str(since or ""),
+                                                           ip=ip)
+                except ProvisionDenied:
+                    out["activity"] = None               # no live engagement to read (host lapsed / none running)
+            else:
+                out["activity"] = None
+        # action == "none": nothing to call; the box renders state / blocked / need.
+        self._audit("customer_flow_step", requester=requester, org_id=requester_org_id, target=h,
+                    outcome=action if plan["blocked"] is None else "blocked")
+        return out
+
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:
         """C1a — the SESSION org's assessment launches for the customer app (``ui/customer_launches.launches``): those
