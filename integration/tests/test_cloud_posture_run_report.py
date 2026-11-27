@@ -106,3 +106,31 @@ def test_live_collection_is_gated_and_refuses_when_not_entitled(monkeypatch, tmp
     assert result.n_facts == 0 and result.family_verdict() != "CLEAN"
     note = " ".join(result.notes).lower()
     assert "gated" in note and ("entitl" in note or "gate=entitlement" in note), result.notes
+
+
+def test_live_collection_is_gated_and_refuses_an_unallowlisted_host(monkeypatch, tmp_path):
+    """GATE ISOLATION, egress leg (dep-free; RUNS IN CI): with the kill-switch clear and ACTIVE_RECON
+    granted, an un-allowlisted control-plane host makes invoke_tool's egress gate refuse BEFORE any boto3
+    read — so run_cloud_posture_live returns a no-FACT, never-CLEAN INCONCLUSIVE with gate=egress. Proves the
+    egress control (DECLARED == ACTUAL egress) reaches THROUGH the glue, not only the entitlement gate."""
+    pytest.importorskip("framework.v2.verify")
+    from framework.v2 import entitlement
+    from framework.v2.agents import egress_guard
+    from framework.v2.common import paths
+
+    from vigil_integration.live.cloud_posture_run import run_cloud_posture_live
+
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: tmp_path / f"{slug}.halt")   # kill-switch clear
+    monkeypatch.setattr(entitlement, "require_capability", lambda cap: None)                 # entitled
+    monkeypatch.setattr(egress_guard, "build_engagement_allowlist",
+                        lambda **k: SimpleNamespace(permits=lambda host: False))             # NOTHING allowlisted
+
+    session = SimpleNamespace(provider="aws", account_id=_ACCOUNT, region="us-east-1",
+                              access_key_id="ASIATEMP", secret_access_key="s", session_token="t")
+    signers, _ = _signers_and_trust()
+    gate = CloudScopeGate(scope=StaticCloudScopeSource(_IN_SCOPE), engagement_slug="acme")
+    result = run_cloud_posture_live(session, scope_gate=gate, engagement_slug="acme", signers=signers)
+
+    assert result.n_facts == 0 and result.family_verdict() != "CLEAN"
+    note = " ".join(result.notes).lower()
+    assert "gate=egress" in note, result.notes

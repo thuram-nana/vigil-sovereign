@@ -43,6 +43,7 @@ def run_cloud_posture_live(
     collector_id: str = "cloud-live",
     capture_time_epoch: "int | None" = None,
     tool_context: Any = None,
+    sink: Any = None,
 ) -> CloudLivePostureResult:
     """Collect LIVE cloud posture as the minted customer identity and re-derive signed FACTs over it.
 
@@ -50,8 +51,8 @@ def run_cloud_posture_live(
     ``session_data`` (``require_injected_credentials=True`` — the collector FAILS CLOSED rather than fall
     back to VIGIL's ambient boto3 identity), runs it THROUGH the gated ``invoke_tool`` chain (kill-switch /
     entitlement / charter scope / egress allowlist + the audit spine — a bare call is still fully gated;
-    pass ``tool_context`` to inherit the engagement's spine sink + posture), then hands the collector's
-    retained native export (``output['export']``, ``format='native'``) to the EXISTING
+    pass ``sink`` for the audit spine and ``tool_context`` for the engagement's posture), then hands the
+    collector's retained native export (``output['export']``, ``format='native'``) to the EXISTING
     :func:`cloud_live_posture.cloud_live_verify` verbatim — which D5-scope-gates the capture against the
     signed charter and mints a signed FACT per confirmed insecure subject. Returns the
     :class:`CloudLivePostureResult`.
@@ -98,8 +99,12 @@ def run_cloud_posture_live(
         ctx = ToolContext(slug=engagement_slug,
                           prompt_callback=getattr(tool_context, "prompt_callback", None),
                           dry_run=bool(getattr(tool_context, "dry_run", False)))
-    sink = getattr(tool_context, "sink", None) or getattr(tool_context, "spine_sink", None)
-    result = invoke_tool(registry, sensor.name, {}, ctx, sink=sink)
+    # The audit sink for the event spine (tool_call / tool_result / refusal). ``invoke_tool`` takes it as a
+    # SEPARATE argument (a ToolContext carries no sink), so accept it explicitly; fall back to one carried on
+    # a duck-typed ``tool_context`` for convenience. ``None`` simply omits events — the gating is unaffected.
+    audit_sink = sink if sink is not None else (
+        getattr(tool_context, "sink", None) or getattr(tool_context, "spine_sink", None))
+    result = invoke_tool(registry, sensor.name, {}, ctx, sink=audit_sink)
 
     if not getattr(result, "ok", False):
         # A GATE refused (kill-switch / entitlement / scope / egress) OR the collector itself fail-closed
