@@ -353,3 +353,14 @@ def test_verify_never_raises_on_hostile_input():
     bad_entry = ChainEntry(seq=0, prev_hash="0" * 64, cert_digest="x", entry_hash="y")
     ok, _ = verify_owner_anchor(rec, [bad_entry], _chain_and_head([rec])[1], _owner_root())
     assert ok is False
+    # a non-CanonicalModel RECORD must REFUSE (not raise) too: record_cert_digest() would throw without the guard,
+    # so this reds if the anchor-2 digest path is not wrapped fail-closed (the asymmetry anchor-1 never had).
+    entries, head = _chain_and_head([rec])
+
+    class _NotAModel:                              # no canonical_bytes/digest -> record_cert_digest raises unguarded
+        pass
+
+    ok2, why2 = verify_owner_anchor(_NotAModel(), entries, head, _owner_root())
+    assert ok2 is False and "digest failed" in why2
+    assert verify_anchored_record(_NotAModel(), anc, secret=SECRET_SLACK, entries=entries, head=head,
+                                  trust_root=_owner_root()).trustworthy is False

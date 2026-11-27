@@ -282,7 +282,10 @@ def verify_owner_anchor(record: CanonicalModel, entries: list[ChainEntry], head:
         return False, f"anchor-2: owner head verification failed — {type(exc).__name__}"
     if not ok:
         return False, f"anchor-2: owner-signed head does not verify — {reason}"
-    digest = record_cert_digest(record)
+    try:                                     # a non-canonical / hostile record is a fail-closed refusal, not a raise
+        digest = record_cert_digest(record)
+    except Exception as exc:  # noqa: BLE001 — honour the "never raises on hostile input" contract, as anchor-1 does
+        return False, f"anchor-2: record digest failed — {type(exc).__name__}"
     if not any(hmac.compare_digest(e.cert_digest, digest) for e in entries):
         return False, "anchor-2: record is not present in the owner-anchored chain (not covered by the head)"
     return True, "anchor-2 verified: record is anchored by the owner-signed spine head"
