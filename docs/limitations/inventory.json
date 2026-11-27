@@ -168,6 +168,22 @@
    "w16_issue": null
   },
   {
+   "id": "LIMIT-cloudflare-live-r2-api",
+   "title": "The Cloudflare R2 live read-only REST surface is proof-gated on a real customer token",
+   "summary": "CloudflareLiveSensor's pure-protocol layer (the host-pinned egress guard, the response parse, the native translation, and the oracle promotion) is fully covered offline through the injectable transport seam. The exact live R2 read-only REST shapes (the /r2/buckets list plus the managed and custom-domain JSON) and whether a per-run read-only token's groups include 'Workers R2 Storage Read' cannot run in CI and are an honestly-registered residual proven against a live customer token.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/sensors/cloudflare_live.py",
+    "symbol": "CloudflareLiveSensor"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "LIMIT-agent-body-scaffold",
    "title": "The pluggable next-gen agent-body is an interface-only scaffold",
    "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",

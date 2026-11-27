@@ -337,6 +337,10 @@ def test_cloud_posture_run_azure_e2e(monkeypatch, tmp_path):
     assert "sha256:" in md
     assert "framework.v2 verify" in md
     assert "oracle-confirmed fact(s)" in md
+    # NO-LEAK end-to-end (mirror the Cloudflare E2E): the injected bearer appears in NEITHER the signed result
+    # (notes/admissions) NOR the rendered report — not just the intermediate collect export.
+    assert INJECTED_BEARER not in f"{result.notes}\n{getattr(result, 'admissions', '')}\n{md}"
+    assert INJECTED_BEARER not in (collect.summary or "")
 
 
 def test_partial_azure_session_fails_closed_through_run_cloud_posture_live(monkeypatch, tmp_path):

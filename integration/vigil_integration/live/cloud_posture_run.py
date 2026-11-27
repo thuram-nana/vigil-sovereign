@@ -330,9 +330,9 @@ class MultiCloudPostureResult:
 
 def _provider_key(result: CloudLivePostureResult, index: int, existing: "dict[str, Any]") -> str:
     """A deterministic, COLLISION-FREE key for ``result`` within ``existing`` (the results accumulated so far).
-    Prefers the bare provider token; on a collision falls back to ``provider#account`` then ``provider#<index>``
-    (``index`` is unique per session, so a key is always found). Dropping a colliding result is NOT an option —
-    that would mask a tenant's FACTs; disambiguation keeps every result addressable and counted."""
+    Prefers the bare provider token; on a collision falls back to ``provider#account``, then a ``provider#<index>#<n>``
+    suffix probed against ``existing`` until free. Dropping a colliding result is NOT an option — that would mask a
+    tenant's FACTs; disambiguation keeps every result addressable and counted."""
     base = (str(getattr(result, "provider", "") or "").strip()) or f"provider-{index}"
     if base not in existing:
         return base
@@ -340,7 +340,16 @@ def _provider_key(result: CloudLivePostureResult, index: int, existing: "dict[st
     cand = f"{base}#{account}" if account else f"{base}#{index}"
     if cand not in existing:
         return cand
-    return f"{base}#{index}"  # index is unique within one run -> guaranteed unique, deterministic
+    # ``cand`` is taken — e.g. an earlier session's account string equals this session's index (account "2",
+    # index 2). Returning ``base#index`` here could ALIAS that earlier ``base#account`` and overwrite its
+    # result. Probe a provably-unique double-hash suffix against ``existing`` instead (deterministic in
+    # (index, existing); a bare cloud account id carries no "#", so ``base#index#n`` can alias nothing).
+    n = 0
+    while True:
+        probe = f"{base}#{index}#{n}"
+        if probe not in existing:
+            return probe
+        n += 1
 
 
 def run_multicloud_posture(

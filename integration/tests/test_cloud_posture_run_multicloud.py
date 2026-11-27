@@ -344,6 +344,30 @@ def test_run_multicloud_drives_the_real_dispatch_gated_fail_closed(monkeypatch, 
 # ---------------------------------------------------------------------------------------------------------
 # 6. Two sessions for the SAME provider both count — a provider-key collision never masks a tenant's FACTs.
 # ---------------------------------------------------------------------------------------------------------
+def test_provider_key_fallback_never_aliases_on_index_account_collision():
+    """Regression (red-pen): the ``_provider_key`` fallback must NEVER return a key already in ``existing`` —
+    even when an earlier session's account string equals a later same-provider session's positional index
+    (account "2" at index 2). A collision there would overwrite/DROP the earlier result and mask its FACTs."""
+    class _R:
+        def __init__(self, provider, account):
+            self.provider = provider
+            self.account = account
+    existing: dict = {}
+    # s0=(aws,'') -> 'aws'; s1=(aws,'2') -> 'aws#2'; s2=(aws,'') at index 2 would alias 'aws#2' under the old code.
+    k0 = cpr._provider_key(_R("aws", ""), 0, existing); existing[k0] = 0
+    k1 = cpr._provider_key(_R("aws", "2"), 1, existing); existing[k1] = 1
+    k2 = cpr._provider_key(_R("aws", ""), 2, existing); existing[k2] = 2
+    assert k1 == "aws#2"                      # the account branch keyed s1
+    assert k2 not in (k0, k1)                 # s2 did NOT alias/overwrite s0 or s1
+    assert len({k0, k1, k2}) == 3             # all three addressable -> no result dropped
+    # determinism: the same sequence of (provider, account, index) yields the same keys on a fresh dict
+    e3: dict = {}
+    r0 = cpr._provider_key(_R("aws", ""), 0, e3); e3[r0] = 0
+    r1 = cpr._provider_key(_R("aws", "2"), 1, e3); e3[r1] = 1
+    r2 = cpr._provider_key(_R("aws", ""), 2, e3); e3[r2] = 2
+    assert (r0, r1, r2) == (k0, k1, k2)       # byte-identical across runs
+
+
 def test_run_multicloud_same_provider_twice_is_not_masked(monkeypatch):
     pytest.importorskip("framework.v2.verify")
     signers = _signers()
