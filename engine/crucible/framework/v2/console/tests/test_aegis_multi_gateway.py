@@ -133,6 +133,10 @@ def test_real_gateway_self_registers(tmp_path):
     env.pop("CRUCIBLE_ROOT_STRICT", None)
     env["PYTHONPATH"] = wt_engine + ":" + wt_int
     env["AEGIS_GW_LAUNCHED_BY"] = "cli"
+    # AS-2e: a real gateway refuses to start without a per-deployment secret (the world-known demo key would
+    # make every actor pseudonym trivially reversible). Provide it the PRODUCTION way — via the child ENV,
+    # never on argv (so it cannot leak through /proc/<pid>/cmdline), exactly as the sovereign console does.
+    env["AEGIS_GW_SECRET"] = "selfreg-real-deployment-secret-0123456789abcdef"
     proc = subprocess.Popen(
         [sys.executable, "-m", "framework.v2", "aegis", "gateway", "--upstream", "http://127.0.0.1:9",
          "--host", "127.0.0.1", "--port", "18097", "--mode", "observe", "--slug", "selfreg-test"],
