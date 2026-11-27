@@ -88,7 +88,7 @@ body[data-plane="customer"] #app { display: block; }
 /* the scrolling main column */
 #cust-main { grid-area: main; min-width: 0; padding: 20px clamp(16px, 3.5vw, 40px) 72px;
   padding-right: max(clamp(16px, 3.5vw, 40px), env(safe-area-inset-right, 0px)); }
-#cust-main > * { max-width: 1200px; }
+#cust-main > :not(.cust-auth) { max-width: 1200px; }
 
 @media (max-width: 860px) {
   .cust-shell { grid-template-columns: 1fr; grid-template-areas: "mtop" "main"; }
