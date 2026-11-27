@@ -413,6 +413,95 @@ def test_hostile_and_oversize_alerts_fail_closed():
     assert res.dropped == 2 and res.push_count == 1          # the two hostile alerts dropped; the real one lands
 
 
+def test_reportable_but_unstampable_alert_mid_batch_is_dropped_and_batch_continues():
+    # REGRESSION (AS-10b red-pen HIGH): a REPORTABLE alert with NO coercible timestamp is DROPPED by the map
+    # path (it fails closed rather than wallclock-stamp) — but that drop must NEVER abort the batch. Feed one in
+    # the MIDDLE of a batch THROUGH EdrPollJob.execute / run_job and prove: (a) the job COMPLETES (not failed),
+    # (b) the bad alert is dropped-and-counted, (c) the genuine detection ordered AFTER it still lands.
+    # On the pre-fix code map_edr_alert was called OUTSIDE the parse try/except, so this BoundaryError propagated
+    # into PerTenantRunner.run_job -> the WHOLE tenant poll went FAILED and the trailing detection was lost
+    # (push_count==1, state=="failed"); this test REDS there and GREENS only with the per-record guard.
+    spool = tempfile.mkdtemp()
+    before = _alert(alert_id="d1")                                   # a genuine detection ordered BEFORE the bad one
+    bad = _alert(alert_id="x1")                                      # reportable (critical/score 95)...
+    del bad["timestamp"]                                             # ...but un-stampable: no coercible ts -> drop-class
+    after = _alert(alert_id="d2", detection_name="Credential.Dumping", severity="high", score=80)  # ordered AFTER
+    assert E.is_reportable(bad) is True                              # it IS a genuine detection, not benign-skipped
+    job, receiver = _poll_job(spool, [before, bad, after], require_auth=False)
+    out = PerTenantRunner(ORG, enabled=True).run_job(
+        JobSpec(tenant=ORG, kind="edr_poll", payload={}), job.as_execute())
+    # (a) the job completed — a single record's data fault did NOT fail the tenant poll
+    assert out.state is not None and out.state.value != "failed"
+    assert out.state.value == "succeeded"
+    res = job.result
+    # (b) the bad alert was dropped-and-counted as a data fault (NOT an unexpected per-record error)
+    assert res.dropped == 1 and res.errors == 0
+    # (c) BOTH genuine detections landed — crucially the one ordered AFTER the bad record was not lost
+    assert res.push_count == 2
+    pushed_classes = {p.finding["attack_class"] for p in res.pushed}
+    assert "edr/Credential.Dumping" in pushed_classes               # the trailing detection reached the receiver
+    assert all(p.result.outcome in (IngestOutcome.SPOOLED, IngestOutcome.DEDUP_NOOP) for p in res.pushed)
+
+
+def _poll_job_with_sender(spool, alerts, sender, *, kek=None):
+    """A poll job whose ingest delivery is the injected ``sender`` (so a test can make the push of ONE record
+    fault). Everything else is the real wired path (broker-armed minter + ingest stamp, armed receiver)."""
+    kek = kek if kek is not None else os.urandom(32)
+    reg, store, broker, verifier = _wiring(kek)
+    receiver = _armed_receiver(spool, verifier, require_auth=False)
+    ingest_handle = broker.issue(_grant(), org=ORG, connector_id=INGEST_CONN, now=NOW_DT)
+    push = E.EdrPushClient(broker=broker, handle=ingest_handle, now=NOW_DT, sender=sender(receiver))
+    minter = E.EdrAnchorMinter(store, _FixedKek(kek), enabled=True)
+    cfg = E.EdrPollConfig(org=ORG, host=HOST, instance_id=INSTANCE, anchor_connector_id=ANCHOR_CONN)
+    job = E.EdrPollJob(fetch=E.StaticVendorFetch(list(alerts)), push=push, minter=minter, config=cfg, enabled=True)
+    return job, receiver
+
+
+def test_genuine_per_record_fault_is_counted_as_error_and_the_batch_continues():
+    # A per-record fault that is NEITHER drop-class (BoundaryError) NOR systemic (broker/transport down) — e.g. a
+    # transient ValueError raised while delivering ONE finding — must be counted on `errors` and the loop must
+    # CONTINUE. Pins the fix's per-record `errors` guard, distinct from the drop path. (Pre-fix: map/build/mint/
+    # push ran OUTSIDE any per-record guard, so this would propagate and fail the whole tenant poll.)
+    spool = tempfile.mkdtemp()
+
+    def _trap(receiver):
+        base = E.receiver_sender(receiver)
+
+        def _send(body, headers):
+            if b'"attack_class":"edr/TRAP"' in body:
+                raise ValueError("synthetic per-record delivery fault for THIS finding")   # not Boundary/systemic
+            return base(body, headers)
+        return _send
+
+    alerts = [_alert(alert_id="g1"),
+              _alert(alert_id="t1", detection_name="TRAP"),                                # this one errors
+              _alert(alert_id="g2", detection_name="Credential.Dumping", severity="high", score=80)]
+    job, receiver = _poll_job_with_sender(spool, alerts, _trap)
+    out = PerTenantRunner(ORG, enabled=True).run_job(
+        JobSpec(tenant=ORG, kind="edr_poll", payload={}), job.as_execute())
+    assert out.state.value == "succeeded"                           # a single record's fault did NOT fail the poll
+    res = job.result
+    assert res.errors == 1 and res.dropped == 0 and res.push_count == 2   # trap errored; both good records landed
+
+
+def test_systemic_transport_fault_propagates_and_fails_only_this_tenant():
+    # Contrast: a SYSTEMIC fault — the ingest transport is DOWN (an OSError on delivery) — fails EVERY record this
+    # cycle, so it must NOT be swallowed as a per-record error. It propagates; the runner CONTAINS it (this
+    # tenant's job goes FAILED, no other tenant degraded). This is the "broker down may still fail the job" line.
+    spool = tempfile.mkdtemp()
+
+    def _down(receiver):                                            # noqa: ARG001 — the transport never reaches it
+        def _send(body, headers):
+            raise OSError("ingest socket is down")                  # systemic outage, identical for every record
+        return _send
+
+    job, receiver = _poll_job_with_sender(spool, [_alert()], _down)
+    out = PerTenantRunner(ORG, enabled=True).run_job(
+        JobSpec(tenant=ORG, kind="edr_poll", payload={}), job.as_execute())
+    assert out.state.value == "failed"                             # systemic → the runner fails THIS tenant's poll
+    assert job.result.errors == 0 and job.result.push_count == 0   # not miscounted as a swallowed per-record error
+
+
 def test_oversize_sealed_envelope_is_dropped_by_the_receiver_cap():
     # A finding whose non-ASCII label expands PAST the receiver's 16 KiB sealed-envelope cap is DROPPED by the
     # receiver (visible 413), never black-holed. Proves the receiver's cap governs the pushed finding.
