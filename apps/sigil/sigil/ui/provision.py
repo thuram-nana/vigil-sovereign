@@ -88,6 +88,32 @@ _ADD_BAD_EMAIL = "enter the email address your teammate signs in to VIGIL with"
 # (only while VIGIL_CUSTOMER_SEATS is on). {limit} is the current allowance.
 _SEAT_LIMIT_MSG = ("this workspace has reached its member limit ({limit}). Remove a member, or add a seat, "
                    "before adding another")
+# The team EMAIL INVITE (VIGIL_CUSTOMER_TEAM_INVITE; default ON): an org_admin invites a person who has NO VIGIL
+# account yet, by email. The invite is a pending record plus a single-use, expiring token sent in an email; it grants
+# nothing until it is accepted at sign-up / sign-in. The customer-facing refusals (the cockpit cuts a refusal at 200
+# chars; each names no model, engine or price and uses only the screen's own words).
+_INVITE_BAD_EMAIL = "enter a valid email address to send the invitation to"
+_INVITE_ALREADY_PENDING = ("an invitation to that email is already pending for this workspace. Revoke it first to send "
+                           "a new one")
+_INVITE_TOO_MANY = ("this workspace has too many pending invitations. Revoke one, or wait for some to be accepted or "
+                    "to expire, before inviting another")
+_INVITE_NOT_FOUND = "that invitation is no longer pending (it may have been accepted, revoked or expired)"
+# The invite email. The single-use token is the only sensitive value; it is NEVER logged (only sent). No em dashes, no
+# engine / model / price, no account-existence signal about anyone else.
+_INVITE_SUBJECT = "You have been invited to a VIGIL workspace"
+
+
+def _invite_email_body(token: str, *, days: int) -> str:
+    """The invite email text: what it is, the single-use token to present, and how long it lasts. The token is the
+    only sensitive value and appears ONLY here (never stored, never logged)."""
+    return (
+        "You have been invited to join a VIGIL workspace.\n\n"
+        "Create your VIGIL account (or sign in, if you already have one) with THIS email address, and present this "
+        "single-use invitation token when asked:\n\n"
+        f"    {token}\n\n"
+        f"The invitation works once and expires in {int(days)} days. Until you accept it, it grants nothing.\n\n"
+        "If you were not expecting this invitation, ignore this email. VIGIL will never ask you for this token by "
+        "phone, chat or another email.\n")
 # The emails that carry a 6-digit code beside the token (only while the provisioner has an EmailCodeLedger; without
 # one the emails are exactly as before). The code and the token prove the same thing: control of the mailbox.
 _SIGNUP_CODE_EMAIL = (
@@ -615,7 +641,8 @@ class Provisioner:
     email token in the response when no real sender is configured — it must stay False in production."""
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
-                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None, cloud_fetcher=None,
+                 signup_cap_limiter=None, member_limiter=None, member_invites=None,
+                 target_fetcher=None, cloud_fetcher=None,
                  cloud_principal_arn="", cloud_gcp_fetcher=None, cloud_gcp_connector_sa="",
                  azure_fetcher=None, azure_client_id="", cloudflare_fetcher=None,
                  connect_check_limiter=None, connect_org_limiter=None,
@@ -733,6 +760,12 @@ class Provisioner:
         # (so there is no "checked-but-never-incremented" dead gate — the review's finding); when injected,
         # every member op is both GUARDED and COUNTED against it. The factory wires a per-minute ceiling.
         self.member_limiter = member_limiter
+        # The PENDING team-invite ledger (ui/member_invites_store.MemberInviteLedger): single-use, expiring invitations
+        # an org_admin raises for a person with NO VIGIL account yet. None ⇒ the invite verbs fail closed (no store ⇒
+        # the feature cannot act), so a deployment that drops the ledger never silently invents an invite. The factory
+        # always wires it over `config.CUSTOMER_MEMBER_INVITES_DIR`; the team-invite FLAG gates the ROUTES
+        # (customer_team_invite_enabled, default ON) a layer up -- this ledger stays inert until a gated route reaches it.
+        self.member_invites = member_invites
         # The DURABLE per-org / per-requester checkout-creation limiter (a LoginRateLimiter, guard-and-count via
         # `admit`). The HTTP transport builds a fresh Provisioner per request, so the limit MUST live on disk,
         # not on this instance. None ⇒ checkout is REFUSED (fail-closed: an unwired limiter can never mean
@@ -2131,6 +2164,169 @@ class Provisioner:
             seq = self.orgs.grant_membership(requester_org_id, member_username, role,
                                              issued_at=self._next_issued())
         return {"org_id": requester_org_id, "username": member_username, "role": role, "seq": seq}
+
+    # -- the team EMAIL INVITE (VIGIL_CUSTOMER_TEAM_INVITE; default ON) ------------------------------
+    def customer_member_invite(self, requester: str, requester_org_id: str, email: str, role: str, *, ip: str = "",
+                               mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """An org_admin invites a person who has NO VIGIL account yet, by the email to send the invitation to, with a
+        customer-grantable role. This mints a PENDING invite (a single-use, expiring token) and sends the invite email
+        -- it GRANTS NOTHING; authority is conferred only when the invite is accepted at sign-up / sign-in
+        (``customer_member_invite_accept``).
+
+        Order (each step fail-closed, nothing acted on before the last): the role must be customer-grantable and the
+        email well-formed (pure input checks); then, inside the transaction lock and the cross-process membership lock
+        the member verbs hold, the requester must hold ``manage_members`` in the SESSION org FIRST (so a non-admin learns
+        nothing and cannot raise invites), then the E3c step-up, then the per-org rate guard (every AUTHORISED invite is
+        metered -- the same per-org ceiling the grant/revoke verbs use, so invite email cannot be used to flood an
+        address), then the dedupe (one live pending invite per (org, email)) and the per-org pending cap (both enforced
+        atomically by the ledger). The owner-signed spine audit names the OPAQUE ``invite_id`` as its target, NEVER the
+        invited address (we tell no one whether an email has an account, and never log a third party's email). The
+        invite email (which carries the single-use token) is sent AFTER the lock is released, so no network I/O is done
+        while holding the spine lock; the token is never logged. ``requester``/``requester_org_id`` are the hop-bound
+        session principal, never a body field, so a customer invites into THEIR bound org only."""
+        t = self._now() if now is None else float(now)
+        if self.member_invites is None:
+            raise ProvisionError("team invitations are not enabled on this deployment")
+        if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
+            raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
+        from ..governor.customers import _check_email
+        try:
+            email_l = _check_email(email)
+        except ValueError:
+            raise ProvisionError(_INVITE_BAD_EMAIL) from None
+        from . import member_invites_store
+        from .. import config
+        with _members_section(self._lock, self.store):
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_members"):
+                self._audit("member_invite", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            self._member_rate_guard(requester_org_id, now=t)   # meter AUTHORISED invites (bounds invite email per org)
+            if self.member_invites.pending_email_exists(requester_org_id, email_l, now=t):
+                raise ProvisionDenied(_INVITE_ALREADY_PENDING)             # one live pending invite per (org, email)
+            try:
+                invite = self.member_invites.create(requester_org_id, email_l, role, now=t)
+            except member_invites_store.InviteExists:
+                raise ProvisionDenied(_INVITE_ALREADY_PENDING) from None
+            except member_invites_store.InviteCapReached:
+                raise ProvisionDenied(_INVITE_TOO_MANY) from None
+            except ValueError:
+                raise ProvisionError(_INVITE_BAD_EMAIL) from None
+            token = invite.pop("token")              # the single-use value for the email ONLY: never audited/returned
+            # durable audit of the authorised invite -- the OPAQUE invite_id as target, never the invited email.
+            self._audit("member_invite", requester=requester, org_id=requester_org_id, target=invite["invite_id"],
+                        outcome=f"role={role}", critical=True, role=role)
+        # the email (carrying the single-use token) is sent OUTSIDE the lock -- no SMTP under the spine lock, exactly as
+        # request_signup sends its verify email. A send failure leaves the invite valid (sent=False); the admin can
+        # revoke / re-invite. The token is NEVER logged.
+        days = max(1, int(config.CUSTOMER_INVITE_TTL_SECONDS // 86400))
+        sent = bool(self.email_sender.send(email_l, _INVITE_SUBJECT, _invite_email_body(token, days=days)))
+        out = {"org_id": requester_org_id, "invite_id": invite["invite_id"], "email": email_l, "role": role,
+               "expires_at": invite["expires_at"], "status": invite["status"], "sent": sent}
+        if self.expose_dev_tokens and not sent:
+            out["dev_token"] = token                   # DEV ONLY (no real sender) -- never populated in prod
+        return out
+
+    def customer_member_invites_list(self, requester: str, requester_org_id: str, *, ip: str = "",
+                                     now: "Optional[float]" = None) -> dict:
+        """The Team screen's pending-invites read: the SESSION org's live, unexpired pending invitations (invite_id,
+        the invited email, the capped role, created_at, expires_at, status), oldest first. Listing invites is an
+        administrator's act (``manage_members``) -- a viewer / analyst / operator / non-member / another org's admin is
+        refused (403), exactly as the member list is. A read: no lock, nothing minted, no owner key used."""
+        t = self._now() if now is None else float(now)
+        store = self.member_invites
+
+        def project(_s, org_id: str) -> dict:
+            invites = store.pending_for_org(org_id, now=t) if store is not None else []
+            return {"org_id": org_id, "invites": invites, "count": len(invites)}
+        return self._customer_read(requester, requester_org_id, "manage_members", project)
+
+    def customer_member_invite_revoke(self, requester: str, requester_org_id: str, invite_id: str, *, ip: str = "",
+                                      mfa_at: float = 0.0, now: "Optional[float]" = None) -> dict:
+        """An org_admin cancels a pending invitation of THEIR org by its opaque ``invite_id`` -- the single-use token is
+        dropped, so even if the email was seen the invite can no longer be accepted (the SAFE direction). The admin
+        check (``manage_members``) comes first (TOCTOU-safe inside the membership lock), then the step-up, then the
+        per-org rate guard; an unknown / already-accepted / expired invite is refused in plain words. ``requester`` /
+        ``requester_org_id`` are the hop-bound session principal, never a body field."""
+        t = self._now() if now is None else float(now)
+        if self.member_invites is None:
+            raise ProvisionError("team invitations are not enabled on this deployment")
+        iid = str(invite_id or "")
+        with _members_section(self._lock, self.store):
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="manage_members"):
+                self._audit("member_invite_revoke", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester is not an administrator of this org")
+            self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+            self._member_rate_guard(requester_org_id, now=t)
+            revoked = self.member_invites.revoke(requester_org_id, iid, now=t)
+            if revoked is None:
+                raise ProvisionDenied(_INVITE_NOT_FOUND)
+            self._audit("member_invite_revoke", requester=requester, org_id=requester_org_id, target=iid,
+                        outcome="revoked", critical=True)
+        return {"org_id": requester_org_id, "invite_id": iid, "revoked": True}
+
+    def customer_member_invite_accept(self, username: str, *, token: str = "", ip: str = "",
+                                      now: "Optional[float]" = None) -> dict:
+        """Redeem an invitation presented at sign-up / sign-in. The hop principal is the just-authenticated account
+        (``username``, never a body field -- Finding D); the single-use ``token`` came from the invite email. On a
+        VALID, unexpired, unused token whose invited email matches THIS account's email, it owner-signs the capped
+        membership into the inviting org -- the SAME ``grant_membership`` ``grant_member``/``add_member`` perform -- and
+        marks the invite accepted (single-use). The invite record created by an authorised admin IS the authority here
+        (there is no live admin requester), so acceptance owner-signs the grant directly rather than re-checking
+        ``admit_customer``; the role was capped at invite time and is re-checked fail-closed.
+
+        Fail-closed, GRANTS NOTHING, never raises for an ordinary refusal (so a bad token never breaks the sign-in it
+        rides): an expired / already-used / unknown token, a token for a different mailbox, or a workspace at its seat
+        limit all return ``{"accepted": False, "reason": ...}`` with no membership change and the token left intact for
+        a later retry where that applies. The owner-signed grant runs inside the cross-process membership lock with the
+        critical audit BEFORE it (committed implies audited) and the single-use flip LAST (the commit marker), so a
+        crash before the flip leaves the token valid for an idempotent retry."""
+        t = self._now() if now is None else float(now)
+        if self.member_invites is None:
+            return {"accepted": False, "reason": "disabled"}
+        tok = str(token or "")
+        if not tok:
+            return {"accepted": False, "reason": "no_token"}
+        acct = self.customers.customer(str(username or ""))
+        if acct is None:
+            return {"accepted": False, "reason": "no_account"}      # fail-closed: no active account to seat
+        from ..governor.customers import _normalize_email
+        with _members_section(self._lock, self.store):
+            inv = self.member_invites.peek(tok, now=t)              # validate WITHOUT consuming (commit-marker)
+            if inv is None:
+                return {"accepted": False, "reason": "invalid"}     # unknown / expired / already used -> refused
+            role = inv["role"]
+            if role not in _CUSTOMER_GRANTABLE_ROLES:               # defence in depth (the store already caps)
+                return {"accepted": False, "reason": "invalid"}
+            if _normalize_email(inv["email"]) != _normalize_email(acct.email):
+                # the token must be redeemed by the very mailbox it was issued to (token + email binding)
+                self._audit("member_invite_accept", requester=acct.username, org_id=inv["org_id"],
+                            target=acct.username, outcome="denied", reason="email_mismatch")
+                return {"accepted": False, "reason": "email_mismatch"}
+            org_id = inv["org_id"]
+            member_username = _member_target(acct.username)
+            existing = self.orgs.membership_role(member_username, org_id)
+            if existing is not None:
+                # already a member of the inviting org: an invite never silently CHANGES a current member's role -- the
+                # token is simply consumed (single-use) and their current role stands.
+                self._audit("member_invite_accept", requester=acct.username, org_id=org_id, target=member_username,
+                            outcome=f"already_member:{existing}")
+                self.member_invites.accept(tok, now=t)
+                return {"accepted": True, "org_id": org_id, "username": member_username, "role": existing,
+                        "already_member": True}
+            try:
+                self._seat_guard(org_id)             # a NEW member consumes a seat (no-op unless seats are on)
+            except ProvisionDenied:
+                return {"accepted": False, "reason": "no_seat"}     # token stays valid; an admin frees a seat, retry
+            # critical audit BEFORE the owner-signed grant (committed implies audited), exactly as add_member; then the
+            # capped owner-signed membership; then the commit marker (mark accepted) LAST (single-use).
+            self._audit("member_invite_accept", requester=acct.username, org_id=org_id, target=member_username,
+                        outcome=f"role={role}", critical=True, role=role)
+            seq = self.orgs.grant_membership(org_id, member_username, role, issued_at=self._next_issued())
+            self.member_invites.accept(tok, now=t)   # commit marker: single-use (pending -> accepted)
+        return {"accepted": True, "org_id": org_id, "username": member_username, "role": role, "seq": seq}
 
     # -- asset-ownership target registration (Slice G0 — billing != testing) ------------------------
     def target_challenge(self, requester: str, requester_org_id: str, host: str, *,
@@ -5468,6 +5664,7 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
     from ..governor.wallet import WalletRegistry
     from .email_channel import EmailCodeLedger, EmailTokenLedger
     from .login_ratelimit import LoginRateLimiter
+    from .member_invites_store import MemberInviteLedger
     from .pending_checkout import PendingPlanCheckouts, billing_spool_dirs, stripe_billing_spool_dirs
     from .pending_totp import PendingTotpEnrolments
     from .signcount import SignCountLedger
@@ -5525,6 +5722,11 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                               if config.SIGNUP_EMAIL_PER_HOUR > 0 else None),   # default OFF (0)
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
+        # the PENDING team-invite ledger (single-use, expiring invitations). Always wired (cheap, a filesystem dir like
+        # the email-token ledger); the team-invite FLAG gates the ROUTES a layer up, so this stays inert until reached.
+        member_invites=MemberInviteLedger(config.CUSTOMER_MEMBER_INVITES_DIR,
+                                          ttl_s=config.CUSTOMER_INVITE_TTL_SECONDS,
+                                          max_pending_per_org=config.CUSTOMER_MAX_PENDING_INVITES),
         # the owner-signed pending plan-checkout records (audit E1b; signed + verified by the deployment owner key),
         # reading the billing-webhook spool (read-only) before an expired one may lapse.
         pending_checkouts=PendingPlanCheckouts(config.PENDING_PLAN_CHECKOUT_DIR, owner_key=orgs.owner_key,

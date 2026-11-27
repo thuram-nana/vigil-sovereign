@@ -1738,6 +1738,24 @@ class Handler(BaseHTTPRequestHandler):
                 return p.customer_members(requester, str(body.get("org_id", "")), ip=ip)
             return p.add_member(requester, str(body.get("org_id", "")), str(body.get("email", "")),
                                 str(body.get("role", "")), ip=ip, mfa_at=body.get("mfa_at"))
+        # The team EMAIL INVITE (VIGIL_CUSTOMER_TEAM_INVITE; DEFAULT ON): invite a person who has NO VIGIL account yet,
+        # list / revoke pending invites, and redeem an invite token at sign-up / sign-in. Absent (unknown action -> 404)
+        # ONLY when the flag is explicitly turned off, the same flag that gates the edge routes. requester is the hop
+        # principal, org from the edge SESSION (never a free body field); the accept path's requester is the
+        # just-authenticated account (the edge stamps it after minting the session).
+        if action in ("member_invite", "member_invites_list", "member_invite_revoke", "member_invite_accept"):
+            from .. import config as _config
+            if not _config.customer_team_invite_enabled():
+                return None
+            if action == "member_invite":
+                return p.customer_member_invite(requester, str(body.get("org_id", "")), str(body.get("email", "")),
+                                                str(body.get("role", "")), ip=ip, mfa_at=body.get("mfa_at"))
+            if action == "member_invites_list":
+                return p.customer_member_invites_list(requester, str(body.get("org_id", "")), ip=ip)
+            if action == "member_invite_revoke":
+                return p.customer_member_invite_revoke(requester, str(body.get("org_id", "")),
+                                                       str(body.get("invite_id", "")), ip=ip, mfa_at=body.get("mfa_at"))
+            return p.customer_member_invite_accept(requester, token=str(body.get("token", "")), ip=ip)
         # Slice G0 — asset-ownership target registration. requester is the HMAC-bound hop principal (Finding
         # D); org_id comes from the edge's SERVER-side session (never a free body field a customer chose);
         # host/method are the customer's requested target. Gated in-service on admit_customer(run_engagement).
