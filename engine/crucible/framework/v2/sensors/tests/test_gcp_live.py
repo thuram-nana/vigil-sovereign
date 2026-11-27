@@ -11,6 +11,7 @@ cloud oracles. Near-zero-FP (the AWS lessons, corrected after a BLOCK):
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 from framework.v2.sensors.cloud import (
@@ -125,6 +126,136 @@ def test_normalize_mints_a_lead_for_a_confirmed_public_bucket():
     inv = gcp_inventory_from_responses(buckets=[_bucket("open", ["allUsers"])], org_pap_enforced=False, project="p")
     obs = cloud_observations(normalize_cloud_export(inv), seq=1)
     assert any(getattr(o, "attrs", {}).get("lead_class") == "public_exposure" for o in obs)
+
+
+# --- LIVE-collection seam: project-level public IAM grant surfaces as a public_roles signal -------------
+#
+# The pure `_project_iam_to_inventory` tests above hand-feed role-carrying bindings, so they passed even
+# while the LIVE path was dead: `_bindings_from_policy` dropped the binding `role`, so `_collect_project_iam`
+# produced role-less dicts and `public_roles` NEVER populated on live-collected data (the documented project
+# signal never fired). These tests drive the ACTUAL reducer / collection seam, proving the capability is real.
+
+
+def _sdk_binding(role, members, *, conditioned=False):
+    """A google-cloud `getIamPolicy` binding object (``.role`` / ``.members`` / ``.condition``) — the SDK
+    shape ``_bindings_from_policy`` reduces (an IAM Condition rides on ``.condition``)."""
+    return SimpleNamespace(role=role, members=list(members),
+                           condition=SimpleNamespace(expression="x") if conditioned else None)
+
+
+def _sdk_policy(*bindings):
+    return SimpleNamespace(bindings=list(bindings))
+
+
+def test_bindings_from_policy_preserves_role_for_project_iam():
+    # The exact dead-code regression guard: the reducer that fed project IAM used to DROP `role`.
+    reduced = GcpLiveSensor._bindings_from_policy(_sdk_policy(
+        _sdk_binding("roles/viewer", ["allUsers"]),
+        _sdk_binding("roles/editor", ["user:a@b.com"], conditioned=True)))
+    assert reduced == [
+        {"members": ["allUsers"], "conditioned": False, "role": "roles/viewer"},
+        {"members": ["user:a@b.com"], "conditioned": True, "role": "roles/editor"}]
+    # a dict-shaped binding (the other branch) carries role too; a role-less binding degrades to "".
+    assert GcpLiveSensor._bindings_from_policy(SimpleNamespace(bindings=[
+        {"role": "roles/owner", "members": ["allUsers"], "condition": None},
+        {"members": ["allUsers"]}])) == [
+        {"members": ["allUsers"], "conditioned": False, "role": "roles/owner"},
+        {"members": ["allUsers"], "conditioned": False, "role": ""}]
+
+
+def test_live_collected_project_iam_surfaces_public_roles_signal_not_fact(monkeypatch):
+    # Drive the real collection seam `_collect_project_iam` (which calls `_bindings_from_policy`) via a faked
+    # `resourcemanager_v3` client returning an UNCONDITIONED `allUsers` grant on a real role at the project
+    # level — exactly the public-exposure misconfiguration the module docstring says it records.
+    import types
+
+    policy = _sdk_policy(
+        _sdk_binding("roles/viewer", ["allUsers", "user:ops@acme.com"]),   # unconditioned anon on a real role
+        _sdk_binding("roles/owner", ["user:admin@acme.com"]))              # ordinary grant → a principal only
+
+    class _ProjectsClient:
+        def __init__(self, *, credentials=None, **kw):
+            pass
+
+        def get_iam_policy(self, *, resource=None):
+            assert resource == "projects/acme-prod"
+            return policy
+
+    g_rm = types.ModuleType("google.cloud.resourcemanager_v3")
+    g_rm.ProjectsClient = _ProjectsClient  # type: ignore[attr-defined]
+    g_cloud = types.ModuleType("google.cloud")
+    g_cloud.resourcemanager_v3 = g_rm  # type: ignore[attr-defined]
+    g = types.ModuleType("google")
+    g.cloud = g_cloud  # type: ignore[attr-defined]
+    for name, mod in {"google": g, "google.cloud": g_cloud,
+                      "google.cloud.resourcemanager_v3": g_rm}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    collected = GcpLiveSensor()._collect_project_iam("acme-prod", credentials=object())
+    # the LIVE reducer now carries role through, so the project response is complete...
+    assert collected == {"project": "acme-prod", "bindings": [
+        {"members": ["allUsers", "user:ops@acme.com"], "conditioned": False, "role": "roles/viewer"},
+        {"members": ["user:admin@acme.com"], "conditioned": False, "role": "roles/owner"}]}
+
+    inv = gcp_inventory_from_responses(project_iam=collected, org_pap_enforced=False, project="acme-prod")
+    proj = [r for r in inv["resources"] if r["id"] == "projects/acme-prod"]
+    # POSITIVE: the project-level public grant now SURFACES as an auditable public_roles signal...
+    assert proj and proj[0]["public_roles"] == ["roles/viewer"]
+    # ...carrying NO `public`/`grants` flag (the signal-not-FACT contract: deferred DRS-org-policy confirm)...
+    assert "public" not in proj[0] and "grants" not in proj[0]
+    # ...so the deterministic oracle records it as a signal and mints NO public-exposure FACT for it.
+    assert not confirm_cloud_posture_facts(inv)
+    # the ordinary (non-anon) members still land as topology principals, anon never does.
+    pri = {p["id"] for p in inv["principals"]}
+    assert pri == {"user:ops@acme.com", "user:admin@acme.com"}
+
+
+def test_live_collected_conditioned_anon_project_grant_does_not_surface(monkeypatch):
+    # NEGATIVE control: a Condition-narrowed anon project binding is NOT an unconditional public grant, so it
+    # must NOT surface a public_roles signal (mirrors the bucket `conditioned` handling), even via the live path.
+    import types
+
+    policy = _sdk_policy(_sdk_binding("roles/viewer", ["allUsers"], conditioned=True))
+
+    class _ProjectsClient:
+        def __init__(self, *, credentials=None, **kw):
+            pass
+
+        def get_iam_policy(self, *, resource=None):
+            return policy
+
+    g_rm = types.ModuleType("google.cloud.resourcemanager_v3")
+    g_rm.ProjectsClient = _ProjectsClient  # type: ignore[attr-defined]
+    g_cloud = types.ModuleType("google.cloud")
+    g_cloud.resourcemanager_v3 = g_rm  # type: ignore[attr-defined]
+    g = types.ModuleType("google")
+    g.cloud = g_cloud  # type: ignore[attr-defined]
+    for name, mod in {"google": g, "google.cloud": g_cloud,
+                      "google.cloud.resourcemanager_v3": g_rm}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    collected = GcpLiveSensor()._collect_project_iam("acme-prod", credentials=object())
+    assert collected["bindings"] == [
+        {"members": ["allUsers"], "conditioned": True, "role": "roles/viewer"}]
+    inv = gcp_inventory_from_responses(project_iam=collected, org_pap_enforced=False, project="acme-prod")
+    # no projects/<id> resource at all (the only anon binding was condition-narrowed) and no FACT.
+    assert not [r for r in inv["resources"] if r["id"] == "projects/acme-prod"]
+    assert not confirm_cloud_posture_facts(inv)
+
+
+def test_role_key_is_additive_bucket_path_unchanged():
+    # The `role` key is threaded for BOTH consumers; the bucket consumer (`_anon_binding_kinds` via
+    # `bucket_resource`) reads only members/conditioned, so an iam_binding now carrying `role` is byte-identical.
+    with_role = _bucket("open", ["allUsers"], pap="inherited")
+    with_role["iam_bindings"][0]["role"] = "roles/storage.objectViewer"   # the extra key the live reducer adds
+    without_role = _bucket("open", ["allUsers"], pap="inherited")
+    assert (bucket_resource(with_role, org_pap_enforced=False)
+            == bucket_resource(without_role, org_pap_enforced=False))
+    # and a conditioned bucket binding with a role is still never promoted.
+    cond = _bucket("c", ["allUsers"], pap="inherited", conditioned=True)
+    cond["iam_bindings"][0]["role"] = "roles/storage.admin"
+    r = bucket_resource(cond, org_pap_enforced=False)
+    assert "public" not in r and r["conditioned_public"] is True
 
 
 # --- egress + fail-closed run + fusion wiring ----------------------------------

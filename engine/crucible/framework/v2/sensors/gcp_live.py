@@ -281,17 +281,25 @@ class GcpLiveSensor:
 
     @staticmethod
     def _bindings_from_policy(policy: Any) -> list[dict]:
-        """Reduce an IAM policy object (bucket or project) to ``[{"members":[...], "conditioned": bool}]``,
-        preserving whether each binding carried an IAM ``condition``."""
+        """Reduce an IAM policy object (bucket or project) to
+        ``[{"members":[...], "conditioned": bool, "role": str}]``, preserving whether each binding carried
+        an IAM ``condition`` AND the binding's ``role``. The ``role`` is REQUIRED by the project-IAM
+        consumer (``_project_iam_to_inventory``), which records an UNCONDITIONED anon grant on a real role
+        as the auditable ``public_roles`` project signal; without it that signal is dead on live-collected
+        data. The bucket consumer (``_anon_binding_kinds`` via ``bucket_resource``) reads only
+        ``members``/``conditioned`` and ignores the extra key, so carrying ``role`` is purely ADDITIVE —
+        the bucket path is byte-identical."""
         out: list[dict] = []
         for binding in GcpLiveSensor._safe(lambda: list(getattr(policy, "bindings", []) or []), []) or []:
             if isinstance(binding, dict):
                 members = [str(m) for m in (binding.get("members") or [])]
                 conditioned = binding.get("condition") is not None
+                role = str(binding.get("role") or "")
             else:
                 members = [str(m) for m in getattr(binding, "members", []) or []]
                 conditioned = getattr(binding, "condition", None) is not None
-            out.append({"members": members, "conditioned": bool(conditioned)})
+                role = str(getattr(binding, "role", "") or "")
+            out.append({"members": members, "conditioned": bool(conditioned), "role": role})
         return out
 
     def _collect_buckets(self, storage_client: Any) -> list[dict]:
