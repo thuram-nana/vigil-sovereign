@@ -13,6 +13,8 @@ in the sovereign leg where framework is unimportable — exactly like the siblin
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from vigil_integration.live.cloud_live_posture import cloud_live_verify
@@ -73,3 +75,34 @@ def test_report_adapter_is_empty_safe_for_a_refused_capture():
     assert refused.refused is True and refused.n_facts == 0
     md = render_cloud_posture_report(refused, target=f"aws:{_ACCOUNT}")
     assert "PROVEN FACT" not in md
+
+
+def test_live_collection_is_gated_and_refuses_when_not_entitled(monkeypatch, tmp_path):
+    """GATE ISOLATION (dep-free; RUNS IN CI): ``run_cloud_posture_live`` drives the live collector THROUGH
+    the W1.4 fail-closed chain (``invoke_tool``), never ``sensor.run()`` directly. With the ACTIVE_RECON
+    entitlement DENIED, the gate refuses BEFORE the collector touches boto3 — so the result is a no-FACT,
+    never-CLEAN INCONCLUSIVE carrying the gate reason, and no live control-plane read happens. No boto3 is
+    needed (the gate refuses before the sensor's boto3 code), so this proves the gating is wired and the
+    live collection cannot run ungated — exactly the control the sensor's fail-closed contract requires."""
+    pytest.importorskip("framework.v2.verify")
+    from framework.v2 import entitlement
+    from framework.v2.common import paths
+
+    from vigil_integration.live.cloud_posture_run import run_cloud_posture_live
+
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: tmp_path / f"{slug}.halt")  # kill-switch clear
+
+    def _deny(cap):
+        raise PermissionError("active_recon not entitled")
+
+    monkeypatch.setattr(entitlement, "require_capability", _deny)                            # NOT entitled
+
+    session = SimpleNamespace(provider="aws", account_id=_ACCOUNT, region="us-east-1",
+                              access_key_id="ASIATEMP", secret_access_key="s", session_token="t")
+    signers, _ = _signers_and_trust()
+    gate = CloudScopeGate(scope=StaticCloudScopeSource(_IN_SCOPE), engagement_slug="acme")
+    result = run_cloud_posture_live(session, scope_gate=gate, engagement_slug="acme", signers=signers)
+
+    assert result.n_facts == 0 and result.family_verdict() != "CLEAN"
+    note = " ".join(result.notes).lower()
+    assert "gated" in note and ("entitl" in note or "gate=entitlement" in note), result.notes

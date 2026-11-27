@@ -27,7 +27,6 @@ imports are stdlib + the sovereign ``cloud_live_posture`` sibling (itself framew
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 from .cloud_live_posture import CloudLivePostureResult, cloud_live_verify
@@ -43,12 +42,15 @@ def run_cloud_posture_live(
     resource: str = "",
     collector_id: str = "cloud-live",
     capture_time_epoch: "int | None" = None,
+    tool_context: Any = None,
 ) -> CloudLivePostureResult:
     """Collect LIVE cloud posture as the minted customer identity and re-derive signed FACTs over it.
 
     Builds :class:`~framework.v2.sensors.cloud_live.CloudLiveSensor` scoped to the injected
     ``session_data`` (``require_injected_credentials=True`` — the collector FAILS CLOSED rather than fall
-    back to VIGIL's ambient boto3 identity), runs it over an empty args dict, then hands the collector's
+    back to VIGIL's ambient boto3 identity), runs it THROUGH the gated ``invoke_tool`` chain (kill-switch /
+    entitlement / charter scope / egress allowlist + the audit spine — a bare call is still fully gated;
+    pass ``tool_context`` to inherit the engagement's spine sink + posture), then hands the collector's
     retained native export (``output['export']``, ``format='native'``) to the EXISTING
     :func:`cloud_live_posture.cloud_live_verify` verbatim — which D5-scope-gates the capture against the
     signed charter and mints a signed FACT per confirmed insecure subject. Returns the
@@ -64,25 +66,52 @@ def run_cloud_posture_live(
     for byte-reproducible signed bytes, or leave it ``None`` (no capture time bound). The oracle's own
     signal confidence — never a hand-set value — backs every FACT (``cloud_live_verify`` is the authority).
 
-    FATAL-2: the only ``framework`` symbol (``CloudLiveSensor``) is imported function-locally.
+    FATAL-2: the only ``framework`` symbols (the gated-invocation chain + ``CloudLiveSensor``) are
+    imported function-locally.
     """
+    from framework.v2.agents.tools import (  # noqa: PLC0415 (FATAL-2: function-local)
+        ToolContext,
+        ToolRegistry,
+        invoke_tool,
+    )
     from framework.v2.sensors.cloud_live import CloudLiveSensor  # noqa: PLC0415 (FATAL-2: function-local)
 
     provider = str(getattr(session_data, "provider", "") or "")
     account = str(getattr(session_data, "account_id", "") or "")
 
+    # GATE + AUDIT the live collection through the W1.4 fail-closed chain (kill-switch / entitlement /
+    # charter scope / destructive / egress allowlist) and the event spine — NEVER call ``sensor.run()``
+    # directly: that would reach the customer's cloud control plane ungated (a tripped kill-switch could not
+    # abort it; a missing ACTIVE_RECON entitlement or an un-allowlisted control-plane host would not stop it)
+    # and unrecorded. ``invoke_tool`` runs every gate BEFORE the collector touches boto3, refuses fail-closed,
+    # and records tool_call / tool_result / refusal. ``ctx.slug`` is authoritative for gating; the
+    # engagement's spine sink + posture (prompt_callback / dry_run / world) are inherited from
+    # ``tool_context`` when the caller supplies one (a bare call is still fully gated, just unaudited).
     sensor = CloudLiveSensor(credentials=session_data, require_injected_credentials=True)
-    result = sensor.run({}, SimpleNamespace())
+    registry = ToolRegistry()
+    registry.register(sensor)
+    if isinstance(tool_context, ToolContext):
+        ctx = ToolContext(slug=engagement_slug or tool_context.slug,
+                          world=getattr(tool_context, "world", None),
+                          prompt_callback=tool_context.prompt_callback, dry_run=tool_context.dry_run)
+    else:
+        ctx = ToolContext(slug=engagement_slug,
+                          prompt_callback=getattr(tool_context, "prompt_callback", None),
+                          dry_run=bool(getattr(tool_context, "dry_run", False)))
+    sink = getattr(tool_context, "sink", None) or getattr(tool_context, "spine_sink", None)
+    result = invoke_tool(registry, sensor.name, {}, ctx, sink=sink)
 
     if not getattr(result, "ok", False):
-        # The collector refused / fail-closed (no identity substitution, account-drift, or boto3 absent):
-        # nothing was captured, so nothing is adjudicated. Surface a no-FACT result that is NEVER a clean
-        # negative, carrying the collector's own reason (the oracle authority never runs on an un-captured
-        # target).
+        # A GATE refused (kill-switch / entitlement / scope / egress) OR the collector itself fail-closed
+        # (no identity substitution, account-drift, boto3 absent): nothing was captured, so nothing is
+        # adjudicated. Surface a no-FACT result that is NEVER a clean negative, carrying the gate/collector
+        # reason (the oracle authority never runs on an un-captured target).
         res = CloudLivePostureResult(provider=provider, account=account)
+        reason = str(getattr(result, "note", "") or getattr(result, "refusal_reason", "") or "no detail")
+        gate = str(getattr(result, "gate", "") or "")
         res.notes.append(
-            "live collector did not run to completion (fail-closed, nothing captured): "
-            + str(getattr(result, "note", "") or "no detail"))
+            "live collection did not run to completion (gated / fail-closed, nothing captured"
+            + (f"; gate={gate}" if gate else "") + "): " + reason)
         return res
 
     out = getattr(result, "output", None) or {}

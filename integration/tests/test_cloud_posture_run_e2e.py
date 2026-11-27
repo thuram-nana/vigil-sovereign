@@ -120,6 +120,23 @@ def _set_dummy_ambient_env(monkeypatch):
     monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
 
 
+def _grant_gates(monkeypatch, tmp_path):
+    """Provision a PASSING engagement posture so invoke_tool's W1.4 gate chain lets the live collection run:
+    the kill-switch is clear, the ACTIVE_RECON entitlement is granted, and the customer's control-plane hosts
+    are on the egress allowlist. In production these come from the signed charter +
+    targets/<slug>/collector-hosts.txt; here we model a properly-provisioned engagement so the gated happy
+    path exercises the full mint->collect->oracle->FACT->report chain (the gate-REFUSAL path is proven
+    dep-free in test_cloud_posture_run_report)."""
+    from framework.v2 import entitlement
+    from framework.v2.agents import egress_guard
+    from framework.v2.common import paths
+
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: tmp_path / f"{slug}.halt")   # kill-switch clear
+    monkeypatch.setattr(entitlement, "require_capability", lambda cap: None)                 # ACTIVE_RECON granted
+    monkeypatch.setattr(egress_guard, "build_engagement_allowlist",
+                        lambda **k: SimpleNamespace(permits=lambda host: True))              # control-plane allowed
+
+
 def _seed_fake_aws(boto3):
     """Seed moto's account with the TRUE POSITIVES + the negative-control TRAPS. The COLLECTOR only reads;
     the TEST seeds. Mirrors the collector's own moto seeding (the reuse target)."""
@@ -176,7 +193,7 @@ def _fact_subjects(result) -> set:
     return out
 
 
-def test_cloud_posture_run_e2e(monkeypatch):
+def test_cloud_posture_run_e2e(monkeypatch, tmp_path):
     """Mint -> collect (real sensor, moto) -> oracle re-fire -> signed FACT -> offline verify -> report."""
     import boto3
 
@@ -187,6 +204,7 @@ def test_cloud_posture_run_e2e(monkeypatch):
     from framework.v2.verify.verifier import OracleVerifier
 
     _set_dummy_ambient_env(monkeypatch)
+    _grant_gates(monkeypatch, tmp_path)    # a properly-provisioned posture: the gated collection runs
     signers, tr = _signers_and_trust()
     creds = _Creds()  # the minted DATA session (claimed account == moto default)
 
