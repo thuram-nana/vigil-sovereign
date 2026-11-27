@@ -186,6 +186,15 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
+# The PENDING team invitations an org_admin raises for a person who has no VIGIL account yet (ui/member_invites_store.py):
+# one 0600 marker per invite, named by sha256(the single-use token). An invite GRANTS NOTHING until it is redeemed at
+# sign-up / sign-in; the raw token is never stored (only its hash names the marker) so a directory read cannot recover a
+# live token. Ephemeral operational state under customer/ (the backup EXCLUDES it, like the email-token markers): a
+# restore drops any un-redeemed invite (it is simply re-sent; the authoritative membership a redeemed invite produced is
+# owner-signed on the spine). The invite TTL (7 days) and the per-org pending ceiling bound abuse.
+CUSTOMER_MEMBER_INVITES_DIR = _customer / "member_invites"
+CUSTOMER_INVITE_TTL_SECONDS = _int_env("VIGIL_CUSTOMER_INVITE_TTL_SECONDS", 7 * 24 * 3600)   # a pending invite lives 7 days
+CUSTOMER_MAX_PENDING_INVITES = _int_env("VIGIL_CUSTOMER_MAX_PENDING_INVITES", 100)           # per-org pending-invite ceiling
 SIGNUP_EMAIL_RATELIMIT_DIR = _customer / "signup_mailbox_ratelimit"   # per-canonical-mailbox sign-up limiter
 TRIAL_LAUNCH_CAP_DIR = _customer / "trial_launch_cap"   # the global daily trial-launch cap's markers
 TRIAL_IP_LIMIT_DIR = _customer / "trial_ip_limit"       # the opt-in per-IP trial-grant limiter's markers
@@ -970,6 +979,31 @@ def customer_team_ui_enabled() -> bool:
     for the page (it is written into the page, so a change takes effect at the edge's next start) and on every request
     by the edge and the cockpit for the routes."""
     return (os.environ.get("VIGIL_CUSTOMER_TEAM_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+# The small set of explicit OFF values for a DEFAULT-ON flag (case-insensitive). Unlike the default-OFF posture flags
+# above (enabled only on an affirmative value), a default-ON flag is enabled unless it is explicitly turned off, so an
+# unset / empty / unrecognised value leaves it ON.
+_CUSTOMER_FLAG_NEGATIVE = frozenset({"0", "false", "no", "off", "disabled"})
+
+
+def customer_team_invite_enabled() -> bool:
+    """True iff the team EMAIL-INVITE flow is on (`VIGIL_CUSTOMER_TEAM_INVITE`). DEFAULT ON (launch posture): the flow
+    ships enabled, so an unset / empty / unrecognised value leaves it ON, and ONLY an explicit off value
+    (`0`/`false`/`no`/`off`/`disabled`, case-insensitive) turns it off. This is the gate for the invite backend an
+    org_admin uses to invite a person who has NO VIGIL account yet: the edge's `POST api/customer/member/invite` ->
+    provision `member_invite`, `GET api/customer/member/invites` -> `member_invites_list`,
+    `POST api/customer/member/invite/revoke` -> `member_invite_revoke`, and the accept-token path wired into sign-up /
+    sign-in (`member_invite_accept`). With it OFF every one of those is absent (404, exactly an unknown route/action)
+    and sign-up / sign-in ignore any presented invite token, so the flow is byte-identical to its not existing.
+
+    Distinct from `customer_team_ui_enabled()` (the Team SCREEN -- member list, add an existing account, change role,
+    remove -- default OFF, its own PR): turning the Team screen off does not touch the invite backend, and vice versa.
+    NON-NEGOTIABLE regardless of this flag: an invite is role-capped to the customer-grantable set, its token is
+    single-use and expiring, it is tenant-scoped to the inviting workspace, it is rate-limited per org, and it GRANTS
+    NOTHING until it is accepted. Read by the edge and the cockpit on every request, so set the SAME value on both
+    sides (a value on one side only still fails closed)."""
+    return (os.environ.get("VIGIL_CUSTOMER_TEAM_INVITE") or "").strip().lower() not in _CUSTOMER_FLAG_NEGATIVE
 
 
 def customer_settings_enabled() -> bool:
