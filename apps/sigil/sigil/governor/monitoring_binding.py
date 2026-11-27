@@ -13,8 +13,12 @@ Wire, don't rebuild (plan §9.1 rule 10). The binding CONTRACT lives once in the
 only COMPOSES them into the bind+publish step and its read-back + fail-closed revert, and reads the published
 state back for the custui Monitoring surface.
 
-PUBLIC-REPO SAFE. The published binding carries NO plaintext secret: :func:`seal_origin_commitment` returns the
-sha256 of the AS-2h-SEALED (ciphertext) origin-lock secret, and only that commitment is signed and published.
+PUBLIC-REPO SAFE. The published binding carries NO plaintext secret: its ``origin_secret_sha256`` field is
+:func:`origin_secret_commitment` — a DETERMINISTIC domain-separated HMAC-SHA256 (a keyed PRF, AS-2h
+:func:`vigil_core.aegis_sealing.secret_mac`) keyed by the origin-lock secret. It reveals nothing about the
+secret and carries no plaintext; it is NOT a sha256 of the sealed ciphertext (the at-rest AEAD seal uses a
+random nonce and is not reproducible). The data plane matches by recomputing the SAME keyed PRF from the
+delivered secret.
 
 Determinism: every time / epoch / commitment is a caller-supplied value; signing is Ed25519 over canonical bytes
 (no wall-clock, no RNG on a signed path). Publish is SUPERSEDE (content-addressed path, atomic replace), never an
@@ -212,10 +216,30 @@ def bind_and_publish(reg: MonitoringAuthorityV2Registry, org_id: str, host: str,
         read_back_binding(reg, signed_binding, root)
         record_binding(reg, signed_binding, requested_by=requested_by)
     except Exception as e:   # noqa: BLE001 — never leave a bound-but-unpublished/unverifiable grant
-        reg.revoke(org_id, host, issued_at=float(issued_at) + 2e-6, reason="bind publish/read-back failed")
-        reg.unpublish(org_id, host, instance_id=instance_id, replica_index=int(replica_index))
-        unpublish_binding(reg, org_id, host)
-        raise ValueError(f"could not publish/verify the bound v2 authority: {type(e).__name__}: {e}") from e
+        # Revert DATA-PLANE-FIRST and FAULT-TOLERANTLY. The two PUBLISHED files (grant + binding) are what arm
+        # the keyless data plane — grant_binds_origin cross-checks THEM and never consults the spine revocation —
+        # so they must come down FIRST, and a fault reverting one must NOT skip the others. A correlated I/O fault
+        # (e.g. disk-full / transient IO) can hit both the original write and a revert step; if the spine revoke
+        # ran first and raised, the two published files would be stranded on disk still cross-checking as `bound`
+        # (a fail-open armed pair). So each step is guarded independently and the spine revoke (the safe-direction
+        # audit append the cross-check ignores) runs last. The original publish fault is always surfaced; any
+        # revert fault is appended for the operator log.
+        revert_faults: list[str] = []
+        for _label, _step in (
+            ("unpublish-grant",
+             lambda: reg.unpublish(org_id, host, instance_id=instance_id, replica_index=int(replica_index))),
+            ("unpublish-binding", lambda: unpublish_binding(reg, org_id, host)),
+            ("revoke",
+             lambda: reg.revoke(org_id, host, issued_at=float(issued_at) + 2e-6,
+                                reason="bind publish/read-back failed")),
+        ):
+            try:
+                _step()
+            except Exception as re:   # noqa: BLE001 — a revert fault must not skip the remaining reverts
+                revert_faults.append(f"{_label}: {type(re).__name__}: {re}")
+        tail = f" [revert faults: {'; '.join(revert_faults)}]" if revert_faults else ""
+        raise ValueError(
+            f"could not publish/verify the bound v2 authority: {type(e).__name__}: {e}{tail}") from e
     return {"org_id": org_id, "host": host, "epoch": view.epoch, "bound": True,
             "capabilities": [c.value for c in view.capabilities],
             "not_before": view.not_before, "not_after": view.not_after,

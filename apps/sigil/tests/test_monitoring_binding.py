@@ -6,11 +6,14 @@ the published record; a non-deterministic published artifact):
 
   * ``bind_and_publish`` publishes a binding the keyless plane can VERIFY and mints a grant that CROSS-CHECKS
     against it (``grant_binds_origin`` passes over the PUBLISHED files — what the data plane reads);
-  * the published binding carries NO plaintext secret — only the sha256 COMMITMENT to the AS-2h-sealed ciphertext;
-  * ``seal_origin_commitment`` is deterministic and commits to ciphertext (differs per secret / epoch; never the
-    secret itself);
+  * the published binding carries NO plaintext secret — only the keyed-PRF COMMITMENT (HMAC-SHA256 over the
+    origin-lock secret), never the secret itself nor a bare sha256 of it;
+  * ``origin_secret_commitment`` is deterministic (differs per secret / epoch / host; a keyed PRF, not a bare
+    sha256 of plaintext, and not the secret);
   * FAIL-CLOSED: no owner key, a bad origin, or a publish/read-back fault leaves NOTHING bound — a grant refusal
-    publishes nothing; a publish fault REVERTS (revoke + unpublish BOTH files), so no bound-but-unverifiable grant;
+    publishes nothing; a publish fault REVERTS, unpublishing BOTH files data-plane-first and fault-tolerantly
+    (even a fault DURING the revert cannot strand a cross-checking grant+binding pair), so no bound-but-
+    unverifiable grant;
   * the status read is fail-closed (a deleted/forged binding file reads UNBOUND) and derived from the published
     artifacts the defence verifies;
   * the UNBOUND grant path is unchanged (origin=None — the AS-2f byte-identity seam);
@@ -118,9 +121,12 @@ def test_published_binding_carries_no_plaintext_secret():
     for name in (res["grant_published"], res["binding_published"]):
         data = (_pubdir(reg) / name).read_text()
         assert _SECRET.decode() not in data and "origin-lock-secret" not in data
-    # the commitment is a keyed PRF over the secret, not the raw secret nor a bare hash of plaintext
+    # the PUBLISHED commitment (origin_secret_sha256) is a keyed PRF over the secret — not the raw secret and not
+    # a bare sha256 of plaintext. (binding_sha256 is the whole-document digest, a different value; assert over the
+    # actual published commitment so weakening it toward sha256(plaintext) would fail HERE.)
     import hashlib
-    assert res["binding_sha256"] != hashlib.sha256(_SECRET).hexdigest() and _SECRET.hex() not in res["binding_sha256"]
+    commitment = res["binding"]["document"]["origin_secret_sha256"]
+    assert commitment != hashlib.sha256(_SECRET).hexdigest() and _SECRET.hex() not in commitment
 
 
 def test_origin_secret_commitment_is_deterministic_and_hides_the_secret():
@@ -183,6 +189,29 @@ def test_a_publish_fault_reverts_both_the_grant_and_the_binding(monkeypatch):
     assert not list(_pubdir(reg).glob("*.binding.json"))
     st = mb.binding_status(reg, "org_a", "api.example.com", now=5100.0, trust_root=root)
     assert st["bound"] is False
+
+
+def test_a_fault_during_the_revert_still_unpublishes_both_files(monkeypatch):
+    # Correlated fault: the publish path faults AND a revert step faults too (a disk/IO condition can hit both).
+    # The two data-plane-arming PUBLISHED files (grant + binding) must STILL both come down — grant_binds_origin
+    # cross-checks the published files and never consults the spine revocation, so a revert ordered revoke-first
+    # and unguarded would strand a cross-checking (bound) pair visible to the keyless plane while the op reports
+    # failure (fail-open). Regression for: revert is data-plane-first + each step independently guarded.
+    from sigil.governor import monitoring_binding as mb
+    s = _store()
+    _prove(s, "org_a", "api.example.com")
+    reg, root = _reg(s), _owner_root()
+    # fault the main try AFTER both files are published...
+    monkeypatch.setattr(mb, "read_back_binding", lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    # ...and fault the spine revoke DURING the revert (the step that, if run first + unguarded, strands the files)
+    monkeypatch.setattr(reg, "revoke",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("spine append failed during revert")))
+    with pytest.raises(ValueError):                                   # the original publish fault is still surfaced
+        _bind(reg, "org_a", "api.example.com", root=root)
+    # despite the revoke fault, BOTH published files are gone -> the keyless plane cannot arm this grant
+    assert not list(_pubdir(reg).glob("*.binding.json"))             # binding file came down
+    st = mb.binding_status(reg, "org_a", "api.example.com", now=5100.0, trust_root=root)
+    assert st["bound"] is False and st["reason"] == "grant-file-unreadable"   # grant file came down too
 
 
 def test_binding_status_fails_closed_when_the_published_binding_is_removed():

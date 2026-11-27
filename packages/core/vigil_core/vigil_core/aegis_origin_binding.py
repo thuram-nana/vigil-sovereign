@@ -14,9 +14,12 @@ AEGIS data plane (which verifies the identical published bytes before it forward
 CONSTRUCTION, never by a drift-catching test. It REUSES the AS-2a :class:`AuthoritySubject` and
 :class:`OriginTuple` so the authority and the binding never drift on what "the subject" or "the origin" is.
 
-PUBLIC-REPO SAFE. The published binding carries NO plaintext secret: ``origin_secret_sha256`` is a sha256
-commitment to the tenant's *sealed* (ciphertext) origin-lock secret (AS-2h ``vigil_core.aegis_sealing``), so
-the record reveals nothing a captor could use, and a delivered sealed secret can later be matched to it.
+PUBLIC-REPO SAFE. The published binding carries NO plaintext secret: ``origin_secret_sha256`` is a DETERMINISTIC
+domain-separated HMAC-SHA256 commitment (a keyed PRF — AS-2h ``vigil_core.aegis_sealing``'s ``secret_mac``) keyed
+by the origin-lock secret, so the record reveals nothing a captor could use. It is NOT a sha256 of the sealed
+ciphertext (the at-rest AEAD seal is nonce-randomised and non-reproducible); the data plane matches by recomputing
+the SAME keyed PRF from the DELIVERED secret. (The field name keeps ``sha256`` for the HMAC-SHA256 primitive it is
+built on, not to imply a bare hash of the secret or its ciphertext.)
 
 Determinism: NO wallclock and NO global RNG anywhere on a signed or canonical path. Every time and epoch is a
 caller-supplied field; the signing bytes and the binding digest are pure functions of the document. The digest
@@ -56,7 +59,7 @@ class AegisOriginBinding(BaseModel):
     """The per-subject owner-signed origin binding the keyless AEGIS plane cross-checks before it forwards.
 
     Binds the SAME ``subject`` and ``origin`` shapes the v2 grant declares (AS-2a reuse) to the ``edge_chain``
-    and a sha256 ``origin_secret_sha256`` commitment to the tenant's SEALED origin-lock secret (no plaintext).
+    and a keyed-PRF ``origin_secret_sha256`` commitment (HMAC-SHA256 over the origin-lock secret, no plaintext).
     The grant's ``origin_binding_sha256`` equals :func:`origin_binding_digest` of this document, so tampering
     with the origin, the edge chain or the commitment changes the digest and the grant is detectably unbound."""
 
@@ -66,9 +69,11 @@ class AegisOriginBinding(BaseModel):
     origin: OriginTuple
     edge_chain: str = Field(default="shared_actor", description="The declared edge provider_id (a safe path "
                             "component), or the 'shared_actor' sentinel; MUST match the bound grant's edge_chain.")
-    origin_secret_sha256: str = Field(min_length=64, max_length=64, description="sha256 (64 lowercase hex) of the "
-                                      "tenant's SEALED origin-lock secret (ciphertext). A commitment, NOT the "
-                                      "secret — the published record carries no plaintext (public-repo safe).")
+    origin_secret_sha256: str = Field(min_length=64, max_length=64, description="A keyed-PRF commitment (64 "
+                                      "lowercase hex) to the tenant's origin-lock secret: a DETERMINISTIC domain-"
+                                      "separated HMAC-SHA256 (AS-2h secret_mac), NOT a sha256 of the sealed "
+                                      "ciphertext and NOT the secret — the published record carries no plaintext "
+                                      "(public-repo safe); the data plane recomputes it from the delivered secret.")
     epoch: int = Field(ge=1, description="Monotone binding generation; a higher epoch supersedes a lower.")
     issued_at: float = Field(default=0.0, description="Mint anchor / per-subject anti-replay high-water.")
     issued_by: str = Field(default="", description="Owner / provisioner that minted this binding.")
