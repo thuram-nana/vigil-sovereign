@@ -42,6 +42,11 @@ jobs:
           # the posture analyzer uses to read the templates.
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           pip install "cfn-lint==1.61.0"
+          # The Z3R relay guard + CFN posture analyzer import the vigil_core integrity substrate
+          # (Signature / TrustRoot / evidence_signing_bytes / verify_threshold). Install it the same way
+          # every other CI job does (editable, no deps) so the analyzer step and the offline tests below
+          # can import it — without it they raise ModuleNotFoundError: No module named 'vigil_core'.
+          pip install -e packages/core/vigil_core --no-deps
 
       - name: cfn-lint — every AEGIS staging template (BLOCKING within this advisory job)
         run: |
