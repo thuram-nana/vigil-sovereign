@@ -364,3 +364,26 @@ def test_fresh_process_drains_resume_the_rotation_cursor_from_disk():
     assert len(_raw_ids(s, flood[0])) == 1                       # the flood got only its fair one-per-three-passes
     # MUTATION: revert the cursor to in-memory-only (reset to 0 on each construction) — every fresh watcher
     # re-pins the first-sorting flood, so neither small tenant is ever served and both assertions turn red.
+
+
+# --- a FLOODED heartbeat draws its reserve + its fair round-robin share, never the whole shared pool ---------
+def test_a_flooded_heartbeat_does_not_monopolize_the_shared_budget():
+    # The heartbeat is served FIRST and, once its reserve is spent, falls through to the SHARED pool. Under the
+    # (default) quantum of 1 it takes only ONE shared write per round, so even when the HEARTBEAT ITSELF is the
+    # flood it cannot drain the whole shared pool ahead of the other tenants — they still get their fair share.
+    # (Complements the non-heartbeat flood test: here the flood sits on the heartbeat's shared-pool fallback.)
+    by_slug = sorted((A, B, C), key=lambda d: ms.domain_slug(*d))
+    hb, t1, t2 = by_slug[0], by_slug[1], by_slug[2]              # the heartbeat sorts first AND is the flood
+    s, w = _rig(domains=(A, B, C), heartbeat=hb,
+                append_ceiling_per_s=9.0, pass_window_s=1.0, heartbeat_reserve=3)   # budget 9, reserve 3, DEFAULT q
+    assert w.append_budget == 9 and w.drr_quantum == 1          # the budgeted DEFAULT quantum is 1 (Finding 1)
+    _seed(w, *hb, 50)                                            # the HEARTBEAT itself floods the spool
+    t1_ids = _seed(w, *t1, 3)
+    t2_ids = _seed(w, *t2, 3)
+    r = w.drain()
+    # the two normal tenants are NOT starved by the heartbeat flood — each fully drained this pass...
+    assert sorted(_raw_ids(s, t1[0])) == sorted(t1_ids)
+    assert sorted(_raw_ids(s, t2[0])) == sorted(t2_ids)
+    # ...and the flooded heartbeat took only its RESERVE (3) — the 6 shared writes went to t1+t2, not the flood.
+    assert len(_raw_ids(s, hb[0])) == 3
+    assert r["recorded"] == 9 and len(_raw_events(s)) == 9

@@ -665,13 +665,27 @@ class MonitoringSpoolWatcher:
         to 0 and re-pinning the first-sorting domain — which would bring cross-pass starvation back. Read under
         the drain's single-drainer flock (``_drr_drain`` runs inside it), so the read + advance below is
         race-free across drainer processes. Best-effort and bounded: any fault, or an implausible value, reads 0
-        (the rotation then simply starts from the front that pass). Never raises."""
+        (the rotation then simply starts from the front that pass). Never raises. Hardened like the drain lock
+        (``O_NOFOLLOW`` + ``O_NONBLOCK`` + a regular-file check): a planted symlink/FIFO/directory at the path
+        reads 0 — a FIFO cannot block the drain, a directory cannot freeze the rotation (which would silently
+        reopen cross-pass starvation). The spool root is 0700/operator-owned, so this is defense-in-depth."""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
-            with open(self.spool / ".drr-cursor", "rb") as fh:
-                n = int(fh.read(64).decode("utf-8").strip())
+            fd = os.open(str(self.spool / ".drr-cursor"), flags)
+        except OSError:
+            return 0
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return 0
+            n = int(os.read(fd, 64).decode("utf-8").strip())
             return n if n >= 0 else 0
         except (OSError, ValueError):
             return 0
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def _write_drr_cursor(self, n: int) -> None:
         """Advance the FILE-persisted DRR cursor ATOMICALLY (temp file + ``os.replace``), under the single-drainer
