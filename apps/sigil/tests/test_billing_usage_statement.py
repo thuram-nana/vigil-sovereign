@@ -101,7 +101,12 @@ def test_each_request_is_one_charge_priced_from_the_rate_card():
     (scan,) = out["scans"]
     assert scan["status"] == "ok" and scan["requests"] == 2 and scan["amount_mc"] == 2502
     assert out["credits"] == "2.502"
-    text = json.dumps(out).lower()
+    # The model/currency hygiene guard below must ignore the OPAQUE engagement slug: it is a random id
+    # (e.g. "bik8usdnqs-...") that can coincidentally contain a forbidden substring like 'usd' — that is not
+    # a model-name or USD leak. A real leak names the model ('claude-opus-4-8') or carries USD in a SEMANTIC
+    # field, which is still caught after the opaque id is stripped (mirrors the ``credits_per_usd`` exclusion
+    # in test_the_published_rates_are_in_credits_only).
+    text = json.dumps(out).lower().replace(r["slug"].lower(), "")
     assert "claude" not in text and "opus" not in text and "usd" not in text and "estimate" not in text
 
 
