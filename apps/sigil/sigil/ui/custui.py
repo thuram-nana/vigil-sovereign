@@ -1383,7 +1383,7 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         c, r = self._provision("member_invite_revoke", requester, payload)
         return self._json(r, c)
 
-    def _redeem_invite_token(self, username: str, token: str) -> "Optional[dict]":
+    def _redeem_invite_token(self, username: str, token: str) -> "dict | None":
         """After a sign-up / sign-in minted this session, redeem a presented invite token (if any) to a capped
         membership in the inviting org. The principal is the just-authenticated account (never a body field); only the
         token travels. Best-effort and gated by the invite flag: a bad / expired / used token never fails the sign-in
