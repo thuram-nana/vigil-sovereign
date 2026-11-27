@@ -243,6 +243,15 @@ CUSTOMER_DATA_RIGHTS_DIR = SIGIL_HOME / "customer_data_rights"
 # the recorded request and the owner notification all state the same figures.
 CUSTOMER_DATA_RIGHTS_SLA_DAYS = 30
 CUSTOMER_DATA_RIGHTS_CONTACT = "info@sigilsovereign.com"
+# Per-tenant customer KNOWLEDGE corpus (customer_knowledge_enabled). A customer uploads their own organization
+# documents so the assistant knows their org. Each org's corpus lives in its OWN sub-directory under here, named by a
+# one-way hash of org_id (tenant_knowledge.store), and inside it a per-org signed spine, a per-org vector index and a
+# per-org graph dir. It is DISJOINT by construction from the owner's global single-tenant stores (SPINE_PATH /
+# QDRANT_PATH / GRAPH_DIR) and from every other org's corpus, so a customer can NEVER read the owner's private notes /
+# transcripts / commits and NEVER another tenant's documents. Durable customer content (the customer uploaded it and
+# nothing regenerates it): its own top-level directory the backup captures and a restore brings back. Written only
+# while VIGIL_CUSTOMER_KNOWLEDGE is on.
+CUSTOMER_KNOWLEDGE_DIR = SIGIL_HOME / "customer_knowledge"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -465,6 +474,24 @@ def customer_assistant_wallet_enabled() -> bool:
     drawn (flat billing: VIGIL bears the model cost, bounded per org per day by the turn budget times the grant's cap).
     Read at call time."""
     return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT_WALLET") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_knowledge_enabled() -> bool:
+    """True iff the per-tenant customer KNOWLEDGE corpus is ON (`VIGIL_CUSTOMER_KNOWLEDGE`). DEFAULT ON: with the var
+    UNSET (or any value that is not an explicit off, `_FLAG_EXPLICIT_OFF`) the feature is enabled, so a fresh consumer
+    deploy ships with it on; ONLY an explicit off value (`0`/`false`/`no`/`off`/`disabled`) turns it off. This is the
+    ONE consumer flag that defaults on (an owner launch decision - every other `customer_*` predicate defaults off);
+    the production deploy templates also set it to `1` explicitly. A working flag-OFF path is retained so it can be
+    toggled and a flag-off golden stays valid: with it off the three `customer_knowledge_*` provisioner actions and
+    their edge routes are ABSENT (404 as an unknown action), NO per-org corpus directory is created, and the security
+    assistant grounds ONLY in oracle-confirmed findings exactly as before (no document block) - byte-identical to a
+    build without the feature. ON, a customer may upload their own organization documents into a SEPARATE per-org
+    corpus (its own spine + vector index + graph dir, scoped by a one-way hash of org_id - `CUSTOMER_KNOWLEDGE_DIR`)
+    that NEVER touches the owner's global single-tenant stores, and the assistant MAY additionally summarise / cite
+    that org's OWN documents as context - it still never asserts or mints a finding from a document (the oracle alone
+    mints a FACT). Read at call time. The per-tenant isolation, the owner-global-store unreachability, the upload caps
+    and the assistant finding-minting firewall hold regardless of this flag's default."""
+    return (os.environ.get("VIGIL_CUSTOMER_KNOWLEDGE") or "").strip().lower() not in _FLAG_EXPLICIT_OFF
 
 
 def assistant_turns_per_hour() -> int:
@@ -1608,6 +1635,10 @@ OWNER_KEY_ID = os.environ.get("SIGIL_OWNER_KEY_ID", "owner")
 # it comes only from an owner-signed `governor.account` grant (single-owner-key / nothing-self-
 # authorizes doctrine). An OIDC identity with no matching owner-signed account is REFUSED.
 _OIDC_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+# The explicit-OFF values for a DEFAULT-ON flag (`customer_knowledge_enabled`): unset, blank or anything that is not one
+# of these keeps a default-on feature ON, and only an explicit off turns it off. The inverse-polarity complement of the
+# default-off `_OIDC_AFFIRMATIVE` predicates, for the lone consumer flag the owner ships on by default.
+_FLAG_EXPLICIT_OFF = frozenset({"0", "false", "no", "off", "disabled"})
 
 
 def oidc_enabled() -> bool:
@@ -1750,6 +1781,42 @@ def assistant_finding_limit() -> int:
     except ValueError:
         return 50
     return n if 1 <= n <= 200 else 50
+
+
+def customer_knowledge_max_doc_bytes() -> int:
+    """The largest single document a customer may upload into their knowledge corpus
+    (`VIGIL_CUSTOMER_KNOWLEDGE_MAX_DOC_BYTES`, default 1 MiB). A hard cap enforced server-side before any chunk /
+    embed / spine write, so one upload can never exhaust the corpus. Junk/out-of-range falls back to the default."""
+    raw = (os.environ.get("VIGIL_CUSTOMER_KNOWLEDGE_MAX_DOC_BYTES") or "").strip()
+    try:
+        n = int(raw) if raw else 1024 * 1024
+    except ValueError:
+        return 1024 * 1024
+    return n if 1 <= n <= 32 * 1024 * 1024 else 1024 * 1024
+
+
+def customer_knowledge_max_docs_per_org() -> int:
+    """The most distinct documents one org's knowledge corpus may hold (`VIGIL_CUSTOMER_KNOWLEDGE_MAX_DOCS`, default
+    200). A per-org ceiling checked before each ingest (fail-closed: at the cap a new filename is refused), so a tenant
+    can never grow an unbounded corpus. Junk/out-of-range falls back to the default."""
+    raw = (os.environ.get("VIGIL_CUSTOMER_KNOWLEDGE_MAX_DOCS") or "").strip()
+    try:
+        n = int(raw) if raw else 200
+    except ValueError:
+        return 200
+    return n if 1 <= n <= 10_000 else 200
+
+
+def customer_knowledge_query_limit() -> int:
+    """The most document chunks one assistant turn (or one `customer_knowledge_query`) grounds on
+    (`VIGIL_CUSTOMER_KNOWLEDGE_QUERY_LIMIT`, default 6). A bound on the document context size the grounded prompt
+    carries, additive to `assistant_finding_limit` (which bounds findings). Junk/out-of-range falls back to default."""
+    raw = (os.environ.get("VIGIL_CUSTOMER_KNOWLEDGE_QUERY_LIMIT") or "").strip()
+    try:
+        n = int(raw) if raw else 6
+    except ValueError:
+        return 6
+    return n if 1 <= n <= 50 else 6
 
 
 def oidc_settings() -> dict:

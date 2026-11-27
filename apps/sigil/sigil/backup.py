@@ -148,15 +148,21 @@ _STATE_DIRS = ("qdrant", "graph",
                # owner-signed append-only row per close-account / deletion request). The customer recorded it and
                # nothing regenerates it, and it is the durable item the owner's documented process acts on, so a
                # restore must bring it back; it names the account, so it is restored owner-only (_PRIVATE_STATE_DIRS).
-               "customer_data_rights")
+               "customer_data_rights",
+               # Consumer Knowledge: the per-tenant uploaded-document corpus (tenant_knowledge/store.py). Each org's
+               # subtree under customer_knowledge/<h>/ holds its OWN spine + vector index + graph; the customer
+               # uploaded the documents and nothing regenerates them, so a restore must bring them back. Per-tenant
+               # content, restored owner-only (_PRIVATE_STATE_DIRS); captured raw like qdrant/graph, and robust against
+               # a concurrent ingest (_ATOMIC_STATE_DIRS skips an in-flight temp).
+               "customer_knowledge")
 # State subtrees whose files hold personal data: restored 0600 in a 0700 directory, as their store writes them.
-_PRIVATE_STATE_DIRS = ("customer_preferences", "customer_data_rights")
+_PRIVATE_STATE_DIRS = ("customer_preferences", "customer_data_rights", "customer_knowledge")
 # State subtrees a live process writes by temp-file-then-rename (spine.atomicio.atomic_write_text) while a backup may
 # be running — the customer profile is saved from the cockpit, the very process that also serves the in-browser backup.
 # An atomic write's temp file (spine.consistent_copy.transient) is never state: it exists only while that save is in
 # flight, so it is never captured; and a file of such a unit that is gone by the time it is read (renamed over or
 # removed since the listing) is simply not in this backup — never a crash that fails the whole backup.
-_ATOMIC_STATE_DIRS = ("customer_preferences",)
+_ATOMIC_STATE_DIRS = ("customer_preferences", "customer_knowledge")
 
 # --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
 # Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
@@ -177,6 +183,7 @@ CAPTURED_TOP_LEVEL = frozenset({
     "model_meter",              # PRICING M1c: per-launch model-gateway meters (money data)
     "customer_preferences",     # legal/governance S1: the customer-entered General profile (0600/0700 on restore)
     "customer_data_rights",     # legal/governance S3: the customer data-rights request ledger (0600/0700 on restore)
+    "customer_knowledge",       # Consumer Knowledge: per-tenant uploaded-doc corpus + per-org spine/index/graph (0600/0700 on restore)
     "bridge.env",               # #70: shipped unit EnvironmentFiles (operator config; 0600 on restore)
     "cockpit.env",
     "customer.env",

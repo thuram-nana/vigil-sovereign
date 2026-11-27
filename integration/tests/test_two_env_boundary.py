@@ -117,6 +117,10 @@ assert "strix" not in _m, "ui.assistant_wallet must not import strix at module s
 import sigil.governor.assistant_turns          # PR-J2: the owner-signed assistant-turn ledger (audit + rate limit)
 assert "framework" not in _m, "governor.assistant_turns must not import framework at module scope"
 assert "strix" not in _m, "governor.assistant_turns must not import strix at module scope"
+import sigil.tenant_knowledge                   # PR-K: the per-tenant customer knowledge corpus (sovereign reuse)
+import sigil.tenant_knowledge.store             # PR-K: the per-org spine + vector index + graph scoping (fail-closed)
+assert "framework" not in _m, "tenant_knowledge must not import framework at module scope"
+assert "strix" not in _m, "tenant_knowledge must not import strix at module scope"
 import sigil.config                           # APEX PR-1: the sovereign autonomous-driver flag accessor (pure env read)
 assert hasattr(sigil.config, "apex_autonomous_enabled"), "sigil.config must expose apex_autonomous_enabled"
 assert "framework" not in _m, "sigil.config must not import framework at module scope"

@@ -140,6 +140,12 @@ def _make_full_source(tmp_path, *, provision=True):
     (src / "qdrant" / "collection" / "storage.bin").write_bytes(b"QDRANT-VECTORS-\x00\x01\x02")
     (src / "graph" / "current").mkdir(parents=True)
     (src / "graph" / "current" / "kuzu.db").write_bytes(b"KUZU-GRAPH-MIRROR")
+    # Consumer Knowledge: a per-tenant corpus subtree (tenant_knowledge/store.py). Opaque bytes under a per-org hash
+    # dir prove the capture; the real store nests its OWN spine + vector index + graph here, restored owner-only.
+    (src / "customer_knowledge" / "org0hash" / "spine").mkdir(parents=True)
+    (src / "customer_knowledge" / "org0hash" / "spine" / "spine.jsonl").write_text('{"v":1,"kind":"document"}\n')
+    (src / "customer_knowledge" / "org0hash" / "qdrant").mkdir(parents=True)
+    (src / "customer_knowledge" / "org0hash" / "qdrant" / "storage.bin").write_bytes(b"ORG-CORPUS-VECTORS-\x00\x01")
     # PRICING M1c: a real hash-chained model-gateway meter (money data: an unsettled run's charge comes from it).
     _write_meter(src / "model_meter")
     # #70: the unit EnvironmentFiles the shipped sovereign units read from SIGIL_HOME (captured).
