@@ -230,6 +230,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
+    # Live Control (VIGIL_CUSTOMER_LIVE_CONTROL) — the #/live screen: watch the live engagement (phase activity)
+    # and steer it with an advisory instruction. The SAME flag that serves /api/customer/launch/instruct +
+    # /api/customer/live/activity, so the screen and its routes are never out of step; off, the tab is absent and
+    # #/live is the home screen (byte-identical). A non-secret on/off value counting in the build id.
+    live_control = _config.customer_live_control_enabled()
     # Legal/governance S1 — the settings shell (the #/settings hub + the General preferences tab). Like every switch
     # here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
@@ -304,6 +309,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_POSTURE__": "1" if posture else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
+                                     "__VIGIL_LIVE_CONTROL__": "1" if live_control else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
@@ -766,6 +772,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
+            return self._live_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
         # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
         if path == "/api/customer/posture" and _posture_on():
@@ -841,6 +849,28 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _live_activity(self):
+        """Live Control — GET the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``, incrementally via a ``since`` cursor. Like every customer read, the REQUESTER +
+        ORG come from the SERVER-side session, never the query (a query ``org_id`` is ignored); the query carries
+        ONLY the target ``host`` (the org's own proven target) and the ``since`` cursor. The provisioner resolves
+        the slug within the session org's own proven set and returns the fixed-field, customer-safe rows — no
+        secret, IP or target detail ever crosses the seam."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def _one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253),
+                                      "since": _one("since", 16), "ip": self._ip()}
+        c, r = self._provision("launch_activity", requester, payload)
         return self._json(r, c)
 
     def _proof_download(self):
@@ -1232,6 +1262,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
             return self._launch(action, body)
+        if action == "launch/instruct" and _live_control_on():        # Live Control mission steering (flag OFF -> 404)
+            return self._launch_instruct(body)
         if action == "retest" and _retest_on():                       # C1b (flag OFF -> unknown-action 404)
             return self._retest(body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
@@ -1353,6 +1385,25 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
         else:
             return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _launch_instruct(self, body: dict):
+        """Live Control MISSION STEERING — forward ONE advisory instruction for the session org's running
+        engagement on ``host`` to the provisioner, which resolves the slug server-side (only for a host the org
+        has proven) and enqueues it on the offense-local advisory queue the engine drains. Like ``_launch``, the
+        acting REQUESTER + ORG come from the SERVER session — NEVER the body (tenant isolation at the edge): the
+        body carries ONLY the target ``host`` (the org's own proven target), the instruction ``text``, and a
+        client ``idem_key`` (so a double-click / reconnect is a no-op). ADVISORY-only: it fires no tool, relaxes
+        no scope, mints no fact; the engine folds it into its untrusted think context at the next loop top."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""),   # session org, never body-supplied
+                                      "host": body.get("host", ""), "text": body.get("text", ""),
+                                      "idem_key": body.get("idem_key", ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("launch_instruct", requester, payload)
         return self._json(r, c)
 
     def _retest(self, body: dict):
@@ -1798,6 +1849,11 @@ def _launch_ui_on() -> bool:
 def _retest_on() -> bool:
     from .. import config as _config
     return _config.customer_retest_ui_enabled()
+
+
+def _live_control_on() -> bool:
+    from .. import config as _config
+    return _config.customer_live_control_enabled()
 
 
 def _posture_on() -> bool:

@@ -3000,6 +3000,62 @@ class Provisioner:
             out["credit_resumed"] = True
         return out
 
+    def launch_instruct(self, requester: str, requester_org_id: str, *, host: str = "", text: str = "",
+                        idem_key: str = "", ip: str = "", mfa_at: float = 0.0,
+                        now: "Optional[float]" = None) -> dict:
+        """Live Control MISSION STEERING — enqueue ONE advisory instruction ("focus on auth", "check the admin
+        API") for the session org's running engagement on ``host``, WITHOUT restarting it. Behind
+        ``customer_live_control_enabled()`` (default-OFF → the action is a 404 unknown-action), then
+        ``admit_customer(run_engagement)`` + tenant-bind: the engagement slug is resolved SERVER-side from
+        (org, host) ONLY for a host the org has ownership-proven, so a customer can neither name another tenant's
+        slug nor steer a host its org never proved. NO fresh step-up: an instruction is ADVISORY — it is folded
+        into the engine's UNTRUSTED think context (it fires no tool, relaxes no scope, mints no fact), so it
+        carries no more authority than the objective the run already held, and the session admit + tenant bind
+        are sufficient. Idempotent on ``idem_key`` (a double-click / reconnect is a no-op). Returns
+        {slug, seq, idempotent}; raises ProvisionDenied on an unknown/unproven host or empty text."""
+        from .. import config
+        if not config.customer_live_control_enabled():
+            raise ProvisionDenied("customer live control is not enabled")
+        from . import live_control
+        with self._lock:                         # serialise the idempotency check-and-enqueue (single-process)
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_instruct", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+            try:
+                r = live_control.submit_instruction(self.store, requester_org_id, host, text, idem_key=idem_key)
+            except ValueError as e:
+                self._audit("launch_instruct", requester=requester, org_id=requester_org_id, outcome="refused")
+                raise ProvisionDenied(str(e)) from e
+        self._audit("launch_instruct", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="accepted", critical=True)
+        return {"slug": r.get("slug"), "seq": r.get("seq"), "idempotent": bool(r.get("idempotent"))}
+
+    def launch_activity(self, requester: str, requester_org_id: str, *, host: str = "", since: "Any" = "",
+                        ip: str = "") -> dict:
+        """Live Control — READ the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``. Behind ``customer_live_control_enabled()`` + ``admit_customer(run_engagement)``.
+        A pure READ: no step-up, no mutation, no money. The engagement slug is resolved SERVER-side from
+        (org, host) ONLY for a host the org has ownership-proven (tenant-safe); returns the fixed-field,
+        customer-safe activity rows + a ``since`` cursor (the seam itself drops anything off the allowlist, so no
+        secret/IP/target detail can cross). Raises ProvisionDenied on an unknown/unproven host."""
+        from .. import config
+        if not config.customer_live_control_enabled():
+            raise ProvisionDenied("customer live control is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("launch_activity", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not view launches for this org")
+        from . import live_control
+        raw = str(since or "").strip()
+        try:
+            s = int(raw) if raw not in ("", "-") else -1
+        except ValueError:
+            s = -1
+        try:
+            return live_control.activity(self.store, requester_org_id, host, since=s)
+        except ValueError as e:
+            raise ProvisionDenied(str(e)) from e
+
     def retest(self, requester: str, requester_org_id: str, finding_ref: str, *, engagement_slug: str = "",
                oracle_context_digest: str = "", ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None,
                reverify=None, _drive_reproof: "Optional[Callable[[Any], None]]" = None,

@@ -1062,6 +1062,7 @@ const GUIDE = null; const GUIDE_ON = false; const MONITORING_ON = false; const T
 const ATTACK_PATH_ON = false; const BLIND_VULN_ON = false;   // PR-L (Area 11): off here (shell reads ATTACK_PATH_ON)
 const SETTINGS_ON = false; const PRIVACY_CENTER_ON = false;
 const SELLER_IDENTITY_ON = false;    // legal/governance S7: off here (shell reads SELLER_IDENTITY_ON for its tab)
+const LIVE_ON = false;    // Live Control: off here (shell reads LIVE_ON for its tab)
 globalThis.location = { hash: "#/" };
 function viewDashboard() { return "dashboard"; } function viewSecurityScreen() { return "security"; }
 function viewGuideScreen() { return "guide"; } function viewSignup() {} function viewRecover() {} function viewGoogleCode() {}

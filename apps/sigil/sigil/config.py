@@ -616,6 +616,16 @@ def customer_pause_resume_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_live_control_enabled() -> bool:
+    """True iff the customer Live Control routes are ON (`VIGIL_CUSTOMER_LIVE_CONTROL` affirmative). OFF by
+    default: the edge route /api/customer/launch/instruct + its provisioner action `launch_instruct` and the
+    #/live SPA screen are all absent (404 / tab hidden) exactly as an unknown route, so the whole mission-
+    steering surface stays INERT until the owner turns this on. A customer instruction is ADVISORY ONLY — it is
+    folded into the running engine's untrusted think context (it fires no tool, relaxes no scope, mints no
+    fact); this flag gates only the CUSTOMER-facing ability to enqueue such guidance for THEIR own engagement."""
+    return (os.environ.get("VIGIL_CUSTOMER_LIVE_CONTROL") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def trial_preview_enabled() -> bool:
     """True iff the free-trial PREVIEW is ON (`VIGIL_TRIAL_PREVIEW_ENABLED` affirmative). OFF by default: sign-up
     grants the legacy trial exactly as before. ON: a sign-up grants the trial under the `trial-preview:<org>` entry

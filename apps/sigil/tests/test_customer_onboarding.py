@@ -478,6 +478,8 @@ def test_the_guide_covers_every_screen_of_the_app():
     wheres = {st["where"] for st in steps.values()}
     assert {"Account security", "Code", "Monitoring", "GitHub"} <= wheres
     assert {key[1] for key, st in steps.items() if st.get("route") == "#/monitoring"} == {"monitor", "events", "manage"}
+    # Live Control (#/live): watch VIGIL work, steer it with an advisory note, and pause/resume the run
+    assert {key[1] for key, st in steps.items() if st.get("route") == "#/live"} == {"watch", "steer", "pause"}
     # the Code screen (#/code): every Red-Pen step that happens on it is routed there; disconnecting starts on GitHub
     assert {key[1] for key, st in steps.items() if st.get("route") == "#/code"} == {"connect", "pr", "settings", "system",
                                                                                   "fix"}

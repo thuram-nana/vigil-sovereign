@@ -577,3 +577,15 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .cust-data-rights-request-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .cust-data-rights-request { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
 .cust-data-rights-request-kind { font-weight: 600; }
+
+/* Live Control (#/live) — the live-engagement activity timeline + steering box */
+.live-head h2 { margin-bottom: 4px; }
+.live-controls { display: flex; gap: 8px; margin: 8px 0 16px; }
+.live-instruct { width: 100%; box-sizing: border-box; resize: vertical; min-height: 3em; margin-bottom: 8px; font: inherit; }
+.live-note { min-height: 1.2em; }
+.live-feed { list-style: none; margin: 0; padding: 0; }
+.live-step { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-top: 1px solid var(--border, #eee); }
+.live-step:first-child { border-top: 0; }
+.live-step-t { font-family: var(--font-mono, monospace); font-size: var(--fs-sm, 0.85em); color: var(--muted, #888); min-width: 6.5em; }
+.live-step-i { width: 1.2em; text-align: center; }
+.live-step-l { flex: 1; }

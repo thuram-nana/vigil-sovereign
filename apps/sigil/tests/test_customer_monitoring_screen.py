@@ -144,7 +144,7 @@ let renders = 0; function render() { renders++; }
 let whoRefreshes = 0; async function refreshWho() { whoRefreshes++; }
 function shell(inner, current) { return h("div.shell", { dataset: { current: current } }, inner); }
 var GUIDE_ON = false;
-var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false;   // every other page flag: off
+var SECURITY_ON = false, TEAM_ON = false, LAUNCH_ON = false, CODE_ON = false, CONNECT_ON = false, SETTINGS_ON = false, PRIVACY_CENTER_ON = false, SELLER_IDENTITY_ON = false, LIVE_ON = false;   // every other page flag: off
 var ATTACK_PATH_ON = false, BLIND_VULN_ON = false;   // PR-L (Area 11) flags: off here (shell reads ATTACK_PATH_ON)
 const VUI = window.VUI;
 const calls = [], toasts = [], errs = [];

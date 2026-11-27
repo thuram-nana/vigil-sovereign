@@ -317,6 +317,31 @@ class PhaseLedger:
         """Append one status record and mirror the transition onto the spine. TOTAL (see :meth:`_write`)."""
         self._write(phase, status, **extra)
         self._emit(phase, status)
+        self._emit_customer_activity(phase, status)
+
+    def _emit_customer_activity(self, phase: str, status: str) -> None:
+        """Live Control (default-OFF via ``VIGIL_CUSTOMER_LIVE_CONTROL``): mirror the phase transition onto the
+        customer-safe activity seam under the shared seam base, so the sovereign Live Control edge can show the
+        customer what VIGIL is doing. Best-effort and flag-gated — when the flag is off this is a COMPLETE
+        no-op, so engine behaviour is byte-identical. Only the fixed-allowlist ``{phase, status}`` ever cross;
+        the seam (``vigil_core.live_activity``) itself drops anything off the customer-safe allowlist, so no
+        secret, IP, target detail or internal field can leak through it."""
+        if (os.environ.get("VIGIL_CUSTOMER_LIVE_CONTROL") or "").strip().lower() not in ("1", "true", "yes", "on"):
+            return
+        try:
+            from vigil_core.live_activity import emit as _emit_activity
+            from vigil_core.live_activity import reset as _reset_activity
+            from vigil_core.seam_base import resolve_seam_base
+            base = resolve_seam_base()
+            # A customer slug is reused by every launch of the same (org, host); the activity seam is per slug. So
+            # when a NEW run attempt begins (preflight started — never a resumable phase, so this fires on a fresh
+            # launch AND on a --resume re-attempt), clear the trail first, so the feed shows the CURRENT run, not
+            # the concatenation of every past run on this host. A stale customer cursor auto-recovers (see read()).
+            if phase == P_PREFLIGHT and status == "started":
+                _reset_activity(base, self._slug)
+            _emit_activity(base, self._slug, phase, status, ts=time.time())
+        except Exception:  # noqa: BLE001 — a customer-activity mirror must never perturb the engine
+            return
 
     def _emit(self, phase: str, status: str) -> None:
         """Mirror the phase transition onto the event spine (best-effort) so the live process
