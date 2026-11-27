@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-ingest"
+version = "0.1.0"
+description = "AEGIS AS-9b ingest receiver (hot SPOOL) — the per-tenant inbound endpoint sensors/providers push findings into."
+requires-python = ">=3.11"
+# The engine-plane receiver core lives in framework.v2.aegis.receiver (so the AS-28 SaaS-closure deny-list
+# gate covers it); this distribution re-exports it. The engine package (framework.v2.aegis.*) and vigil_core
+# are supplied on PYTHONPATH by the deployment image, not vendored here.
+
+[tool.setuptools]
+packages = ["aegis_ingest"]
+
+# Ruff mirrors the engine/sigil config (line-length 120, py311, the same lint set) so new code is linted
+# consistently wherever it runs.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]

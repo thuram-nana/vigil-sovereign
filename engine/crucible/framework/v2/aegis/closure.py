@@ -77,6 +77,9 @@ _FIRST_PARTY_ROOTS: dict[str, pathlib.Path] = {"framework": _ENGINE_ROOT}
 SAAS_ENTRYPOINTS: tuple[str, ...] = (
     "framework.v2.aegis.cli",
     "framework.v2.aegis.gateway",
+    # AS-9b: the ingest receiver core (served by apps/aegis-ingest). Engine-leg; its closure must be as clean
+    # of denied offense/SDK modules as the gateway's — so the deny-list gate covers the receiver serve path.
+    "framework.v2.aegis.receiver",
 )
 
 # The defense-owned SERVING layer this slice authors and controls. A reachable module under this package
