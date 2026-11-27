@@ -222,6 +222,8 @@ _GOVERNOR_EVENT_WRITERS = frozenset({
     "governor/eval_offense_attestation.py", "governor/invoices.py", "governor/killswitch.py",
     "governor/launch_settlement.py", "governor/metering.py", "governor/monitoring_authority.py",
     "governor/monitoring_authority_v2.py",  # AS-2f: owner-signed v2 monitoring-authority registry (own literal signals)
+    "governor/monitoring_binding.py",  # AS-2g: owner-signed origin-binding publish step; its own literal signal
+                                       # governor.aegis_origin_binding (SIGNAL_V2_BINDING), an append-only bind audit
     "governor/offense_gate.py", "governor/orgs.py", "governor/postpaid.py", "governor/promotion.py",
     "governor/report_unlock.py", "governor/subscription.py", "governor/trial_claim.py", "governor/wallet.py",
     "governor/billing_reversal.py",   # W5: owner-signed reversal/arrears ledger (its own literal signal governor.billing_reversal)

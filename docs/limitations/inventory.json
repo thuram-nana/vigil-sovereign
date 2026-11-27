@@ -168,6 +168,22 @@
    "w16_issue": null
   },
   {
+   "id": "LIMIT-cloudflare-live-r2-api",
+   "title": "The Cloudflare R2 live read-only REST surface is proof-gated on a real customer token",
+   "summary": "CloudflareLiveSensor's pure-protocol layer (the host-pinned egress guard, the response parse, the native translation, and the oracle promotion) is fully covered offline through the injectable transport seam. The exact live R2 read-only REST shapes (the /r2/buckets list plus the managed and custom-domain JSON) and whether a per-run read-only token's groups include 'Workers R2 Storage Read' cannot run in CI and are an honestly-registered residual proven against a live customer token.",
+   "classification": "real-unfinished-code",
+   "severity": "low",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/sensors/cloudflare_live.py",
+    "symbol": "CloudflareLiveSensor"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "docs/DEFERRED-INFRA.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "LIMIT-agent-body-scaffold",
    "title": "The pluggable next-gen agent-body is an interface-only scaffold",
    "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",
@@ -792,6 +808,38 @@
    },
    "marker": false,
    "check": "file-exists",
+   "source_doc": "infra/aws/aegis-staging/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "AS1B-live-fire-tt-stg",
+   "title": "AEGIS AS-1b TT-STG run-record orchestration is covered offline in full; the live staging run and the record signed under the provisioned staging key are a deploy-gated residual",
+   "summary": "AS-1b (engine/crucible/framework/v2/evidence/aegis_tt_run.py) is the staging-run counterpart to AS-1a's TT-CI rig: it takes a test-tenant acceptance run (TT-A under attack, TT-B the cross-tenant control), fail-closed GATES it, DERIVES the AS-25 record's world from the run (the IaC topology digest over the real AS-26 CloudFormation templates, the subject digest, and the six required case-class counts re-derived from the bound JUnit, never asserted), and assembles + self-verifies the AS-25 signed binding (reusing evidence.aegis_tt build/sign/verify verbatim). Every deterministic layer is covered offline in full by evidence/tests/test_aegis_tt_run.py: the gate's fail-closed negative controls (failed acceptance, in-process rather than distinct-uid mode, a false check, a skipped no-skip term, a dirty/failing manifest, a missing case class, non-VALID artifacts, a production root, an off-census UI route, a wrong signer each yield NO record), the deterministic/order-independent/change-sensitive digests, and the sign+offline-self-verify round-trip under an ephemeral provisioning trust root. What is DEPLOYED-GATED is the LIVE half: standing up TT-STG in a real AWS staging account (the AS-26 stack applied, the GitHub-OIDC staging deploy role wired, MFA console sign-in), executing the e2e deploy + acceptance against it, and SIGNING the binding with the provisioned staging TT-evidence key. The committed trust root docs/evidence/aegis-tt/trust-root.json is honestly 'unprovisioned' (empty authorisers; load_trust_root_doc returns trust_root=None and the verifier fails closed), and the real key is KMS-wrapped in the staging control plane and is NEVER a CI runner key (plan 13.3), so no live record can be produced or verified under the real root in CI. Fail-closed meanwhile: with no provisioned root, no record reads 'implemented_and_demonstrated' (the AS-25 status projection stays 'implemented_not_validated').",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/evidence/aegis_tt_run.py",
+    "symbol": "record_tt_stg_run"
+   },
+   "marker": true,
+   "check": "symbol-exists",
+   "source_doc": "engine/crucible/framework/v2/evidence/aegis_tt_run.py",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-edge-automation-deploy-gated",
+   "title": "AEGIS AS-6c edge automation needs an owner-provided AWS edge control plane + secret store",
+   "summary": "AS-6c ships the declarative edge reconciler (framework.v2.aegis.aegis_edge.EdgeReconciler): over the AS-6a FleetState it provisions/rotates the per-(org,host) edge secret and binds each tenant CloudFront distribution's origin at the gateway unit AS-6a has proven HEALTHY, with no operator step, idempotently and fail-closed (an unproven/unhealthy backing unit refuses the bind; a secret that cannot be provisioned refuses the open; a rollout binds the new origin before draining the old; a retire drains before teardown). That reconcile LOGIC is exercised offline, deterministically, against injected in-memory EdgeControlPlane / EdgeSecretStore doubles. The residual is that the real AWS edge control plane (the CloudFront distribution/origin update and the ALB target-group register/deregister with connection draining) and the real edge-secret store (AWS Secrets Manager / SSM, matching the AS-26 aegis-staging/edge/<tenant> secrets) are owner-provided and deploy-gated: with the VIGIL_AEGIS_EDGE flag off the reconciler is inert and binds/retires nothing, and without the edge-secret store wired it refuses every bind (edge_secret_unavailable, fail-closed — the origin is never opened without a provisioned secret), until the owner wires the live edge plane, whose end-to-end acceptance is AS-1b's TT-STG staging runs, not this slice.",
+   "classification": "real-unfinished-code",
+   "severity": "info",
+   "anchor": {
+    "file": "engine/crucible/framework/v2/aegis/aegis_edge.py",
+    "symbol": "EdgeControlPlane"
+   },
+   "marker": true,
+   "check": "symbol-exists",
    "source_doc": "infra/aws/aegis-staging/README.md",
    "disposition": "file-into-w16",
    "w16_issue": null

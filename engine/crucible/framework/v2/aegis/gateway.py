@@ -1060,6 +1060,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   saas_tenant: str | None = None, saas_host: str | None = None,
                   monitoring_spool: str | None = None,
                   monitoring_secret: bytes | None = None,
+                  emit_v2: bool = False,
                   instance_id: str = "gw", replica_index: int = 0, saas_v2_dir: "str | None" = None,
                   now_fn: "Callable[[], datetime] | None" = None,
                   monotonic_fn: "Callable[[], float] | None" = None,
@@ -1083,10 +1084,35 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
                                      on_authority_event=on_authority_event)
+    if emit_v2 and monitoring_spool is None:
+        raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
     if monitoring_spool is not None:
+        assert monitoring_secret is not None  # guaranteed by the paired-config check above; narrows for the sinks
         from .monitoring_report import SpoolReporter, compose_sinks
         st = httpd.settings  # type: ignore[attr-defined]
         st.monitoring_reporter = SpoolReporter(monitoring_spool, org_id=st.saas_tenant, host=st.saas_host,
                                                secret=monitoring_secret)
         st.on_verdict = compose_sinks(on_verdict, st.monitoring_reporter)
+        # AS-3b (opt-in, DEFAULT-OFF): ADDITIONALLY emit each verdict as an AS-2b aegis_event v2 record into a
+        # DISTINCT incoming_v2/ subtree (the v1 drain never reads it). Hygiene-clean (the LLM / OOB canary
+        # sentinels are redacted so a leak can never be emitted) and deterministic (monotonic seq, content-
+        # addressed event_id). The emission is additive — it never changes the gate/observe path, and a v2
+        # reporter fault is isolated to its own sink (compose_sinks), never the request path.
+        if emit_v2:
+            from .monitoring_event_v2 import EventV2Reporter
+
+            def _authority_epoch() -> int:
+                try:
+                    if st._v2_cache is not None:          # a V2 subject was built: read the live grant epoch
+                        return int(st.v2_decision().epoch)
+                except Exception:
+                    pass
+                return 0                                   # fail-closed: no live V2 grant -> epoch 0
+
+            _canaries = tuple(c for c in (getattr(config, "canary", None),
+                                          getattr(config, "oob_canary", None)) if c)
+            st.event_v2_reporter = EventV2Reporter(
+                monitoring_spool, org_id=st.saas_tenant, host=st.saas_host, instance_id=st.instance_id,
+                secret=monitoring_secret, epoch_fn=_authority_epoch, redact_literals=_canaries)
+            st.on_verdict = compose_sinks(st.on_verdict, st.event_v2_reporter)
     return httpd

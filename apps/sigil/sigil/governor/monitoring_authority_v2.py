@@ -342,15 +342,22 @@ class MonitoringAuthorityV2Registry:
     # -- owner mutations ------------------------------------------------------------------------------
     def grant(self, org_id: str, host: str, *, capabilities, not_before: float, not_after: float,
               lease_not_before: float, lease_not_after: float, instance_id: str, now: float, issued_at: float,
-              replica_index: int = 0, edge_chain: str = "shared_actor") -> tuple[MonitoringGrantV2View,
-                                                                                 SignedMonitoringAuthorityV2]:
+              replica_index: int = 0, edge_chain: str = "shared_actor",
+              origin: "Optional[object]" = None, origin_binding_sha256: "Optional[str]" = None
+              ) -> tuple[MonitoringGrantV2View, SignedMonitoringAuthorityV2]:
         """Owner-sign + RETURN the publishable v2 grant (the DANGEROUS direction) and record it on the spine.
 
         Fail-closed ``ValueError`` on a bad subject/capabilities/window, a missing key, or no CURRENT ownership
         proof for the exact (org, host). ``not_after`` is clamped to the proof's owner-signed expiry (monitoring
         never outlives proven ownership). The epoch is read back from the spine and minted at ``high_water + 1``
-        (strictly monotone). ``issued_at`` must be strictly above the subject's issued high-water. NO origin is
-        attached (AS-2g seam). The caller publishes + reads back the returned signed grant."""
+        (strictly monotone). ``issued_at`` must be strictly above the subject's issued high-water.
+
+        AS-2g binding seam: ``origin`` (an :class:`vigil_core.authority_v2.OriginTuple`) + ``origin_binding_sha256``
+        (the sha256 of the published :class:`vigil_core.aegis_origin_binding.AegisOriginBinding`) are BOTH None by
+        default — an unbound grant, byte-identical to the AS-2f shape. When supplied (both together; the contract
+        refuses one without the other) the grant is BOUND to that published binding, and ``edge_chain`` names the
+        declared edge. The caller (``monitoring_binding.bind_and_publish``) owner-signs + publishes the binding
+        FIRST, then passes its digest here. The caller publishes + reads back the returned signed grant."""
         if self.owner_key is None:
             raise ValueError("granting monitoring authority v2 requires the owner signing key")
         subject = v2_subject(org_id, host)
@@ -380,7 +387,7 @@ class MonitoringAuthorityV2Registry:
             subject=subject, capabilities=caps, epoch=epoch, not_before=_dt(nb), not_after=_dt(na),
             lease=MonitoringLease(not_before=_dt(lnb), not_after=_dt(lna)),
             instance_id=instance_id, replica_index=int(replica_index), edge_chain=edge_chain,
-            origin=None, origin_binding_sha256=None,     # AS-2g seam: no tenant origins in this slice
+            origin=origin, origin_binding_sha256=origin_binding_sha256,   # AS-2g: None/None = unbound (default)
             issued_at=at, issued_by="owner")
         signed = sign_monitoring_authority_v2(doc, {"owner": self.owner_key.private_key_b64})
         # The sovereign spine-of-record: owner-signed core the fold re-verifies, with the TRUE A3 labels.

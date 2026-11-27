@@ -66,11 +66,14 @@ from .posture import annotate_action
 from .rules import DetectionRuleset, default_ruleset
 from .scoring import score_action
 from .sigma import (
+    FieldMap,
     SigmaEvalResult,
     SigmaMatch,
     SigmaRule,
+    default_field_map,
     evaluate_events,
     load_sigma_dir,
+    logsource_channels,
     parse_sigma_rule,
     rule_matches_event,
 )
@@ -104,14 +107,17 @@ __all__ = [
     "parse_syslog",
     "parse_cef",
     "parse_evtx_json",
-    # Sigma runtime + ATT&CK mapping
+    # Sigma runtime + ATT&CK mapping (v2: wildcards, provenance, field maps, logsource)
     "SigmaRule",
     "SigmaMatch",
     "SigmaEvalResult",
+    "FieldMap",
     "parse_sigma_rule",
     "load_sigma_dir",
     "rule_matches_event",
     "evaluate_events",
+    "logsource_channels",
+    "default_field_map",
     # detection efficacy + assembled defense report
     "DefenseReport",
     "DetectionEfficacy",

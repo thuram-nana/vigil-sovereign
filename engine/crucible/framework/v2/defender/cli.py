@@ -14,6 +14,12 @@ Subcommands:
     rules    [--ruleset path]
                  List the active detection rules.
 
+    sigma    --sigma-dir DIR [--log FILE] [--format auto|syslog|cef|evtx_json]
+             [--field-maps] [--match-logsource]
+                 Load operator Sigma rules and SHOW each rule's author,
+                 licence and deployability (AS-17a); optionally evaluate
+                 them against an offline log file.
+
 Defensive only: this surface reports footprint. It never emits an
 evasion payload.
 """
@@ -23,10 +29,12 @@ from __future__ import annotations
 import argparse
 import json
 
+from .logsource import load_log_file
 from .models import ActionDescriptor, ActionKind, Posture
 from .posture import annotate_action
 from .rules import DetectionRuleset, default_ruleset
 from .scoring import score_action
+from .sigma import default_field_map, evaluate_events, load_sigma_dir
 
 
 def _descriptor(args: argparse.Namespace) -> ActionDescriptor:
@@ -67,6 +75,39 @@ def _rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sigma(args: argparse.Namespace) -> int:
+    """Load operator Sigma rules and SHOW provenance + deployability (AS-17a acceptance); if a
+    ``--log`` file is given, also evaluate the ruleset against it (offline, read-only)."""
+    rules = load_sigma_dir(args.sigma_dir)
+    out: dict = {
+        "sigma_dir": args.sigma_dir,
+        "rules": [
+            {**r.provenance, "describe": r.describe()}
+            for r in rules
+        ],
+    }
+    if args.log:
+        load = load_log_file(args.log, args.format)
+        if not load.ok:
+            out["log"] = {"ok": False, "note": load.note}
+        else:
+            res = evaluate_events(
+                rules, load.events,
+                field_map=default_field_map() if args.field_maps else None,
+                match_logsource=args.match_logsource,
+            )
+            out["log"] = {"ok": True, "note": load.note}
+            out["evaluation"] = {
+                "summary": res.summary(),
+                "matched_rule_ids": res.matched_rule_ids,
+                "techniques_detected": res.techniques_detected,
+                "rules_unsupported": res.rules_unsupported,
+                "rules_not_deployable": res.rules_not_deployable,
+            }
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def _add_action_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--kind", required=True, choices=[k.value for k in ActionKind])
     p.add_argument("--surface", default="")
@@ -95,6 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("rules", help="list active detection rules")
     p.add_argument("--ruleset", default="")
     p.set_defaults(fn=_rules)
+
+    p = sub.add_parser("sigma", help="show Sigma rule provenance/deployability; optionally evaluate a log")
+    p.add_argument("--sigma-dir", required=True, help="directory of operator Sigma rules (*.yml/*.yaml)")
+    p.add_argument("--log", default="", help="optional offline log/alert file to evaluate against")
+    p.add_argument("--format", default="auto", choices=["auto", "syslog", "cef", "evtx_json"])
+    p.add_argument("--field-maps", action="store_true", help="apply the built-in field-name alias map")
+    p.add_argument("--match-logsource", action="store_true", help="narrow each rule to its logsource channels")
+    p.set_defaults(fn=_sigma)
 
     return parser
 
