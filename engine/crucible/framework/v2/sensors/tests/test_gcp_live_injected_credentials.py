@@ -56,10 +56,12 @@ def _install_fake_google(monkeypatch, *, forbid_ambient: bool = True) -> dict:
       * ``google.auth.default`` — RECORDS a call and, when ``forbid_ambient``, RAISES, so an injected run that
         touched the ambient chain would fail loudly.
 
-    ``google.cloud`` is a plain module with NO ``__path__`` and no ``resourcemanager_v3`` / ``orgpolicy_v2``
-    attribute, so those optional reads degrade to ``None`` exactly as in prod when the SDKs are absent (this
-    suite tests CREDENTIAL HANDLING, not collection — the E2E covers collection). Returns a recorder dict."""
-    rec: dict = {"token": None, "built": False, "adc_called": False, "storage_credentials": None}
+    ``resourcemanager_v3.ProjectsClient`` / ``orgpolicy_v2.OrgPolicyClient`` are ALSO faked to record the
+    credentials they are handed, so the no-ambient-substitution invariant is proven for ALL THREE collection
+    clients (storage + project-IAM + org-PAP) — a regression dropping ``credentials=`` from any of them (which
+    would silently fall back to ambient ADC for that surface) is caught. Returns a recorder dict."""
+    rec: dict = {"token": None, "built": False, "adc_called": False, "storage_credentials": None,
+                 "projects_credentials": None, "orgpolicy_credentials": None}
 
     class _Credentials:
         def __init__(self, *, token=None, scopes=None, **kw):
@@ -76,6 +78,20 @@ def _install_fake_google(monkeypatch, *, forbid_ambient: bool = True) -> dict:
         def list_buckets(self):
             return []
 
+    class _ProjectsClient:   # resourcemanager_v3 — records the creds it is handed (project-IAM collection)
+        def __init__(self, *, credentials=None, **kw):
+            rec["projects_credentials"] = credentials
+
+        def get_iam_policy(self, *, resource=None):
+            return SimpleNamespace(bindings=[])
+
+    class _OrgPolicyClient:   # orgpolicy_v2 — records the creds it is handed (org-PAP collection)
+        def __init__(self, *, credentials=None, **kw):
+            rec["orgpolicy_credentials"] = credentials
+
+        def get_effective_policy(self, *, name=None):
+            return SimpleNamespace(spec=SimpleNamespace(rules=[]))
+
     def _adc_default(*a, **k):
         rec["adc_called"] = True
         if forbid_ambient:
@@ -91,16 +107,24 @@ def _install_fake_google(monkeypatch, *, forbid_ambient: bool = True) -> dict:
     g_cloud = types.ModuleType("google.cloud")
     g_cloud_storage = types.ModuleType("google.cloud.storage")
     g_cloud_storage.Client = _StorageClient  # type: ignore[attr-defined]
-    # Wire the attribute graph so ``google.auth.default`` and ``from google.cloud import storage`` resolve.
+    g_cloud_rm = types.ModuleType("google.cloud.resourcemanager_v3")
+    g_cloud_rm.ProjectsClient = _ProjectsClient  # type: ignore[attr-defined]
+    g_cloud_op = types.ModuleType("google.cloud.orgpolicy_v2")
+    g_cloud_op.OrgPolicyClient = _OrgPolicyClient  # type: ignore[attr-defined]
+    # Wire the attribute graph so ``google.auth.default`` and ``from google.cloud import storage /
+    # resourcemanager_v3 / orgpolicy_v2`` all resolve.
     google.auth = g_auth  # type: ignore[attr-defined]
     google.oauth2 = g_oauth2  # type: ignore[attr-defined]
     g_oauth2.credentials = g_oauth2_creds  # type: ignore[attr-defined]
     google.cloud = g_cloud  # type: ignore[attr-defined]
     g_cloud.storage = g_cloud_storage  # type: ignore[attr-defined]
+    g_cloud.resourcemanager_v3 = g_cloud_rm  # type: ignore[attr-defined]
+    g_cloud.orgpolicy_v2 = g_cloud_op  # type: ignore[attr-defined]
     for name, mod in {
         "google": google, "google.auth": g_auth, "google.oauth2": g_oauth2,
         "google.oauth2.credentials": g_oauth2_creds, "google.cloud": g_cloud,
         "google.cloud.storage": g_cloud_storage,
+        "google.cloud.resourcemanager_v3": g_cloud_rm, "google.cloud.orgpolicy_v2": g_cloud_op,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
     return rec
@@ -115,8 +139,11 @@ def test_injected_bearer_reaches_google_client_not_ambient(monkeypatch):
     assert r.ok is True, r.note
     # the google credentials were built from the INJECTED bearer token...
     assert rec["built"] is True and rec["token"] == BEARER
-    # ...and those SAME injected credentials were handed to the storage client (the token FLOWS to the client)...
+    # ...and those SAME injected credentials were handed to EVERY collection client (the token FLOWS to each:
+    # storage + project-IAM + org-PAP — so none can regress to ambient ADC undetected)...
     assert getattr(rec["storage_credentials"], "token", None) == BEARER
+    assert getattr(rec["projects_credentials"], "token", None) == BEARER
+    assert getattr(rec["orgpolicy_credentials"], "token", None) == BEARER
     # ...and the ambient ADC chain (google.auth.default) was NEVER consulted (forbid_ambient would have raised).
     assert rec["adc_called"] is False
     # the result is scoped to exactly the injected project/provider.
