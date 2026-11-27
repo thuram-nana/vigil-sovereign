@@ -41,8 +41,8 @@ dependencies = [
     "kuzu==0.11.3",
     "mcp==2.3.0",
     "numpy>=2.4.6,<3",
-    "onnxruntime==1.31.1",
-    "pydantic==2.14.3",
+    "onnxruntime==1.32.0",
+    "pydantic==2.14.4",
     "PyYAML>=6.0.3",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
     "qdrant-client==1.20.0",
     "signxml==5.3.1",                 # SAML Response XML-DSig signature verification (sigil/ui/saml.py)
