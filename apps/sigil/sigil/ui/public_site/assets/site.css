@@ -38,6 +38,8 @@ code, kbd, pre { font-family: var(--font-mono); }
 .nav__links a:hover { color: var(--text-0); }
 .nav__spacer { flex: 1; }
 @media (max-width: 860px) { .nav__links { display: none; } }
+/* phone: keep the sticky nav within the viewport; drop the secondary ghost CTA (the hero keeps both). */
+@media (max-width: 600px) { .nav .btn--ghost { display: none; } }
 
 /* -- buttons ---------------------------------------------------------------- */
 .btn { display: inline-flex; align-items: center; gap: var(--sp-2); font: inherit; font-weight: 600;
@@ -296,7 +298,7 @@ code, kbd, pre { font-family: var(--font-mono); }
       animation-range: entry 0% entry 60%; }
   }
 }
-@keyframes reveal-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+@keyframes reveal-rise { from { transform: translateY(22px); } to { transform: none; } }
 
 /* respect the user's setting: no motion, nothing left hidden */
 @media (prefers-reduced-motion: reduce) {
