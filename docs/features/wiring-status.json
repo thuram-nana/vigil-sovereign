@@ -1491,6 +1491,18 @@
       },
       "check": "ui-screen",
       "rationale": "A top-level unified-UI screen (owner plane, manage_org): a real NAV entry AND a route() destination (renderTenantAssess) in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "aegis.cloudtrail_source",
+      "name": "AWS CloudTrail telemetry source (AS-17b)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/cloudtrail_source.py",
+        "symbol": "CloudTrailSource"
+      },
+      "check": "symbol-exists",
+      "rationale": "The AS-17b engine-leg AWS CloudTrail provider reader: normalizes a CloudTrail delivery (defender.logsource.parse_cloudtrail, additive + gated detect_format), optionally AS-17a Sigma-evaluates it, and pushes INERT metadata-only LEAD findings through the AS-9b IngestReceiver, tamper-evidencing each ingested record with AS-9c anchor-1. OPT-IN: the ACTIVE pull/receiver-push path is DEFAULT-OFF behind the strict VIGIL_AEGIS_CLOUDTRAIL flag (credential materialisation independently gated by VIGIL_AEGIS_CONNECTOR_BROKER); off => inert (pulls nothing, reads no credential, pushes nothing). The pure parse_cloudtrail normalizer + the new 'cloudtrail' --format choice on `defender sigma` are additive and byte-identical on the default path. Pushes through the existing framework.v2.aegis.receiver entrypoint, so no new Gate-5 customer route and no AS-28 closure entrypoint; reuses the LEAD-tier intel vocabulary, so no new IntelSourceKind."
     }
   ]
 }

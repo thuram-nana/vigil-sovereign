@@ -861,6 +861,14 @@ _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "SourceIp": ("SourceIp", "src", "src_ip", "source_ip", "srcip"),
     "EventID": ("EventID", "event_id", "eventid", "cef_signature_id"),
     "TargetFilename": ("TargetFilename", "filename", "file", "path"),
+    # AS-17b — CloudTrail: the normalized ``cloudtrail`` event already keeps AWS' own field names
+    # (``eventSource``/``eventName``/…), so a standard CloudTrail Sigma rule matches directly; these
+    # rows are the pure, ADDITIVE fallbacks for a rule that spells the SAME datum differently
+    # (a direct field hit always wins, so they can only ever ADD a match — never suppress one).
+    "SourceIP": ("SourceIP", "sourceIPAddress", "SourceIp", "src_ip"),
+    "sourceIPAddress": ("sourceIPAddress", "SourceIp", "src_ip"),
+    "UserAgent": ("UserAgent", "userAgent", "http_user_agent"),
+    "AccountId": ("AccountId", "recipientAccountId", "userIdentity.accountId"),
 }
 
 

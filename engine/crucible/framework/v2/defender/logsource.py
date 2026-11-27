@@ -22,6 +22,12 @@ Three formats, each a small, explicit, TOTAL parser:
                flat shape (``{"EventID": 4688, "CommandLine": ...}``) and the nested
                ``Event.System`` / ``Event.EventData`` (incl. the ``Data:[{@Name,#text}]`` array)
                shape are flattened into fields.
+  * CLOUDTRAIL— an AWS CloudTrail delivery as JSON (the ``{"Records":[{...}]}`` envelope, also a
+               single-record object or newline-delimited JSON). Each record's salient fields
+               (``eventSource``/``eventName``/``eventTime``/``awsRegion``/``sourceIPAddress``/
+               ``userAgent``/``errorCode``/… and the ``userIdentity`` sub-fields as dotted keys
+               ``userIdentity.type`` etc.) are flattened under the SAME names standard CloudTrail
+               Sigma rules reference (AS-17b, the ingest half of the CloudTrail telemetry source).
 
 Doctrine, by construction:
   * DEFENSIVE ONLY. This improves the owner's detection coverage. It parses logs; it never
@@ -399,16 +405,147 @@ def parse_evtx_json(text: str) -> list[LogEvent]:
 
 
 # ---------------------------------------------------------------------------
+# AWS CloudTrail (AS-17b — the INGEST half of the CloudTrail telemetry source)
+# ---------------------------------------------------------------------------
+
+# The salient top-level record fields a detection/ingest cares about, kept under the SAME names a
+# standard CloudTrail Sigma rule (``logsource.product=aws, service=cloudtrail``) references, so the
+# normalized event matches those rules directly (the opt-in field map in ``sigma.default_field_map``
+# only ever ADDS canonical aliases on top). Any other top-level SCALAR key is also captured (bounded),
+# exactly like the EVTX flat-shape absorb, so a rule naming a less-common scalar field still matches.
+_CLOUDTRAIL_IDENTITY = ("type", "arn", "accountId", "principalId", "userName", "invokedBy", "userAgent")
+
+
+def _flatten_cloudtrail_record(rec: object) -> "Fields | None":
+    """Flatten ONE CloudTrail record (dict) into fields. Top-level scalars are kept under their own
+    names (``eventSource``/``eventName``/``eventTime``/``awsRegion``/``sourceIPAddress``/``userAgent``/
+    ``eventType``/``errorCode``/``errorMessage``/``readOnly``/``managementEvent``/``recipientAccountId``,
+    and any other scalar); the nested ``userIdentity`` object's salient sub-fields are flattened under
+    dotted keys (``userIdentity.type`` etc.) that match standard CloudTrail Sigma. Returns None for a
+    non-dict. Bounded + total (mirrors ``_flatten_evtx_record``)."""
+    if not isinstance(rec, dict):
+        return None
+    fields: Fields = {}
+
+    def _put(key: object, val: object) -> None:
+        if len(fields) >= _MAX_FIELDS:
+            return
+        if not isinstance(key, str) or not key:
+            return
+        k = key.strip()
+        if not k or k in fields:
+            return
+        if isinstance(val, bool):
+            fields[k] = str(val)                 # a JSON bool -> "True"/"False" (Sigma match is case-insensitive)
+        elif isinstance(val, int):
+            fields[k] = val
+        elif isinstance(val, (str, float)):
+            fields[k] = _coerce(str(val))
+        # dict/list values are containers, not leaf fields — skipped (userIdentity handled explicitly)
+
+    for k, v in rec.items():
+        if k == "userIdentity" and isinstance(v, dict):
+            # Flatten the identity sub-object under dotted keys the way CloudTrail Sigma references it.
+            for sub in _CLOUDTRAIL_IDENTITY:
+                if sub in v and isinstance(v.get(sub), (str, int, float, bool)):
+                    _put(f"userIdentity.{sub}", v.get(sub))
+            # sessionContext.sessionIssuer.* is a common second-level identity hop — capture its scalars too.
+            sess = v.get("sessionContext")
+            issuer = sess.get("sessionIssuer") if isinstance(sess, dict) else None
+            if isinstance(issuer, dict):
+                for sub in _CLOUDTRAIL_IDENTITY:
+                    if sub in issuer and isinstance(issuer.get(sub), (str, int, float, bool)):
+                        _put(f"userIdentity.sessionContext.sessionIssuer.{sub}", issuer.get(sub))
+        elif isinstance(v, (str, int, float, bool)):
+            _put(k, v)
+        # other nested containers (requestParameters, responseElements, …) are not leaf fields — skipped
+    return fields or None
+
+
+def parse_cloudtrail(text: str) -> list[LogEvent]:
+    """Parse an AWS CloudTrail delivery into ``LogEvent``s (channel/source_format 'cloudtrail'). Accepts
+    the delivery envelope ``{"Records":[{...}]}``, a single record object, or newline-delimited JSON (one
+    record per line). Each record is flattened by :func:`_flatten_cloudtrail_record`. ``json.loads`` only,
+    bounded, TOTAL: an undecodable blob or record is skipped, never raised. PURE/DETERMINISTIC; input order
+    preserved — re-parsing the same bytes yields the same events (the determinism the Sigma runtime +
+    AS-17b ingest both rely on)."""
+    records: list[object] = []
+    stripped = text.strip()
+    parsed_whole = False
+    if stripped[:1] in ("[", "{"):
+        try:
+            doc = json.loads(stripped)
+            parsed_whole = True
+            if isinstance(doc, dict):
+                if isinstance(doc.get("Records"), list):
+                    records = list(doc["Records"])          # the CloudTrail delivery envelope
+                else:
+                    records = [doc]                          # a single bare record object
+            elif isinstance(doc, list):
+                records = list(doc)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            parsed_whole = False
+    if not parsed_whole:
+        for line in _iter_lines(text):                       # newline-delimited JSON (one record per line)
+            try:
+                records.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                continue
+
+    out: list[LogEvent] = []
+    for rec in records:
+        if len(out) >= _MAX_EVENTS:
+            break
+        try:                                                 # total-parser contract: one bad record never raises
+            fields = _flatten_cloudtrail_record(rec)
+        except Exception:
+            continue
+        if fields is None:
+            continue
+        out.append(LogEvent(channel="cloudtrail", source_format="cloudtrail", fields=fields,
+                            raw=_clip(json.dumps(rec, default=str, sort_keys=True))))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # format detection + unified entry points
 # ---------------------------------------------------------------------------
 
-_PARSERS = {"syslog": parse_syslog, "cef": parse_cef, "evtx_json": parse_evtx_json}
+_PARSERS = {"syslog": parse_syslog, "cef": parse_cef, "evtx_json": parse_evtx_json,
+            "cloudtrail": parse_cloudtrail}
+
+
+def _looks_like_cloudtrail(text: str) -> bool:
+    """A POSITIVE CloudTrail marker, used to GATE the ``detect_format`` sniff (AS-17b): a top-level
+    ``Records`` LIST whose first item is a dict carrying ``eventSource`` or ``eventVersion`` — the
+    distinctive AWS CloudTrail delivery shape. Total; never raises. Deliberately STRICT so that every
+    JSON input that is NOT a CloudTrail delivery (incl. a non-CloudTrail ``{"Records":[...]}`` wrapper,
+    which the existing ``evtx_json`` path already accepts) sniffs byte-identically to before."""
+    stripped = text.strip()
+    if stripped[:1] != "{":
+        return False
+    try:
+        doc = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    recs = doc.get("Records")
+    if not isinstance(recs, list) or not recs:
+        return False
+    first = recs[0]
+    return isinstance(first, dict) and ("eventSource" in first or "eventVersion" in first)
 
 
 def detect_format(text: str) -> str:
-    """Best-effort format sniff. JSON-ish (starts with '{'/'[') -> 'evtx_json'; a 'CEF:' marker
-    on the first non-empty line -> 'cef'; otherwise 'syslog'. Total and deterministic."""
+    """Best-effort format sniff. An AWS CloudTrail delivery (a positive ``Records``+``eventSource``/
+    ``eventVersion`` marker, see :func:`_looks_like_cloudtrail`) -> 'cloudtrail'; other JSON-ish input
+    (starts with '{'/'[') -> 'evtx_json'; a 'CEF:' marker on the first non-empty line -> 'cef';
+    otherwise 'syslog'. Total and deterministic. The CloudTrail branch is GATED on the positive marker
+    so EVERY non-CloudTrail input keeps its v1 sniff byte-for-byte (the additive-path discipline)."""
     s = text.lstrip()
+    if s[:1] == "{" and _looks_like_cloudtrail(text):
+        return "cloudtrail"
     if s[:1] in ("[", "{"):
         return "evtx_json"
     for line in _iter_lines(text):

@@ -92,7 +92,7 @@ named so the briefing is not silent about half the system.
 | `common` | Shared internal plumbing (paths, canonical-JSON helpers, errors, umask) used across the engine. |
 | `confidence` | The confidence model that scores a finding before the oracle adjudicates the bytes. |
 | `console` | The local read-only Ops Console web UI (`crucible console`). |
-| `defender` | The defensive-analysis surface (`crucible defender`). |
+| `defender` | The defensive-analysis surface (`crucible defender`), incl. the Sigma runtime + the log normalizers (`--format auto|syslog|cef|evtx_json|cloudtrail`; the AWS CloudTrail format feeds the AS-17b telemetry source). |
 | `entitlement` | The licence / entitlement system (`crucible entitlement`). |
 | `eval` | The evaluation harness — corpus, baselines, determinism, soak (`crucible eval` / `crucible benchmark`). |
 | `evidence` | The signed evidence tree — inspect / export / verify (`crucible evidence`). |
