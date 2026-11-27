@@ -3031,6 +3031,31 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="accepted", critical=True)
         return {"slug": r.get("slug"), "seq": r.get("seq"), "idempotent": bool(r.get("idempotent"))}
 
+    def launch_activity(self, requester: str, requester_org_id: str, *, host: str = "", since: "Any" = "",
+                        ip: str = "") -> dict:
+        """Live Control — READ the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``. Behind ``customer_live_control_enabled()`` + ``admit_customer(run_engagement)``.
+        A pure READ: no step-up, no mutation, no money. The engagement slug is resolved SERVER-side from
+        (org, host) ONLY for a host the org has ownership-proven (tenant-safe); returns the fixed-field,
+        customer-safe activity rows + a ``since`` cursor (the seam itself drops anything off the allowlist, so no
+        secret/IP/target detail can cross). Raises ProvisionDenied on an unknown/unproven host."""
+        from .. import config
+        if not config.customer_live_control_enabled():
+            raise ProvisionDenied("customer live control is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("launch_activity", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not view launches for this org")
+        from . import live_control
+        raw = str(since or "").strip()
+        try:
+            s = int(raw) if raw not in ("", "-") else -1
+        except ValueError:
+            s = -1
+        try:
+            return live_control.activity(self.store, requester_org_id, host, since=s)
+        except ValueError as e:
+            raise ProvisionDenied(str(e)) from e
+
     def retest(self, requester: str, requester_org_id: str, finding_ref: str, *, engagement_slug: str = "",
                oracle_context_digest: str = "", ip: str = "", mfa_at: float = 0.0, now: "Optional[float]" = None,
                reverify=None, _drive_reproof: "Optional[Callable[[Any], None]]" = None,

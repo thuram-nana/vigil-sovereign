@@ -766,6 +766,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
+            return self._live_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
         # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
         if path == "/api/customer/posture" and _posture_on():
@@ -841,6 +843,28 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _live_activity(self):
+        """Live Control — GET the customer-safe LIVE ACTIVITY (phase transitions) of the session org's running
+        engagement on ``host``, incrementally via a ``since`` cursor. Like every customer read, the REQUESTER +
+        ORG come from the SERVER-side session, never the query (a query ``org_id`` is ignored); the query carries
+        ONLY the target ``host`` (the org's own proven target) and the ``since`` cursor. The provisioner resolves
+        the slug within the session org's own proven set and returns the fixed-field, customer-safe rows — no
+        secret, IP or target detail ever crosses the seam."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def _one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253),
+                                      "since": _one("since", 16), "ip": self._ip()}
+        c, r = self._provision("launch_activity", requester, payload)
         return self._json(r, c)
 
     def _proof_download(self):

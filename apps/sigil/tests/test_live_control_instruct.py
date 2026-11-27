@@ -158,6 +158,56 @@ def test_instruction_text_is_bounded_but_accepted(monkeypatch):
     assert 0 < len(one) <= 4000
 
 
+# --- live activity read (the "watch VIGIL work" feed) -------------------------------------------------
+def test_activity_reads_the_proven_host_engagement_with_a_cursor():
+    from vigil_core import live_activity as la
+    from vigil_core.seam_base import resolve_seam_base
+
+    from sigil.ui import live_control
+    s = _store()
+    _prove(s, "org_a", "api.example.com")
+    slug = _slug("org_a", "api.example.com")
+    base = resolve_seam_base()                                   # the _iso VIGIL_BASE_DIR, where the engine emits
+    la.emit(base, slug, "scan", "started", ts=1.0)
+    la.emit(base, slug, "scan", "completed", ts=2.0)
+    out = live_control.activity(s, "org_a", "api.example.com")
+    assert out["ok"] and out["slug"] == slug and out["cursor"] == 1
+    assert [(r["phase"], r["status"]) for r in out["rows"]] == [("scan", "started"), ("scan", "completed")]
+    # incremental delivery: polling with since=cursor returns nothing new
+    assert live_control.activity(s, "org_a", "api.example.com", since=out["cursor"])["rows"] == []
+
+
+def test_activity_denies_an_unproven_or_other_org_host():
+    from sigil.ui import live_control
+    s = _store()
+    _prove(s, "org_a", "api.example.com")
+    with pytest.raises(ValueError):
+        live_control.activity(s, "org_a", "other.example.com")   # not proven by org_a
+    with pytest.raises(ValueError):
+        live_control.activity(s, "org_b", "api.example.com")     # cross-tenant
+
+
+def test_provisioner_activity_reads_and_is_flag_and_admit_gated(monkeypatch):
+    from vigil_core import live_activity as la
+    from vigil_core.seam_base import resolve_seam_base
+
+    from sigil.ui.provision import ProvisionDenied
+    s = _store()
+    _prove(s, "org_a", "api.example.com")
+    p = _prov(s)
+    la.emit(resolve_seam_base(), _slug("org_a", "api.example.com"), "reasoning_pass", "completed", ts=1.0)
+    out = p.launch_activity("alice", "org_a", host="api.example.com")
+    assert out["slug"] == _slug("org_a", "api.example.com")
+    assert [r["label"] for r in out["rows"]] == ["Recording the assessment evidence"]
+    # a non-member cannot view another's activity
+    with pytest.raises(ProvisionDenied):
+        p.launch_activity("mallory", "org_a", host="api.example.com")
+    # flag OFF -> refused
+    monkeypatch.delenv("VIGIL_CUSTOMER_LIVE_CONTROL")
+    with pytest.raises(ProvisionDenied):
+        p.launch_activity("alice", "org_a", host="api.example.com")
+
+
 def test_fatal2_live_control_imports_no_framework_or_offense():
     # FATAL-2: the sovereign Live Control adapter must not pull framework.*/strix.* into the customer plane.
     # Its offense-local queue crossing is a LAZY (function-level) import of the import-clean instructions module,

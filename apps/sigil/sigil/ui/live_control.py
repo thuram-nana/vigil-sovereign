@@ -124,3 +124,21 @@ def submit_instruction(store: Any, org_id: str, host: str, text: str, *, idem_ke
     seq = int(res.get("seq", 0))
     _idem_record(slug, key, seq)
     return {"ok": True, "slug": slug, "seq": seq, "idempotent": False}
+
+
+def activity(store: Any, org_id: str, host: str, *, since: int = -1, limit: int = 200) -> dict:
+    """The customer-safe LIVE ACTIVITY of the (org, host) engagement — the phase transitions the engine
+    mirrored onto the shared seam ("Running authorized checks", "Recording the assessment evidence", ...).
+    Resolves the slug SERVER-side (ONLY for a host the org has ownership-proven — tenant-safe) and reads the
+    shared activity seam incrementally with a ``since`` cursor. Returns ``{ok, slug, rows, cursor}`` where each
+    row is ``{seq, ts, phase, label, status}`` (fixed-field, customer-safe — the seam drops anything else) and
+    ``cursor`` is the newest seq (poll again with ``since=cursor``). Raises ``ValueError`` on an unproven host.
+    A read-only projection of the signed-engagement lifecycle; it mints nothing and never promotes a LEAD."""
+    slug = _proven_slug(store, org_id, host)
+    if slug is None:
+        raise ValueError("no such engagement for this org")
+    from vigil_core.live_activity import read as _read
+    from vigil_core.seam_base import resolve_seam_base
+    rows = _read(resolve_seam_base(), slug, since=int(since), limit=int(limit))
+    cursor = rows[-1]["seq"] if rows else int(since)
+    return {"ok": True, "slug": slug, "rows": rows, "cursor": cursor}

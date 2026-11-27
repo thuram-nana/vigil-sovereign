@@ -1783,6 +1783,15 @@ class Handler(BaseHTTPRequestHandler):
             return p.launch_instruct(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
                                      text=str(body.get("text", "")), idem_key=str(body.get("idem_key", "")),
                                      ip=ip, mfa_at=body.get("mfa_at"))
+        # Live Control READ — the customer-safe live activity (phase transitions) of the session org's running
+        # engagement on `host`, incrementally via a `since` cursor. Absent (404) unless VIGIL_CUSTOMER_LIVE_CONTROL
+        # is on; org from the edge SESSION, host validated sovereign-side against the org's own proven set.
+        if action == "launch_activity":
+            from .. import config as _config
+            if not _config.customer_live_control_enabled():
+                return None
+            return p.launch_activity(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
+                                     since=str(body.get("since", "")), ip=ip)
         # C1a — the session org's launches for the customer app's Assessments screen. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_LAUNCH_UI is on, the same flag that gates the edge route; org from the edge SESSION.
         if action == "launch_list":
