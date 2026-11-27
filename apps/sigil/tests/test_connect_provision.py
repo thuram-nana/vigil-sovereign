@@ -178,15 +178,19 @@ def test_overview_says_what_this_deployment_can_do():
     ov = p.customer_connect_overview("u_f", "org_a")
     assert ov["org_id"] == "org_a" and ov["sites"] == [] and ov["cloud"] == [] and "repos" not in ov
     assert ov["available"] == {"site_check": False, "site_auto_recheck": False, "repos": False,
-                               "repo_connect": False, "cloud_connect": False}
+                               "repo_connect": False, "cloud_connect": False,
+                               "cloud_providers": {"aws": False, "gcp": False, "azure": False, "cloudflare": False}}
     p2, _, orgs2 = _prov(cloud_fetcher=_StubCloudFetcher(), target_fetcher=object())
     _seat(orgs2, "org_a", "u_f", "operator")
     av = p2.customer_connect_overview("u_f", "org_a")["available"]
     assert av["site_check"] is True and av["site_auto_recheck"] is True and av["cloud_connect"] is True
+    # the per-provider picker map: only AWS is wired here (principal + fetcher), the rest are not
+    assert av["cloud_providers"] == {"aws": True, "gcp": False, "azure": False, "cloudflare": False}
     p3, _, orgs3 = _prov(cloud_fetcher=_StubCloudFetcher(), target_fetcher=object(), limiters=False)
     _seat(orgs3, "org_a", "u_f", "operator")
     av = p3.customer_connect_overview("u_f", "org_a")["available"]
     assert av["site_check"] is True and av["site_auto_recheck"] is False and av["cloud_connect"] is False
+    assert av["cloud_providers"] == {"aws": False, "gcp": False, "azure": False, "cloudflare": False}
 
 
 def test_the_overview_has_no_cloud_leg_while_its_flag_is_off(monkeypatch):
