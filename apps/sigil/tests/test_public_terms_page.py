@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
 TERMS = ROOT / "terms" / "index.html"
 PRIVACY = ROOT / "privacy" / "index.html"
 COOKIES = ROOT / "cookies" / "index.html"
+SUPPORT = ROOT / "support" / "index.html"
 SECURITY_TXT = ROOT / ".well-known" / "security.txt"
 REPO_DOCS = "https://github.com/thuram-nana/vigil-sovereign/blob/main/"
 COMPANY_SITE = "https://sigilsovereign.com"
@@ -140,8 +141,8 @@ def test_terms_is_in_the_sitemap():
 # --- self-contained and every link resolves ------------------------------------------------------------------------
 
 def test_legal_pages_load_nothing_off_site_and_run_no_script():
-    # the terms, the privacy notice and the cookie notice: no script, no inline style, nothing loaded off-site
-    for page in (TERMS, PRIVACY, COOKIES):
+    # the terms, the privacy, cookie and support pages: no script, no inline style, nothing loaded off-site
+    for page in (TERMS, PRIVACY, COOKIES, SUPPORT):
         name = page.parent.name
         refs = _refs(page.read_text(encoding="utf-8"))
         assert refs.scripts == 0, f"/{name} runs a script"
@@ -384,3 +385,90 @@ def test_terms_page_has_no_owner_placeholders():
     left = owner_markers(TERMS.read_text(encoding="utf-8"))
     assert not left, ("the Terms of Service still carry owner placeholders — the owner must supply:\n  "
                       + "\n  ".join(left))
+
+
+def test_the_support_page_describes_the_hosted_service_and_the_owners_support_commitment():
+    # Owner, 2026-11-24 (decision 4): support goes to info@sigilsovereign.com with a 2-business-day reply TARGET (no
+    # SLA). The page must describe the live hosted service, never the old "self-hosted only / hosted in development"
+    # story, and must not contradict the privacy notice (data does go to the model provider in hosted mode).
+    text = re.sub(r"\s+", " ", SUPPORT.read_text(encoding="utf-8"))
+    assert "mailto:info@sigilsovereign.com" in text and "within <strong>2 business days</strong>" in text
+    assert "a target, not a promised response time" in text and "no service-level agreement" in text
+    for stale in ("in development", "VIGIL is self-hosted", "There's no telemetry", "Request access or a walkthrough"):
+        assert stale not in text, stale
+    assert "We answer deletion requests within 30 days" in text      # the approved retention schedule (decision 3)
+    assert "never ask for one" in text                              # no password / code / secret by email
+
+
+def test_support_page_states_the_corrected_customer_facing_facts():
+    """The three review objections on #1219 — each pinned to the shipped behaviour so a regression reds.
+
+    1. The password-reset email carries a 6-digit CODE and a single-use TOKEN and NO link (provision.py
+       _RECOVER_CODE_EMAIL / "Reset: token {token}") — the page must not claim a reset "link".
+    2. A credit-paused assessment is resumed from Assessments WITHIN 7 DAYS (credit_pause_ttl_s default 604800 s),
+       else it closes and is charged only for what it used (provision.py _CREDIT_PAUSE_BODY).
+    3. Closing an account: cancel any plan first so it does not renew, download reports, unused credits lapse
+       (Terms §14); purchased credits never expire WHILE YOUR ACCOUNT STAYS OPEN (Terms §6, not an absolute)."""
+    text = re.sub(r"\s+", " ", SUPPORT.read_text(encoding="utf-8"))
+    # 1 — reset: a code and a token, never a link
+    assert "6-digit code and a single-use" in text and "there is no link to click" in text
+    assert "single-use link" not in text, "the reset email has no link; the page must not claim one"
+    # 2 — paused assessment: resume within 7 days, else close and charge for what it used
+    assert "resume it from Assessments within 7 days" in text
+    assert "it closes and is charged only for what it used" in text
+    # 3 — credits never expire WHILE the account is open, and the close-account steps
+    assert "purchased credits never expire while your account stays open" in text
+    assert "never expire while your account stays open" in text and "never expire." not in text
+    assert "cancel any plan first so it does not renew" in text
+    assert "unused credits lapse" in text
+    # the owner-asked pointers: the public security policy and a 'Get started' link to the real customer sign-up
+    assert "https://github.com/thuram-nana/vigil-sovereign/blob/main/SECURITY.md" in text
+    assert text.count("https://app.vigilguard.net/") >= 1 and "Get started" in text
+
+
+def test_support_pack_range_and_plan_names_are_derived_from_the_owner_catalog():
+    """The /support "credits and plans" copy is DERIVED from the owner catalog (governor/catalog.py), never pinned
+    to a hand-typed number: the pack PRICE RANGE, the "$1 = 100 credits" no-bonus rate, and the plan NAMES are
+    exactly the OFFERED, NON-RETIRED catalog. Change a price, a plan name, or add a bonus pack in the catalog and
+    this reds until the page is brought back into agreement — the page can never drift from what is on sale."""
+    from sigil.governor import catalog
+    from sigil.governor.billing import EVENT_TOPUP
+    text = re.sub(r"\s+", " ", SUPPORT.read_text(encoding="utf-8"))
+    # offered (non-retired) top-ups = the credit packs on sale. plans() already drops retired entries.
+    packs = [p for p in catalog.plans() if p["kind"] == EVENT_TOPUP]
+    assert packs, "no credit pack is on sale in the owner catalog"
+    amounts = sorted(p["amount_minor"] for p in packs)
+    lo, hi = amounts[0], amounts[-1]
+    assert lo % 100 == 0 and hi % 100 == 0, (lo, hi)        # whole-dollar packs, the way the page states them
+    assert f"from ${lo // 100} to ${hi // 100}" in text, \
+        f"/support pack range must be 'from ${lo // 100} to ${hi // 100}' (the offered catalog)"
+    # every offered pack is exactly $1 = 100 credits (amount_minor cents == credits): the no-volume-bonus rate the
+    # page claims. The retired bonus pack is excluded by plans(); re-introducing one would red this.
+    assert all(p["credits"] == p["amount_minor"] for p in packs), \
+        "an offered pack is not $1 = 100 credits, but /support claims that rate"
+    assert "$1 = 100 credits" in text
+    # the offered CREDIT plan names (never a top-up, never an AEGIS monitoring plan), in catalog order, exactly as
+    # the page lists them — "(Starter, Pro or Team)".
+    names = [e.display_name.split(" (")[0] for e in catalog.credit_plan_entries(offered_only=True)]
+    assert len(names) >= 2, names
+    listed = ", ".join(names[:-1]) + " or " + names[-1]
+    assert f"({listed})" in text, f"/support must name the offered plans as ({listed})"
+    for name in names:
+        assert name in text, f"/support does not name the offered plan {name!r}"
+
+
+def test_support_withdrawal_mention_requires_the_consumer_withdrawal_clause_in_terms():
+    """A /support summary must never outlive the binding clause it points to: whenever the page mentions a right of
+    withdrawal, the Terms must still carry the exact "Right of withdrawal (consumers)" clause (Terms §8) that the
+    summary stands on. Drop the clause from /terms and this reds."""
+    support = re.sub(r"\s+", " ", SUPPORT.read_text(encoding="utf-8")).lower()
+    if "withdrawal" in support:
+        terms = TERMS.read_text(encoding="utf-8")
+        assert "Right of withdrawal (consumers)" in terms, \
+            "/support mentions withdrawal but /terms no longer carries the 'Right of withdrawal (consumers)' clause"
+
+
+def test_support_page_makes_no_overclaim():
+    """The same overclaim lint the legal pages pass, run on /support: no "guarantee", no "100% secure", no bare
+    "protected" / "secure" claim about the Service."""
+    assert overclaims(SUPPORT.read_text(encoding="utf-8")) == []
