@@ -90,7 +90,7 @@
  * CONNECT. When the edge has the Connect screen on (data-connect="1", VIGIL_CUSTOMER_CONNECT — the same switch that serves
  * api/customer/connect), the top bar has Connect (#/connect): one place to prove a website (the method pre-selected, Copy
  * buttons, automatic re-checking until it is verified, a half-finished proof resumed from the server), connect GitHub,
- * and — with data-cloud-connect="1" too — connect an AWS account read-only. Off, there is no tab, #/connect is the home
+ * and — with data-cloud-connect="1" too — connect a cloud account (AWS, GCP, Azure or Cloudflare) read-only. Off, there is no tab, #/connect is the home
  * screen exactly as any unknown route, and no call or timer is made.
  */
 (function () {

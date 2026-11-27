@@ -234,7 +234,7 @@
           clicks: ["Select Connect in the top bar. It lists your workspace's websites, code repositories and cloud accounts, each with its proof state.",
                    "Under Website, select Connect a website, or Continue on one you started earlier. VIGIL picks the proof that is usually quickest for that address; choose another if it suits you better, and use Copy to copy each value exactly.",
                    "Tick I confirm I am authorized to test this asset, then select Check now. VIGIL checks again every few seconds and the site turns Verified by itself, with no reload.",
-                   "Under Code repository, Connect GitHub opens the same install as the Code screen. Under Cloud account, when it is offered, Connect an AWS account shows the exact read-only role to create in that account."],
+                   "Under Code repository, Connect GitHub opens the same install as the Code screen. Under Cloud account, when it is offered, Connect a cloud account lets you choose your provider — AWS, GCP, Azure or Cloudflare — and shows the exact read-only access to create for the one you pick."],
           why: "Connecting proves you own something; it never starts a test by itself. A cloud account is connected read-only, and VIGIL never changes anything in it." },
       ],
     },
