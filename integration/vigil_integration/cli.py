@@ -4195,6 +4195,44 @@ def _cmd_launch_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_launch_run(args: argparse.Namespace) -> int:
+    """`vigil launch-run` — EXECUTE the customer launches that `launch-drain` ENQUEUED. Builds the one
+    authorized execution path (`make_engage_scan_runner`: a `SecurityJobQueue` + a `JobRunner` whose gate is
+    the customer-launch decision and whose worker drives CRUCIBLE's governed engage path) and drains it: each
+    job runs SOLELY via `JobRunner.run_one` (claim -> authorize -> run UNDER the per-slug run lease ->
+    complete), so exactly-once delivery, per-slug serialization and `requeue_stale` crash recovery are the
+    queue's OWN — two concurrent `launch-run` daemons cannot double-run a slug. This is the missing DRAIN half
+    of the launch pipeline: `launch-drain` only ENQUEUES; without a runner, queued customer launches never
+    execute. Imports no framework at module scope (deferred), so the two-env boundary holds."""
+    import json
+
+    from .jobs.launch_runner import make_engage_scan_runner
+
+    queue_root = _resolve_queue_root(args.queue_root, args.base_dir)
+    runner = make_engage_scan_runner(queue_root, base_dir=args.base_dir)
+
+    def _summary(outcomes: Any) -> dict:
+        by_state: "dict[str, int]" = {}
+        for o in outcomes:
+            by_state[o.state] = by_state.get(o.state, 0) + 1
+        return {"ran": len(outcomes), "by_state": by_state}
+
+    if args.watch:
+        import time
+        print(f"  running customer launches from the SecurityJob queue ({queue_root}); Ctrl-C to stop")
+        try:
+            while True:
+                s = _summary(runner.drain())
+                if s["ran"]:
+                    print(json.dumps(s))
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(_summary(runner.drain()), indent=2))
+    return 0
+
+
 def _cmd_redpen_schedule(args: argparse.Namespace) -> int:
     """`vigil redpen-schedule` — the Red-Pen SYSTEM-review ENQUEUE drain (R4; the integration half of the scheduler —
     the sovereign `sigil redpen-schedule tick` and the on-demand action reserve each review and drop an owner-signed
@@ -6196,6 +6234,20 @@ def build_parser() -> argparse.ArgumentParser:
     pxd.add_argument("--watch", action="store_true", help="keep polling as new leases are published; Ctrl-C to stop")
     pxd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between polls")
     pxd.set_defaults(func=_cmd_launch_drain)
+
+    pxr = sub.add_parser("launch-run",
+                         help="EXECUTE the customer launches that `launch-drain` enqueued: drive the SecurityJob "
+                              "queue through the authorized customer-launch runner (claim -> authorize -> run "
+                              "under the per-slug lease -> complete). Exactly-once + per-slug serialization + "
+                              "crash recovery are the queue's own; two runners cannot double-run a slug. This is "
+                              "the DRAIN half of the launch pipeline (`launch-drain` only enqueues).")
+    pxr.add_argument("--base-dir", required=True,
+                     help="the base the engine reads/writes engagement state under (= VIGIL_BASE_DIR)")
+    pxr.add_argument("--queue-root", default="",
+                     help="the SecurityJob queue root (shared with `launch-drain`). Default: <base-dir>/jobs.")
+    pxr.add_argument("--watch", action="store_true", help="keep running newly-enqueued launches; Ctrl-C to stop")
+    pxr.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pxr.set_defaults(func=_cmd_launch_run)
 
     prsd = sub.add_parser("redpen-schedule",
                           help="Red-Pen System reviews (default-OFF: VIGIL_REDPEN_ENABLED): poll the redpen-system "
