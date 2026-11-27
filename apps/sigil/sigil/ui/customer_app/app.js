@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -1920,6 +1920,148 @@
   function onLaunchVisibility() {
     if (document.hidden) stopLaunchPoll();
     else if (here() === "#/assessments" && launchUi.data) loadLaunches();
+  }
+
+  // ---- Live Control (#/live): watch VIGIL work + steer it mid-run (VIGIL_CUSTOMER_LIVE_CONTROL) -----------------
+  // Pure composition of ALREADY-PROVEN routes: the launches read (state + the signed lease for pause/resume), the
+  // advisory instruction POST, and the customer-safe live-activity feed (phase transitions, polled with a cursor).
+  var LIVE_ON = pageFlag("liveControl");
+  var LIVE_POLL_MS = 15000;
+  var LIVE_ICON = { started: "▸", completed: "✓", skipped: "–", failed: "✗", halted: "⏸" };
+  var live = { host: null, rows: [], cursor: -1, timer: null, gen: 0, sending: false, loading: false,
+               holder: null, feed: null };
+
+  function liveActive() {
+    return ((launchUi.data && launchUi.data.launches) || []).filter(function (l) {
+      return l && (l.state === "running" || l.state === "paused");
+    });
+  }
+  function liveRow(r) {
+    var t = (r && typeof r.ts === "number" && r.ts) ? new Date(r.ts * 1000).toLocaleTimeString() : "";
+    return h("li.live-step", {}, [
+      h("span.live-step-t", { text: t }),
+      h("span.live-step-i", { text: own(LIVE_ICON, r && r.status) || "•" }),
+      h("span.live-step-l", { text: (r && r.label) || (r && r.phase) || "" }),
+    ]);
+  }
+  function renderLiveFeed() {
+    if (!live.feed) return;
+    VUI.mount(live.feed, live.rows.length
+      ? h("ul.live-feed", {}, live.rows.map(liveRow))
+      : h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
+  }
+  async function loadLiveActivity() {
+    if (!live.host || live.loading) return;                   // one fetch at a time: no double-append on the cursor
+    live.loading = true;
+    var gen = live.gen, d = null;
+    try {
+      d = await VUI.getJSON(API + "/live/activity?host=" + encodeURIComponent(live.host) + "&since=" + live.cursor);
+    } catch (e) { d = null; }
+    live.loading = false;
+    if (gen !== live.gen || here() !== "#/live") return;      // navigated away / host switched: drop this answer
+    if (d && d.rows && d.rows.length) {
+      live.rows = live.rows.concat(d.rows);
+      if (typeof d.cursor === "number") live.cursor = d.cursor;
+      renderLiveFeed();
+    }
+    scheduleLivePoll();
+  }
+  function scheduleLivePoll() {
+    if (live.timer || here() !== "#/live" || document.hidden || !live.host) return;
+    live.timer = setTimeout(function () { live.timer = null; loadLiveActivity(); }, LIVE_POLL_MS);
+  }
+  function stopLivePoll() { if (live.timer) { clearTimeout(live.timer); live.timer = null; } live.gen++; }
+  async function sendInstruction(ta, note) {
+    var t = (ta && ta.value ? ta.value : "").trim();
+    if (live.sending || !live.host || !t) return;
+    live.sending = true;
+    var idem = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+    try {
+      await VUI.postJSON(API + "/launch/instruct", { host: live.host, text: t, idem_key: idem });
+      ta.value = "";
+      VUI.mount(note, h("span.cust-muted", { text: "✓ Sent — VIGIL will weigh this in its next step." }));
+    } catch (e) {
+      VUI.mount(note, h("span.cust-muted",
+        { text: "⚠ " + ((e && e.data && e.data.error) || "Could not send the instruction.") }));
+    }
+    live.sending = false;
+  }
+  async function liveLaunchAction(action, launch) {
+    var path = action === "pause" ? "/launch/pause" : "/launch/resume";
+    try { await VUI.postJSON(API + path, { lease: launch.lease }); } catch (e) { /* new state shows on reload */ }
+    var d = null;
+    try { d = await VUI.getJSON(API + "/launches"); } catch (e) { d = null; }
+    if (here() !== "#/live") return;
+    if (d) { launchUi.data = d; }
+    VUI.mount(live.holder, liveControlBody());
+    renderLiveFeed();
+  }
+  function liveControlBody() {
+    var running = liveActive();
+    if (!running.length) {
+      live.host = null;
+      return h("div.card.cust-soon", { text: "No assessment is running right now. Start one from Assessments, then "
+        + "come back here to watch VIGIL work and steer it." });
+    }
+    if (!live.host || !running.some(function (l) { return l.host === live.host; })) {
+      live.host = running[0].host; live.rows = []; live.cursor = -1;
+    }
+    var cur = running.filter(function (l) { return l.host === live.host; })[0] || running[0];
+    live.feed = h("div#live-feed", {}, h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
+    var ta = h("textarea.live-instruct", { rows: "2", maxlength: "4000",
+      placeholder: "Tell VIGIL what to focus on — e.g. \"concentrate on authentication\"" });
+    var note = h("div.live-note", {});
+    var controls = [];
+    var acts = (cur && cur.actions) || [];
+    if (acts.indexOf("pause") >= 0) {
+      controls.push(h("button.btn", { onClick: function () { liveLaunchAction("pause", cur); } }, "Pause"));
+    }
+    if (acts.indexOf("resume") >= 0) {
+      controls.push(h("button.btn", { onClick: function () { liveLaunchAction("resume", cur); } }, "Resume"));
+    }
+    return h("div.live", {}, [
+      h("div.live-head", {}, [
+        h("h2", { text: "Live Control" }),
+        h("p.cust-muted", { text: "VIGIL is assessing " + (cur.host || "") + " — "
+          + (own(STATE_LABELS, cur.state) || cur.state) + "." }),
+      ]),
+      controls.length ? h("div.live-controls", {}, controls) : null,
+      h("div.card", {}, [
+        h("h3", { text: "Live activity" }),
+        h("p.cust-muted", { text: "What VIGIL is doing now, step by step — no secrets or target detail." }),
+        live.feed]),
+      h("div.card", {}, [
+        h("h3", { text: "Steer the assessment" }),
+        h("p.cust-muted", { text: "An advisory nudge: VIGIL weighs it, then still passes every authorization and "
+          + "evidence check — it never expands scope." }),
+        ta,
+        h("div.live-send", {}, [h("button.btn",
+          { onClick: function () { sendInstruction(ta, note); } }, "Send to VIGIL")]),
+        note]),
+    ]);
+  }
+  function viewLiveControl() {
+    live.holder = h("div#live-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d = null;
+      try { d = await VUI.getJSON(API + "/launches"); }
+      catch (e) {
+        if (here() !== "#/live") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        d = null;
+      }
+      if (here() !== "#/live") return;
+      if (d) { launchUi.data = d; }
+      VUI.mount(live.holder, liveControlBody());
+      renderLiveFeed();
+      loadLiveActivity();
+    })();
+    return shell(h("div", {}, [live.holder]), "#/live");
+  }
+  function onLiveRoute() { if (here() !== "#/live") stopLivePoll(); }
+  function onLiveVisibility() {
+    if (document.hidden) stopLivePoll();
+    else if (here() === "#/live" && live.host) loadLiveActivity();
   }
 
   // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
@@ -4288,6 +4430,7 @@
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
         .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
+        .concat(LIVE_ON ? [navLink("Live Control", "#/live")] : [])
         .concat(pageFlag("posture") ? [navLink("Fix first", "#/fix-first")] : [])      // PR-B: the Fix-first screen
         .concat(ATTACK_PATH_ON ? [navLink("Attack path", "#/attack-path")] : [])
         .concat(CODE_ON ? [navLink("Code", "#/code")] : [])
@@ -4611,6 +4754,8 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
+    "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
     "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is
@@ -4682,6 +4827,11 @@
   }
   // monitoring on: the events stop refreshing while the page is hidden, and refresh at once when it is back in view
   if (MONITORING_ON) { document.addEventListener("visibilitychange", onMonVisibility); }
+  // Live Control on: the activity feed stops polling off-screen/off-route and resumes when the page is back in view
+  if (LIVE_ON) {
+    window.addEventListener("hashchange", onLiveRoute);
+    document.addEventListener("visibilitychange", onLiveVisibility);
+  }
   state.sub(render);
 
   // ---- boot ---------------------------------------------------------------------------------------

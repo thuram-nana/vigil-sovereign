@@ -230,6 +230,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
+    # Live Control (VIGIL_CUSTOMER_LIVE_CONTROL) — the #/live screen: watch the live engagement (phase activity)
+    # and steer it with an advisory instruction. The SAME flag that serves /api/customer/launch/instruct +
+    # /api/customer/live/activity, so the screen and its routes are never out of step; off, the tab is absent and
+    # #/live is the home screen (byte-identical). A non-secret on/off value counting in the build id.
+    live_control = _config.customer_live_control_enabled()
     # Legal/governance S1 — the settings shell (the #/settings hub + the General preferences tab). Like every switch
     # here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
@@ -304,6 +309,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_POSTURE__": "1" if posture else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
+                                     "__VIGIL_LIVE_CONTROL__": "1" if live_control else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
