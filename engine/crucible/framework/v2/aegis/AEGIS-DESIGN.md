@@ -146,3 +146,28 @@ bounded, curated allowlist of free-text request headers (`user-agent`, `referer`
 …), so the request-side parse-proof oracles (`sqli_attempt`/`command_injection_attempt`) cover
 header/cookie injection. Structured/hop-by-hop/credential headers are excluded; the near-zero-FP
 oracles keep a normal `User-Agent` / `python-requests/2.25.1` / XFF IP list from tripping.
+
+## 8. Telemetry sources — AWS CloudTrail ingest (AS-17b, as built)
+
+A **log-ingest / provider reader** (NOT a detection-rule source): the engine-leg that turns a tenant's
+AWS CloudTrail delivery into INERT, metadata-only LEAD findings on the existing AS-9b ingest path —
+observe/LEAD only, never a block (`enforce_capable=False`).
+
+- **Normalize (additive, no flag).** `defender/logsource.py::parse_cloudtrail` flattens the CloudTrail
+  `{"Records":[…]}` envelope (also a single-record object / NDJSON) into `cloudtrail` `LogEvent`s under
+  AWS' own field names (incl. dotted `userIdentity.*`), reusing the `_coerce`/`_clip`/`_iter_lines`
+  bounds verbatim. `detect_format` gained a GATED `cloudtrail` branch that fires ONLY on a positive
+  `Records`+`eventSource`/`eventVersion` marker, so every pre-existing JSON input keeps its byte-identical
+  sniff. The normalized events feed the UNCHANGED AS-17a Sigma runtime; `sigma.default_field_map()`
+  gained OPT-IN CloudTrail alias rows (a direct field hit always wins — additive only).
+- **Read (engine-leg, DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`).** `aegis/cloudtrail_source.py::CloudTrailSource`
+  composes the shipped machinery: the AS-9a `ConnectorSecretBroker` authenticates the outbound pull (the
+  "CloudTrail/provider reader" consumer row), `parse_cloudtrail` normalizes, AS-17a `evaluate_events`
+  optionally raises a matching record to a stronger LEAD, each `INGEST_FINDING_SCHEMA` finding is pushed
+  through the AS-9b `IngestReceiver.ingest` (seal + v1 spool), and the ingested record is made
+  tamper-evident by AS-9c `vigil_core.aegis_anchors` anchor-1 (producer HMAC keyed by the AS-9a per-(org,
+  connector) sealed secret; anchor-2 is the owner spine). OFF ⇒ INERT: pulls nothing, reads no credential,
+  pushes nothing. Credential materialisation stays INDEPENDENTLY gated by `VIGIL_AEGIS_CONNECTOR_BROKER`.
+  No new serve path / CLI verb and no new `IntelSourceKind` (reuses the LEAD-tier vocabulary), so no
+  Gate-5 census row and no AS-28 closure entrypoint change — the reader pushes through the existing
+  `framework.v2.aegis.receiver` entrypoint and carries zero denied offense/SDK imports.

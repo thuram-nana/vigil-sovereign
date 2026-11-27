@@ -14,7 +14,7 @@ Subcommands:
     rules    [--ruleset path]
                  List the active detection rules.
 
-    sigma    --sigma-dir DIR [--log FILE] [--format auto|syslog|cef|evtx_json]
+    sigma    --sigma-dir DIR [--log FILE] [--format auto|syslog|cef|evtx_json|cloudtrail]
              [--field-maps] [--match-logsource]
                  Load operator Sigma rules and SHOW each rule's author,
                  licence and deployability (AS-17a); optionally evaluate
@@ -140,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("sigma", help="show Sigma rule provenance/deployability; optionally evaluate a log")
     p.add_argument("--sigma-dir", required=True, help="directory of operator Sigma rules (*.yml/*.yaml)")
     p.add_argument("--log", default="", help="optional offline log/alert file to evaluate against")
-    p.add_argument("--format", default="auto", choices=["auto", "syslog", "cef", "evtx_json"])
+    p.add_argument("--format", default="auto", choices=["auto", "syslog", "cef", "evtx_json", "cloudtrail"])
     p.add_argument("--field-maps", action="store_true", help="apply the built-in field-name alias map")
     p.add_argument("--match-logsource", action="store_true", help="narrow each rule to its logsource channels")
     p.set_defaults(fn=_sigma)
