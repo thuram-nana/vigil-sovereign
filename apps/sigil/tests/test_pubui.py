@@ -12,6 +12,7 @@ Load-bearing invariants:
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -127,16 +128,57 @@ def test_public_bind_is_fail_closed():
             PublicServer((bad, 0), PublicHandler)
 
 
+# The certification word-family (certify/certified/certification/...); "certificate" (the cryptographic term) is
+# deliberately NOT matched. The guard's documented intent (tools/reviewer-package/assemble.py) is to forbid wording
+# that ASSERTS a certification, not an honest disclaimer that DENIES one. The Security & Trust Center must state,
+# verbatim from the code-anchored register, that VIGIL holds NO certification (e.g. "holds no ISO/IEC 27001
+# certification", "is not GDPR certified", "not a managed-cloud certification"). Those denials are the opposite of
+# an overclaim, so an affirmative assertion is the offender, never a negated disclaimer.
+_CERT_FAMILY_RE = re.compile(r"\bcertif(?:y|ies|ied|ying|ication|ications|iable|iably)\b", re.IGNORECASE)
+_CERT_NEGATOR_RE = re.compile(r"\b(no|not|never|without|neither|nor)\b", re.IGNORECASE)
+# A clause boundary between a negator and a certification word means the negator governs something else, so the
+# certification word is NOT negated (e.g. "no telemetry; the product is certified").
+_CERT_CLAUSE_BREAK_RE = re.compile(r"[.;:,]|\b(and|but|or|however|yet|so)\b", re.IGNORECASE)
+
+
+def certification_assertions(text: str) -> list[str]:
+    """Certification word-family tokens in ``text`` that ASSERT a certification (empty == none). A token is an
+    honest disclaimer, not an assertion, when a negator (no/not/never/without/neither/nor) governs it: it appears
+    in the window just before the token with no clause boundary between the two. Every other certification token
+    (un-negated, or whose nearest negator is cut off by a clause boundary) is an assertion and is returned."""
+    hits: list[str] = []
+    for m in _CERT_FAMILY_RE.finditer(text):
+        window = text[max(0, m.start() - 48):m.start()]
+        negators = list(_CERT_NEGATOR_RE.finditer(window))
+        if not negators:
+            hits.append(m.group(0))
+            continue
+        between = window[negators[-1].end():]
+        if _CERT_CLAUSE_BREAK_RE.search(between):
+            hits.append(m.group(0))
+    return hits
+
+
+def test_certification_assertion_detector_catches_claims_but_allows_denials():
+    # negative controls: an affirmative claim is caught; the register's exact denials are allowed.
+    assert certification_assertions("VIGIL is ISO 27001 certified.") == ["certified"]
+    assert certification_assertions("We hold a SOC 2 certification.") == ["certification"]
+    assert certification_assertions("no telemetry; our product is certified") == ["certified"]  # cut off by a boundary
+    assert certification_assertions("VIGIL holds no ISO/IEC 27001 certification and operates no certified ISMS.") == []
+    assert certification_assertions("VIGIL is not GDPR certified, as GDPR offers no such certification") == []
+    assert certification_assertions("it is not a managed-cloud certification or an in-product network control") == []
+    assert certification_assertions("Every finding ships as a signed certificate.") == []        # "certificate" is fine
+
+
 def test_public_site_honors_the_honesty_constraints():
-    # Durable guard for the three honesty rules the build spec (and the reviewer-package gate
+    # Durable guard for the honesty rules the build spec (and the reviewer-package gate
     # tools/reviewer-package/assemble.py::assert_no_certification_wording) require on public copy:
     #   * "source-available", NEVER "open source";
-    #   * no certification word-family claim (certify/certified/certification/...) — "certificate" is allowed;
+    #   * no wording that ASSERTS a certification (certify/certified/certification/...); "certificate" is allowed,
+    #     and an honest denial of certification is allowed (it is the opposite of an overclaim);
     #   * no fabricated "start for free" hosted-signup CTA (SaaS is not shipped).
     import pathlib
-    import re
     root = pathlib.Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
-    cert_re = re.compile(r"\bcertif(?:y|ies|ied|ying|ication|ications|iable|iably)\b", re.IGNORECASE)
     opensrc_re = re.compile(r"open[\s-]?source", re.IGNORECASE)
     freecta_re = re.compile(r"start\s+for\s+free", re.IGNORECASE)
     offenders = []
@@ -147,8 +189,10 @@ def test_public_site_honors_the_honesty_constraints():
         rel = f.relative_to(root)
         if opensrc_re.search(text):
             offenders.append(f"{rel}: 'open source' (say 'source-available')")
-        if cert_re.search(text):
-            offenders.append(f"{rel}: certification word-family (negated or not — avoid it)")
+        asserted = certification_assertions(text)
+        if asserted:
+            offenders.append(f"{rel}: wording asserts certification {sorted(set(asserted))} (only an honest denial "
+                             "is allowed)")
         if freecta_re.search(text):
             offenders.append(f"{rel}: 'start for free' (no hosted signup is shipped)")
     assert not offenders, "public-site honesty violations:\n  " + "\n  ".join(offenders)

@@ -1,0 +1,174 @@
+{
+  "title": "VIGIL Security and Trust Center internal evidence register",
+  "note": "Internal governance. Not linked from the public Trust Center. Each row maps a public claim to its implementation evidence, supporting docs, verification status, responsible owner and last review. Source: code-anchored verified-claims register.",
+  "columns": [
+    "public_claim",
+    "implementation_evidence",
+    "supporting_docs",
+    "verification_status",
+    "responsible_owner",
+    "last_reviewed"
+  ],
+  "rows": [
+    {
+      "public_claim": "Ed25519 digital signatures protect owner authority, spine heads, evidence certificates, grants, and quorum acks; runtime verifies only.",
+      "implementation_evidence": "packages/core/vigil_core/vigil_core/crypto.py:143-156, :92-100, :111-134, :75-89; chain.py:68-75; apps/sigil/sigil/cli.py:346,631-717",
+      "supporting_docs": "SECURITY.md; engine/crucible/framework/v2/evidence/certify.py",
+      "verification_status": "Verified",
+      "responsible_owner": "Security Engineering (Cryptography)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Append-only SHA-256 hash-chained event spine is tamper-evident with signed-head anti-rollback.",
+      "implementation_evidence": "packages/core/vigil_core/vigil_core/chain.py:15-16,41-52,78-95; apps/sigil/sigil/spine/store.py:1-8,460-487,635-656",
+      "supporting_docs": "docs/claims/registry.json; engine/crucible/framework/v2/evidence/models.py:10-13",
+      "verification_status": "Verified",
+      "responsible_owner": "Security Engineering (Evidence and Spine)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Merkle inclusion proofs cover pruned/cold-archived records; live certificates are hash-linked and signed, not Merkle.",
+      "implementation_evidence": "apps/sigil/sigil/spine/merkle.py:29-47; apps/sigil/sigil/spine/prune.py:1518,1528",
+      "supporting_docs": "apps/sigil/sigil/spine/merkle.py:1-8; engine/crucible/framework/v2/evidence/models.py:10-13",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Security Engineering (Evidence and Spine)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Cumulative-role RBAC with explicit default-deny and unmapped-route-denies governs every privileged action.",
+      "implementation_evidence": "packages/core/vigil_core/vigil_core/rbac.py:33-116,149-271,312-318; apps/sigil/sigil/governor/orgs.py:710-733",
+      "supporting_docs": "rbac.py:30-33 (owner not grantable)",
+      "verification_status": "Verified",
+      "responsible_owner": "Platform Security (Access Control)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Strict per-tenant isolation via owner-signed per-org membership (authorization-layer, not infrastructure).",
+      "implementation_evidence": "apps/sigil/sigil/governor/orgs.py:735-752; engine/crucible/framework/v2/aegis/connector_secrets.py:426-428",
+      "supporting_docs": "packages/core/vigil_core/vigil_core/hopauth.py:1-27; apps/sigil/sigil/ui/sso_edge.py:8-34",
+      "verification_status": "Verified",
+      "responsible_owner": "Platform Security (Access Control)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Threshold/quorum via m-of-n multi-signature verification plus Shamir secret sharing for the backup key; witness-quorum veto is default-off.",
+      "implementation_evidence": "packages/core/vigil_core/vigil_core/crypto.py:111-134; vigil_core/escrow.py:1-45; engine/crucible/framework/v2/authority/witness_quorum_gate.py:1-40,192-224",
+      "supporting_docs": "SECURITY.md",
+      "verification_status": "Verified",
+      "responsible_owner": "Security Engineering (Cryptography)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Multiple authenticators (scrypt, TOTP, Ed25519 pubkey, bearer tokens) plus RBAC; SSO/SAML/OIDC/SCIM available when the customer edge is enabled.",
+      "implementation_evidence": "apps/sigil/sigil/cli.py:691,711-717,669,581; apps/sigil/sigil/ui/sso_edge.py:1-41",
+      "supporting_docs": "packages/core/vigil_core/vigil_core/rbac.py; hopauth.py",
+      "verification_status": "Verified",
+      "responsible_owner": "Platform Security (Identity)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Secrets sealed at rest (ChaCha20-Poly1305 AEAD under TPM/KMS KEK), value-free single-use broker with zeroized material, header-injection and SSRF guards; broker plaintext plane default-off.",
+      "implementation_evidence": "vigil_core/sealing.py:58-97; vigil_core/kek.py and kek_backends.py:118-160; engine/crucible/framework/v2/aegis/connector_secrets.py:274-318,320-383,480-500,538-540; aegis/broker.py:326",
+      "supporting_docs": ".gitleaks.toml; connector_secrets.py:92-105,492-493",
+      "verification_status": "Verified",
+      "responsible_owner": "Security Engineering (Secrets and Broker)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Encryption in transit via shipped reverse-proxy templates (TLS1.2/1.3 + HSTS) and mTLS on connector ingest; TLS terminated by the operator-run proxy, not the app.",
+      "implementation_evidence": "apps/sigil/deploy/reverse-proxy/vigil.nginx.conf:30-38; vigil.Caddyfile:51-52; engine/crucible/framework/v2/aegis/connector_secrets.py:658-669",
+      "supporting_docs": "apps/sigil/deploy/ templates",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Platform and SRE",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Independently verifiable Ed25519-signed evidence certificates plus content-hash-pinned standalone offline verifiers; audit writer fails closed.",
+      "implementation_evidence": "engine/crucible/framework/v2/evidence/certify.py:4-20; engine/crucible/framework/v2/evidence/audit_offline_verifier.py",
+      "supporting_docs": "SECURITY.md:128-156; docs/claims/registry.json:397",
+      "verification_status": "Verified",
+      "responsible_owner": "Security Engineering (Evidence and Spine)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Fail-closed, default-deny, prove-don't-guess architecture with a machine-checked claims registry gating documentation honesty in CI; many controls are default-off/opt-in.",
+      "implementation_evidence": "docs/claims/registry.json; docs/tests/test_claims_registry.py; .pre-commit-config.yaml:97-102",
+      "supporting_docs": "SECURITY.md:168-169",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Security and Compliance",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "CI SAST/dependency/supply-chain scanning on VIGIL's own code (Semgrep, Bandit, Trivy, Gitleaks) plus a documented coordinated-disclosure process.",
+      "implementation_evidence": ".semgrep/, bandit.yaml, .trivyignore, .gitleaks.toml; .github/workflows/security-scan.yml, supply-chain.yml, vigil-sast.yml",
+      "supporting_docs": "SECURITY.md:20-77",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Application Security",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "AEGIS defensive monitoring (Sigma detection, graduated response, OOB canary correlation, daemon health), operator-enabled and default-off.",
+      "implementation_evidence": "engine/crucible/framework/v2/aegis/response_policy.py, oob_correlator.py; packages/core/vigil_core/vigil_core/rbac.py:169",
+      "supporting_docs": "connector_secrets.py:92-105 (default-off flags)",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Security Operations (AEGIS)",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Code-enforced containment primitives (restricted mode, emergency stop, panic, per-engagement kill-switch) tier-gated and ledger-recorded, plus an operator IR playbook; no staffed on-call or RTO/MTTR SLA.",
+      "implementation_evidence": "packages/core/vigil_core/vigil_core/rbac.py:169-176,236; docs/claims/registry.json:352",
+      "supporting_docs": "docs/legal/INCIDENT-RESPONSE.md; engine/crucible/framework/playbooks/26-incident-response-pivot.md",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Security Operations",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Infrastructure hardening: TPM-sealed key custody, atomic 0600/0700 writes with fsync, cross-process flock, hardened reverse-proxy and systemd artifacts, CI image scanning; template/operator-driven.",
+      "implementation_evidence": "vigil_core/kek.py:171-180; apps/sigil/sigil/spine/store.py:635-656; apps/sigil/deploy/reverse-proxy/ and systemd/; .github/workflows/strix-sandbox-image-scan.yml",
+      "supporting_docs": "branch-protection-verify workflow",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Platform and SRE",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Encrypted off-box backups with passphrase as sole key (never stored), optional m-of-n Shamir escrow, and Merkle-committed owner-signed cold-archive snapshots; cadence is an operator decision.",
+      "implementation_evidence": "vigil_core/escrow.py:1-45; apps/sigil/sigil/backup.py; apps/sigil/sigil/spine/prune.py and merkle.py",
+      "supporting_docs": ".github/workflows/scheduled-chaos-failover.yml",
+      "verification_status": "Verified",
+      "responsible_owner": "Platform and SRE",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Customer findings deterministically mapped to ISO/IEC 27001:2022 Annex A and nine other frameworks; a mapping of your findings, never a claim about VIGIL itself.",
+      "implementation_evidence": "engine/crucible/framework/v2/report/standards.py:64,19-31,95-101,198-529",
+      "supporting_docs": "apps/sigil/sigil/ui/public_site/trust/index.html:74-77; README.md:701-705",
+      "verification_status": "Verified",
+      "responsible_owner": "Product (Reporting) and Compliance",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Documented hosted-service privacy practices: published notice (controller SIGIL SARL), named subprocessors, strictly-necessary cookies, retention and post-closure handling, data-subject rights, DPA on request; governing law Cameroon/OHADA.",
+      "implementation_evidence": "apps/sigil/sigil/ui/privacy_center_store.py:1-18,103-117",
+      "supporting_docs": "apps/sigil/sigil/ui/public_site/privacy/index.html:52-108; apps/sigil/tests/test_customer_privacy_center.py",
+      "verification_status": "Partially Implemented",
+      "responsible_owner": "Privacy and Legal",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Machine-enforced right-to-erasure by crypto-shred of the per-engagement key while the spine still verifies; registered and test-backed, with honest residual scope.",
+      "implementation_evidence": "engine/crucible/framework/v2/common/crypto_shred.py (EvidenceKeyring.shred); test_evidence_erasure.py; docs/claims/registry.json claim W16-8",
+      "supporting_docs": "PRIVACY.md:31-101; knowledge/decisions/0008-crypto-shred-erasure-for-append-only-evidence.md",
+      "verification_status": "Verified",
+      "responsible_owner": "Privacy and Security Engineering",
+      "last_reviewed": "2026-11-27"
+    },
+    {
+      "public_claim": "Published commitment to answer data deletion and rights requests within 30 days, deleting what can be deleted and disclosing what is retained; a practice, not an audited SLA.",
+      "implementation_evidence": "apps/sigil/sigil/ui/public_site/support/index.html:73-76",
+      "supporting_docs": "apps/sigil/sigil/ui/public_site/privacy/index.html:89-102",
+      "verification_status": "Verified",
+      "responsible_owner": "Privacy and Support",
+      "last_reviewed": "2026-11-27"
+    }
+  ]
+}

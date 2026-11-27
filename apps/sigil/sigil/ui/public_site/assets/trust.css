@@ -1,0 +1,124 @@
+/* ==========================================================================
+   VIGIL Security & Trust Center page layer, built ONLY on tokens.css.
+   Its own stylesheet (not site.css) so the Trust Center never collides with
+   the homepage work. CSP-clean: no @import of remote, no webfont, no inline.
+   Theme-aware through the tokens; light + dark both covered by the variables.
+   ========================================================================== */
+
+/* -- hero ------------------------------------------------------------------- */
+.trust-hero { padding: var(--sp-8) 0 var(--sp-6); }
+.trust-hero h1 { max-width: 20ch; }
+.trust-sub { font-size: var(--fs-lg); font-weight: 600; letter-spacing: .01em; color: var(--text-0);
+  margin: 0 0 var(--sp-4); }
+.trust-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin-top: var(--sp-5); }
+.trust-legend__note { font-size: var(--fs-xs); color: var(--text-2); }
+
+.trust-h2 { font-size: var(--fs-2xl); letter-spacing: -.02em; margin: 0 0 var(--sp-3); }
+.trust-intro { font-size: var(--fs-sm); max-width: 66ch; margin: 0 0 var(--sp-6); }
+.trust-note { font-size: var(--fs-sm); max-width: 70ch; margin: var(--sp-5) 0 0; }
+
+/* -- status chips (Verified / Partially Implemented); no attestation badge ----- */
+.chip--verified { color: var(--st-confirmed);
+  border-color: color-mix(in srgb, var(--st-confirmed) 45%, var(--border));
+  background: color-mix(in srgb, var(--st-confirmed) 12%, var(--bg-2)); }
+.chip--partial { color: var(--sev-medium);
+  border-color: color-mix(in srgb, var(--sev-medium) 45%, var(--border));
+  background: color-mix(in srgb, var(--sev-medium) 12%, var(--bg-2)); }
+
+/* -- a security domain block ------------------------------------------------ */
+.sec { margin: 0 0 var(--sp-7); }
+.sec__head { display: flex; align-items: center; gap: var(--sp-3); margin: 0 0 var(--sp-4); }
+.sec__icon { width: 30px; height: 30px; flex: 0 0 auto; color: var(--brand);
+  padding: 7px; border: 1px solid var(--border-strong); border-radius: var(--r-2); background: var(--bg-2);
+  box-sizing: content-box; }
+.sec__head h2, .sec__head h3 { margin: 0; font-size: var(--fs-xl); letter-spacing: -.01em; }
+
+.claims { display: grid; gap: var(--sp-4); grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 720px) { .claims { grid-template-columns: 1fr; } }
+
+.claim { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-3);
+  padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-3); }
+.claim__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); }
+.claim__owner { font-size: var(--fs-xs); color: var(--text-2); text-align: right; }
+.claim__text { margin: 0; color: var(--text-1); font-size: var(--fs-sm); line-height: var(--lh); }
+
+/* -- compliance & framework alignment -------------------------------------- */
+.trust-band-sec { background: var(--bg-1); border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border); }
+.frames { display: grid; gap: var(--sp-4); grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 720px) { .frames { grid-template-columns: 1fr; } }
+.frame { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-3);
+  padding: var(--sp-5); }
+.frame__name { margin: 0 0 var(--sp-2); font-size: var(--fs-lg); letter-spacing: -.01em; color: var(--text-0); }
+.frame__stmt { margin: 0; color: var(--text-1); font-size: var(--fs-sm); line-height: var(--lh); }
+
+/* -- privacy links ---------------------------------------------------------- */
+.privacy-links { list-style: none; margin: var(--sp-5) 0 0; padding: 0; display: flex; flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5); }
+.privacy-links a { color: var(--text-0); font-weight: 600; font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border-strong); padding-bottom: 1px; }
+.privacy-links a:hover { border-color: var(--text-1); }
+
+/* -- resources / document cards -------------------------------------------- */
+.res__h { font-size: var(--fs-micro); letter-spacing: var(--tracking-label); text-transform: uppercase;
+  color: var(--text-2); margin: var(--sp-6) 0 var(--sp-3); }
+.docs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-3);
+  grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 720px) { .docs { grid-template-columns: 1fr; } }
+.doc { display: flex; align-items: center; gap: var(--sp-4); background: var(--bg-1);
+  border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-4) var(--sp-5);
+  transition: border-color .15s, transform .15s; }
+.doc--open:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+.doc__icon { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: var(--r-2); border: 1px solid var(--border-strong); background: var(--bg-2); }
+.doc__svg { width: 18px; height: 18px; color: var(--brand); }
+.doc--locked .doc__svg { color: var(--owner); }
+.doc__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.doc__name { font-weight: 650; font-size: var(--fs-sm); color: var(--text-0); }
+.doc__desc { font-size: var(--fs-xs); color: var(--text-2); }
+.doc__action { flex: 0 0 auto; font-size: var(--fs-xs); font-weight: 600; color: var(--text-1);
+  white-space: nowrap; }
+.doc--open .doc__action { color: var(--text-0); }
+.doc__action--req { color: var(--owner); border: 1px solid var(--owner-line); background: var(--owner-dim);
+  border-radius: var(--r-pill); padding: 5px 12px; }
+.doc__action--req:hover { color: var(--owner); border-color: var(--owner); }
+
+/* -- request-access card + form -------------------------------------------- */
+.reqcard { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-7); align-items: start;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-4); padding: var(--sp-7); }
+@media (max-width: 860px) { .reqcard { grid-template-columns: 1fr; gap: var(--sp-5); padding: var(--sp-5); } }
+.reqcard__intro .muted { font-size: var(--fs-sm); max-width: 44ch; }
+.reqcard__noscript { font-size: var(--fs-sm); color: var(--text-1); background: var(--bg-2);
+  border: 1px solid var(--border-strong); border-radius: var(--r-2); padding: var(--sp-4); margin: var(--sp-4) 0 0; }
+.reqcard__contact { font-size: var(--fs-xs); color: var(--text-2); margin: var(--sp-4) 0 0; }
+.reqcard__contact a, .reqcard__noscript a { color: var(--text-0); border-bottom: 1px solid var(--border-strong); }
+
+.reqform { display: grid; gap: var(--sp-4); }
+.field { display: grid; gap: 6px; }
+.field label { font-size: var(--fs-xs); font-weight: 600; color: var(--text-1);
+  text-transform: uppercase; letter-spacing: .04em; }
+.field input, .field textarea { font: inherit; font-size: var(--fs-sm); color: var(--text-0);
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--r-2);
+  padding: 10px 12px; width: 100%; }
+.field textarea { resize: vertical; min-height: 92px; }
+.field input:focus-visible, .field textarea:focus-visible { outline: none; box-shadow: var(--focus);
+  border-color: var(--st-running); }
+.field input[aria-invalid="true"], .field textarea[aria-invalid="true"] { border-color: var(--st-blocked); }
+.field__err { margin: 0; font-size: var(--fs-xs); color: var(--st-blocked); }
+.reqform__foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4); margin-top: var(--sp-2); }
+.reqform__status { margin: 0; font-size: var(--fs-sm); }
+.reqform__status.is-ok { color: var(--st-confirmed); }
+.reqform__status.is-err { color: var(--st-blocked); }
+.reqform.is-done .field, .reqform.is-done .reqform__foot .btn { opacity: .55; }
+
+/* -- small utilities (so the page carries no inline style attribute) -------- */
+.btn-row--center { justify-content: center; }
+.footer-brand { margin-bottom: var(--sp-3); }
+.footer-tag { font-size: var(--fs-sm); max-width: 34ch; margin: 0; }
+
+/* -- motion safety ---------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .doc, .card, .claim { transition: none; }
+  .doc--open:hover { transform: none; }
+}

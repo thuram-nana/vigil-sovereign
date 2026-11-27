@@ -1,0 +1,131 @@
+{
+  "note": "The ONLY claims and compliance statements approved for public display on the Security & Trust Center, copied verbatim from the code-anchored verified-claims register. The page must contain each claim verbatim with its status; it must contain no claim from the withheld set as an established fact. Internal governance; not linked from the public page.",
+  "public_claims": [
+    {
+      "claim": "Digital signatures use Ed25519 over the audited pyca cryptography library (we do not roll our own crypto) to protect owner authority, signed spine heads, evidence certificates, grants, and quorum acknowledgements. Weak, low-order, and non-canonical keys are rejected fail-closed. The runtime only verifies signatures; signing happens at provisioning.",
+      "status": "Verified",
+      "category": "Encryption and key management",
+      "owner": "Security Engineering (Cryptography)"
+    },
+    {
+      "claim": "The audit log is an append-only, SHA-256 hash-chained event spine that makes tampering evident: deletion, reorder, or rewrite is detectable, and a signed head anchors the chain with a monotonic last-seq anti-rollback guard. It is a single-writer local log, not a blockchain or distributed ledger.",
+      "status": "Verified",
+      "category": "Audit logging and evidence integrity",
+      "owner": "Security Engineering (Evidence and Spine)"
+    },
+    {
+      "claim": "Pruned and cold-archived records carry Merkle inclusion proofs: a real binary Merkle tree (domain-separated leaves and nodes) accumulates hard-pruned entry hashes into a cumulative root committed in the owner-signed head. Live evidence certificates are not Merkle trees; they are Ed25519-signed and hash-linked.",
+      "status": "Partially Implemented",
+      "category": "Audit logging and evidence integrity",
+      "owner": "Security Engineering (Evidence and Spine)"
+    },
+    {
+      "claim": "Role-based access control with cumulative roles (viewer, analyst, operator) and explicit default-deny governs every privileged action, with a per-route permission map where any unmapped route denies. Owner is the trust-root key-holder ceiling, never a grantable bearer role.",
+      "status": "Verified",
+      "category": "Authentication and access control",
+      "owner": "Platform Security (Access Control)"
+    },
+    {
+      "claim": "Strict per-tenant isolation prevents one organization from reaching another organization's data or authority. The customer admission gate has no global-role leg, so capability is purely the owner-signed per-org membership, resolved live and strictly scoped to the org id, default-deny. This is cryptographic and authorization-layer isolation, not hardware, VM, or network segmentation.",
+      "status": "Verified",
+      "category": "Authentication and access control",
+      "owner": "Platform Security (Access Control)"
+    },
+    {
+      "claim": "Threshold and quorum authorization protects critical operations through m-of-n multi-signature verification, which counts distinct valid independent Ed25519 signers against a trust-root threshold and fails closed. The backup passphrase is additionally protected by Shamir m-of-n secret sharing. This is not a threshold-signature cryptosystem (no FROST or BLS). The separate oracle witness-quorum veto is opt-in and default-off.",
+      "status": "Verified",
+      "category": "Authentication and access control",
+      "owner": "Security Engineering (Cryptography)"
+    },
+    {
+      "claim": "Authentication offers multiple authenticators (salted scrypt passwords where the plaintext is never stored, TOTP, Ed25519 public-key enrollment, and per-user bearer tokens) alongside RBAC, with hop assertions bound by HMAC. Enterprise SSO (SAML and OIDC) and SCIM provisioning are available on the customer edge when that edge is enabled.",
+      "status": "Verified",
+      "category": "Authentication and access control",
+      "owner": "Platform Security (Identity)"
+    },
+    {
+      "claim": "Credentials and secrets are sealed at rest with ChaCha20-Poly1305 AEAD under domain- and context-bound additional data, with no plaintext fallback, never stored or logged in plaintext. The connector-secret broker uses value-free handles and single-use authorizations that redact their repr, refuse pickling, open material under the org KEK into a bytearray that is then zeroized, and guard against CR/LF header injection. Outbound fetches refuse cloud-metadata, link-local, RFC1918, and loopback origins (SSRF guard). The broker plaintext plane is default-off.",
+      "status": "Verified",
+      "category": "Encryption and key management",
+      "owner": "Security Engineering (Secrets and Broker)"
+    },
+    {
+      "claim": "Encryption in transit is provided through shipped reverse-proxy deploy templates that configure TLS 1.2/1.3 and HSTS, with mutual-TLS verification supported on the connector ingest leg. TLS is terminated by the operator-run reverse proxy, not by the application itself, so in-transit protection depends on the operator deploying the provided proxy.",
+      "status": "Partially Implemented",
+      "category": "Encryption and key management",
+      "owner": "Platform and SRE"
+    },
+    {
+      "claim": "The audit trail is independently verifiable: every confirmed finding ships as an Ed25519-signed, proof-carrying evidence certificate that checks authenticity, binding, artifact integrity, and reproduction, and standalone zero-dependency offline verifiers (content-hash pinned) let a third party re-run the check from the evidence alone and reach the same verdict. The spine writer fails closed on an unwritable audit.",
+      "status": "Verified",
+      "category": "Audit logging and evidence integrity",
+      "owner": "Security Engineering (Evidence and Spine)"
+    },
+    {
+      "claim": "The product is built on a fail-closed, default-deny, prove-don't-guess security architecture, and a machine-checked claims registry gates documentation honesty against code: every public claim marker must resolve to a real enforcing symbol and a proving test, enforced pre-commit and in required CI. Many capabilities are deliberately default-off or opt-in, so the posture is real but not uniformly always-on.",
+      "status": "Partially Implemented",
+      "category": "Information security",
+      "owner": "Security and Compliance"
+    },
+    {
+      "claim": "For VIGIL's own code, continuous integration runs static analysis, dependency, and supply-chain scanning (Semgrep, Bandit, Trivy, Gitleaks), the repository carries no committed secrets, and a coordinated vulnerability-disclosure process is documented with a 3-day acknowledgement and a 90-day window plus safe harbour for good-faith research.",
+      "status": "Partially Implemented",
+      "category": "Vulnerability management",
+      "owner": "Application Security"
+    },
+    {
+      "claim": "Defensive security monitoring (AEGIS) is available: Sigma-based detection, a graduated response policy, out-of-band canary correlation, a CloudTrail source, and daemon and unit health status. These monitoring planes are default-off behind feature flags and are operator-enabled and self-hosted per deployment; there is no managed detection service.",
+      "status": "Partially Implemented",
+      "category": "Security monitoring",
+      "owner": "Security Operations (AEGIS)"
+    },
+    {
+      "claim": "Incident response is supported by code-enforced containment primitives (restricted mode, emergency stop, panic hard-stop, and a per-engagement kill-switch) that are tier-gated and recorded on the hash-chained ledger, with kill-switch trip broadly available and release owner-only, plus an operator incident-response playbook. What exists is in-product containment controls and a playbook, not a staffed on-call team or defined response-time SLAs.",
+      "status": "Partially Implemented",
+      "category": "Incident response",
+      "owner": "Security Operations"
+    },
+    {
+      "claim": "Infrastructure hardening includes TPM-sealed key custody, atomic writes with 0600/0700 permissions and fsync, cross-process flock serialization, hardened reverse-proxy and systemd deploy artifacts, and CI container-image scanning. This hardening is template-driven and applied by the operator on self-hosted infrastructure; it is not a managed-cloud certification or an in-product network control.",
+      "status": "Partially Implemented",
+      "category": "Infrastructure security",
+      "owner": "Platform and SRE"
+    },
+    {
+      "claim": "Backup and recovery provides encrypted off-box backups whose passphrase is the sole key and is never stored, optional m-of-n Shamir passphrase escrow for survivable recovery, and Merkle-committed, owner-signed cold-archive snapshots that retain verifiable history. Backup cadence and share custody are operator decisions, and no specific cadence, geo-redundancy, or recovery-time is promised.",
+      "status": "Verified",
+      "category": "Backup and recovery",
+      "owner": "Platform and SRE"
+    },
+    {
+      "claim": "Every finding VIGIL proves against your systems is deterministically mapped to the ISO/IEC 27001:2022 Annex A control, and to nine other security frameworks, that it implicates, with a mapping asserted as control coverage only when the oracle re-fires the finding as a graded FACT. This is a mapping of your findings for your auditors, never a compliance claim about VIGIL itself.",
+      "status": "Verified",
+      "category": "Compliance",
+      "owner": "Product (Reporting) and Compliance"
+    },
+    {
+      "claim": "VIGIL maintains documented privacy and data-governance practices for the hosted service: a published privacy notice naming the controller (SIGIL SARL), a named subprocessor list (AWS eu-west-1, Cloudflare, Stripe, Google, GitHub, Anthropic, with a US-transfer disclosure), strictly-necessary session cookies only with no analytics, advertising, cross-site tracking, or consent banner, stated retention and post-account-closure handling, and data-subject rights (access, correction, deletion, and the right to complain to a data-protection authority, with a data processing agreement available on request). Governing law is the Republic of Cameroon and the applicable OHADA Uniform Acts, with a mandatory-rules carve-out, not EU GDPR directly.",
+      "status": "Partially Implemented",
+      "category": "Privacy",
+      "owner": "Privacy and Legal"
+    },
+    {
+      "claim": "Right-to-erasure is machine-enforced by cryptographic shredding: destroying the per-engagement key held off the append-only spine renders sealed credential material cryptographically unrecoverable while the spine chain still verifies. This is a registered, proving-test-backed claim. Seal-at-capture is not yet the default and a scanner-path plaintext residual remains, so erasure is presented with that scope.",
+      "status": "Verified",
+      "category": "Privacy",
+      "owner": "Privacy and Security Engineering"
+    },
+    {
+      "claim": "VIGIL publishes a commitment to answer data deletion and other data-rights requests within 30 days, deleting the data that can be deleted and disclosing what is retained and why, through the info@sigilsovereign.com contact. This is a published practice, not an independently audited service-level agreement.",
+      "status": "Verified",
+      "category": "Privacy",
+      "owner": "Privacy and Support"
+    }
+  ],
+  "compliance_statements": {
+    "iso27001": "VIGIL holds no ISO/IEC 27001 certification and operates no certified ISMS. What VIGIL provides is a findings mapper: a re-proven FACT about your systems is deterministically mapped to the ISO/IEC 27001:2022 Annex A control it implicates (alongside nine other frameworks) so you can speak to your auditors. This is a mapping of your findings, never a compliance claim about VIGIL itself. VIGIL's own security practices are not currently mapped to ISO/IEC 27001, and no such mapping should be published until one is built and committed.",
+    "gdpr": "VIGIL is not GDPR certified, as GDPR offers no such certification, and SIGIL SARL is established in Cameroon rather than the EU. VIGIL maintains documented privacy practices aligned to applicable data-protection obligations: a published privacy notice naming the controller (SIGIL SARL) and its subprocessors, strictly-necessary session cookies with no tracking or consent banner, stated retention and post-account-closure handling, a 30-day commitment to answer data-rights requests, machine-enforced right-to-erasure by cryptographic shredding, and a data processing agreement available on request. The notice is governed by the laws of the Republic of Cameroon and the applicable OHADA Uniform Acts, without depriving you of mandatory protections where you reside.",
+    "soc2": "No SOC 2 attestation report is currently available. VIGIL holds no SOC 2 attestation of any type and displays no SOC 2 badge; we will state otherwise only when a report genuinely exists.",
+    "hipaa": "HIPAA is not applicable to VIGIL. There is no VIGIL healthcare use case, no Business Associate Agreement, and no HIPAA assessment or attestation. HIPAA appears in the product only as a control-mapping target for a customer's own health-data findings."
+  }
+}
