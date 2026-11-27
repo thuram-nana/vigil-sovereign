@@ -484,7 +484,11 @@ class ConnectorSecretBroker:
                 raise ConnectorBrokerRefused(
                     f"sealed credential for connector {handle.connector_id!r} (secret_ref "
                     f"{handle.secret_ref}) failed to open (fail-closed)") from exc
-            material = self._derive_material(handle.scheme, bytes(plain), body)
+            # Pass the mutable bytearray itself (not an immutable bytes copy) so the plaintext lives in
+            # exactly ONE object we can zeroise. For HMAC_SIGNATURE no string copy of the secret is ever
+            # made (only the tag); for BEARER/HEADER_KEY the one unavoidable immutable copy is the header
+            # value str (Python strings cannot be zeroised — see the module limitation).
+            material = self._derive_material(handle.scheme, plain, body)
         finally:
             # Zeroise the transient plaintext regardless of outcome — the broker holds no plaintext it does
             # not need, for no longer than it needs it.
@@ -503,10 +507,12 @@ class ConnectorSecretBroker:
         return self.authorize(handle, now=now, body=body).apply(headers)
 
     @staticmethod
-    def _derive_material(scheme: ConnectorScheme, plain: bytes, body: bytes) -> str:
+    def _derive_material(scheme: ConnectorScheme, plain: bytearray, body: bytes) -> str:
         """Derive the outbound auth material for a scheme. HMAC_SIGNATURE emits a tag (the secret never
         leaves); BEARER/HEADER_KEY emit the header value that carries the credential. Deterministic — no
-        clock, no RNG. The credential is decoded only here, inside the zeroising frame of :meth:`authorize`."""
+        clock, no RNG. ``plain`` is the caller's zeroisable bytearray; the credential is read only here,
+        inside the zeroising frame of :meth:`authorize`, and never copied into a longer-lived object than the
+        returned material."""
         if scheme is ConnectorScheme.HMAC_SIGNATURE:
             if not isinstance(body, (bytes, bytearray)):
                 raise ConnectorBrokerRefused("HMAC_SIGNATURE body must be bytes")
