@@ -73,3 +73,10 @@ condition = "AND"
 paths = ['''(^|/)key_backend\.py$''']
 regexTarget = "match"
 regexes = ['''VIGIL_(PKCS11_[A-Z_]+|OWNER_KEY_BACKEND)''']
+
+[[allowlists]]
+description = "False positive: infra CloudFormation `KeyAlgorithm` / `SigningAlgorithm` values are AWS ACM Private CA + CloudFront enum CONSTANTS (e.g. EC_prime256v1), matched by generic-api-key — public API enums, not secrets."
+condition = "AND"
+paths = ['''(^|/)infra/aws/.*\.cfn\.ya?ml$''']
+regexTarget = "match"
+regexes = ['''(Key|Signing)Algorithm:\s*[A-Za-z0-9_]+''']
