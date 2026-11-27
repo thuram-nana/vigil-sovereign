@@ -718,6 +718,8 @@ jobs:
               integration/tests/test_hexstrike_profile_observations.py \
               integration/tests/test_sovereignty_governs_llm_egress.py \
               integration/tests/test_cloud_live_posture.py \
+              integration/tests/test_cloud_posture_run_e2e.py \
+              integration/tests/test_cloud_posture_run_report.py \
               integration/tests/test_cloud_benchmark.py \
               integration/tests/test_cloud_scope.py \
               integration/tests/test_iac_posture.py \
