@@ -176,7 +176,7 @@ class MonitoringSpoolWatcher:
         # meaningful with BOTH a finite append budget and a declared heartbeat.
         if heartbeat_reserve is None:
             if self._heartbeat_slug is not None and self.append_budget is not None:
-                n = max(1, len(self._domains))
+                n = max(1, len(self._domains or {}))   # domains is non-None here (heartbeat requires it); narrow for mypy
                 self.heartbeat_reserve = min(self.append_budget, max(1, self.append_budget // n))
             else:
                 self.heartbeat_reserve = 0
@@ -566,8 +566,9 @@ class MonitoringSpoolWatcher:
         # Budget: None => UNBOUNDED (the per_domain_limit scan still bounds the work). A finite budget splits
         # into a RESERVED heartbeat pool (only the heartbeat may draw it) and a SHARED pool (any domain draws).
         unbounded = self.append_budget is None
-        reserved = min(self.heartbeat_reserve, self.append_budget) if (hb is not None and not unbounded) else 0
-        shared = None if unbounded else (self.append_budget - reserved)
+        budget = 0 if self.append_budget is None else int(self.append_budget)   # narrowed int for the budget math
+        reserved = min(self.heartbeat_reserve, budget) if (hb is not None and not unbounded) else 0
+        shared = 0 if unbounded else (budget - reserved)   # 0 when unbounded (never consulted: _can_spend short-circuits)
         q = self.drr_quantum
         # Service order: the HEARTBEAT domain FIRST every round (never rotated — its reserved share is served
         # before a flood can touch the shared pool), then the other declared domains. Their base order is the
