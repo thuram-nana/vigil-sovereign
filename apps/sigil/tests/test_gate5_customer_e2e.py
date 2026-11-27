@@ -105,6 +105,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/team": ("Team", ("api/customer/members",)),
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/settings": ("Settings", ("api/customer/preferences",)),
@@ -141,6 +142,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
                   "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect an AWS account": 1},
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
+    # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
+    # The activity feed rows are <li> steps, not buttons.
+    "#/live": {"Pause": 1, "Send to VIGIL": 1},
     "#/attack-path": {"View findings": 1},                          # F1's one chain card (its steps unlisted)
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
@@ -181,7 +185,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
@@ -190,7 +194,7 @@ _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "team": "1
 # api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
 # writes data-cloud-connect="1" only with both on). Fix first (PR-B) is served only with its own switch AND its
 # master switch, VIGIL_APEX_PRESENTATION.
-_GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LAUNCH_UI",
+_GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LIVE_CONTROL", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
@@ -389,11 +393,16 @@ _FAKE_SERVER = {
                              "canary": "a1b2c3d4e5f6", "received_at": 1700000000,
                              "receipt_digest": "sha256:9c1e4f2a7b8d"}}]},
     "api/customer/launches": {"org_id": "org_acme", "pause_resume": True,
-                              "launches": [{"slug": "cust_b", "launch": "n1", "state": "running", "depth": "quick",
-                                            "actions": ["pause"], "lease": {}}],
+                              "launches": [{"slug": "cust_b", "host": "b.example", "launch": "n1", "state": "running",
+                                            "depth": "quick", "actions": ["pause"], "lease": {}}],
                               "finished": [{"slug": "cust_a", "launch": "n0", "state": "completed", "ended_at": 10}],
                               "choices": [{"product_id": "vigil_launch_quick", "depth": "quick"},
                                           {"product_id": "vigil_launch_deep", "depth": "deep"}]},
+    # Live Control's customer-safe activity feed for the running engagement (cust_b): phase transitions only, no secrets
+    # or target detail. The screen reads this on arrival for the running host (query-stripped key matches any ?host=…).
+    "api/customer/live/activity": {"ok": True, "slug": "cust_b", "cursor": 1, "rows": [
+        {"seq": 0, "ts": 1700000000.0, "phase": "scan", "label": "Scanning the surface", "status": "started"},
+        {"seq": 1, "ts": 1700000001.0, "phase": "scan", "label": "Scanning the surface", "status": "completed"}]},
     "api/customer/members": {"org_id": "org_acme", "members": [
         {"username": "cust_ana", "email": "ana@acme.com", "role": "founder"},
         {"username": "cust_ben", "email": "ben@acme.com", "role": "analyst", "since": 1700000000}]},
@@ -937,7 +946,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "launches", "onboarding", "billing/offers", "connect",
+        for p in ("members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3
