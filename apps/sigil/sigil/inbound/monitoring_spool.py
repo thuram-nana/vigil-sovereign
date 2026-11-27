@@ -151,12 +151,21 @@ class MonitoringSpoolWatcher:
             self.append_budget = budget
         self.append_ceiling_per_s = (None if append_ceiling_per_s is None else float(append_ceiling_per_s))
         self.pass_window_s = float(pass_window_s)
-        # DRR quantum: the reports one domain is served per ROUND (the interleaving granularity). Default = the
-        # per-pass per-domain cap, so with NO append budget the round-robin drains each declared domain's whole
-        # per-pass share in signed-slug order — identical to the AS-3a strict drain. A smaller quantum (set
-        # when an append budget is in force) interleaves the domains finely, so a flooded domain cannot spend
-        # the whole budget before the others are served (it gets its fair share per round and no more).
-        self.drr_quantum = self.per_domain_limit if drr_quantum is None else max(1, int(drr_quantum))
+        # DRR quantum: the reports one domain is served per ROUND (the interleaving granularity). The DEFAULT
+        # depends on whether an append budget is in force:
+        #   * WITH a budget -> 1, so the round-robin interleaves one report per domain per round. A larger
+        #     default (e.g. the per-domain cap) would let a flooded domain — the heartbeat past its reserve
+        #     INCLUDED, since it falls through to the shared pool — drain the WHOLE budget in round 1 and starve
+        #     every other domain this pass. Fine interleaving is what makes the budget shared fairly.
+        #   * WITHOUT a budget -> the per-pass per-domain cap, so the round-robin drains each declared domain's
+        #     whole per-pass share in signed-slug order — byte-for-byte the AS-3a strict drain.
+        # An explicit ``drr_quantum`` always overrides both defaults.
+        if drr_quantum is not None:
+            self.drr_quantum = max(1, int(drr_quantum))
+        elif self.append_budget is not None:
+            self.drr_quantum = 1
+        else:
+            self.drr_quantum = self.per_domain_limit
         # The HEARTBEAT domain (strict mode only): one declared (org, host) whose reports are the liveness
         # signal that must ALWAYS get through. It is served FIRST every round and holds a RESERVED slice of the
         # append budget that only it may spend, so a flood of another domain can neither delay it past the DRR
@@ -170,26 +179,40 @@ class MonitoringSpoolWatcher:
             if hslug not in self._domains:
                 raise ValueError("the heartbeat (org, host) must be one of the declared domains")
             self._heartbeat_slug = hslug
-        # RESERVED heartbeat budget: writes of the append budget only the heartbeat may spend. Default = the
-        # heartbeat's own EQUAL share of the budget (budget // #declared-domains, at least 1), reserved; the
-        # remainder is the SHARED pool any domain draws. An explicit value is clamped into [0, budget]. Only
-        # meaningful with BOTH a finite append budget and a declared heartbeat.
+        # DRR cross-pass rotation BASE: the STABLE sorted list of all declared NON-heartbeat domains (the
+        # heartbeat is always served first, so it is excluded). The round-robin starts at a FILE-PERSISTED cursor
+        # (``<spool>/.drr-cursor``, read and advanced under the single-drainer flock — see ``_drr_drain``) into
+        # this list. A STABLE base (it never shrinks as domains empty within a pass) is what makes the rotation
+        # cycle every declared domain to the front over passes, so a sustained tight budget starves none of them
+        # — even across FRESH drain PROCESSES (a systemd/cron/CLI drain unit), which the file-persisted cursor
+        # resumes instead of re-pinning the first-sorting domain every pass.
+        self._drr_rotation = ([] if self._domains is None
+                              else sorted(s for s in self._domains if s != self._heartbeat_slug))
+        n_other = len(self._drr_rotation)          # count of declared NON-heartbeat domains
+        # RESERVED heartbeat budget: writes of the append budget only the heartbeat may spend (and RELEASED to
+        # the shared pool mid-pass once the heartbeat is drained — see ``_drr_drain``). Default = the heartbeat's
+        # own EQUAL share of the budget (budget // #declared-domains, >= 1), but held STRICTLY BELOW the budget
+        # whenever another domain is declared, so the shared pool is never empty (else every non-heartbeat domain
+        # would starve). An explicit value is clamped into [0, budget]. Only meaningful with BOTH a finite append
+        # budget and a declared heartbeat.
         if heartbeat_reserve is None:
             if self._heartbeat_slug is not None and self.append_budget is not None:
                 n = max(1, len(self._domains or {}))   # domains is non-None here (heartbeat requires it); narrow for mypy
-                self.heartbeat_reserve = min(self.append_budget, max(1, self.append_budget // n))
+                reserve = max(1, self.append_budget // n)
+                if n_other:                            # keep >= 1 write in the shared pool for the other domains
+                    reserve = min(reserve, self.append_budget - 1)
+                self.heartbeat_reserve = min(self.append_budget, max(0, reserve))
             else:
                 self.heartbeat_reserve = 0
         else:
             hr = max(0, int(heartbeat_reserve))
             self.heartbeat_reserve = hr if self.append_budget is None else min(self.append_budget, hr)
-        # DRR cross-pass rotation. The round-robin starts at a persisted integer cursor into this STABLE sorted
-        # list of all declared NON-heartbeat domains (the heartbeat is always served first, so it is excluded).
-        # A STABLE base (it never shrinks as domains empty within a pass) is what makes the rotation cycle every
-        # declared domain to the front over successive passes, so a sustained tight budget starves none of them.
-        self._drr_rotation = ([] if self._domains is None
-                              else sorted(s for s in self._domains if s != self._heartbeat_slug))
-        self._drr_cursor = 0   # DRR rotation pointer across passes (deterministic; advances only under budget)
+        # An explicit reserve that swallows the WHOLE budget leaves the shared pool empty, so every non-heartbeat
+        # declared domain would starve forever under a heartbeat flood. Refuse it fail-closed (the default above
+        # never reaches here — it is capped at ``budget - 1`` whenever another domain is declared).
+        if (self.append_budget is not None and self._heartbeat_slug is not None
+                and n_other >= 1 and self.heartbeat_reserve >= self.append_budget):
+            raise ValueError("heartbeat_reserve must be < append_budget when other domains are declared")
         # ------------------------------------------------------------------------------------------------
         self._pass_seen: "Optional[set]" = None   # AS-3c: the (org, report_id) spine baseline during a recovery pass
         self.spool = Path(spool_dir)
@@ -545,9 +568,11 @@ class MonitoringSpoolWatcher:
         FAIRNESS. Domains are served round-robin, ``drr_quantum`` reports at a time: a flooded domain gets its
         quantum per round and NO more before the next domain is served, so it can never drain front-to-back and
         delay another domain's reports beyond the quantum. The HEARTBEAT domain is served FIRST every round and
-        draws from a RESERVED slice of the append budget that only it may spend, so a flood can neither consume
-        the budget before the heartbeat is served nor starve it. Under a sustained tight budget the non-
-        heartbeat order ROTATES by a persisted integer cursor across passes, so no late-sorting domain starves.
+        draws from a RESERVED slice of the append budget that only it may spend (released to the shared pool once
+        the heartbeat is drained this pass), so a flood can neither consume the budget before the heartbeat is
+        served nor starve it. Under a sustained tight budget the non-heartbeat order ROTATES by a FILE-PERSISTED
+        integer cursor (``<spool>/.drr-cursor``, under the drain's flock) across passes AND across fresh drain
+        processes, so no late-sorting domain starves.
 
         APPEND-RATE BUDGET. ``append_budget`` caps the spine ``_record`` writes this pass (derived from the real
         ``sigil spine append-rate`` ceiling; see ``__init__``). Only a ``recorded`` outcome spends budget — a
@@ -555,7 +580,7 @@ class MonitoringSpoolWatcher:
         reports are still in ``incoming/<slug>/`` (they were never claimed) and drain next pass, nothing lost.
 
         Returns ``(recorded, deduped, rejected, seqs)``. DETERMINISTIC: the budget derives from injected
-        constants and the schedule from a persisted integer cursor — no wall-clock, no RNG in the fairness
+        constants and the schedule from a file-persisted integer cursor — no wall-clock, no RNG in the fairness
         math. FATAL-2: sovereign-only (no framework/strix import). Never raises on one bad file (``_process_one``
         is fail-closed)."""
         recorded = deduped = rejected = 0
@@ -576,9 +601,10 @@ class MonitoringSpoolWatcher:
         # to the domains that actually have reports this pass — so the rotation cycles every declared domain to
         # the front over passes even as domains empty out (no cross-pass starvation under a tight budget). With
         # NO budget the base is unrotated, so the order is exactly the AS-3a signed-slug order.
+        cursor = self._read_drr_cursor() if not unbounded else 0   # FILE-persisted, read under the drain's flock
         rotation = self._drr_rotation
         if rotation and not unbounded:
-            k = self._drr_cursor % len(rotation)
+            k = cursor % len(rotation)
             rotation = rotation[k:] + rotation[:k]
         others = [s for s in rotation if s in picks and s != hb]
         order = ([hb] if hb is not None else []) + others
@@ -621,11 +647,45 @@ class MonitoringSpoolWatcher:
                     elif status == "rejected":
                         rejected += 1
                     # "gone" (raced away) -> nothing
+                # Once the heartbeat is fully drained this pass, RELEASE its unused reserved budget to the shared
+                # pool (once — ``reserved`` is then 0): otherwise a LIGHT heartbeat (fewer reports than its
+                # reserve) would strand that reserve and throttle every other domain to (budget - reserve)/pass.
+                if hb is not None and not unbounded and reserved > 0 and pos[hb] >= len(picks[hb]):
+                    shared += reserved
+                    reserved = 0
             if not unbounded and reserved <= 0 and shared <= 0:
                 break                                  # the whole append budget is spent — stop the pass fairly
         if not unbounded:
-            self._drr_cursor += 1                      # advance the rotation for the next budgeted pass
+            self._write_drr_cursor(cursor + 1)         # advance the FILE-persisted rotation for the next pass
         return recorded, deduped, rejected, seqs
+
+    def _read_drr_cursor(self) -> int:
+        """The DRR rotation cursor, FILE-persisted at ``<spool>/.drr-cursor`` so a FRESH drain PROCESS (a
+        systemd/cron/CLI drain unit reconstructs the watcher each run) RESUMES the rotation instead of resetting
+        to 0 and re-pinning the first-sorting domain — which would bring cross-pass starvation back. Read under
+        the drain's single-drainer flock (``_drr_drain`` runs inside it), so the read + advance below is
+        race-free across drainer processes. Best-effort and bounded: any fault, or an implausible value, reads 0
+        (the rotation then simply starts from the front that pass). Never raises."""
+        try:
+            with open(self.spool / ".drr-cursor", "rb") as fh:
+                n = int(fh.read(64).decode("utf-8").strip())
+            return n if n >= 0 else 0
+        except (OSError, ValueError):
+            return 0
+
+    def _write_drr_cursor(self, n: int) -> None:
+        """Advance the FILE-persisted DRR cursor ATOMICALLY (temp file + ``os.replace``), under the single-drainer
+        flock. Best-effort: a write fault never fails the drain — the only cost is one pass's rotation not
+        advancing (the next pass retries). Never raises."""
+        tmp = self.spool / (".drr-cursor.tmp-" + str(os.getpid()))
+        try:
+            tmp.write_text(str(int(n)), encoding="utf-8")
+            os.replace(tmp, self.spool / ".drr-cursor")
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def _scan_declared_subtree(self, ddir: Path, json_budget: int,
                                foreign_budget: int) -> "tuple[list[str], list[os.DirEntry[str]]]":

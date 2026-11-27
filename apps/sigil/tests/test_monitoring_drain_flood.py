@@ -267,3 +267,100 @@ def test_strict_without_flood_params_matches_as3a_drain_in_one_pass():
     assert r["recorded"] == 8 and r["off_domain"] == 0 and r["rejected"] == 0
     assert sorted(_raw_ids(s, "org_a")) == sorted(a_ids)
     assert sorted(_raw_ids(s, "org_b")) == sorted(b_ids)
+
+
+# ============================================================================================================
+# Red-pen follow-up — four confirmed findings (1 HIGH + 3 MEDIUM) on the AS-3c part-2 flood isolation.
+# ============================================================================================================
+
+# --- FINDING 1 (HIGH): the DEFAULT quantum must interleave under a budget (not drain a flood front-to-back) --
+def test_default_quantum_under_a_budget_does_not_starve_other_domains_or_the_heartbeat():
+    # THE headline regression. With NO explicit drr_quantum but an append budget in force, the default quantum
+    # must be the fine-interleaving 1 — NOT the per-domain cap. The flood is on the first-sorting domain, so a
+    # per-domain-cap quantum would let it drain the WHOLE shared budget in round 1 and starve the normal tenant
+    # (and, past its reserve, would also let a heartbeat flood eat the shared pool). The normal tenant and the
+    # heartbeat must both be fully served this pass.
+    by_slug = sorted((A, B, C), key=lambda d: ms.domain_slug(*d))
+    flood, hb, norm = by_slug[0], by_slug[1], by_slug[2]
+    s, w = _rig(domains=(A, B, C), heartbeat=hb,
+                append_ceiling_per_s=9.0, pass_window_s=1.0)        # budget 9; NO drr_quantum (default must be 1)
+    assert w.append_budget == 9 and w.drr_quantum == 1             # the default is 1 under a budget (Finding 1)
+    hb_ids = _seed(w, *hb, 3)
+    norm_ids = _seed(w, *norm, 3)
+    _seed(w, *flood, 50)                                           # the flood sorts FIRST
+    r = w.drain()
+    assert sorted(_raw_ids(s, hb[0])) == sorted(hb_ids)           # heartbeat NOT starved
+    assert sorted(_raw_ids(s, norm[0])) == sorted(norm_ids)       # normal tenant NOT starved
+    assert len(_raw_ids(s, flood[0])) < 50 and r["recorded"] == 9  # flood bounded, budget honoured
+    # MUTATION: restore the old default (drr_quantum defaults to per_domain_limit under a budget) — the flood,
+    # sorting first, drains the whole shared budget in round 1 and the normal tenant records 0, turning the
+    # `== norm_ids` assertion red. (The heartbeat survives via its reserve, so the NORM assertion is the pin.)
+
+
+# --- FINDING 2 (MEDIUM): an explicit reserve that swallows the whole budget is refused fail-closed -----------
+def test_heartbeat_reserve_ge_budget_with_other_domains_is_refused():
+    # reserve >= budget leaves the shared pool empty, so every non-heartbeat domain starves forever under a
+    # heartbeat flood. Construction must refuse it rather than silently clamp.
+    with pytest.raises(ValueError) as e:
+        _rig(domains=(A, B), heartbeat=A, append_ceiling_per_s=4.0, pass_window_s=1.0, heartbeat_reserve=4)
+    assert "heartbeat_reserve must be < append_budget" in str(e.value)
+    with pytest.raises(ValueError):                               # strictly greater is refused too
+        _rig(domains=(A, B), heartbeat=A, append_ceiling_per_s=4.0, pass_window_s=1.0, heartbeat_reserve=9)
+    # but reserve == budget with ONLY the heartbeat declared (no other domain to starve) is fine, and so is the
+    # default reserve (capped below the budget), which must never trip the guard.
+    _, w_solo = _rig(domains=(A,), heartbeat=A, append_ceiling_per_s=4.0, pass_window_s=1.0, heartbeat_reserve=4)
+    assert w_solo.heartbeat_reserve == 4
+    _, w_def = _rig(domains=(A, B), heartbeat=A, append_ceiling_per_s=4.0, pass_window_s=1.0)
+    assert 0 < w_def.heartbeat_reserve < w_def.append_budget      # default stays strictly below the budget
+
+
+# --- FINDING 3 (MEDIUM): a LIGHT heartbeat releases its unused reserve to the shared pool --------------------
+def test_light_heartbeat_releases_unused_reserve_to_the_other_domains():
+    # The heartbeat has FEWER reports (1) than its reserve (3). Once it is drained this pass the stranded 2
+    # reserved writes must be RELEASED to the shared pool, so the non-heartbeat domain drains MORE than
+    # (budget - reserve) == 3 — here all 5 it is given (1 for the light heartbeat + 5 == budget 6).
+    s, w = _rig(domains=(A, B), heartbeat=A, append_ceiling_per_s=6.0, pass_window_s=1.0,
+                heartbeat_reserve=3, drr_quantum=1)
+    assert w.append_budget == 6 and w.heartbeat_reserve == 3
+    hb_ids = _seed(w, *A, 1)                                      # a LIGHT heartbeat (1 < reserve 3)
+    nb_ids = _seed(w, *B, 10)                                     # the other domain has plenty of backlog
+    r = w.drain()
+    assert sorted(_raw_ids(s, "org_a")) == sorted(hb_ids)        # the heartbeat drained its 1
+    assert len(_raw_ids(s, "org_b")) == 5                        # the other domain drained 5 ...
+    assert len(_raw_ids(s, "org_b")) > w.append_budget - w.heartbeat_reserve   # ... which is MORE than 6 - 3
+    assert r["recorded"] == 6                                     # the whole budget was used, none stranded
+    # MUTATION: drop the release (reserved and shared stay independent) — the other domain drains only 3
+    # (budget - reserve) and the stranded 2 reserved writes are wasted, turning the `== 5` / `> 3` assertions red.
+
+
+# --- FINDING 4 (MEDIUM): the rotation cursor is FILE-persisted, so fresh drain processes resume it -----------
+def test_fresh_process_drains_resume_the_rotation_cursor_from_disk():
+    # Simulate a systemd/cron/CLI drain unit: a BRAND-NEW watcher is constructed for every pass, sharing ONE
+    # spool_dir and store. A persistent flood sits on the first-sorting domain; two small tenants sort after it.
+    # With the cursor only in memory, every fresh watcher would start at 0, re-pin the flood, and starve the
+    # smalls forever. Because the cursor is persisted to <spool>/.drr-cursor (read+advanced under the drain
+    # flock), the rotation resumes across processes and BOTH smalls are served within 3 fresh-process passes.
+    s = _store()
+    reg = None
+    for o, h in (A, B, C):
+        reg = _grant(s, o, h)
+    spool = tempfile.mkdtemp()
+
+    def fresh():
+        return ms.MonitoringSpoolWatcher(s, spool_dir=spool, secret_for=lambda o, h: SECRETS.get((o, h)),
+                                         authority=reg, now_fn=lambda: NOW, domains=(A, B, C),
+                                         append_ceiling_per_s=1.0, pass_window_s=1.0, drr_quantum=1)
+
+    by_slug = sorted((A, B, C), key=lambda d: ms.domain_slug(*d))
+    flood, small1, small2 = by_slug[0], by_slug[1], by_slug[2]
+    w0 = fresh()
+    _seed(w0, *flood, 5)                                          # a persistent flood on the first-sorting domain
+    s1_ids = _seed(w0, *small1, 1)
+    s2_ids = _seed(w0, *small2, 1)
+    for _ in range(3):
+        fresh().drain()                                          # a FRESH watcher (fresh _drr_cursor state) per pass
+    assert sorted(_raw_ids(s, small1[0])) == sorted(s1_ids)      # both small tenants served across fresh processes
+    assert sorted(_raw_ids(s, small2[0])) == sorted(s2_ids)
+    assert len(_raw_ids(s, flood[0])) == 1                       # the flood got only its fair one-per-three-passes
+    # MUTATION: revert the cursor to in-memory-only (reset to 0 on each construction) — every fresh watcher
+    # re-pins the first-sorting flood, so neither small tenant is ever served and both assertions turn red.
