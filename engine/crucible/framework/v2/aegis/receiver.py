@@ -67,6 +67,7 @@ from .connector_secrets import (
     InboundConnectorVerifier,
 )
 from .monitoring_report import (
+    _MAX_ENVELOPE_BYTES,          # the SHARED spool-envelope byte cap — the drain refuses a larger file
     REPORT_DOMAIN,
     REPORT_SCHEMA,
     atomic_spool_write,
@@ -119,14 +120,16 @@ class IngestOutcome:
     SPOOLED = "spooled"                 # authenticated, in-bounds, landed in the hot spool            -> 202
     DEDUP_NOOP = "dedup_noop"           # byte-identical content already spooled (idempotent re-POST)  -> 202
     DROPPED_OVERSIZE = "dropped_oversize"   # body over the size cap — DROP-and-count                  -> 413
+    DROPPED_ENVELOPE = "dropped_envelope"   # the SEALED envelope exceeds the spool/drain file cap     -> 413
     DROPPED_RATE = "dropped_rate"       # per-minute accept cap exceeded — DROP-and-count              -> 429
     REJECTED_AUTH = "rejected_auth"     # no/invalid HMAC and no verified mTLS client                  -> 401
     REJECTED_MALFORMED = "rejected_malformed"   # unparseable / schema-invalid / wrong-tenant finding  -> 400
+    SPOOL_FAULT = "spool_fault"         # transient seal/spool I/O fault (SERVER-side) — retryable      -> 503
     DISABLED = "disabled"               # receiver is DEFAULT-OFF                                       -> 503
 
     _HTTP = {
-        SPOOLED: 202, DEDUP_NOOP: 202, DROPPED_OVERSIZE: 413, DROPPED_RATE: 429,
-        REJECTED_AUTH: 401, REJECTED_MALFORMED: 400, DISABLED: 503,
+        SPOOLED: 202, DEDUP_NOOP: 202, DROPPED_OVERSIZE: 413, DROPPED_ENVELOPE: 413, DROPPED_RATE: 429,
+        REJECTED_AUTH: 401, REJECTED_MALFORMED: 400, SPOOL_FAULT: 503, DISABLED: 503,
     }
 
     @classmethod
@@ -188,9 +191,11 @@ class IngestReceiver:
         self.spooled = 0
         self.deduped = 0
         self.dropped_oversize = 0
+        self.dropped_envelope = 0
         self.dropped_rate = 0
         self.rejected_auth = 0
         self.rejected_malformed = 0
+        self.spool_faults = 0
         self.disabled_hits = 0
 
     @property
@@ -306,8 +311,9 @@ class IngestReceiver:
     # -- the one entry point -------------------------------------------------------------------------------
     def ingest(self, body: bytes, *, hmac_header: str = "", mtls_client_verified: bool = False) -> IngestResult:
         """Accept ONE pushed finding. Order: DEFAULT-OFF gate → size cap → rate cap → auth → bounded parse →
-        seal + atomic spool. Every rejection path DROPS-and-COUNTS and returns a value-free :class:`IngestResult`;
-        this method NEVER raises into the request path (``enforce_capable=False`` — accept + spool only)."""
+        seal → sealed-envelope cap → atomic spool. Every rejection path DROPS-and-COUNTS and returns a
+        value-free :class:`IngestResult`; this method NEVER raises into the request path
+        (``enforce_capable=False`` — accept + spool only)."""
         if not self._enabled:
             self.disabled_hits += 1
             return IngestResult(IngestOutcome.DISABLED, IngestOutcome.http_status(IngestOutcome.DISABLED),
@@ -337,21 +343,36 @@ class IngestReceiver:
             fields = self._parse_finding(body)
             report = self._build_report(fields)
             env = seal_report(report, self._report_secret)
-            data = canonical_json(env)
-            filename = sha256_hex(data)[:32] + ".json"       # the content-addressed spool name (determinism)
-            # A byte-identical re-POST already landed under this content-addressed name — report it as an
-            # idempotent no-op (and ``atomic_spool_write`` below leaves the existing file untouched anyway).
-            already = (self._incoming / filename).exists()
-            atomic_spool_write(self._incoming, data)         # idempotent: skips if the final name already exists
+            data = canonical_json(env)                        # bytes — exactly what lands on disk
         except (BoundaryError, ValueError) as exc:
             self.rejected_malformed += 1
             return IngestResult(IngestOutcome.REJECTED_MALFORMED,
                                 IngestOutcome.http_status(IngestOutcome.REJECTED_MALFORMED),
                                 detail=f"malformed: {type(exc).__name__}")
-        except Exception:        # noqa: BLE001 — a spool/seal fault must never raise into the request path
-            self.rejected_malformed += 1
-            return IngestResult(IngestOutcome.REJECTED_MALFORMED,
-                                IngestOutcome.http_status(IngestOutcome.REJECTED_MALFORMED), detail="spool fault")
+        except Exception:        # noqa: BLE001 — a seal/serialise fault is a SERVER fault, never malformed input
+            self.spool_faults += 1
+            return IngestResult(IngestOutcome.SPOOL_FAULT,
+                                IngestOutcome.http_status(IngestOutcome.SPOOL_FAULT), detail="seal fault")
+        # The SEALED envelope must fit the drain's file cap. ``seal_report`` canonicalises with
+        # ``ensure_ascii=True``, so a body within ``_max_body`` whose free-text fields hold non-ASCII can
+        # expand PAST the cap once sealed — and the AS-3c drain permanently QUARANTINES any file over
+        # ``_MAX_ENVELOPE_BYTES``. DROP-and-count it here (visible 413) rather than black-holing a record the
+        # receiver reported as accepted (mirrors ``monitoring_report.SpoolReporter``'s own envelope guard).
+        if len(data) > _MAX_ENVELOPE_BYTES:
+            self.dropped_envelope += 1
+            return IngestResult(IngestOutcome.DROPPED_ENVELOPE,
+                                IngestOutcome.http_status(IngestOutcome.DROPPED_ENVELOPE),
+                                detail="sealed envelope over spool cap")
+        filename = sha256_hex(data)[:32] + ".json"           # the content-addressed spool name (determinism)
+        # A byte-identical re-POST already landed under this content-addressed name — report it as an
+        # idempotent no-op (and ``atomic_spool_write`` below leaves the existing file untouched anyway).
+        already = (self._incoming / filename).exists()
+        try:
+            atomic_spool_write(self._incoming, data)         # idempotent: skips if the final name already exists
+        except Exception:        # noqa: BLE001 — a spool I/O fault is a transient SERVER fault (retryable), never malformed
+            self.spool_faults += 1
+            return IngestResult(IngestOutcome.SPOOL_FAULT,
+                                IngestOutcome.http_status(IngestOutcome.SPOOL_FAULT), detail="spool fault")
         if already:
             self.deduped += 1
             return IngestResult(IngestOutcome.DEDUP_NOOP, IngestOutcome.http_status(IngestOutcome.DEDUP_NOOP),
@@ -364,8 +385,9 @@ class IngestReceiver:
         """A value-free operational snapshot (for the health probe). No tenant content, no secret."""
         return {"org_id": self.org_id, "host": self.host, "enabled": self._enabled, "spooled": self.spooled,
                 "deduped": self.deduped, "dropped_oversize": self.dropped_oversize,
-                "dropped_rate": self.dropped_rate, "rejected_auth": self.rejected_auth,
-                "rejected_malformed": self.rejected_malformed}
+                "dropped_envelope": self.dropped_envelope, "dropped_rate": self.dropped_rate,
+                "rejected_auth": self.rejected_auth, "rejected_malformed": self.rejected_malformed,
+                "spool_faults": self.spool_faults}
 
 
 # ======================================================================================================
@@ -428,6 +450,7 @@ def serve_receiver(spool_dir: "str | os.PathLike", *, org_id: str, host: str, re
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = 30          # per-connection read timeout: a slow/stalled client cannot pin a thread forever
 
         def log_message(self, *args: Any) -> None:   # noqa: ARG002 — silence default stderr access log
             pass

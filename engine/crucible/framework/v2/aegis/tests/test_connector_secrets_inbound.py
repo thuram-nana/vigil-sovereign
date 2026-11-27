@@ -109,7 +109,11 @@ def test_tampered_body_rejected_replay():
 def test_malformed_tag_rejected_without_raising():
     v, secret = _rig()
     body = b"x"
-    for bad in ("", "deadbeef", "v2=" + hmac.new(secret, body, hashlib.sha256).hexdigest(), "v1=zzzz"):
+    # The non-ASCII ``v1=…`` tags are the regression guard: ``hmac.compare_digest`` on two ``str`` RAISES
+    # ``TypeError`` when either holds a non-ASCII char, so a hostile ``"v1=café…"`` tag must fail CLOSED
+    # (ok=False) and NEVER unwind the stack — the documented "malformed tag → ok=False (never raises)" contract.
+    for bad in ("", "deadbeef", "v2=" + hmac.new(secret, body, hashlib.sha256).hexdigest(), "v1=zzzz",
+                "v1=café", "v1=" + "\U0001f600" * 8, "v1=" + "ÿ" * 64):
         assert v.verify_hmac(org=ORG, connector_id=HMAC_CONN, body=body, presented=bad).ok is False
 
 

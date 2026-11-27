@@ -552,7 +552,7 @@ jobs:
             #     a wrong path — exactly what importorskip would otherwise hide as a skip.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             VIGIL_REQUIRE_PLANES=vigil_integration,vigil_gateway,framework,vigil_core \
-            PYTHONPATH=integration:engine/crucible:gateway:.github/scripts python -m pytest \
+            PYTHONPATH=integration:engine/crucible:gateway:apps/aegis-ingest:.github/scripts python -m pytest \
               -p pytest_require_planes -rs \
               docs/tests/test_out_of_scope_is_honest.py \
               integration/tests/test_tool_intake.py \
@@ -577,6 +577,7 @@ jobs:
               integration/tests/test_findings_crossing.py \
               integration/tests/test_graph_evidence_join.py \
               integration/tests/test_aegis_saas_acceptance.py \
+              apps/aegis-ingest/tests/test_distribution.py \
               integration/tests/IT/test_aegis_tt_rig.py \
               integration/tests/test_langplugins.py \
               integration/tests/test_backup_aegis_monitoring_excluded.py \

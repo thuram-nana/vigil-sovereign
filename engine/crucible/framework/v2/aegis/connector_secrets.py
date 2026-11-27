@@ -641,7 +641,17 @@ class InboundConnectorVerifier:
             for i in range(len(plain)):
                 plain[i] = 0
             del plain
-        ok = isinstance(presented, str) and presented.startswith("v1=") and hmac.compare_digest(presented, expected)
+        # Compare constant-time as ASCII BYTES. ``hmac.compare_digest`` on two ``str`` RAISES ``TypeError`` if
+        # either holds a non-ASCII char, so a hostile ``presented="v1=café…"`` tag would unwind the stack —
+        # breaking this method's documented "malformed tag → ok=False (never raises)" contract. ``expected`` is
+        # always ASCII ("v1=" + hexdigest); a non-ASCII (hence un-encodable, hence non-matching) ``presented``
+        # fails closed as a mismatch.
+        ok = False
+        if isinstance(presented, str) and presented.startswith("v1="):
+            try:
+                ok = hmac.compare_digest(presented.encode("ascii"), expected.encode("ascii"))
+            except UnicodeEncodeError:
+                ok = False
         return InboundVerifyReceipt(org=org, connector_id=connector_id, scheme=consumer.scheme,
                                     epoch=sealed.epoch, secret_ref=secret_ref, method="hmac", ok=bool(ok))
 

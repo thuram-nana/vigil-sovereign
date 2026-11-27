@@ -162,6 +162,39 @@ def test_foreign_tenant_finding_rejected():
     assert res.outcome == R.IngestOutcome.REJECTED_MALFORMED   # bound to org_a/apme.cm only
 
 
+def test_sealed_envelope_over_cap_dropped_not_black_holed():
+    # A body WITHIN the inbound size cap whose non-ASCII free-text expands PAST the drain's 16 KiB file cap
+    # once sealed (``seal_report`` canonicalises with ``ensure_ascii`` → 6-12 bytes/char). It must DROP-and-count
+    # (a visible 413), NEVER land a file the AS-3c drain would permanently quarantine while the receiver reported
+    # the record accepted (202). Without the envelope guard this body spools (regression: spooled == 1).
+    spool = tempfile.mkdtemp()
+    rcv = _rcv(spool, require_auth=False)
+    # A real sensor sends COMPACT UTF-8 (ensure_ascii=False) to stay under the byte cap: 2000 astral chars = 8 KB
+    # on the wire. The receiver then SEALS with ensure_ascii=True (12 bytes/astral) → a > 16 KiB envelope.
+    body = json.dumps(_finding(attack_class="\U0001f600" * 2000),
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert len(body) <= 16 * 1024                                  # within the inbound body cap (not an oversize drop)
+    res = rcv.ingest(body)
+    assert res.outcome == R.IngestOutcome.DROPPED_ENVELOPE and res.http_status == 413
+    assert rcv.dropped_envelope == 1 and rcv.spooled == 0
+    assert list((Path(spool) / "incoming" / domain_slug(ORG, HOST)).glob("*.json")) == []   # nothing landed
+    assert rcv.metrics()["dropped_envelope"] == 1
+
+
+def test_spool_io_fault_is_retryable_server_fault_not_malformed(monkeypatch):
+    # A transient spool WRITE fault is a SERVER fault: the sensor must get a retryable 503, not a 400 that reads
+    # "your input was malformed, do not retry" (which would silently lose a legitimate authenticated finding).
+    rcv = _rcv(require_auth=False)
+
+    def _boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(R, "atomic_spool_write", _boom)
+    res = rcv.ingest(_body(_finding()))
+    assert res.outcome == R.IngestOutcome.SPOOL_FAULT and res.http_status == 503
+    assert rcv.spool_faults == 1 and rcv.rejected_malformed == 0 and rcv.spooled == 0
+
+
 # --- SPOOL SHAPE (drain-verifiable) --------------------------------------------------------------
 def test_landed_envelope_is_drain_shaped_and_mac_verifies():
     spool = tempfile.mkdtemp()
