@@ -1232,6 +1232,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
             return self._launch(action, body)
+        if action == "launch/instruct" and _live_control_on():        # Live Control mission steering (flag OFF -> 404)
+            return self._launch_instruct(body)
         if action == "retest" and _retest_on():                       # C1b (flag OFF -> unknown-action 404)
             return self._retest(body)
         if action in ("monitoring/authorize", "monitoring/revoke") and _monitoring_on():
@@ -1353,6 +1355,25 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             c, r = self._provision(action.replace("/", "_", 1), requester, payload)  # launch_start|cancel|pause|resume
         else:
             return self._deny(404, "unknown launch action")
+        return self._json(r, c)
+
+    def _launch_instruct(self, body: dict):
+        """Live Control MISSION STEERING — forward ONE advisory instruction for the session org's running
+        engagement on ``host`` to the provisioner, which resolves the slug server-side (only for a host the org
+        has proven) and enqueues it on the offense-local advisory queue the engine drains. Like ``_launch``, the
+        acting REQUESTER + ORG come from the SERVER session — NEVER the body (tenant isolation at the edge): the
+        body carries ONLY the target ``host`` (the org's own proven target), the instruction ``text``, and a
+        client ``idem_key`` (so a double-click / reconnect is a no-op). ADVISORY-only: it fires no tool, relaxes
+        no scope, mints no fact; the engine folds it into its untrusted think context at the next loop top."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""),   # session org, never body-supplied
+                                      "host": body.get("host", ""), "text": body.get("text", ""),
+                                      "idem_key": body.get("idem_key", ""), "ip": self._ip(),
+                                      "mfa_at": rec.get("mfa_at")}
+        c, r = self._provision("launch_instruct", requester, payload)
         return self._json(r, c)
 
     def _retest(self, body: dict):
@@ -1798,6 +1819,11 @@ def _launch_ui_on() -> bool:
 def _retest_on() -> bool:
     from .. import config as _config
     return _config.customer_retest_ui_enabled()
+
+
+def _live_control_on() -> bool:
+    from .. import config as _config
+    return _config.customer_live_control_enabled()
 
 
 def _posture_on() -> bool:
