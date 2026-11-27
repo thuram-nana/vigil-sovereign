@@ -44,8 +44,11 @@ jobs:
           pip install "cfn-lint==1.61.0"
           # The Z3R relay guard + CFN posture analyzer import the vigil_core integrity substrate
           # (Signature / TrustRoot / evidence_signing_bytes / verify_threshold). Install it the same way
-          # every other CI job does (editable, no deps) so the analyzer step and the offline tests below
-          # can import it — without it they raise ModuleNotFoundError: No module named 'vigil_core'.
+          # every other CI job does: the hash-pinned runtime lock FIRST (it carries pydantic + the other
+          # vigil_core runtime deps), THEN vigil_core editable --no-deps. The runtime lock was missing here,
+          # so the analyzer and the offline tests died at import with ModuleNotFoundError (first on
+          # 'vigil_core', and — once that was on the path — on 'pydantic'), i.e. the advisory checks never ran.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
           pip install -e packages/core/vigil_core --no-deps
 
       - name: cfn-lint — every AEGIS staging template (BLOCKING within this advisory job)
