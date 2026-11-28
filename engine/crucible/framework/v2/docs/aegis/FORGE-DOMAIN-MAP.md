@@ -239,7 +239,7 @@ Two supporting areas that every domain leans on:
 
 | Area | Path | Verified | Note |
 |------|------|:---:|------|
-| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-17c IdP (Okta System Log) normalizer + gated `detect_format` (`parse_idp`); AS-7b Coraza |
+| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/`, `aegis/coraza_source.py` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-17c IdP (Okta System Log) normalizer + gated `detect_format` (`parse_idp`); **AS-7b Coraza (BUILT — `aegis/coraza_source.py`: deterministic read-only Coraza/CRS front-WAF SUPPLY-CHAIN attestation composing the AS-7a §7 licence gate [`coraza-v3` + `coreruleset-crs-4x` service-use] with an AS-28-style stdlib corpus PIN → `admissible = licensed AND pinned`; a Coraza v3 DetectionOnly hit's `rule_refs` are normalized address-free and admitted as a LEAD only over an admissible corpus [drifted/unlicensed ⇒ fail closed, no belief]; surfaced read-only on the AS-5c probe; MEASURES, never acts — a CRS hit is a LEAD never a block; default-OFF `VIGIL_AEGIS_CORAZA`)** |
 | CODEOWNERS trust domains (`_CRITICAL_PREFIXES`) | `.github/CODEOWNERS`, `integration/tests/test_codeowners_coverage.py` | yes | AS-0: `aegis/`, `verify/`, `veracity/`, `vigil_core/` are critical prefixes |
 | Slice graph (acyclicity, levels, disjoint manifests) | `engine/crucible/framework/v2/aegis/slice_graph.json` + `aegis/tests/test_aegis_slice_graph.py` | yes | AS-0 graph gate (72 slices, 24 waves) |
 
