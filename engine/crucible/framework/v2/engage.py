@@ -1512,7 +1512,10 @@ def run_engagement(
     # reloads the scan's snapshotted report and skips ONLY the scan + the spine-emitting reasoning
     # pass (RESUMABLE_PHASES); every pure-reasoning phase — including the grounding veracity
     # firewall — re-runs, so a resumed report is re-verified, never a stale snapshot.
-    ledger = PhaseLedger(slug, resume=resume, sink=sink)
+    # ``spine`` (the append-only blackboard, opt-in telemetry) is handed to the ledger so — and ONLY when the
+    # customer live-graph flag is on — each phase transition can drain the real recorded agent events onto the
+    # customer-safe live-graph seam. Default (no spine / flag off) → the ledger builds no projector → byte-identical.
+    ledger = PhaseLedger(slug, resume=resume, sink=sink, spine=spine)
 
     # Suppress the SPINE RE-EMIT of a pure-reasoning phase that ALSO writes to the append-only
     # event spine and that a PRIOR run already recorded there. Two re-run phases emit: FUSION

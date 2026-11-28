@@ -155,10 +155,17 @@ class PhaseLedger:
     can raise into the engagement.
     """
 
-    def __init__(self, slug: str, *, resume: bool = False, sink: Any = None) -> None:
+    def __init__(self, slug: str, *, resume: bool = False, sink: Any = None,
+                 spine: Any = None) -> None:
         self._slug = slug
         self._resume = bool(resume)
         self._sink = sink
+        # Customer live-graph (default-OFF behind VIGIL_CUSTOMER_LIVE_GRAPH): the append-only agent SPINE handle,
+        # so each phase transition can ALSO drain the real agent events into the customer-safe live-graph seam.
+        # None (the default, and every operator / greenfield run) => no projector is ever built => byte-identical.
+        self._spine = spine
+        self._graph: Any = None
+        self._graph_built = False
         self._completed_prior: set[str] = set()
         # Launch binding (see :meth:`bind_launch`). Unbound by default, which is the per-slug behaviour every
         # operator / greenfield run has always had.
@@ -318,6 +325,7 @@ class PhaseLedger:
         self._write(phase, status, **extra)
         self._emit(phase, status)
         self._emit_customer_activity(phase, status)
+        self._emit_customer_graph(phase, status)
 
     def _emit_customer_activity(self, phase: str, status: str) -> None:
         """Live Control (default-OFF via ``VIGIL_CUSTOMER_LIVE_CONTROL``): mirror the phase transition onto the
@@ -342,6 +350,45 @@ class PhaseLedger:
             _emit_activity(base, self._slug, phase, status, ts=time.time())
         except Exception:  # noqa: BLE001 — a customer-activity mirror must never perturb the engine
             return
+
+    def _emit_customer_graph(self, phase: str, status: str) -> None:
+        """Customer live-GRAPH (default-OFF via ``VIGIL_CUSTOMER_LIVE_GRAPH``): at each phase transition, drain
+        the real agent events the spine recorded since the last transition onto the customer-safe live-graph seam
+        and mirror the transition itself as the graph's phase backbone. A superset of
+        :meth:`_emit_customer_activity` — where that mirrors only phase transitions, this mirrors the actual
+        sub-agent / tool activity, grounded one-for-one in recorded blackboard events (no fabrication). Requires
+        the spine handle (passed by ``run_engagement``); without it, or with the flag off, this is a COMPLETE
+        no-op (byte-identical). Best-effort and swallow-on-error — a customer mirror must never perturb the
+        engine."""
+        if self._spine is None:
+            return
+        try:
+            from .agents.graph_projection import flag_enabled
+            if not flag_enabled():
+                return
+            proj = self._graph_projector()
+            if proj is None:
+                return
+            if phase == P_PREFLIGHT and status == "started":
+                proj.reset()                 # a new run attempt — anchor at the spine high-water (current run only)
+            proj.on_phase(phase, status, ts=time.time())
+        except Exception:  # noqa: BLE001 — a customer-graph mirror must never perturb the engine
+            return
+
+    def _graph_projector(self) -> Any:
+        """Lazily build the offense graph projector over this run's spine (once). None if it cannot be built —
+        the caller then no-ops. Built behind the flag + spine checks in :meth:`_emit_customer_graph`."""
+        if self._graph is not None or self._graph_built:
+            return self._graph
+        self._graph_built = True
+        try:
+            from vigil_core.seam_base import resolve_seam_base
+
+            from .agents.graph_projection import GraphProjector
+            self._graph = GraphProjector(self._spine, self._slug, resolve_seam_base())
+        except Exception:  # noqa: BLE001 — never let projector construction perturb the engine
+            self._graph = None
+        return self._graph
 
     def _emit(self, phase: str, status: str) -> None:
         """Mirror the phase transition onto the event spine (best-effort) so the live process

@@ -2088,10 +2088,20 @@
   // Pure composition of ALREADY-PROVEN routes: the launches read (state + the signed lease for pause/resume), the
   // advisory instruction POST, and the customer-safe live-activity feed (phase transitions, polled with a cursor).
   var LIVE_ON = pageFlag("liveControl");
+  // Live agent-GRAPH (VIGIL_CUSTOMER_LIVE_GRAPH, strict default-OFF): the richer #/live surface — a live graph
+  // of the real sub-agents/phases + a streaming rich transcript, every node & event grounded in a real recorded
+  // blackboard event (no fabricated data). OFF => every graph branch below is skipped and #/live is the exact
+  // Live Control-only screen (byte-identical). Independent of LIVE_ON: the graph can be on with Live Control off.
+  var LIVE_GRAPH_ON = pageFlag("liveGraph");
   var LIVE_POLL_MS = 15000;
+  var GRAPH_POLL_MS = 4000;                                     // tightened near-real-time poll for the graph view
   var LIVE_ICON = { started: "▸", completed: "✓", skipped: "–", failed: "✗", halted: "⏸" };
   var live = { host: null, rows: [], cursor: -1, timer: null, gen: 0, sending: false, loading: false,
                holder: null, feed: null };
+  // graph-view state (only used when LIVE_GRAPH_ON). `all` is the FULL recorded transcript (for replay/scrub +
+  // client-side per-node filter); `nodes`/`edges` are the latest live graph snapshot; `sel` is the selected node.
+  var lg = { nodes: [], edges: [], gen: 0, cursor: -1, all: [], sel: "", scrub: -1, nodeEls: {},
+             graphEl: null, feedEl: null, detailEl: null, errored: false };
 
   function liveActive() {
     return ((launchUi.data && launchUi.data.launches) || []).filter(function (l) {
@@ -2113,6 +2123,7 @@
       : h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
   }
   async function loadLiveActivity() {
+    if (LIVE_GRAPH_ON) return loadGraphTick();                 // the richer graph view drives its own fetch + poll
     if (!live.host || live.loading) return;                   // one fetch at a time: no double-append on the cursor
     live.loading = true;
     var gen = live.gen, d = null, status = 0;
@@ -2135,7 +2146,8 @@
   }
   function scheduleLivePoll() {
     if (live.timer || here() !== "#/live" || document.hidden || !live.host) return;
-    live.timer = setTimeout(function () { live.timer = null; loadLiveActivity(); }, LIVE_POLL_MS);
+    live.timer = setTimeout(function () { live.timer = null; loadLiveActivity(); },
+      LIVE_GRAPH_ON ? GRAPH_POLL_MS : LIVE_POLL_MS);
   }
   // Two ways to halt the loop. stopLivePoll ENDS it (leaving #/live, a host switch, a 401/404): it bumps `gen` so
   // any in-flight answer is dropped. pauseLivePoll only HOLDS it (the tab hidden): it keeps `gen`, so an in-flight
@@ -2176,8 +2188,13 @@
     }
     if (!live.host || !running.some(function (l) { return l.host === live.host; })) {
       live.host = running[0].host; live.rows = []; live.cursor = -1;
+      if (LIVE_GRAPH_ON) {                                     // a host switch starts the graph trail fresh too
+        lg.nodes = []; lg.edges = []; lg.gen = 0; lg.cursor = -1; lg.all = []; lg.sel = ""; lg.scrub = -1;
+        lg.nodeEls = {}; lg.errored = false;
+      }
     }
     var cur = running.filter(function (l) { return l.host === live.host; })[0] || running[0];
+    if (LIVE_GRAPH_ON) return graphBody(cur, running);
     live.feed = h("div#live-feed", {}, h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
     var ta = h("textarea.live-instruct", { rows: "2", maxlength: "4000",
       placeholder: "Tell VIGIL what to focus on — e.g. \"concentrate on authentication\"" });
@@ -2211,6 +2228,294 @@
         note]),
     ]);
   }
+
+  // ---- Live agent-GRAPH view (LIVE_GRAPH_ON) --------------------------------------------------------------------
+  // A live graph of the REAL sub-agents/phases + a streaming rich transcript. Every node, edge and event is a
+  // customer-safe projection of a real recorded blackboard event (the server fold is grounded; the client only
+  // RENDERS what the server returns — it invents nothing: no random data, no placeholder agent, no synthetic
+  // node). CSP-clean: listeners are attached (addEventListener via onClick / the svg helper), never inline.
+  var LG_SVGNS = "http://www.w3.org/2000/svg";
+  var LG_GROUP_LABEL = { stage: "Engagement stages", orchestration: "Orchestration", recon: "Reconnaissance",
+    exploit: "Exploitation", assurance: "Assurance & critics", report: "Reporting", support: "Support",
+    engine: "Engine" };
+  var LG_GROUP_ORDER = ["stage", "orchestration", "recon", "exploit", "assurance", "report", "support", "engine"];
+  var LG_STATUS = { running: "running", done: "done", failed: "failed", paused: "paused", skipped: "skipped",
+    pending: "pending", active: "active" };
+  var lgIdemN = 0;
+  function graphIdem() { lgIdemN += 1; return "g" + String(Date.now()) + "-" + String(lgIdemN); }   // counter nonce, not random
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(LG_SVGNS, tag);
+    for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k)) el.setAttribute(k, attrs[k]); }
+    return el;
+  }
+  function lgMaxSeq() { return lg.all.length ? lg.all[lg.all.length - 1].seq : -1; }
+  function lgReplaying() { return lg.scrub >= 0 && lg.scrub < lgMaxSeq(); }
+
+  async function loadGraphTick() {
+    if (!live.host || live.loading) return;                   // one fetch at a time: no double-append on the cursor
+    live.loading = true;
+    var gen = live.gen, g = null, a = null, status = 0;
+    try { g = await VUI.getJSON(API + "/live/graph?host=" + encodeURIComponent(live.host)); }
+    catch (e) { g = null; status = (e && e.status) || 0; }
+    if (status !== 401 && status !== 404) {                    // only poll the transcript if the graph read was ok
+      try { a = await VUI.getJSON(API + "/live/graph/activity?host=" + encodeURIComponent(live.host)
+              + "&since=" + lg.cursor); }
+      catch (e) { a = null; if (!status) status = (e && e.status) || 0; }
+    }
+    live.loading = false;
+    if (gen !== live.gen || here() !== "#/live") return;       // navigated away / host switched: drop this answer
+    if (status === 401 || status === 404) {                    // session gone, or screen switched off: STOP
+      stopLivePoll();
+      if (status === 401) { await refreshWho(); nav("#/login"); }
+      return;
+    }
+    var changed = false;
+    if (g && g.nodes) { lg.nodes = g.nodes; lg.edges = g.edges || []; lg.gen = g.generation || 0;
+      lg.errored = false; changed = true; }
+    else if (!g) { lg.errored = true; changed = true; }
+    if (a && a.rows && a.rows.length) {
+      var first = a.rows[0].seq;
+      if (lg.all.length && first <= lg.all[lg.all.length - 1].seq) { lg.all = a.rows.slice(); lg.scrub = -1; }
+      else { lg.all = lg.all.concat(a.rows); }                 // a trail reset (new run) resyncs from seq 0 -> replace
+      if (typeof a.cursor === "number") lg.cursor = a.cursor;
+      changed = true;
+    }
+    if (changed) {
+      renderGraphPanel(); renderGraphDetail(); renderGraphFeed();
+      if (!lgReplaying()) renderGraphScrub();                  // refresh the slider max while following live (not mid-drag)
+    }
+    scheduleLivePoll();
+  }
+
+  function lgStatusDot(status) {
+    var s = own(LG_STATUS, status) || "active";
+    return h("span.lgraph-dot", { dataset: { s: s }, title: s });
+  }
+  function graphNodeCard(n) {
+    var selected = lg.sel === n.id;
+    var meta = [h("span.lgraph-n-ev", { text: (n.events || 0) + (n.events === 1 ? " event" : " events") })];
+    if (n.verified) meta.push(h("span.lgraph-badge", { title: "oracle-verified steps", text: "✓ " + n.verified }));
+    if (n.first_ref) meta.push(h("span.lgraph-ref", { title: "provenance: blackboard event id", text: "#" + n.first_ref }));
+    var card = h("button.lgraph-node" + (selected ? ".is-sel" : ""), {
+      dataset: { node: n.id, group: n.group || "support" },
+      "aria-pressed": selected ? "true" : "false",
+      onClick: function () { selectGraphNode(selected ? "" : n.id); },
+    }, [
+      h("span.lgraph-n-head", {}, [lgStatusDot(n.status), h("span.lgraph-n-label", { text: n.label || n.id })]),
+      h("span.lgraph-n-meta", {}, meta),
+    ]);
+    lg.nodeEls[n.id] = card;
+    return card;
+  }
+  function renderGraphPanel() {
+    if (!lg.graphEl) return;
+    lg.nodeEls = {};
+    if (lg.errored && !lg.nodes.length) {
+      VUI.mount(lg.graphEl, h("p.cust-muted", { text: "Could not load the live graph just now — retrying." }));
+      return;
+    }
+    if (!lg.nodes.length) {
+      VUI.mount(lg.graphEl, h("p.cust-muted", { text: "No agent activity has been recorded yet. The graph fills "
+        + "in as VIGIL works — it never shows a step that did not happen." }));
+      return;
+    }
+    var byGroup = {};
+    lg.nodes.forEach(function (n) { var g = n.group || "support"; (byGroup[g] = byGroup[g] || []).push(n); });
+    var cols = [];
+    LG_GROUP_ORDER.forEach(function (g) {
+      var ns = byGroup[g]; if (!ns || !ns.length) return;
+      cols.push(h("div.lgraph-col", { dataset: { group: g } }, [
+        h("div.lgraph-col-h", { text: own(LG_GROUP_LABEL, g) || g }),
+        h("div.lgraph-col-b", {}, ns.map(graphNodeCard)),
+      ]));
+    });
+    var svg = svgEl("svg", { "class": "lgraph-edges" });
+    var canvas = h("div.lgraph-canvas", {}, cols);
+    // the svg sits behind the node columns; it is appended to the scroller and sized/drawn after layout settles
+    var scroller = h("div.lgraph-scroll", {}, [canvas]);
+    scroller.appendChild(svg);
+    lg.svgEl = svg; lg.scrollEl = scroller;
+    VUI.mount(lg.graphEl, scroller);
+    // measure + draw edges after the browser has laid the nodes out
+    if (window.requestAnimationFrame) window.requestAnimationFrame(drawGraphEdges); else setTimeout(drawGraphEdges, 0);
+  }
+  function drawGraphEdges() {
+    var svg = lg.svgEl, scroller = lg.scrollEl;
+    if (!svg || !scroller || !lg.edges.length) { if (svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); } return; }
+    try {
+      var base = scroller.getBoundingClientRect();
+      var w = scroller.scrollWidth, hgt = scroller.scrollHeight;
+      svg.setAttribute("width", String(w)); svg.setAttribute("height", String(hgt));
+      svg.setAttribute("viewBox", "0 0 " + w + " " + hgt);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      function center(id) {
+        var el = lg.nodeEls[id]; if (!el) return null;
+        var r = el.getBoundingClientRect();
+        return { x: r.left - base.left + scroller.scrollLeft + r.width / 2,
+                 y: r.top - base.top + scroller.scrollTop + r.height / 2 };
+      }
+      lg.edges.forEach(function (e) {
+        var a = center(e.src), b = center(e.dst); if (!a || !b) return;
+        var hl = lg.sel && (e.src === lg.sel || e.dst === lg.sel);
+        svg.appendChild(svgEl("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+          "class": "lgraph-edge", "data-kind": e.kind, "data-hl": hl ? "1" : "0" }));
+      });
+    } catch (err) { /* best-effort: nodes still render without connectors */ }
+  }
+
+  function selectGraphNode(id) {
+    lg.sel = id || "";
+    renderGraphPanel();                                        // re-highlight the selected node + its edges
+    renderGraphDetail();
+    renderGraphFeed();
+  }
+  function lgSelNode() {
+    if (!lg.sel) return null;
+    for (var i = 0; i < lg.nodes.length; i++) { if (lg.nodes[i].id === lg.sel) return lg.nodes[i]; }
+    return null;
+  }
+  function renderGraphDetail() {
+    if (!lg.detailEl) return;
+    var n = lgSelNode();
+    if (!n) { VUI.mount(lg.detailEl, h("p.cust-muted", { text: "Select a node to see its activity and steer just "
+      + "that part of the assessment." })); return; }
+    var kids = [
+      h("div.lgraph-d-head", {}, [lgStatusDot(n.status),
+        h("strong", { text: n.label || n.id }),
+        h("span.cust-muted", { text: " · " + (own(LG_GROUP_LABEL, n.group) || n.group) })]),
+      h("p.cust-muted", { text: (n.events || 0) + " recorded "
+        + (n.events === 1 ? "event" : "events") + (n.verified ? " · " + n.verified + " oracle-verified" : "")
+        + (n.first_ref ? " · from spine event #" + n.first_ref : "") + "." }),
+    ];
+    if (n.kind === "agent") {
+      var ta = h("textarea.live-instruct", { rows: "2", maxlength: "4000",
+        placeholder: "Steer " + (n.label || "this agent") + " — e.g. \"focus on the admin API\"" });
+      var note = h("div.live-note", {});
+      kids.push(h("div.lgraph-steer", {}, [
+        h("p.cust-muted", { text: "An advisory nudge aimed at this node. VIGIL weighs it, then still passes every "
+          + "authorization and evidence check — it never expands scope." }),
+        ta,
+        h("div.live-send", {}, [h("button.btn",
+          { onClick: function () { sendGraphInstruction(ta, note, n); } }, "Steer " + (n.label || "node"))]),
+        note]));
+    } else {
+      kids.push(h("p.cust-muted", { text: "This is an engagement stage. Steer a specific agent node to nudge the "
+        + "work, or use the box below to steer the whole assessment." }));
+    }
+    VUI.mount(lg.detailEl, h("div", {}, kids));
+  }
+  async function sendGraphInstruction(ta, note, node) {
+    var t = (ta && ta.value ? ta.value : "").trim();
+    if (live.sending || !live.host || !t) return;
+    live.sending = true;
+    // Steer THAT node: prefix the advisory text with the node focus. Advisory-only — the SAME money-safe
+    // live_control.submit_instruction path; it fires no tool, relaxes no scope, mints no fact.
+    var focus = node && node.label ? ("[focus: " + node.label + "] ") : "";
+    try {
+      await VUI.postJSON(API + "/launch/instruct", { host: live.host, text: focus + t, idem_key: graphIdem() });
+      ta.value = "";
+      VUI.mount(note, h("span.cust-muted", { text: "✓ Sent — VIGIL will weigh this in its next step." }));
+    } catch (e) {
+      VUI.mount(note, h("span.cust-muted",
+        { text: "⚠ " + ((e && e.data && e.data.error) || "Could not send the instruction.") }));
+    }
+    live.sending = false;
+  }
+
+  function graphRow(r) {
+    var t = (r && typeof r.ts === "number" && r.ts) ? new Date(r.ts * 1000).toLocaleTimeString() : "";
+    var kids = [
+      h("span.lgraph-r-t", { text: t }),
+      h("span.lgraph-r-role", { dataset: { node: r.node }, text: r.role || "" }),
+      h("span.lgraph-r-l", { text: r.label || r.kind || "" }),
+    ];
+    if (r.verified) kids.push(h("span.lgraph-badge", { title: "oracle-verified", text: "✓" }));
+    if (r.ref) kids.push(h("span.lgraph-ref", { title: "provenance: blackboard event id", text: "#" + r.ref }));
+    return h("li.lgraph-step" + (lg.sel && r.node === lg.sel ? ".is-sel" : ""), {}, kids);
+  }
+  function renderGraphFeed() {
+    if (!lg.feedEl) return;
+    var rows = lg.all;
+    if (lg.sel) rows = rows.filter(function (r) { return r.node === lg.sel; });     // selection filters the transcript
+    if (lgReplaying()) rows = rows.filter(function (r) { return r.seq <= lg.scrub; });   // replay/scrub
+    var body;
+    if (!rows.length) {
+      body = h("p.cust-muted", { text: lg.sel ? "No recorded activity for this node yet."
+        : "No activity has been recorded yet." });
+    } else {
+      body = h("ul.lgraph-feed", {}, rows.slice(-400).map(graphRow));
+    }
+    VUI.mount(lg.feedEl, body);
+  }
+  function renderGraphScrub() {
+    if (!lg.scrubEl) return;
+    var max = lgMaxSeq();
+    if (max < 1) { VUI.mount(lg.scrubEl, h("span.cust-muted", { text: "Replay available once activity is recorded." })); return; }
+    var cur = lgReplaying() ? lg.scrub : max;
+    var slider = h("input.lgraph-range", { type: "range", min: "0", max: String(max), value: String(cur),
+      "aria-label": "Replay position" });
+    slider.addEventListener("input", function () {
+      lg.scrub = parseInt(slider.value, 10);
+      if (lg.scrub >= max) lg.scrub = -1;                      // dragged to the end => back to live tail
+      renderGraphFeed(); renderGraphScrubNote();
+    });
+    var liveBtn = h("button.btn", { onClick: function () { lg.scrub = -1; renderGraphScrub(); renderGraphFeed(); } }, "Live");
+    lg.scrubNoteEl = h("span.lgraph-scrub-note", {});
+    VUI.mount(lg.scrubEl, h("div.lgraph-scrub", {}, [slider, liveBtn, lg.scrubNoteEl]));
+    renderGraphScrubNote();
+  }
+  function renderGraphScrubNote() {
+    if (!lg.scrubNoteEl) return;
+    VUI.mount(lg.scrubNoteEl, h("span.cust-muted", { text: lgReplaying()
+      ? ("Replaying the recorded stream up to step " + lg.scrub + " — tamper-evident on the engine spine.")
+      : "Following live." }));
+  }
+  function graphBody(cur, running) {
+    var controls = [];
+    var acts = (cur && cur.actions) || [];
+    if (acts.indexOf("pause") >= 0) controls.push(h("button.btn", { onClick: function () { liveLaunchAction("pause", cur); } }, "Pause"));
+    if (acts.indexOf("resume") >= 0) controls.push(h("button.btn", { onClick: function () { liveLaunchAction("resume", cur); } }, "Resume"));
+    lg.graphEl = h("div#live-graph.lgraph", {}, h("p.cust-muted", { text: "Loading the live agent graph…" }));
+    lg.detailEl = h("div#live-graph-detail", {}, h("p.cust-muted", { text: "Select a node to steer just that part." }));
+    lg.feedEl = h("div#live-graph-feed", {}, h("p.cust-muted", { text: "Waiting for VIGIL to begin…" }));
+    lg.scrubEl = h("div#live-graph-scrub", {});
+    var gta = h("textarea.live-instruct", { rows: "2", maxlength: "4000",
+      placeholder: "Tell VIGIL what to focus on — e.g. \"concentrate on authentication\"" });
+    var gnote = h("div.live-note", {});
+    // render whatever we already have, then the first poll tick refreshes it
+    setTimeout(function () { renderGraphPanel(); renderGraphDetail(); renderGraphFeed(); renderGraphScrub(); }, 0);
+    return h("div.live.lgraph-view", {}, [
+      h("div.live-head", {}, [
+        h("h2", { text: "Live agent graph" }),
+        h("p.cust-muted", { text: "VIGIL is assessing " + (cur.host || "") + " — "
+          + (own(STATE_LABELS, cur.state) || cur.state) + ". Every node and step below is a real recorded event — "
+          + "nothing here is simulated." }),
+      ]),
+      controls.length ? h("div.live-controls", {}, controls) : null,
+      h("div.card", {}, [
+        h("h3", { text: "Agents & stages" }),
+        h("p.cust-muted", { text: "The real sub-agents and engagement stages, with live status. Select a node to "
+          + "filter the transcript and steer just that part." }),
+        lg.graphEl]),
+      h("div.lgraph-two", {}, [
+        h("div.card.lgraph-detail-card", {}, [h("h3", { text: "Selected node" }), lg.detailEl]),
+        h("div.card.lgraph-feed-card", {}, [
+          h("h3", { text: "Activity transcript" }),
+          h("p.cust-muted", { text: "What VIGIL actually did, streamed live — no secrets or target detail. Scrub to "
+            + "replay the recorded stream." }),
+          lg.scrubEl, lg.feedEl]),
+      ]),
+      h("div.card", {}, [
+        h("h3", { text: "Steer the assessment" }),
+        h("p.cust-muted", { text: "An advisory nudge for the whole run: VIGIL weighs it, then still passes every "
+          + "authorization and evidence check — it never expands scope." }),
+        gta,
+        h("div.live-send", {}, [h("button.btn",
+          { onClick: function () { sendGraphInstruction(gta, gnote, null); } }, "Send to VIGIL")]),
+        gnote]),
+    ]);
+  }
+
   function viewLiveControl() {
     live.holder = h("div#live-body", {}, loadingHolder("Loading…"));
     (async function () {

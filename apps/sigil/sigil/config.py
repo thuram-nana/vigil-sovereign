@@ -675,6 +675,20 @@ def customer_live_control_enabled() -> bool:
     return _default_on_flag("VIGIL_CUSTOMER_LIVE_CONTROL")
 
 
+def customer_live_graph_enabled() -> bool:
+    """True iff the customer LIVE AGENT-GRAPH surface is ON (``VIGIL_CUSTOMER_LIVE_GRAPH`` affirmative). STRICT
+    DEFAULT-OFF: unset / any non-affirmative token reads OFF, and off the edge routes
+    (``/api/customer/live/graph`` + ``/api/customer/live/graph/activity``), their provisioner actions
+    (``launch_graph`` / ``launch_graph_activity``) and the #/live graph panel are all ABSENT (404 / panel hidden)
+    exactly as an unknown route, so the whole agent-graph surface stays INERT and #/live is BYTE-IDENTICAL to a
+    build without it. The SAME env var the OFFENSE phase-ledger gates its spine->seam projection on, so the emit
+    and the read are never out of step. A pure READ of a customer-safe projection of the engagement's own agent
+    spine — it mints nothing, charges nothing, launches nothing; node steering reuses the advisory
+    live_control.submit_instruction (money-doctrine-neutral). Independent of ``VIGIL_CUSTOMER_LIVE_CONTROL`` (that
+    gates the coarser phase-only activity feed); this gates the richer graph + rich-activity surface."""
+    return (os.environ.get("VIGIL_CUSTOMER_LIVE_GRAPH") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def trial_preview_enabled() -> bool:
     """True iff the free-trial PREVIEW is ON (`VIGIL_TRIAL_PREVIEW_ENABLED` affirmative). OFF by default: sign-up
     grants the legacy trial exactly as before. ON: a sign-up grants the trial under the `trial-preview:<org>` entry

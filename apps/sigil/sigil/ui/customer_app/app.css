@@ -706,3 +706,46 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .live-step-t { font-family: var(--font-mono, monospace); font-size: var(--fs-sm, 0.85em); color: var(--muted, #888); min-width: 6.5em; }
 .live-step-i { width: 1.2em; text-align: center; }
 .live-step-l { flex: 1; }
+
+/* Live agent-GRAPH (#/live, VIGIL_CUSTOMER_LIVE_GRAPH) — a live graph of the real sub-agents/phases + a
+   streaming rich transcript. Status colours are theme tokens with safe fallbacks; the graph panel scrolls
+   horizontally WITHIN itself (never the page). */
+.lgraph-scroll { position: relative; overflow-x: auto; overflow-y: hidden; padding: 4px 2px 8px; }
+.lgraph-canvas { position: relative; z-index: 1; display: flex; gap: 22px; align-items: flex-start; min-width: min-content; }
+.lgraph-edges { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: visible; }
+.lgraph-edge { stroke: var(--border, #cfd4dc); stroke-width: 1.5; opacity: 0.55; }
+.lgraph-edge[data-kind="delegation"] { stroke: var(--accent, #6ea8fe); opacity: 0.6; }
+.lgraph-edge[data-kind="sequence"] { stroke-dasharray: 4 4; }
+.lgraph-edge[data-hl="1"] { stroke: var(--accent, #6ea8fe); opacity: 1; stroke-width: 2.25; }
+.lgraph-col { display: flex; flex-direction: column; gap: 8px; min-width: 150px; }
+.lgraph-col-h { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; }
+.lgraph-col-b { display: flex; flex-direction: column; gap: 8px; }
+.lgraph-node { text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; cursor: pointer;
+  background: var(--surface-2, var(--surface, #fff)); border: 1px solid var(--border, #d7dbe2); border-radius: 10px;
+  color: inherit; font: inherit; width: 100%; box-sizing: border-box; }
+.lgraph-node:hover { border-color: var(--accent, #6ea8fe); }
+.lgraph-node.is-sel { border-color: var(--accent, #6ea8fe); box-shadow: 0 0 0 2px var(--accent, #6ea8fe) inset; }
+.lgraph-n-head { display: flex; align-items: center; gap: 8px; }
+.lgraph-n-label { font-weight: 600; font-size: 0.9rem; }
+.lgraph-n-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 0.74rem; opacity: 0.75; }
+.lgraph-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; background: var(--muted, #9aa3b2); }
+.lgraph-dot[data-s="running"], .lgraph-dot[data-s="active"] { background: var(--accent, #6ea8fe); }
+.lgraph-dot[data-s="done"] { background: var(--ok, #39b36a); }
+.lgraph-dot[data-s="failed"] { background: var(--danger, #e5534b); }
+.lgraph-dot[data-s="paused"] { background: var(--warn, #d9a441); }
+.lgraph-dot[data-s="skipped"], .lgraph-dot[data-s="pending"] { background: var(--muted, #9aa3b2); }
+.lgraph-badge { color: var(--ok, #39b36a); font-weight: 600; }
+.lgraph-ref { font-family: var(--font-mono, monospace); opacity: 0.6; }
+.lgraph-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; }
+@media (max-width: 760px) { .lgraph-two { grid-template-columns: minmax(0, 1fr); } }
+.lgraph-steer { margin-top: 10px; }
+.lgraph-scrub { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.lgraph-range { flex: 1; min-width: 140px; }
+.lgraph-scrub-note { font-size: 0.78rem; }
+.lgraph-feed { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+.lgraph-step { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-top: 1px solid var(--border, #eee); }
+.lgraph-step:first-child { border-top: 0; }
+.lgraph-step.is-sel { background: var(--surface-2, rgba(110,168,254,0.08)); }
+.lgraph-r-t { font-family: var(--font-mono, monospace); font-size: 0.8em; color: var(--muted, #888); min-width: 6.5em; }
+.lgraph-r-role { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.6; min-width: 6em; }
+.lgraph-r-l { flex: 1; }

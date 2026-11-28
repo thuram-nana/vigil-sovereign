@@ -238,6 +238,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # /api/customer/live/activity, so the screen and its routes are never out of step; off, the tab is absent and
     # #/live is the home screen (byte-identical). A non-secret on/off value counting in the build id.
     live_control = _config.customer_live_control_enabled()
+    # Live agent-GRAPH (VIGIL_CUSTOMER_LIVE_GRAPH) — the richer #/live surface: a live graph of the real
+    # sub-agents / phases + a streaming rich transcript, grounded in the engagement's own agent spine. STRICT
+    # default-OFF — the SAME flag that serves /api/customer/live/graph(/activity); off, the panel is absent and
+    # #/live is byte-identical to the Live Control-only screen. A non-secret on/off value counting in the build id.
+    live_graph = _config.customer_live_graph_enabled()
     # Legal/governance S1 — the settings shell (the #/settings hub + the General preferences tab). Like every switch
     # here, a non-secret on/off value written into the page, counting in the build id; its routes are served only
     # when it is on.
@@ -318,6 +323,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_LIVE_CONTROL__": "1" if live_control else "0",
+                                     "__VIGIL_LIVE_GRAPH__": "1" if live_graph else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
                                      "__VIGIL_AUTHORIZATIONS__": "1" if authorizations else "0",
                                      "__VIGIL_PRIVACY_CENTER__": "1" if privacy_center else "0",
@@ -788,6 +794,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_events")
         if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
             return self._live_activity()
+        if path == "/api/customer/live/graph" and _live_graph_on():        # Live agent GRAPH (flag OFF -> 404)
+            return self._live_graph()
+        if path == "/api/customer/live/graph/activity" and _live_graph_on():   # Live graph rich transcript (OFF -> 404)
+            return self._live_graph_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
         # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
         if path == "/api/customer/posture" and _posture_on():
@@ -887,6 +897,49 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253),
                                       "since": _one("since", 16), "ip": self._ip()}
         c, r = self._provision("launch_activity", requester, payload)
+        return self._json(r, c)
+
+    def _live_graph(self):
+        """Live agent-GRAPH — GET the customer-safe live agent/engagement GRAPH (real sub-agents / phases + the
+        recorded delegation / sequence edges) of the session org's running engagement on ``host``. Like every
+        customer read, the REQUESTER + ORG come from the SERVER-side session, never the query (a query ``org_id``
+        is ignored); the query carries ONLY the target ``host`` (the org's own proven target). The provisioner
+        resolves the slug within the session org's own proven set and returns a customer-safe graph — no secret,
+        IP or target detail crosses. A pure read: viewing mints / charges / launches nothing."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def _one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253), "ip": self._ip()}
+        c, r = self._provision("launch_graph", requester, payload)
+        return self._json(r, c)
+
+    def _live_graph_activity(self):
+        """Live agent-GRAPH — GET the customer-safe RICH ACTIVITY TRANSCRIPT (the sub-agents' reasoning + tool
+        events, each grounded in a real recorded event) of the session org's running engagement on ``host``,
+        incrementally via a ``since`` cursor and optionally filtered to ONE ``node`` (the selected graph node).
+        REQUESTER + ORG come from the SERVER-side session, never the query; the query carries only the ``host``,
+        the ``since`` cursor and the ``node`` filter. ``since=-1`` is the full REPLAY. The provisioner resolves
+        the slug within the session org's own proven set and returns fixed-field, customer-safe rows."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+        def _one(name: str, cap: int) -> str:
+            v = q.get(name) or []
+            return v[0] if len(v) == 1 and len(v[0]) <= cap else ""
+
+        payload = {"org_id": str(rec.get("org_id") or ""), "host": _one("host", 253),
+                   "since": _one("since", 16), "node": _one("node", 48), "ip": self._ip()}
+        c, r = self._provision("launch_graph_activity", requester, payload)
         return self._json(r, c)
 
     def _proof_download(self):
@@ -1295,7 +1348,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._launch(action, body)
         if action in ("launch/pause", "launch/resume") and _pause_resume_on():  # PR-4b (flag OFF -> unknown-action 404)
             return self._launch(action, body)
-        if action == "launch/instruct" and _live_control_on():        # Live Control mission steering (flag OFF -> 404)
+        # Advisory mission steering. Served when EITHER Live Control OR the Live agent-Graph is on: the graph's
+        # node-steer reuses this same advisory path (live_control.submit_instruction). With the graph flag OFF the
+        # gate is unchanged (Live Control only), so #/live stays byte-identical; the graph flag only ADDS the steer.
+        if action == "launch/instruct" and (_live_control_on() or _live_graph_on()):   # (both OFF -> 404)
             return self._launch_instruct(body)
         if action == "retest" and _retest_on():                       # C1b (flag OFF -> unknown-action 404)
             return self._retest(body)
@@ -1986,6 +2042,11 @@ def _retest_on() -> bool:
 def _live_control_on() -> bool:
     from .. import config as _config
     return _config.customer_live_control_enabled()
+
+
+def _live_graph_on() -> bool:
+    from .. import config as _config
+    return _config.customer_live_graph_enabled()
 
 
 def _posture_on() -> bool:

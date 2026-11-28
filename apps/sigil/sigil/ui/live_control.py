@@ -137,6 +137,43 @@ def submit_instruction(store: Any, org_id: str, host: str, text: str, *, idem_ke
     return {"ok": True, "slug": slug, "seq": seq, "idempotent": False}
 
 
+def agent_graph(store: Any, org_id: str, host: str) -> dict:
+    """The customer-safe LIVE AGENT/ENGAGEMENT GRAPH of the (org, host) engagement — a DERIVED fold over the same
+    recorded agent-spine rows the activity transcript streams, so a node/edge can never show activity the events
+    do not contain (AS-4a honesty). Resolves the slug SERVER-side (ONLY for a host the org has ownership-proven —
+    tenant-safe) and reads the shared live-graph seam. Returns ``{ok, slug, nodes, edges, generation, cursor}``:
+    nodes = the real sub-agents / phases that actually posted (per-node status + provenance ref + oracle-verified
+    count), edges = the recorded delegation / phase-sequence / attachment links. Raises ``ValueError`` on an
+    unproven host (fail-closed, tenant-safe). A read-only projection; it mints nothing and promotes no LEAD."""
+    slug = _proven_slug(store, org_id, host)
+    if slug is None:
+        raise ValueError("no such engagement for this org")
+    from vigil_core.live_graph import graph as _graph
+    from vigil_core.seam_base import resolve_seam_base
+    g = _graph(resolve_seam_base(), slug)
+    return {"ok": True, "slug": slug, "nodes": g.get("nodes", []), "edges": g.get("edges", []),
+            "generation": int(g.get("generation", 0)), "cursor": int(g.get("cursor", -1))}
+
+
+def graph_activity(store: Any, org_id: str, host: str, *, since: int = -1, limit: int = 300,
+                   node: str = "") -> dict:
+    """The customer-safe RICH ACTIVITY TRANSCRIPT of the (org, host) engagement — the sub-agents' reasoning +
+    tool events as the spine recorded them, each grounded in a real blackboard event (its ``ref``). Resolves the
+    slug SERVER-side (tenant-safe) and reads the shared live-graph seam incrementally with a ``since`` cursor;
+    ``since=-1`` returns the whole recorded stream (the honest REPLAY / scrub). ``node`` optionally filters to
+    ONE node (what the UI does when a graph node is selected). Returns ``{ok, slug, rows, cursor}`` where each row
+    is ``{seq, ts, node, role, label, kind, status, ref, verified}`` (fixed-field, customer-safe — the seam drops
+    anything else). Raises ``ValueError`` on an unproven host. A read-only projection; it mints nothing."""
+    slug = _proven_slug(store, org_id, host)
+    if slug is None:
+        raise ValueError("no such engagement for this org")
+    from vigil_core.live_graph import read as _read
+    from vigil_core.seam_base import resolve_seam_base
+    rows = _read(resolve_seam_base(), slug, since=int(since), limit=int(limit), node=str(node or ""))
+    cursor = rows[-1]["seq"] if rows else int(since)
+    return {"ok": True, "slug": slug, "rows": rows, "cursor": cursor}
+
+
 def activity(store: Any, org_id: str, host: str, *, since: int = -1, limit: int = 200) -> dict:
     """The customer-safe LIVE ACTIVITY of the (org, host) engagement — the phase transitions the engine
     mirrored onto the shared seam ("Running authorized checks", "Recording the assessment evidence", ...).

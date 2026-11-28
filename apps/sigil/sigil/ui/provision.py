@@ -3210,7 +3210,9 @@ class Provisioner:
         are sufficient. Idempotent on ``idem_key`` (a double-click / reconnect is a no-op). Returns
         {slug, seq, idempotent}; raises ProvisionDenied on an unknown/unproven host or empty text."""
         from .. import config
-        if not config.customer_live_control_enabled():
+        # Advisory steering is served when EITHER Live Control OR the Live agent-Graph is on — the graph's
+        # node-steer reuses this same advisory path (it mints no fact, relaxes no scope). Both off => refused.
+        if not (config.customer_live_control_enabled() or config.customer_live_graph_enabled()):
             raise ProvisionDenied("customer live control is not enabled")
         from . import live_control
         with self._lock:                         # serialise the idempotency check-and-enqueue (single-process)
@@ -3249,6 +3251,53 @@ class Provisioner:
             s = -1
         try:
             return live_control.activity(self.store, requester_org_id, host, since=s)
+        except ValueError as e:
+            raise ProvisionDenied(str(e)) from e
+
+    def launch_graph(self, requester: str, requester_org_id: str, *, host: str = "", ip: str = "") -> dict:
+        """Customer LIVE AGENT-GRAPH — READ the customer-safe live agent/engagement GRAPH (the real sub-agents /
+        phases that posted, with per-node status + provenance + the recorded delegation / sequence edges) of the
+        session org's running engagement on ``host``. Behind ``customer_live_graph_enabled()`` (STRICT
+        default-OFF → the action is a 404 unknown-action) + ``admit_customer(run_engagement)``. A pure READ of a
+        customer-safe projection of the engagement's own agent spine: no step-up, no mutation, NO money (mints /
+        charges / launches nothing). The slug is resolved SERVER-side from (org, host) ONLY for a host the org has
+        ownership-proven (tenant-safe); the seam drops anything off its allowlist, so no secret / IP / target
+        detail / payload text can cross. Raises ProvisionDenied on an unknown/unproven host."""
+        from .. import config
+        if not config.customer_live_graph_enabled():
+            raise ProvisionDenied("customer live graph is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("launch_graph", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not view launches for this org")
+        from . import live_control
+        try:
+            return live_control.agent_graph(self.store, requester_org_id, host)
+        except ValueError as e:
+            raise ProvisionDenied(str(e)) from e
+
+    def launch_graph_activity(self, requester: str, requester_org_id: str, *, host: str = "", since: "Any" = "",
+                              node: str = "", ip: str = "") -> dict:
+        """Customer LIVE AGENT-GRAPH — READ the customer-safe RICH ACTIVITY TRANSCRIPT (the sub-agents' reasoning
+        + tool events, each grounded in a real recorded blackboard event) of the session org's running engagement
+        on ``host``, incrementally via a ``since`` cursor, optionally filtered to ONE ``node`` (what the UI does
+        when a graph node is selected). Behind ``customer_live_graph_enabled()`` + ``admit_customer(run_engagement)``.
+        A pure READ: no step-up, no mutation, no money. Slug resolved SERVER-side for a proven host only
+        (tenant-safe); fixed-field customer-safe rows + a cursor. ``since=-1`` is the full REPLAY. Raises
+        ProvisionDenied on an unknown/unproven host."""
+        from .. import config
+        if not config.customer_live_graph_enabled():
+            raise ProvisionDenied("customer live graph is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("launch_graph_activity", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not view launches for this org")
+        from . import live_control
+        raw = str(since or "").strip()
+        try:
+            s = int(raw) if raw not in ("", "-") else -1
+        except ValueError:
+            s = -1
+        try:
+            return live_control.graph_activity(self.store, requester_org_id, host, since=s, node=str(node or ""))
         except ValueError as e:
             raise ProvisionDenied(str(e)) from e
 

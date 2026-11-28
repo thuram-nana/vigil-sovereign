@@ -1796,7 +1796,9 @@ class Handler(BaseHTTPRequestHandler):
         # validated sovereign-side against the org's own proven set. Advisory-only: fires no tool, relaxes no scope.
         if action == "launch_instruct":
             from .. import config as _config
-            if not _config.customer_live_control_enabled():
+            # Served when EITHER Live Control OR the Live agent-Graph is on — the graph's node-steer reuses this
+            # same advisory path. Both off => absent (404), byte-identical to the surface not existing.
+            if not (_config.customer_live_control_enabled() or _config.customer_live_graph_enabled()):
                 return None
             return p.launch_instruct(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
                                      text=str(body.get("text", "")), idem_key=str(body.get("idem_key", "")),
@@ -1810,6 +1812,24 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.launch_activity(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
                                      since=str(body.get("since", "")), ip=ip)
+        # Live AGENT-GRAPH READ — the customer-safe live agent/engagement graph (real sub-agents / phases + the
+        # recorded delegation / sequence edges) of the session org's running engagement on `host`. Absent (404)
+        # unless VIGIL_CUSTOMER_LIVE_GRAPH is on (STRICT default-OFF); org from the edge SESSION, host validated
+        # sovereign-side against the org's own proven set. A pure read of a customer-safe projection — no money.
+        if action == "launch_graph":
+            from .. import config as _config
+            if not _config.customer_live_graph_enabled():
+                return None
+            return p.launch_graph(requester, str(body.get("org_id", "")), host=str(body.get("host", "")), ip=ip)
+        # Live AGENT-GRAPH rich-activity READ — the sub-agents' reasoning + tool transcript, incrementally via a
+        # `since` cursor, optionally filtered to ONE `node` (the selected graph node). Absent (404) unless the
+        # same VIGIL_CUSTOMER_LIVE_GRAPH is on; org from the edge SESSION, host validated sovereign-side.
+        if action == "launch_graph_activity":
+            from .. import config as _config
+            if not _config.customer_live_graph_enabled():
+                return None
+            return p.launch_graph_activity(requester, str(body.get("org_id", "")), host=str(body.get("host", "")),
+                                           since=str(body.get("since", "")), node=str(body.get("node", "")), ip=ip)
         # C1a — the session org's launches for the customer app's Assessments screen. Absent (unknown action -> 404)
         # unless VIGIL_CUSTOMER_LAUNCH_UI is on, the same flag that gates the edge route; org from the edge SESSION.
         if action == "launch_list":
