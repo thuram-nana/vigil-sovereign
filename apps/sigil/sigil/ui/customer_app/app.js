@@ -2121,9 +2121,43 @@
   // posts STRICT booleans (`=== true`) for confirm / authorized, and NEVER puts requester / org / mfa_at in the body —
   // the edge takes those from the server session. Behind the same page flag as this screen (absent => route is home).
   var COMMAND_ON = pageFlag("command");
-  var cmdbox = { log: null, input: null, send: null, busy: false };
+  // The CONTINUITY layer, all per-viewer and client-side except the transcript store (the default-OFF server slice
+  // below). It makes the box FEEL like one running conversation WITHOUT touching the money / authority doctrine:
+  //   * a FIFO message queue — type several lines back-to-back; they drain in order, ONE round-trip at a time, and
+  //     nothing is dropped. A queued line is never auto-confirmed: a queued "launch" still stops at awaiting_confirm
+  //     and waits for the explicit Confirm click, exactly as a single line does (the drain just calls cmdCommand).
+  //   * a remembered CURRENT host — a host-less follow-up ("pause", "status", "focus on auth") is resolved against it
+  //     and the host is passed EXPLICITLY to the edge; the server classify/flow stay stateless and host-explicit (the
+  //     UI fills the host, the server never infers one). A line that names a different host switches context.
+  //   * a live status poll — while a run is live, the box's activity card updates in place (reusing LIVE_POLL_MS and
+  //     the launch_activity `since` cursor) instead of asking the customer to re-type "status"; it stops when the run
+  //     ends, on 401/404, and off-route / off-screen.
+  // CHAT_MEMORY_ON (its own default-OFF flag, under the command flag) persists the conversation server-side so it
+  // survives reload; off, the box is byte-identical to today (nothing is read on arrival).
+  var CHAT_MEMORY_ON = COMMAND_ON && pageFlag("chatMemory");
+  var cmdbox = { log: null, input: null, send: null, hostbar: null, history: null, activeHost: "",
+                 queue: [], draining: false, busy: false, loaded: false };
+  // The box's own live-status poll: a generation-guarded, single-flight loop (modelled on the #/live feed) that
+  // appends new steps to the LAST activity card and stops the moment the run is no longer live.
+  var cmdPoll = { host: "", cursor: "", feed: null, timer: null, gen: 0, loading: false };
 
   function cmdIdem() { return String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10); }
+
+  // The remembered-host banner ("Working on: <host>"). cmdSetHost switches context when a line names a host; a
+  // host-less follow-up keeps the current one. Pure UI state — it NEVER rides a request body (the host passed to the
+  // edge is an ordinary, explicit target field, exactly as a typed host would be).
+  function cmdRenderHostbar() {
+    if (!cmdbox.hostbar) { return; }
+    VUI.mount(cmdbox.hostbar, cmdbox.activeHost
+      ? h("span.cmd-working", { text: "Working on: " + cmdbox.activeHost })
+      : null);
+  }
+  function cmdSetHost(host) {
+    var hh = String(host || "").trim().toLowerCase();
+    if (!hh || hh === cmdbox.activeHost) { return; }
+    cmdbox.activeHost = hh;                                   // a named host switches the remembered context
+    cmdRenderHostbar();
+  }
   function cmdAdd(node) {
     if (cmdbox.log && node) {
       cmdbox.log.appendChild(node);
@@ -2254,6 +2288,15 @@
       h("div.cmd-confirm-go", {}, [go])]));
   }
 
+  function cmdStepRow(x) {
+    return h("li.cmd-step", {}, [h("span.cmd-step-l", { text: (x && (x.label || x.phase)) || "" })]);
+  }
+  // Is the flow-step reply's launch still LIVE (running or paused)? Only then does an activity card keep polling.
+  function cmdRunLive(r) {
+    var lc = r && r.launch;
+    var st = String((lc && lc.state) || "");
+    return !!(lc && (st === "running" || st === "paused"));
+  }
   function cmdActivityCard(r) {
     var feed = r.activity;
     var rows = (feed && feed.rows) || [];
@@ -2267,11 +2310,57 @@
         : "Nothing is running on " + (r.host || "this host") + " right now.";
       return cmdSay("vigil", cmdNote(msg, "cust-muted"));
     }
-    return cmdSay("vigil", h("div.card.cmd-activity", {}, [
-      h("h3", { text: "Live activity" }),
-      h("ul.cmd-feed", {}, rows.map(function (x) {
-        return h("li.cmd-step", {}, [h("span.cmd-step-l", { text: (x && (x.label || x.phase)) || "" })]);
-      }))]));
+    var ul = h("ul.cmd-feed", {}, rows.map(cmdStepRow));
+    var card = cmdSay("vigil", h("div.card.cmd-activity", {}, [h("h3", { text: "Live activity" }), ul]));
+    cmdPollBind(r, ul);                                       // keep THIS card live while the run runs; stop when it ends
+    return card;
+  }
+
+  // ---- the box's live status poll (piece 3) --------------------------------------------------------------------
+  // Bind the poll to the LAST rendered activity card: remember its feed <ul> and the launch_activity cursor, cancel
+  // any earlier card's loop (bump gen), and start polling only while the run is live. CSP-clean: setTimeout +
+  // addEventListener only, no inline handlers.
+  function cmdPollBind(r, ul) {
+    cmdStopPoll();                                           // one poller at a time: end any prior card's loop
+    if (!cmdRunLive(r)) { return; }                         // a card for a run that is not live has nothing to poll
+    cmdPoll.host = String((r && r.host) || cmdbox.activeHost || "");
+    var feed = r && r.activity;
+    cmdPoll.cursor = (feed && feed.cursor != null) ? String(feed.cursor) : "";
+    if (cmdPoll.host) { cmdPoll.feed = ul; cmdSchedulePoll(); }
+  }
+  async function cmdLoadActivity() {
+    if (!cmdPoll.host || cmdPoll.loading) { return; }        // single-flight: no double-append on the cursor
+    cmdPoll.loading = true;
+    var gen = cmdPoll.gen, r = null, status = 0;
+    try { r = await VUI.postJSON(API + "/flow", cmdFlowBody({ intent: "status", host: cmdPoll.host, since: cmdPoll.cursor })); }
+    catch (e) { r = null; status = (e && e.status) || 0; }
+    cmdPoll.loading = false;
+    if (gen !== cmdPoll.gen || here() !== "#/command") { return; }   // cancelled / navigated away: drop this answer
+    if (status === 401) { cmdStopPoll(); refreshWho().then(function () { nav("#/login"); }); return; }
+    if (status === 404 || status === 403) { cmdStopPoll(); return; } // feature off / permission gone: stop quietly
+    if (r) {
+      var feed = r.activity, rows = (feed && feed.rows) || [];
+      if (rows.length && cmdPoll.feed) { rows.forEach(function (x) { cmdPoll.feed.appendChild(cmdStepRow(x)); }); }
+      if (feed && feed.cursor != null) { cmdPoll.cursor = String(feed.cursor); }
+      if (!cmdRunLive(r)) { cmdStopPoll(); return; }         // the run ended: stop polling (no more work to do)
+    }
+    cmdSchedulePoll();
+  }
+  function cmdSchedulePoll() {
+    if (cmdPoll.timer || here() !== "#/command" || document.hidden || !cmdPoll.host) { return; }
+    cmdPoll.timer = setTimeout(function () { cmdPoll.timer = null; cmdLoadActivity(); }, LIVE_POLL_MS);
+  }
+  // stopCmdPoll ENDS the loop (run ended, left the box, 401/404): bump gen so an in-flight answer is dropped and
+  // forget the card. pauseCmdPoll only HOLDS it (tab hidden), keeping gen so an in-flight fetch still lands.
+  function cmdStopPoll() {
+    if (cmdPoll.timer) { clearTimeout(cmdPoll.timer); cmdPoll.timer = null; }
+    cmdPoll.gen++; cmdPoll.host = ""; cmdPoll.feed = null;
+  }
+  function cmdPausePoll() { if (cmdPoll.timer) { clearTimeout(cmdPoll.timer); cmdPoll.timer = null; } }
+  function onCmdRoute() { if (here() !== "#/command") { cmdStopPoll(); } }
+  function onCmdVisibility() {
+    if (document.hidden) { cmdPausePoll(); }
+    else if (here() === "#/command" && cmdPoll.host) { cmdLoadActivity(); }
   }
 
   function cmdDomainCard(r) {
@@ -2323,48 +2412,110 @@
 
   // advance the flow by one transition. STRICT booleans for confirm / authorized; NO org / requester / mfa_at in the
   // body (the edge supplies those from the session); a fresh idem key only for a steer (idempotent re-send).
+  // Build the flow body from a signal. STRICT booleans for confirm / authorized (never bool()); NO org / requester /
+  // mfa_at (the edge supplies those from the session). Shared by cmdFlow and the status poll, so every flow POST —
+  // typed step or background poll — is byte-identical in shape and can never carry a confirm the box did not mean.
+  function cmdFlowBody(signal) {
+    return { intent: signal.intent || "", host: signal.host || "", depth: signal.depth || "",
+             product_id: signal.product_id || "", method: signal.method || "",
+             authorized: signal.authorized === true, confirm: signal.confirm === true,
+             text: signal.text || "", since: signal.since || "",
+             idem_key: signal.idem_key || (signal.intent === "steer" ? cmdIdem() : "") };
+  }
   async function cmdFlow(signal) {
-    var body = { intent: signal.intent || "", host: signal.host || "", depth: signal.depth || "",
-                 product_id: signal.product_id || "", method: signal.method || "",
-                 authorized: signal.authorized === true, confirm: signal.confirm === true,
-                 text: signal.text || "", since: signal.since || "",
-                 idem_key: signal.idem_key || (signal.intent === "steer" ? cmdIdem() : "") };
     var r;
-    try { r = await VUI.postJSON(API + "/flow", body); }
+    try { r = await VUI.postJSON(API + "/flow", cmdFlowBody(signal)); }
     catch (e) { cmdError(e); return null; }
     cmdRender(r, signal);
     return r;
   }
 
   // classify ONE typed line, then route it. An advice intent is answered read-only; every other intent advances the
-  // flow (which still gates the explicit affirm on verify and the explicit spend confirm on launch).
+  // flow (which still gates the explicit affirm on verify and the explicit spend confirm on launch). The "You" turn
+  // is rendered by cmdEnqueue BEFORE this runs (so a queued line shows at once); this is the processing half only.
   async function cmdCommand(line) {
-    cmdSay("you", cmdNote(String(line), "cmd-you-text"));
     var r;
     try { r = await VUI.postJSON(API + "/assistant/command", { line: line }); }
     catch (e) { cmdError(e); return; }
     var intent = r && r.intent;
     if (intent === "advice") { cmdAdvice(r.advice); return; }
     cmdSay("vigil", cmdNote(cmdPlanLabel(r)));                 // show the deterministic classification as the plan
-    await cmdFlow({ intent: intent, host: r.host || "", depth: r.depth || "", text: r.text || "" });
+    var named = String((r && r.host) || "");
+    if (named) { cmdSetHost(named); }                          // a named host switches the remembered context (piece 2)
+    var host = named || cmdbox.activeHost || "";               // a host-less follow-up resolves against the remembered host
+    await cmdFlow({ intent: intent, host: host, depth: (r && r.depth) || "", text: (r && r.text) || "" });
   }
 
-  async function cmdSubmit() {
-    var line = (cmdbox.input && cmdbox.input.value ? cmdbox.input.value : "").trim();
-    if (cmdbox.busy || !line) { return; }
+  // ---- the client message queue (piece 1) ---------------------------------------------------------------------
+  // A customer may type and Send several lines back-to-back: each is shown AT ONCE as a pending "You" turn, then the
+  // FIFO drains them ONE round-trip at a time, in order. Send stays enabled and nothing is dropped. The backend still
+  // processes one step at a time, and — critically — a queued line is never auto-confirmed: cmdCommand classifies and
+  // takes ONE flow step, and a launch still stops at awaiting_confirm for an EXPLICIT Confirm click.
+  function cmdSayYou(line) {
+    return cmdAdd(h("div.cmd-turn.cmd-you.cmd-pending", {}, [
+      h("span.cmd-who", { text: "You" }),
+      h("div.cmd-body", {}, cmdNote(String(line), "cmd-you-text"))]));
+  }
+  function cmdEnqueue(line) {
+    var turn = cmdSayYou(line);                                // show it immediately, marked pending until it is its turn
+    cmdbox.queue.push({ line: String(line), turn: turn });
+    cmdDrain();
+  }
+  async function cmdDrain() {
+    if (cmdbox.draining) { return; }                          // one in-flight round-trip at a time; the FIFO is in order
+    cmdbox.draining = true;
     cmdbox.busy = true;
-    if (cmdbox.send) { cmdbox.send.disabled = true; }
-    cmdbox.input.value = "";
-    try { await cmdCommand(line); }
-    finally {
+    try {
+      while (cmdbox.queue.length) {
+        var item = cmdbox.queue.shift();
+        if (item.turn && item.turn.classList) { item.turn.classList.remove("cmd-pending"); }
+        await cmdCommand(item.line);                           // classify + ONE flow step; NEVER auto-confirms a launch
+      }
+    } finally {
+      cmdbox.draining = false;
       cmdbox.busy = false;
-      if (cmdbox.send) { cmdbox.send.disabled = false; }
     }
   }
 
+  function cmdSubmit() {
+    var line = (cmdbox.input && cmdbox.input.value ? cmdbox.input.value : "").trim();
+    if (!line) { return; }                                     // Send stays ENABLED; a blank line is the only no-op
+    cmdbox.input.value = "";
+    cmdEnqueue(line);
+  }
+
+  // piece 4a — on mount, when the transcript store is ON, replay this (org, session)'s prior CONVERSATIONAL turns (the
+  // typed lines and the grounded advice answers) so the box survives a reload / navigation. Read-only and best-effort:
+  // a feature-off / store fault just leaves a fresh box. The history lives in its OWN container ABOVE the live log, so
+  // it reads oldest-first and never fights the live turns. The turns are the customer's OWN tenant data (org + session
+  // are server-side); they are shown verbatim as plain text, drive nothing, and can mint nothing.
+  async function cmdLoadTranscript() {
+    if (!CHAT_MEMORY_ON || cmdbox.loaded) { return; }
+    cmdbox.loaded = true;
+    var d = null;
+    try { d = await VUI.getJSON(API + "/chat/history"); }
+    catch (e) {
+      if (here() === "#/command" && e && e.status === 401) { await refreshWho(); nav("#/login"); }
+      return;                                                 // feature off (404) / fault: a fresh box, nothing shown
+    }
+    if (here() !== "#/command" || !cmdbox.history || !d) { return; }
+    var turns = ((d && d.turns) || []).filter(function (t) { return t && t.text; });
+    if (!turns.length) { return; }
+    VUI.mount(cmdbox.history, [h("p.cmd-history-note.cust-muted", { text: "Earlier in this conversation" })].concat(
+      turns.map(function (t) {
+        var you = String(t.role) !== "assistant";
+        return h("div.cmd-turn.cmd-history.cmd-" + (you ? "you" : "vigil"), {}, [
+          h("span.cmd-who", { text: you ? "You" : "VIGIL" }),
+          h("div.cmd-body", {}, cmdNote(String(t.text || ""), you ? "cmd-you-text" : "cust-muted"))]);
+      })));
+  }
+
   function viewCommandBox() {
-    cmdbox.busy = false;
+    cmdStopPoll();                                            // a fresh mount: end any stale poll from a prior visit
+    cmdbox.busy = false; cmdbox.draining = false; cmdbox.queue = []; cmdbox.activeHost = ""; cmdbox.loaded = false;
     cmdbox.log = h("div#cmd-log.cmd-log", {});
+    cmdbox.history = h("div.cmd-history-log", {});            // prior-conversation turns (piece 4a), filled async
+    cmdbox.hostbar = h("div.cmd-hostbar", {});                // "Working on: <host>" (piece 2), filled on first host
     cmdbox.input = h("input.cmd-input", { type: "text", maxlength: "2000", autocomplete: "off",
       "aria-label": "Command", placeholder: "verify example.com   launch example.com   status   what should I fix first?",
       onKeydown: function (e) {
@@ -2375,12 +2526,14 @@
       + "“launch example.com”, “status” or “pause”. Ask a question (“what should I "
       + "fix first?”) for grounded, read-only advice. Nothing launches or spends until you confirm it explicitly.",
       "cust-muted"));
+    cmdLoadTranscript();                                      // default-OFF: a no-op (no read) unless the store is on
     return shell(h("div.cmd-screen", {}, [
       h("div.cmd-head", {}, [
         h("h2", { text: "Command" }),
         cmdNote("One box, one engagement. Each line is read deterministically: a question is answered as advice, a "
-          + "command drives the flow, and every spend or authorization step asks you explicitly.", "cust-muted")]),
-      h("div.card.cmd-card", {}, [cmdbox.log]),
+          + "command drives the flow, and every spend or authorization step asks you explicitly.", "cust-muted"),
+        cmdbox.hostbar]),
+      h("div.card.cmd-card", {}, [cmdbox.history, cmdbox.log]),
       h("div.cmd-inputrow", {}, [cmdbox.input, cmdbox.send])]), "#/command");
   }
 
@@ -5479,6 +5632,12 @@
   if (LIVE_ON) {
     window.addEventListener("hashchange", onLiveRoute);
     document.addEventListener("visibilitychange", onLiveVisibility);
+  }
+  // Command box on: the box's live status poll stops off-route/off-screen and resumes when the page is back in view
+  // (same discipline as the #/live feed — CSP-clean addEventListener, no inline handlers).
+  if (COMMAND_ON) {
+    window.addEventListener("hashchange", onCmdRoute);
+    document.addEventListener("visibilitychange", onCmdVisibility);
   }
   state.sub(render);
 
