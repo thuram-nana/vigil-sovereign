@@ -165,8 +165,20 @@ distribution, with caps and authenticated transport.
 - **Hot set:** SPOOL (receiver shares the spool chain tail).
 - **Slices:** AS-9a broker · AS-9b receiver · AS-20 notify/SIEM emitter (the connector
   CONSUMER — reuses the AS-9a broker to STAMP an outbound credential; adds no OracleKind,
-  opens no serve route) · AS-31 Detection Mirror (DM-signer, cert v2 defense delegation at
-  `finding_receiver.py`) · **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
+  opens no serve route) · **AS-31 Detection Mirror (BUILT — `aegis/detection_mirror.py`)** — the
+  deterministic READ-ONLY DETECTION MIRROR: a reflected, metadata-only view of the detection posture
+  that UNIFIES the AS-30 detection SOURCE catalog (the provider inventory), the AS-7b detection CONTENT
+  admissibility (the Coraza/CRS attestation + its `admit_rule_refs` lead gate) and the AS-3b AS-2e
+  output-hygiene leak gate, all reached by RELATIVE import (never re-implemented); it reflects the
+  cataloged sources × the admissible CRS content leads (address-free, bounded, sorted, de-duplicated,
+  hygiene-clean) + a deterministic posture digest, and `reflect(source, refs)` admits a detection hit as
+  a LEAD only over a cataloged source AND admissible content (fail closed otherwise). Surfaced read-only
+  on the AS-5c probe; MEASURES/REFLECTS, never acts — a mirrored hit is a LEAD never a block, it drives no
+  admit/shed/allow/block decision and mutates no state; inert unless the AS-7b `VIGIL_AEGIS_CORAZA` dep is
+  armed; default-OFF `VIGIL_AEGIS_DETECTION_MIRROR`. (Scope note: the read-only mirror CORE lands here; the
+  wider DM-signer / cert-v2 defense-delegation extension of `finding_receiver.py` — a control-plane write
+  path — is deliberately NOT in this read-only, stdlib-only engine slice and remains to build.) ·
+  **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
   provider reader normalizes CloudTrail, pushes INERT LEADs through the AS-9b receiver (no new
   customer route → no Gate-5 census row), and tamper-evidences each record via AS-9c anchor-1;
   DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`. · **AS-17c IdP sign-in/audit telemetry source (built)** —
