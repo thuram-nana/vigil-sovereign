@@ -130,55 +130,74 @@ def test_public_bind_is_fail_closed():
 
 # The certification word-family (certify/certified/certification/...); "certificate" (the cryptographic term) is
 # deliberately NOT matched. The guard's documented intent (tools/reviewer-package/assemble.py) is to forbid wording
-# that ASSERTS a certification, not an honest disclaimer that DENIES one. The Security & Trust Center must state,
-# verbatim from the code-anchored register, that VIGIL holds NO certification (e.g. "holds no ISO/IEC 27001
-# certification", "is not GDPR certified", "not a managed-cloud certification"). Those denials are the opposite of
-# an overclaim, so an affirmative assertion is the offender, never a negated disclaimer.
+# that ASSERTS a certification. The Security & Trust Center states, VERBATIM from the code-anchored register, that
+# VIGIL holds NO certification; those exact reviewed denials are the ONLY place a certification word may appear.
+#
+# A proximity-negation heuristic is UNSOUND: it measures how close a negator sits, not which noun it governs, so
+# "there is no doubt VIGIL is SOC 2 certified", a double negative, or "leaves no gaps in its SOC 2 certification"
+# all slip through. So the guard is an ALLOWLIST, not a heuristic: it removes the exact reviewed approved strings
+# (docs/trust/public-claims.json: every public claim text and every compliance statement) from the scanned text,
+# then flags ANY remaining certification word. Any certification wording that is not verbatim an approved denial,
+# affirmative or cleverly negated, survives the scrub and fails CI, forcing a human to review it.
 _CERT_FAMILY_RE = re.compile(r"\bcertif(?:y|ies|ied|ying|ication|ications|iable|iably)\b", re.IGNORECASE)
-_CERT_NEGATOR_RE = re.compile(r"\b(no|not|never|without|neither|nor)\b", re.IGNORECASE)
-# A clause boundary between a negator and a certification word means the negator governs something else, so the
-# certification word is NOT negated (e.g. "no telemetry; the product is certified").
-_CERT_CLAUSE_BREAK_RE = re.compile(r"[.;:,]|\b(and|but|or|however|yet|so)\b", re.IGNORECASE)
 
 
-def certification_assertions(text: str) -> list[str]:
-    """Certification word-family tokens in ``text`` that ASSERT a certification (empty == none). A token is an
-    honest disclaimer, not an assertion, when a negator (no/not/never/without/neither/nor) governs it: it appears
-    in the window just before the token with no clause boundary between the two. Every other certification token
-    (un-negated, or whose nearest negator is cut off by a clause boundary) is an assertion and is returned."""
-    hits: list[str] = []
-    for m in _CERT_FAMILY_RE.finditer(text):
-        window = text[max(0, m.start() - 48):m.start()]
-        negators = list(_CERT_NEGATOR_RE.finditer(window))
-        if not negators:
-            hits.append(m.group(0))
-            continue
-        between = window[negators[-1].end():]
-        if _CERT_CLAUSE_BREAK_RE.search(between):
-            hits.append(m.group(0))
-    return hits
+def _approved_public_strings() -> list[str]:
+    """The reviewed strings that may carry a certification word: every public claim text and every compliance
+    statement in the committed governance snapshot (docs/trust/public-claims.json)."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[3]
+    data = json.loads((repo / "docs" / "trust" / "public-claims.json").read_text(encoding="utf-8"))
+    return [c["claim"] for c in data["public_claims"]] + list(data["compliance_statements"].values())
 
 
-def test_certification_assertion_detector_catches_claims_but_allows_denials():
-    # negative controls: an affirmative claim is caught; the register's exact denials are allowed.
-    assert certification_assertions("VIGIL is ISO 27001 certified.") == ["certified"]
-    assert certification_assertions("We hold a SOC 2 certification.") == ["certification"]
-    assert certification_assertions("no telemetry; our product is certified") == ["certified"]  # cut off by a boundary
-    assert certification_assertions("VIGIL holds no ISO/IEC 27001 certification and operates no certified ISMS.") == []
-    assert certification_assertions("VIGIL is not GDPR certified, as GDPR offers no such certification") == []
-    assert certification_assertions("it is not a managed-cloud certification or an in-product network control") == []
-    assert certification_assertions("Every finding ships as a signed certificate.") == []        # "certificate" is fine
+def certification_violations(text: str, approved: "list[str] | None" = None) -> list[str]:
+    """Certification word-family tokens in ``text`` that are NOT part of a reviewed approved string (empty ==
+    clean). The exact approved strings are removed first, so only verbatim approved denials are permitted; every
+    other certification token (an affirmative claim, or a negated one that is not a reviewed denial) is returned."""
+    scrubbed = text
+    for s in (approved if approved is not None else _approved_public_strings()):
+        if s:
+            scrubbed = scrubbed.replace(s, " ")
+    return _CERT_FAMILY_RE.findall(scrubbed)
+
+
+# The fabricated assertions the old proximity heuristic let through (negator present, but governing another noun,
+# or a double negative). Each MUST now be flagged, because none is a verbatim approved denial.
+_CERT_BYPASS_ATTEMPTS = (
+    "There is no doubt VIGIL is SOC 2 Type II certified.",
+    "VIGIL is never not SOC 2 certified.",
+    "VIGIL leaves no gaps in its SOC 2 certification.",
+    "We spare no effort to keep VIGIL ISO 27001 certified.",
+    "No vendor is more thoroughly certified than VIGIL.",
+)
+
+
+def test_certification_guard_flags_unapproved_cert_wording_and_allows_only_reviewed_denials():
+    approved = _approved_public_strings()
+    # every fabricated assertion is caught, however it is phrased (the allowlist does not reason about negation scope)
+    for attempt in _CERT_BYPASS_ATTEMPTS:
+        assert certification_violations(attempt, approved), f"bypass not flagged: {attempt!r}"
+    assert certification_violations("VIGIL is ISO 27001 certified.", approved) == ["certified"]
+    # the genuine, reviewed denials that DO appear on the page are allowed (scrubbed, no violation)
+    cert_bearing = [s for s in approved if _CERT_FAMILY_RE.search(s)]
+    assert len(cert_bearing) >= 3, "the approved set must carry the ISO / GDPR / infrastructure denials"
+    for denial in cert_bearing:
+        assert certification_violations(denial, approved) == [], f"approved denial wrongly flagged: {denial[:60]}"
+    # "certificate" (the cryptographic term) is never a certification word
+    assert certification_violations("Every finding ships as a signed certificate.", approved) == []
 
 
 def test_public_site_honors_the_honesty_constraints():
     # Durable guard for the honesty rules the build spec (and the reviewer-package gate
     # tools/reviewer-package/assemble.py::assert_no_certification_wording) require on public copy:
     #   * "source-available", NEVER "open source";
-    #   * no wording that ASSERTS a certification (certify/certified/certification/...); "certificate" is allowed,
-    #     and an honest denial of certification is allowed (it is the opposite of an overclaim);
+    #   * no certification word-family token that is not part of a reviewed approved denial (an allowlist, not a
+    #     negation heuristic); "certificate" is allowed;
     #   * no fabricated "start for free" hosted-signup CTA (SaaS is not shipped).
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
+    approved = _approved_public_strings()
     opensrc_re = re.compile(r"open[\s-]?source", re.IGNORECASE)
     freecta_re = re.compile(r"start\s+for\s+free", re.IGNORECASE)
     offenders = []
@@ -189,10 +208,10 @@ def test_public_site_honors_the_honesty_constraints():
         rel = f.relative_to(root)
         if opensrc_re.search(text):
             offenders.append(f"{rel}: 'open source' (say 'source-available')")
-        asserted = certification_assertions(text)
-        if asserted:
-            offenders.append(f"{rel}: wording asserts certification {sorted(set(asserted))} (only an honest denial "
-                             "is allowed)")
+        cviol = certification_violations(text, approved)
+        if cviol:
+            offenders.append(f"{rel}: certification word(s) {sorted(set(cviol))} not part of a reviewed approved "
+                             "denial (affirmative or cleverly-negated wording must be reviewed)")
         if freecta_re.search(text):
             offenders.append(f"{rel}: 'start for free' (no hosted signup is shipped)")
     assert not offenders, "public-site honesty violations:\n  " + "\n  ".join(offenders)

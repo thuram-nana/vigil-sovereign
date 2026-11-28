@@ -50,23 +50,32 @@ def _page_text(html_src: str) -> str:
     return _collapse(html.unescape(re.sub(r"<[^>]+>", " ", html_src)))
 
 
-# the same negation-aware certification detector the public_site honesty guard uses, re-stated here so this
-# suite is self-contained and carries its own negative control.
+# The certification honesty guard is an ALLOWLIST (the same approach the public_site guard uses), re-stated here so
+# this suite is self-contained and carries its own negative control. A proximity-negation heuristic is UNSOUND (it
+# cannot tell which noun a negator governs). So a certification word-family token is a violation UNLESS it is part
+# of a reviewed approved string (every public claim text + every compliance statement in the governance snapshot).
 _CERT_FAMILY = re.compile(r"\bcertif(?:y|ies|ied|ying|ication|ications|iable|iably)\b", re.IGNORECASE)
-_CERT_NEG = re.compile(r"\b(no|not|never|without|neither|nor)\b", re.IGNORECASE)
-_CERT_BREAK = re.compile(r"[.;:,]|\b(and|but|or|however|yet|so)\b", re.IGNORECASE)
+_APPROVED_STRINGS = [c["claim"] for c in CONTENT["public_claims"]] + list(CONTENT["compliance_statements"].values())
+
+# fabricated assertions the old proximity heuristic wrongly cleared; each MUST be flagged (none is an approved denial).
+_CERT_BYPASS_ATTEMPTS = (
+    "There is no doubt VIGIL is SOC 2 Type II certified.",
+    "VIGIL is never not SOC 2 certified.",
+    "VIGIL leaves no gaps in its SOC 2 certification.",
+    "We spare no effort to keep VIGIL ISO 27001 certified.",
+    "No vendor is more thoroughly certified than VIGIL.",
+)
 
 
-def cert_assertions(text: str) -> list[str]:
-    """Certification word-family tokens that ASSERT (affirmatively claim) a certification; a negated disclaimer is
-    allowed. Empty == no affirmative certification wording."""
-    hits: list[str] = []
-    for m in _CERT_FAMILY.finditer(text):
-        window = text[max(0, m.start() - 48):m.start()]
-        negs = list(_CERT_NEG.finditer(window))
-        if not negs or _CERT_BREAK.search(window[negs[-1].end():]):
-            hits.append(m.group(0))
-    return hits
+def certification_violations(text: str) -> list[str]:
+    """Certification word-family tokens that are NOT part of a reviewed approved string (empty == clean). The exact
+    approved strings are removed first, so affirmative or cleverly-negated wording that is not a reviewed denial is
+    returned as a violation."""
+    scrubbed = text
+    for s in _APPROVED_STRINGS:
+        if s:
+            scrubbed = scrubbed.replace(s, " ")
+    return _CERT_FAMILY.findall(scrubbed)
 
 
 # affirmative constructs that must NEVER appear on the page (the withheld / absent set). Each is affirmative-only,
@@ -90,7 +99,7 @@ _FORBIDDEN = [
 
 def forbidden_hits(text: str) -> list[str]:
     flat = _collapse(text)
-    return [p for p in _FORBIDDEN if re.search(p, flat, re.IGNORECASE)] + cert_assertions(flat)
+    return [p for p in _FORBIDDEN if re.search(p, flat, re.IGNORECASE)] + certification_violations(flat)
 
 
 def _serve(root=None, *, access_requests_dir=None, access_limiter=None):
@@ -221,13 +230,18 @@ def test_no_withheld_or_fabricated_claim_appears_on_the_page():
 
 
 def test_the_honesty_checks_are_not_a_no_op():
-    # negative controls: an affirmative certification claim and a withheld claim ARE caught.
+    # negative controls: every fabricated certification assertion is caught when appended to the real page, however
+    # it is phrased (the allowlist does not reason about negation scope), and so is a withheld compliance claim.
     page = TRUST.read_text(encoding="utf-8")
-    assert forbidden_hits(page + " <p>VIGIL is SOC 2 certified and ISO 27001 certified.</p>")
+    for attempt in _CERT_BYPASS_ATTEMPTS:
+        assert forbidden_hits(page + " <p>" + attempt + "</p>"), f"bypass not flagged: {attempt!r}"
     assert forbidden_hits(page + " <p>VIGIL is HIPAA compliant.</p>")
-    assert cert_assertions("Our platform is SOC 2 certified") == ["certified"]
-    # the honest denials the register requires are NOT flagged
-    assert cert_assertions("VIGIL holds no ISO/IEC 27001 certification and operates no certified ISMS.") == []
+    assert certification_violations("Our platform is SOC 2 certified") == ["certified"]
+    # the genuine reviewed denials that appear on the page are allowed (scrubbed, no violation)
+    cert_bearing = [s for s in _APPROVED_STRINGS if _CERT_FAMILY.search(s)]
+    assert len(cert_bearing) >= 3
+    for denial in cert_bearing:
+        assert certification_violations(denial) == [], f"approved denial wrongly flagged: {denial[:60]}"
     assert forbidden_hits("A data processing agreement is available on request.") == []
 
 
@@ -371,6 +385,30 @@ def test_access_request_rate_limits_per_source(tmp_path):
         _c, hdrs, _b = _json_post(port, _GOOD)
         assert "Retry-After" in {k.title(): v for k, v in hdrs.items()} or "retry-after" in hdrs
         assert store.pending_count(tmp_path / "req") == 3
+    finally:
+        srv.shutdown()
+
+
+def test_access_request_rate_limit_keys_on_the_trusted_client_ip(tmp_path):
+    # Issue-B regression: the limiter must key on the real client IP taken from X-Real-IP (trusted ONLY from the
+    # loopback proxy hop), so two distinct sources have INDEPENDENT budgets. The shipped public proxies now SET
+    # X-Real-IP from the real peer (overwriting any client value), so this per-source key cannot be spoofed to
+    # dodge the throttle, nor collapsed onto one global bucket. With no X-Real-IP the earlier test keys them all
+    # onto the loopback peer; here two different X-Real-IP values must NOT share a budget.
+    limiter = LoginRateLimiter(tmp_path / "lim", max_fails=1, window_s=3600, base_lock_s=60, max_lock_s=60)
+    srv, port = _serve(access_requests_dir=tmp_path / "req", access_limiter=limiter)
+
+    def submit(ip):
+        return _post(port, "/api/trust/access-request", json.dumps(_GOOD),
+                     headers={"Content-Type": "application/json", "Accept": "application/json",
+                              "Origin": f"http://127.0.0.1:{port}", "X-Real-IP": ip})[0]
+    try:
+        assert submit("203.0.113.10") == 200          # source A, first attempt: admitted on A's own budget
+        assert submit("203.0.113.20") == 200          # source B: an INDEPENDENT key, also admitted (not collapsed)
+        assert submit("203.0.113.10") == 429          # A is now locked on A's budget alone
+        assert submit("203.0.113.20") == 429          # B is locked on B's budget alone
+        # exactly the two admitted requests were queued (one per distinct source)
+        assert store.pending_count(tmp_path / "req") == 2
     finally:
         srv.shutdown()
 
