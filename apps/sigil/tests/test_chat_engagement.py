@@ -176,8 +176,10 @@ def test_command_sends_advice_to_the_model_and_returns_action_intents_without_ac
 
 
 def test_derive_and_decide_are_pure_over_the_named_states():
+    # awaiting_approval is the ADDITIVE per-action approval pause (VIGIL_CUSTOMER_ACTION_APPROVAL); it sits
+    # after awaiting_confirm and is reachable from the launch path AND a live-control step (see engagement_flow).
     assert flow.STATES == ("need_domain", "need_verify", "verifying", "ready", "awaiting_confirm",
-                           "reserving", "running", "done")
+                           "awaiting_approval", "reserving", "running", "done")
     # no host -> need_domain; an unproven host -> need_verify; a pending challenge -> verifying; verified -> ready
     assert flow.derive_state([], {}, "")["state"] == "need_domain"
     assert flow.derive_state([{"host": "h.com", "status": "pending"}], {}, "h.com")["state"] == "verifying"

@@ -270,6 +270,12 @@ CUSTOMER_DATA_RIGHTS_CONTACT = "info@sigilsovereign.com"
 # nothing regenerates it): its own top-level directory the backup captures and a restore brings back. Written only
 # while VIGIL_CUSTOMER_KNOWLEDGE is on.
 CUSTOMER_KNOWLEDGE_DIR = SIGIL_HOME / "customer_knowledge"
+# Action-approval gate (VIGIL_CUSTOMER_ACTION_APPROVAL, default OFF) — the per-org store of the Allow/Block
+# per-action approval checkpoint: pending owner-review requests, the owner-signed single-use Allow grants, the
+# single-use nonce ledger and the append-only owner-signed, LWW-high-water-guarded evidence log of every
+# decision. Per-org under a domain-separated hash of the org_id (tenant-isolated by construction). Durable
+# governance evidence (who approved what); written ONLY while VIGIL_CUSTOMER_ACTION_APPROVAL is on.
+CUSTOMER_ACTION_APPROVAL_DIR = SIGIL_HOME / "customer_action_approval"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -474,6 +480,21 @@ def customer_assistant_enabled() -> bool:
     ON, a turn still fails closed unless the model gateway is reachable and an owner key is present to mint the turn's
     grant."""
     return _default_on_flag("VIGIL_CUSTOMER_ASSISTANT")
+
+
+def customer_action_approval_enabled() -> bool:
+    """True iff the per-action APPROVAL GATE is ON (`VIGIL_CUSTOMER_ACTION_APPROVAL` affirmative). OFF by
+    DEFAULT and a STRICT opt-in (the opt-in posture-flag pattern, NOT default-on): only an explicit affirmative
+    (``1``/``true``/``yes``/``on``/``enabled``) turns it on; UNSET / empty / any other token is OFF. When OFF,
+    the engagement flow is BYTE-IDENTICAL to today — ``customer_flow_step`` never classifies risk, never
+    pauses, never records an approval, and the read/answer edge routes + provisioner actions are ABSENT (404
+    exactly as an unknown route), so the existing confirm-then-launch behaviour is unchanged. When ON, a
+    running engagement that proposes a RISKY action (scope-changing / destructive / out-of-window /
+    spend-crossing, classified deterministic-first) PAUSES at ``awaiting_approval`` and resumes only on an
+    explicit, owner-signed, single-use, time-boxed Allow (default-BLOCK on timeout); every decision is recorded
+    as append-only, owner-signed, tamper-evident evidence. ADDITIVE: it composes with — never replaces — the
+    explicit spend confirm, the step-up gate and the CRUCIBLE safety stack. Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_ACTION_APPROVAL") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_assistant_wallet_enabled() -> bool:

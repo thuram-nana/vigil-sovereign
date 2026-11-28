@@ -59,10 +59,18 @@ NEED_VERIFY = "need_verify"
 VERIFYING = "verifying"
 READY = "ready"
 AWAITING_CONFIRM = "awaiting_confirm"
+# AWAITING_APPROVAL — the ADDITIVE per-action approval pause (the action-approval gate). It sits AFTER the
+# spend-confirm and BEFORE a risky step runs: when the gate is on (VIGIL_CUSTOMER_ACTION_APPROVAL) and the
+# server classifies the next action as risky with no live owner Allow in hand, the flow PAUSES here and emits
+# an approval request; the engagement resumes only on an explicit, owner-signed Allow (default-BLOCK on
+# timeout). It is reachable from both the launch path (after awaiting_confirm) AND a live control step
+# (from running), so it is NOT a single linear position — the gate names it, the provisioner enforces it.
+AWAITING_APPROVAL = "awaiting_approval"
 RESERVING = "reserving"
 RUNNING = "running"
 DONE = "done"
-STATES = (NEED_DOMAIN, NEED_VERIFY, VERIFYING, READY, AWAITING_CONFIRM, RESERVING, RUNNING, DONE)
+STATES = (NEED_DOMAIN, NEED_VERIFY, VERIFYING, READY, AWAITING_CONFIRM, AWAITING_APPROVAL,
+          RESERVING, RUNNING, DONE)
 
 #: The allowlisted control intents the flow forwards to the already-gated launch controls (host↔lease matched).
 CONTROL_INTENTS = ("steer", "pause", "resume", "cancel")
@@ -226,3 +234,29 @@ def offered_depth(choices: "Optional[list]", product_id: str) -> "Optional[str]"
             d = c.get("depth")
             return str(d) if d is not None else None
     return None
+
+
+def gate(plan: dict, *, requires_approval: bool, approval_present: bool) -> dict:
+    """The PURE action-approval gate — the ADDITIVE layer that composes with :func:`decide` WITHOUT replacing
+    it. Given the base ``plan`` :func:`decide` produced and two booleans the provisioner computes (from the
+    flag + the risk classifier + the live grant store), return the plan to act on:
+
+      * the base plan carried a real action (not ``none``/blocked), the server classified it as RISKY
+        (``requires_approval``) and there is NO live owner Allow for it (``approval_present`` False) ⇒ PAUSE:
+        action ``none``, state :data:`AWAITING_APPROVAL`, ``need`` ``approval`` — the engagement does not run
+        the step; the provisioner emits the approval request and the operator must Allow (default-BLOCK on
+        timeout) before a later step passes ``approval_present=True`` and this returns the base plan unchanged.
+      * otherwise (not risky, OR a live Allow is in hand, OR the base plan already took no action / was
+        blocked) ⇒ the base plan UNCHANGED — so with the gate OFF (the provisioner never calls this) or with a
+        valid Allow, behaviour is byte-identical to today.
+
+    PURE + side-effect-free: it NAMES the pause, it does not record or mint anything. Fail-closed by shape —
+    it can only ever turn a would-run action INTO a pause, never turn a pause into a run or widen an action."""
+    action = str(plan.get("action") or "none")
+    blocked = plan.get("blocked")
+    if action == "none" or blocked is not None:
+        return plan                                  # nothing would run (or already blocked) — no gate to apply
+    if not requires_approval or approval_present:
+        return plan                                  # not risky, or an owner Allow is already in hand — proceed
+    return {"action": "none", "state": AWAITING_APPROVAL,
+            "blocked": "owner approval is required before this action runs", "need": "approval"}

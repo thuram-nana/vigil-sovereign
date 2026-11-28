@@ -1986,6 +1986,19 @@ class Handler(BaseHTTPRequestHandler):
                                         confirm=body.get("confirm") is True, text=str(body.get("text", "")),
                                         idem_key=str(body.get("idem_key", "")), since=str(body.get("since", "")),
                                         ip=ip, mfa_at=body.get("mfa_at"))
+        # The per-action APPROVAL GATE: read the SESSION org's pending approvals / answer one Allow or Block.
+        # STRICT opt-in (VIGIL_CUSTOMER_ACTION_APPROVAL, default OFF => unknown action -> 404), so the engagement
+        # flow is byte-identical when off. requester is the hop principal, org + mfa_at from the edge SESSION
+        # (never a body field a customer controls); only the approval_id + the Allow/Block choice ride the body.
+        if action in ("customer_approvals", "customer_approval_answer"):
+            from .. import config as _config
+            if not _config.customer_action_approval_enabled():
+                return None
+            if action == "customer_approvals":
+                return p.customer_approvals(requester, str(body.get("org_id", "")), ip=ip)
+            return p.customer_approval_answer(requester, str(body.get("org_id", "")),
+                                              approval_id=str(body.get("approval_id", "")),
+                                              allow=body.get("allow") is True, ip=ip, mfa_at=body.get("mfa_at"))
         # PR-K - the per-tenant customer KNOWLEDGE corpus: upload / list / query the SESSION org's OWN organization
         # documents. DEFAULT ON (VIGIL_CUSTOMER_KNOWLEDGE); absent (unknown action -> 404) only when it is EXPLICITLY
         # off. requester is the hop principal, org from the edge SESSION (never a free body field); the document body

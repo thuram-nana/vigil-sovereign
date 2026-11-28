@@ -4770,6 +4770,34 @@ class Provisioner:
         if active is not None:                        # surface the active launch WITHOUT its signed lease
             out["launch"] = {k: active.get(k) for k in ("slug", "launch", "state", "depth") if k in active}
 
+        # ---- the ADDITIVE action-approval gate (default-OFF under VIGIL_CUSTOMER_ACTION_APPROVAL) ----
+        # When ON, a risky NAMED action PAUSES for an explicit, owner-signed Allow before it runs. This is an
+        # ADDITIVE layer on top of decide()'s own gates (the explicit affirm on verify, the explicit spend
+        # confirm on launch): it never widens an action, only turns a would-run risky step into a pause. With
+        # the flag OFF this whole block is skipped, so the flow is BYTE-IDENTICAL to confirm-then-launch.
+        if (config.customer_action_approval_enabled() and plan["blocked"] is None and action != "none"):
+            from . import action_approval as _appr
+            from . import action_risk as _risk
+            # DETERMINISTIC-FIRST: the risk is decided from the action kind (+ a closed set of blast-radius
+            # facts; the advisory LLM judge is intentionally OFF here — deterministic-only). Blast-radius FACTS
+            # from live scope/window/spend reads are a classifier extension point (see action_risk) not yet fed
+            # from here — residual, honestly scoped; decide() already blocks unproven/out-of-scope hosts upstream.
+            risk = _risk.classify_action(action)
+            if risk.requires_approval:
+                params = {"host": h, "depth": str(depth or ""), "product_id": str(product_id or ""),
+                          "text": str(text or "")}
+                outcome = _appr.gate_step(requester_org_id, h, action, risk=risk, params=params,
+                                          requested_by=requester, now=t)
+                gated = _flow.gate(plan, requires_approval=True, approval_present=outcome.allow)
+                if not outcome.allow:
+                    out["state"], out["blocked"], out["need"] = gated["state"], gated["blocked"], gated["need"]
+                    out["approval"] = outcome.approval
+                    self._audit("customer_flow_step", requester=requester, org_id=requester_org_id, target=h,
+                                outcome="awaiting_approval")
+                    return out
+                # outcome.allow: a live owner-signed Allow was spent (single-use) — fall through and run EXACTLY
+                # this action once, exactly as if the gate were off.
+
         if action == "assets":
             out["assets"] = assets                     # the org's own ownership status rows (tenant-scoped)
         elif action == "challenge":
@@ -4818,6 +4846,58 @@ class Provisioner:
         self._audit("customer_flow_step", requester=requester, org_id=requester_org_id, target=h,
                     outcome=action if plan["blocked"] is None else "blocked")
         return out
+
+    # ---- the per-action APPROVAL GATE read/answer routes (VIGIL_CUSTOMER_ACTION_APPROVAL; default-OFF) ------
+    def customer_approvals(self, requester: str, requester_org_id: str, *, ip: str = "",
+                           now: "Optional[float]" = None) -> dict:
+        """Read the SESSION org's OPEN approval requests (the pending-approval cards the operator answers). Each
+        card carries the risk level, categories and reasons + an honest expiry — everything the UI needs, no key
+        and no nonce. Expired requests are swept to default-BLOCK on read (the audit trail shows the timeout).
+        requester / org are the hop-bound session principal, NEVER a body field (tenant isolation at the edge);
+        the per-org store makes another tenant's approvals structurally unreachable. Behind
+        VIGIL_CUSTOMER_ACTION_APPROVAL (refused here too, defence in depth under the dispatch 404)."""
+        from .. import config
+        if not config.customer_action_approval_enabled():
+            raise ProvisionDenied("the action-approval gate is not enabled")
+        t = self._now() if now is None else float(now)
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            self._audit("customer_approvals", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not read approvals for this org (view_assessments)")
+        from . import action_approval as _appr
+        pending = _appr.list_pending(requester_org_id, now=t)
+        self._audit("customer_approvals", requester=requester, org_id=requester_org_id, outcome="read")
+        return {"ok": True, "pending": pending}
+
+    def customer_approval_answer(self, requester: str, requester_org_id: str, *, approval_id: str = "",
+                                 allow: bool = False, ip: str = "", mfa_at: float = 0.0,
+                                 now: "Optional[float]" = None) -> dict:
+        """Answer ONE pending approval Allow or Block. Answering is a run_engagement CONTROL decision, so the
+        requester is admitted at that tier (the same one that drives the engagement). An ALLOW of a HIGH-risk
+        action additionally requires a FRESH step-up second factor (``_require_stepup``; no-op unless
+        enforcement is on) — so releasing a money/destructive/scope action always rides a recent proof. The
+        Allow is recorded as an owner-signed, single-use, time-boxed per-action grant bound to EXACTLY that
+        action; a Block writes no grant (the gate stays closed — default-block). IDEMPOTENT on the approval id.
+        requester / org / mfa_at come from the SERVER session only (never a body field). Behind
+        VIGIL_CUSTOMER_ACTION_APPROVAL (refused here too)."""
+        from .. import config
+        if not config.customer_action_approval_enabled():
+            raise ProvisionDenied("the action-approval gate is not enabled")
+        t = self._now() if now is None else float(now)
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("customer_approval_answer", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not answer approvals for this org (run_engagement)")
+        from . import action_approval as _appr
+        aid = str(approval_id or "")
+        if allow is True:
+            # step-up ONLY for a HIGH-risk Allow (the pending record carries the risk the gate classified).
+            pend = _appr.pending_for(requester_org_id, aid)
+            if isinstance(pend, dict) and bool((pend.get("risk") or {}).get("requires_stepup")):
+                self._require_stepup(mfa_at, now=t)      # E3c: a fresh step-up (no-op unless enforcement is on)
+        res = _appr.answer(requester_org_id, requester, aid, allow=allow is True, now=t)
+        self._audit("customer_approval_answer", requester=requester, org_id=requester_org_id, target=aid,
+                    outcome=res.decision or "invalid")
+        return {"ok": res.ok, "decision": res.decision, "approval_id": res.approval_id,
+                "already": res.already, "reason": res.reason}
 
     # ---- PR-K: the per-tenant customer KNOWLEDGE corpus actions (``tenant_knowledge``) --------------------------------
     def customer_knowledge_ingest(self, requester: str, requester_org_id: str, filename: str, data_bytes: bytes,

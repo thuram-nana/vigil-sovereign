@@ -1313,6 +1313,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._command(body)
         if action == "flow" and _assistant_on():                     # B3 engagement flow machine (OFF -> 404)
             return self._flow(body)
+        if action == "flow/approvals" and _action_approval_on():      # action-approval gate: read (OFF -> 404)
+            return self._approvals(body)
+        if action == "flow/approval" and _action_approval_on():       # action-approval gate: Allow/Block (OFF -> 404)
+            return self._approval_answer(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1656,6 +1660,34 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             "authorized": body.get("authorized") is True, "confirm": body.get("confirm") is True,
             "text": body.get("text", ""), "idem_key": body.get("idem_key", ""), "since": body.get("since", "")}
         c, r = self._provision("customer_flow_step", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _approvals(self, body: dict):
+        """GET-style read of the SESSION org's OPEN per-action approvals (the Allow/Block cards). REQUESTER +
+        ORG come from the SERVER session, NEVER the body — a customer reads only THEIR bound org's approvals
+        (tenant isolation at the edge). No body input is used."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()}
+        c, r = self._provision("customer_approvals", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _approval_answer(self, body: dict):
+        """Answer ONE pending approval Allow or Block. REQUESTER + ORG + the E3c step-up stamp come from the
+        SERVER session, NEVER the body (tenant isolation + the money/authority doctrine at the edge: a body
+        org_id / requester / mfa_at is ignored). The body carries ONLY the ``approval_id`` and the explicit
+        ``allow`` choice — STRICT identity (``is True``), so only an explicit JSON ``true`` is an Allow and
+        everything else fails closed to a Block/no-op. An Allow of a high-risk action is gated server-side on a
+        fresh step-up before it is recorded."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {
+            "org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+            "mfa_at": rec.get("mfa_at"),                 # E3c step-up stamp from the SESSION, never body
+            "approval_id": body.get("approval_id", ""), "allow": body.get("allow") is True}
+        c, r = self._provision("customer_approval_answer", str(rec.get("username") or ""), payload)
         return self._json(r, c)
 
     def _code_connected(self):
@@ -2033,6 +2065,11 @@ def _proof_badge_on() -> bool:
 def _assistant_on() -> bool:
     from .. import config as _config
     return _config.customer_assistant_enabled()
+
+
+def _action_approval_on() -> bool:
+    from .. import config as _config
+    return _config.customer_action_approval_enabled()
 
 
 def _knowledge_on() -> bool:
