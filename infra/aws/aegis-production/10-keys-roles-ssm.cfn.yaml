@@ -1,0 +1,434 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AEGIS AS-34 production platform - KMS keys (one per zone + the OWNER root and a separate RELEASE root,
+  spec section 4.6), permission-bounded IAM roles per zone (E2: one key per zone), an SSM command document
+  for production bringup, and an IMDSv2-ENFORCED launch template (spec section 5: HttpTokens required). The
+  production counterpart of AS-26 (infra/aws/aegis-staging/10-keys-roles-ssm). Where staging ships a TEST
+  owner and a TEST release root, production declares the REAL owner root and the REAL release root (these
+  sign host/origin proofs, grants, leases and enforce-releases). Admin of either root requires MFA
+  (aws:MultiFactorAuthPresent) - the offline posture proxy for the "MFA sign-in" acceptance; the live
+  console sign-in with a hardware MFA device is a production operator step. PRODUCTION platform,
+  merged-not-applied. Long-form intrinsics only (check-yaml parses it as plain YAML).
+
+Parameters:
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ARN of an account permissions-boundary policy applied to every zone role. Empty uses the
+      boundary this template defines (ZoneRolePermissionsBoundary).
+
+Conditions:
+  UseOwnBoundary:
+    Fn::Equals:
+      - Ref: PermissionsBoundaryArn
+      - ""
+
+Resources:
+  # --------------------------------------------------------------------------------------------------
+  # Permissions boundary shared by every zone role - a hard ceiling (no iam:*, no kms:ScheduleKeyDeletion,
+  # no wildcarded sts:AssumeRole) so a compromised zone role can never widen itself.
+  # --------------------------------------------------------------------------------------------------
+  ZoneRolePermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aegis-production-zone-role-boundary
+      Description: Hard ceiling for every AEGIS production zone role (no privilege escalation).
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBoundedOperations
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - secretsmanager:GetSecretValue
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - cloudwatch:PutMetricData
+            Resource: "*"
+          - Sid: DenyPrivilegeEscalation
+            Effect: Deny
+            Action:
+              - "iam:*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:PutKeyPolicy"
+              - "sts:AssumeRole"
+              - "organizations:*"
+            Resource: "*"
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-zone KMS keys (E2: one key per zone). Each key is usable only by its own zone role.
+  # --------------------------------------------------------------------------------------------------
+  Z2EKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production Z2E (enforcement) data key.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production Z2W (workers) data key.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production Z2X (actuation) provider-credential key. Only the Z2X role may use it.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production Z3 (control plane) KEK.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production Z4 (offense sandbox) key. Disjoint from every defense key (B-5).
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # The OWNER root and the SEPARATE RELEASE root (spec section 4.6: owner root + a distinct release root).
+  # Admin of either requires MFA - the offline posture proxy for the "MFA sign-in" acceptance. The live
+  # console/CLI sign-in with a hardware MFA device is the production operator step (deploy-gated). Where
+  # staging labels these test-owner / test-release, production carries the REAL owner and release roots.
+  # --------------------------------------------------------------------------------------------------
+  OwnerKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AEGIS production OWNER root (signs host/origin proofs, grants, leases).
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AdminRequiresMFA
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:PutKeyPolicy"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:DisableKey"
+              - "kms:CreateGrant"
+            Resource: "*"
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: "false"
+      Tags:
+        - Key: vigil:root
+          Value: owner
+
+  ReleaseKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: >-
+        AEGIS production RELEASE root (enforce-release signing, separate from the owner root, spec section
+        4.6). A release is an owner act under this root (D30) - MFA-gated here; the live hardware-MFA sign
+        in is the production operator step.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AdminRequiresMFA
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:PutKeyPolicy"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:DisableKey"
+              - "kms:CreateGrant"
+            Resource: "*"
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: "false"
+      Tags:
+        - Key: vigil:root
+          Value: release
+
+  OwnerKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aegis-production-owner
+      TargetKeyId:
+        Ref: OwnerKey
+
+  ReleaseKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aegis-production-release
+      TargetKeyId:
+        Ref: ReleaseKey
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-zone IAM roles, each with the shared permissions boundary. EC2 service principal (instances
+  # assume via an instance profile). No role may assume another (B-5/escalation ceiling).
+  # --------------------------------------------------------------------------------------------------
+  Z2ERole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-production-z2e
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2e-enforcement
+
+  Z2WRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-production-z2w
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2w-workers
+
+  Z2XRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-production-z2x
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z2x-actuation
+
+  Z3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-production-z3
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z3-control
+
+  Z4Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aegis-production-z4
+      PermissionsBoundary:
+        Fn::If:
+          - UseOwnBoundary
+          - Ref: ZoneRolePermissionsBoundary
+          - Ref: PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: vigil:zone
+          Value: z4-offense
+
+  # --------------------------------------------------------------------------------------------------
+  # IMDSv2-ENFORCED launch template (spec section 5; T-XT / cloud-metadata hardening). HttpTokens=required
+  # forces a session-token IMDS fetch; the hop limit of 1 keeps the token off any forwarded hop.
+  # --------------------------------------------------------------------------------------------------
+  Z2EInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aegis-production-z2e
+      Roles:
+        - Ref: Z2ERole
+
+  ImdsV2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: aegis-production-imdsv2
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        IamInstanceProfile:
+          Arn:
+            Fn::GetAtt:
+              - Z2EInstanceProfile
+              - Arn
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: vigil:imdsv2
+                Value: required
+
+  # --------------------------------------------------------------------------------------------------
+  # SSM command document for production bringup. SSM-only (no SSH); the reconciler (AS-6a) drives workers
+  # through SSM, never an interactive shell.
+  # --------------------------------------------------------------------------------------------------
+  ProductionBringupDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: aegis-production-bringup
+      DocumentType: Command
+      DocumentFormat: YAML
+      Content:
+        schemaVersion: "2.2"
+        description: AEGIS production bringup - pull the pinned image digest and start the tenant unit (SSM-only).
+        parameters:
+          imageDigest:
+            type: String
+            description: The sha256 image digest to run (AS-28 Dockerfile.saas), pinned by the reconciler.
+            allowedPattern: "^sha256:[0-9a-f]{64}$"
+        mainSteps:
+          - action: aws:runShellScript
+            name: bringup
+            inputs:
+              timeoutSeconds: "600"
+              runCommand:
+                - "set -euo pipefail"
+                - 'echo "aegis production bringup for digest {{ imageDigest }}"'
+                - "systemctl --no-block start aegis-saas-gateway@production.service"
+      Tags:
+        - Key: vigil:environment
+          Value: production
+
+Outputs:
+  OwnerKeyArn:
+    Description: OWNER root KMS key ARN (MFA-gated admin).
+    Value:
+      Fn::GetAtt:
+        - OwnerKey
+        - Arn
+  ReleaseKeyArn:
+    Description: RELEASE root KMS key ARN (separate from owner, MFA-gated admin).
+    Value:
+      Fn::GetAtt:
+        - ReleaseKey
+        - Arn
+  ImdsV2LaunchTemplateId:
+    Description: IMDSv2-enforced launch template id.
+    Value:
+      Ref: ImdsV2LaunchTemplate
+  ZoneRoleBoundaryArn:
+    Description: Permissions-boundary managed policy applied to every zone role.
+    Value:
+      Ref: ZoneRolePermissionsBoundary

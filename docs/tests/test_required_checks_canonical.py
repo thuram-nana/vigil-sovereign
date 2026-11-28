@@ -147,16 +147,18 @@ KNOWN_ADVISORY: dict[str, str] = {
         "the PR when cross-tenant isolation regresses."
     ),
     "aegis-infra (CFN analyzers + Z3R relay guards, advisory)": (
-        "aegis-infra.yml (AS-26 OPS-1) — runs cfn-lint over the AEGIS staging CloudFormation templates plus "
-        "the two OFFLINE layers this slice ships: the deterministic Z3R relay guards "
-        "(integration/tests/test_aegis_relay_guard.py) and the AS-26 CFN posture analyzer "
-        "(integration/tests/test_aegis_infra_posture.py — IMDSv2, disjoint EIPs, MFA roots, keyless relay, "
-        "paging, drift). Advisory because the live AWS staging stack cannot be applied in CI (no live "
-        "staging account in the merge pipeline), so the job proves only what is provable offline and stays "
-        "non-blocking while the live stack and its sign-in / page-delivery / live-drift checks are a staging "
-        "operator step; its promotion to a required check would need tools/governance/require-checks.sh "
-        "--apply. The relay-guard and posture tests ALSO run in the required 'integration two-env boundary "
-        "(P5)' job, so the offline guarantees are not lost by leaving this advisory."
+        "aegis-infra.yml (AS-26 OPS-1 + AS-34) - runs cfn-lint over the AEGIS staging AND production "
+        "CloudFormation templates plus the two OFFLINE layers these slices ship: the deterministic Z3R "
+        "relay guards (integration/tests/test_aegis_relay_guard.py) and the CFN posture analyzer, the SAME "
+        "analyzer over both platforms (integration/tests/test_aegis_infra_posture.py staging + "
+        "integration/tests/test_aegis_production_posture.py production - IMDSv2, disjoint EIPs, MFA roots, "
+        "keyless relay, paging, drift). Advisory because the live AWS staging/production stacks cannot be "
+        "applied in CI (no live account in the merge pipeline), so the job proves only what is provable "
+        "offline and stays non-blocking while the live stacks and their sign-in / page-delivery / "
+        "live-drift checks are an operator step; its promotion to a required check would need "
+        "tools/governance/require-checks.sh --apply. The relay-guard and posture tests ALSO run in the "
+        "required 'integration two-env boundary (P5)' job, so the offline guarantees are not lost by "
+        "leaving this advisory."
     ),
 }
 
