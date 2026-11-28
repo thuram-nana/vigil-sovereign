@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     )
     from .capacity import CapacityBudget, CapacityGovernor
     from .probe_socket import ProbeSocketServer
+    from .receipts import ReceiptLedger
 
 from ..common.logging import get_logger
 from .actor_graph import ActorGraph
@@ -165,6 +166,20 @@ def _probe_socket_flag() -> bool:
     return (os.environ.get(PROBE_SOCKET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5d (receipts): the default-OFF switch for the append-only ENFORCEMENT-OUTCOME receipt ledger. Kept in
+# LOCKSTEP with ``receipts.RECEIPTS_ENV`` (a test asserts they match) and read here directly so the receipts
+# module is NOT eagerly import-reachable from the gateway (it is imported only when the flag is on).
+RECEIPTS_ENV = "VIGIL_AEGIS_RECEIPTS"
+
+
+def _receipts_flag() -> bool:
+    """AS-5d receipt-ledger switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and
+    re-read per request so a live flip-OFF stops recording at once). OFF ⇒ no ledger is built, no receipt is
+    recorded, and the gateway data path (and the AS-5c probe snapshot) are byte-identical."""
+    import os
+    return (os.environ.get(RECEIPTS_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -271,6 +286,18 @@ class GatewaySettings:
         if capacity_budget is not None:
             from .capacity import CapacityGovernor
             self.capacity_governor = CapacityGovernor(capacity_budget, monotonic=self._v2_monotonic)
+        # AS-5d (receipts) — the append-only, hash-linked ENFORCEMENT-OUTCOME receipt ledger. Built ONCE when the
+        # default-OFF VIGIL_AEGIS_RECEIPTS flag is on at construction (cheap + inert: in-memory, no thread, no
+        # socket); a receipt is APPENDED per terminal enforcement disposition only when ``receipts_active``. OFF ⇒
+        # the ledger is never built, no receipt is recorded, and the gateway data path (and the AS-5c probe
+        # snapshot) are byte-identical. A receipt RECORDS an outcome the gate already decided — it is never itself
+        # a block or a verdict (only a fired oracle blocks). The monotonic clock is INJECTED (the same clock the
+        # V2/capacity/probe planes use) for determinism. Importing the module lazily here keeps it OFF the eager
+        # __init__/__main__ import path (make-gate byte-identity).
+        self.receipt_ledger: "ReceiptLedger | None" = None
+        if _receipts_flag():
+            from .receipts import ReceiptLedger
+            self.receipt_ledger = ReceiptLedger(monotonic=self._v2_monotonic)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -359,6 +386,16 @@ class GatewaySettings:
             gov = self.capacity_governor
             snap["capacity_active"] = bool(self.capacity_active)
             snap["capacity"] = gov.snapshot() if gov is not None else None
+        except Exception:
+            pass
+        # AS-5d (receipts): surface the enforcement-outcome ledger snapshot (count + chain head + tally) ONLY when
+        # the ledger is recording, so a receipts-OFF gateway's probe answer is byte-identical to the AS-5c one.
+        # Metadata only (no address, no secret), mirroring the AS-5a capacity snapshot.
+        try:
+            led = self.receipt_ledger
+            if led is not None and self.receipts_active:
+                snap["receipts_active"] = True
+                snap["receipts"] = led.snapshot()
         except Exception:
             pass
         return snap
@@ -493,6 +530,26 @@ class GatewaySettings:
         runs and the gateway path is byte-identical. Independent of enforce/observe: load shedding protects
         availability in BOTH modes (it is operational, not an enforcement action)."""
         return self.capacity_governor is not None and _capacity_flag()
+
+    @property
+    def receipts_active(self) -> bool:
+        """Is the AS-5d receipt ledger recording for THIS request? Only when the ledger was built (the default-OFF
+        VIGIL_AEGIS_RECEIPTS flag was on at construction) AND the flag is STILL on — so an operator flipping it OFF
+        at runtime stops recording live. Independent of enforce/observe: an ``allowed``/``shed`` outcome is
+        recorded in both modes; a ``blocked`` outcome arises only under effective enforce (a fired oracle)."""
+        return self.receipt_ledger is not None and _receipts_flag()
+
+    def record_outcome(self, outcome: str, reason: str = "") -> None:
+        """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
+        and any error is swallowed so a receipt fault can NEVER touch the data path. A receipt RECORDS the
+        disposition the gate already produced — it is not itself a block or a verdict."""
+        led = self.receipt_ledger
+        if led is None or not self.receipts_active:
+            return
+        try:
+            led.record(outcome, reason)
+        except Exception:
+            pass
 
     def saas_decision(self):
         """AE-3 per-request re-authorization. None when this is not a SaaS gateway; otherwise the AE-2
@@ -796,6 +853,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         """403 with the certificate id — the honest, auditable block. The cert is re-runnable offline
         (``CertRef.reverify``), so the block is provable, not a guess."""
         cid = verdict.certificate.cert_id if verdict.certificate else ""
+        # AS-5d (receipts): record the BLOCKED enforcement outcome (a record THAT a fired oracle blocked — not the
+        # cause of the block; the block rides on the certificate above). No-op unless the ledger is active; total.
+        self.settings.record_outcome("blocked", verdict.attack_class)
         # AUDIT — every aegis.respond block is recorded with its re-runnable certificate id, the
         # attack class, and the client, so the operator has a complete, provable enforcement trail.
         try:
@@ -967,6 +1027,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         finding, so this is logged (not emitted as an attack verdict) and carries a Retry-After for honest
         back-off."""
         retry = admission.retry_after_header
+        # AS-5d (receipts): record the SHED enforcement outcome (availability-first, before inspection — never a
+        # block). No-op unless the ledger is active; total. The reason is the address-free capacity shed category.
+        self.settings.record_outcome("shed", getattr(admission, "reason", ""))
         try:
             _log.info("aegis.gateway.capacity_shed", slug=self.settings.slug, reason=admission.reason,
                       client=self._actor_key(), method=self.command, retry_after=retry)
@@ -1192,6 +1255,11 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if self._is_block(rverdict):
             self._send_block(rverdict)  # type: ignore[arg-type]
             return
+        # AS-5d (receipts): record the ALLOWED enforcement outcome — a request AEGIS INSPECTED (request- and
+        # response-side) and chose not to block, now relayed to the upstream. This fires only on the
+        # inspected-and-let-through path; an un-inspected pass-through (no valid authority) mints no receipt (no
+        # enforcement occurred). No-op unless the ledger is active; total.
+        self.settings.record_outcome("allowed", "relayed")
         self._relay(status, resp_headers, content)
 
     @staticmethod
