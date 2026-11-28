@@ -3732,7 +3732,7 @@
   // nothing. It mints nothing, arms nothing, releases nothing — the actual Release stays behind AS-29's gate on
   // #/monitoring/settings. It renders NO button (read-only), so the Monitoring screens' button census is unchanged.
   // CSP-safe: it uses no handler at all (pure display).
-  var MON_HEADLINE = { unsupported: "Not protected", inactive: "Not monitored", degraded: "Degraded",
+  var MON_HEADLINE = { unsupported: "Not monitored", inactive: "Not monitored", degraded: "Degraded",
                        unverified: "Proof of control lapsed", observing: "Observing", enforcing: "Enforcing · Respond" };
   var MON_OUTCOME = { prevented_before_execution: "block attacks before they reach your app",
                       response_withheld_after_execution: "withhold the response after your app has run",
@@ -3789,7 +3789,7 @@
   }
   function monPreviewCard(p) {
     var badge = h("span.cust-badge.cust-badge-" + (p.headline === "enforcing" ? "on" : (p.headline === "observing"
-      ? "signal" : "off")), { text: own(MON_HEADLINE, p.headline) || "Not protected" });
+      ? "signal" : "off")), { text: own(MON_HEADLINE, p.headline) || "Not monitored" });
     var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(p.host) }), badge])];
     var nowText = monPreviewOutcomeText(p.observe_outcomes);
     body.push(kv("Now", nowText ? ("AEGIS can " + nowText + ".") : "AEGIS does not inspect this host yet."));
