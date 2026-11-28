@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     )
     from .attribution import AttributionMeter
     from .capacity import CapacityBudget, CapacityGovernor
+    from .coraza_source import CorazaAttestationMeter, CorazaCorpus
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
@@ -218,6 +219,25 @@ def _attribution_flag() -> bool:
     return (os.environ.get(ATTRIBUTION_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-7b (coraza): the default-OFF switch for the deterministic read-only CORAZA/CRS FRONT-WAF SUPPLY-CHAIN
+# ATTESTATION — whether the front-WAF detection content (the ``coraza-v3`` engine + the ``coreruleset-crs-4x`` corpus)
+# a tenant runs is licence-admitted (AS-7a §7 gate) AND pinned (AS-28-style corpus digest), so a Coraza DetectionOnly
+# hit's typed ``rule_refs`` may be admitted as a LEAD (never a block). Kept in LOCKSTEP with
+# ``coraza_source.CORAZA_ENV`` (a test asserts they match) and read here directly so the coraza_source module (and,
+# through it, the AS-7a license_gate / pydantic / vigil_core) is NOT eagerly import-reachable from the gateway (it is
+# imported only when the flag is on AND its dependency — a configured CRS corpus manifest — exists).
+CORAZA_ENV = "VIGIL_AEGIS_CORAZA"
+
+
+def _coraza_flag() -> bool:
+    """AS-7b coraza switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read per
+    snapshot so a live flip-OFF stops surfacing the attestation at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The attestation is ALSO
+    inert whenever its dependency — a configured CRS corpus manifest — is absent (there is nothing to attest)."""
+    import os
+    return (os.environ.get(CORAZA_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -282,6 +302,7 @@ class GatewaySettings:
                  on_authority_event: "Callable[[Any], None] | None" = None,
                  capacity_budget: "CapacityBudget | None" = None,
                  impact_budget: "ImpactBudget | None" = None,
+                 coraza_corpus: "CorazaCorpus | None" = None,
                  probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
@@ -367,6 +388,21 @@ class GatewaySettings:
                 and self.impact_budget_meter is not None):
             from .attribution import AttributionMeter
             self.attribution_meter = AttributionMeter(self.capacity_governor, self.impact_budget_meter)
+        # AS-7b (coraza) — the deterministic, READ-ONLY Coraza/CRS front-WAF SUPPLY-CHAIN ATTESTATION: whether the
+        # front-WAF detection content (the coraza-v3 engine + the coreruleset-crs-4x corpus) a tenant runs is
+        # licence-admitted (AS-7a §7 gate) AND pinned (AS-28-style corpus digest), so a Coraza DetectionOnly hit's
+        # typed rule_refs may be admitted as a LEAD. Built ONCE, only when the default-OFF VIGIL_AEGIS_CORAZA flag is
+        # on at construction AND its dependency — a configured CRS corpus manifest — exists (mirroring AS-5a's
+        # configured budget). It holds NO mutable state and NEVER mutates the licence ledger or the corpus: it only
+        # READS. It MEASURES and never acts — the attestation drives no admit/shed/allow/block decision (only a fired
+        # oracle blocks; a CRS rule_ref is a LEAD, never a block). OFF (or no corpus configured) ⇒ no meter is built,
+        # nothing is computed, and the gateway data path (and the probe snapshot) are byte-identical. Importing the
+        # module lazily here keeps it (and, through it, the AS-7a license_gate) OFF the eager __init__/__main__ path.
+        self.coraza_meter: "CorazaAttestationMeter | None" = None
+        if _coraza_flag() and coraza_corpus is not None:
+            from .coraza_source import CorazaAttestationMeter
+            from .license_gate import load_ledger
+            self.coraza_meter = CorazaAttestationMeter(coraza_corpus, ledger=load_ledger())
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -488,6 +524,18 @@ class GatewaySettings:
             if attrib is not None and self.attribution_active:
                 snap["attribution_active"] = True
                 snap["attribution"] = attrib.snapshot()
+        except Exception:
+            pass
+        # AS-7b (coraza): surface the deterministic read-only Coraza/CRS front-WAF supply-chain attestation — whether
+        # the front-WAF detection content is licence-admitted (AS-7a) AND pinned (AS-28-style corpus digest), so a
+        # Coraza DetectionOnly hit's rule_refs may be admitted as a LEAD — ONLY when the meter is active, so a gateway
+        # without the feature answers a probe byte-identically. Metadata only (counts + a digest, no address, no
+        # secret). It MEASURES, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            cm = self.coraza_meter
+            if cm is not None and self.coraza_active:
+                snap["coraza_active"] = True
+                snap["coraza"] = cm.snapshot()
         except Exception:
             pass
         return snap
@@ -654,6 +702,14 @@ class GatewaySettings:
                 and _attribution_flag()
                 and self.capacity_active
                 and self.impact_budget_active)
+
+    @property
+    def coraza_active(self) -> bool:
+        """Is the AS-7b Coraza/CRS front-WAF supply-chain attestation active for THIS snapshot? Only when the meter
+        was built (the default-OFF VIGIL_AEGIS_CORAZA flag was on at construction AND a CRS corpus was configured)
+        AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing the attestation live.
+        Read-only / observational: it never gates enforcement (a CRS rule_ref is a LEAD, never a block)."""
+        return self.coraza_meter is not None and _coraza_flag()
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
@@ -1397,6 +1453,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   notify_notifier: "Callable[[Verdict], None] | None" = None,
                   capacity_budget: "CapacityBudget | None" = None,
                   impact_budget: "ImpactBudget | None" = None,
+                  coraza_corpus: "CorazaCorpus | None" = None,
                   probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
@@ -1417,7 +1474,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
                                      on_authority_event=on_authority_event, capacity_budget=capacity_budget,
-                                     impact_budget=impact_budget, probe_socket_path=probe_socket_path)
+                                     impact_budget=impact_budget, coraza_corpus=coraza_corpus,
+                                     probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
     if monitoring_spool is not None:
