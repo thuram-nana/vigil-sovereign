@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from .attribution import AttributionMeter
     from .capacity import CapacityBudget, CapacityGovernor
     from .coraza_source import CorazaAttestationMeter, CorazaCorpus
+    from .detection_coverage import DetectionCoverageMeter
     from .detection_kit import DetectionKit, DetectionKitMeter
     from .detection_mirror import DetectionMirrorMeter
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
@@ -279,6 +280,26 @@ def _detection_mirror_flag() -> bool:
     return (os.environ.get(DETECTION_MIRROR_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-8 (detection coverage): the default-OFF switch for the deterministic read-only DETECTION-CONTENT COVERAGE
+# measure over the AS-7b admissible CRS content, which attack TECHNIQUES / rule-classes the admissible,
+# hygiene-clean content covers (by the canonical CRS rule-id banding) + how much of the known technique taxonomy +
+# a deterministic posture digest. Kept in LOCKSTEP with ``detection_coverage.COVERAGE_ENV`` (a test asserts they
+# match) and read here directly so the detection_coverage module (and, through it, coraza_source /
+# monitoring_event_v2) is NOT eagerly import-reachable from the gateway (it is imported only when the flag is on AND
+# its dependency, the AS-7b Coraza attestation meter, exists).
+COVERAGE_ENV = "VIGIL_AEGIS_COVERAGE"
+
+
+def _coverage_flag() -> bool:
+    """AS-8 detection-coverage switch: strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the measure at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The measure is ALSO inert
+    whenever its dependency, the AS-7b Coraza attestation (``VIGIL_AEGIS_CORAZA`` + a configured CRS corpus), is
+    off; the AS-2e hygiene gate is a flagless pure function, so there is no further dep flag to arm."""
+    import os
+    return (os.environ.get(COVERAGE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -477,6 +498,22 @@ class GatewaySettings:
         if _detection_mirror_flag() and self.coraza_meter is not None and coraza_corpus is not None:
             from .detection_mirror import DetectionMirrorMeter
             self.detection_mirror_meter = DetectionMirrorMeter(self.coraza_meter, coraza_corpus.rule_ids)
+        # AS-8 (detection coverage): the deterministic, READ-ONLY detection-content COVERAGE measure over the AS-7b
+        # admissible CRS content (the enforced CRS rule-ids admitted through the AS-7b gate), which attack TECHNIQUES
+        # / rule-classes the admissible, hygiene-clean content covers (by the canonical CRS rule-id banding), how much
+        # of the known technique taxonomy that is, and a deterministic posture digest, surfaced address-free /
+        # hygiene-clean (AS-2e) and read-only on the AS-5c probe snapshot. Built ONCE, only when the default-OFF
+        # VIGIL_AEGIS_COVERAGE flag is on at construction AND the AS-7b Coraza meter (its DEPENDENCY) exists (there
+        # is no admissible content to measure otherwise). It holds NO mutable state and NEVER mutates the licence
+        # ledger or the corpus: it only READS. It MEASURES and never acts, a classified technique is a LEAD, never a
+        # block (only a fired oracle blocks), and it drives no admit/shed/allow/block decision. OFF (or the AS-7b dep
+        # off) ⇒ no meter is built, nothing is computed, and the gateway data path (and the probe snapshot) are
+        # byte-identical. Importing the module lazily here keeps it (and, through it, coraza_source /
+        # monitoring_event_v2) OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        self.coverage_meter: "DetectionCoverageMeter | None" = None
+        if _coverage_flag() and self.coraza_meter is not None and coraza_corpus is not None:
+            from .detection_coverage import DetectionCoverageMeter
+            self.coverage_meter = DetectionCoverageMeter(self.coraza_meter, coraza_corpus.rule_ids)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -635,6 +672,18 @@ class GatewaySettings:
             if dm is not None and self.detection_mirror_active:
                 snap["detection_mirror_active"] = True
                 snap["detection_mirror"] = dm.snapshot()
+        except Exception:
+            pass
+        # AS-8 (detection coverage): surface the deterministic read-only measure of what the admissible CRS content
+        # covers — which attack techniques / rule-classes (by the CRS rule-id banding), how much of the known
+        # taxonomy, address-free and hygiene-clean (AS-2e) — ONLY when the meter is active, so a gateway without the
+        # feature answers a probe byte-identically. Metadata only (counts + labels + a digest, no address, no
+        # secret). It MEASURES, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            cov = self.coverage_meter
+            if cov is not None and self.coverage_active:
+                snap["coverage_active"] = True
+                snap["coverage"] = cov.snapshot()
         except Exception:
             pass
         return snap
@@ -827,6 +876,17 @@ class GatewaySettings:
         observational: it never gates enforcement (a mirrored detection hit is a LEAD, never a block)."""
         return (self.detection_mirror_meter is not None
                 and _detection_mirror_flag()
+                and self.coraza_active)
+
+    @property
+    def coverage_active(self) -> bool:
+        """Is the AS-8 detection-content coverage measure active for THIS snapshot? Only when the meter was built
+        (the default-OFF VIGIL_AEGIS_COVERAGE flag was on at construction AND the AS-7b Coraza meter exists) AND the
+        flag is STILL on AND its DEPENDENCY (the AS-7b Coraza attestation, ``coraza_active``) is STILL active — so
+        flipping EITHER the coverage or the coraza flag off at runtime stops surfacing the measure live. Read-only /
+        observational: it never gates enforcement (a classified technique is a LEAD, never a block)."""
+        return (self.coverage_meter is not None
+                and _coverage_flag()
                 and self.coraza_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
