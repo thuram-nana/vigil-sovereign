@@ -124,7 +124,9 @@ def test_negative_control_a_tampered_record_in_a_retained_backup_fails_reverify(
 
     salt, sealed = backup._read_header(dest)
     body = json.loads(unseal(backup._derive_key(PW, salt), sealed, context=backup._BODY_CONTEXT))
-    spine_rel = next(r for r in body["files"] if r.endswith("spine.jsonl"))
+    # the MAIN owner spine specifically: the full-source fixture also captures per-tenant spines
+    # (customer_knowledge/<org>/spine/spine.jsonl), so match the root spine rel exactly, not any *spine.jsonl.
+    spine_rel = next(r for r in body["files"] if r == "spine/spine.jsonl")
     raw = bytearray(base64.b64decode(body["files"][spine_rel]))
     # corrupt the recorded payload text of the FIRST record ("memory one" → "memory oNe"): the record's stored
     # hash/binding no longer matches its content, breaking the chain the restore re-verifies.

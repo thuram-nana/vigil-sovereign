@@ -1963,6 +1963,22 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
                                             str(body.get("question", "")), ip=ip)
+        # PR-K - the per-tenant customer KNOWLEDGE corpus: upload / list / query the SESSION org's OWN organization
+        # documents. DEFAULT ON (VIGIL_CUSTOMER_KNOWLEDGE); absent (unknown action -> 404) only when it is EXPLICITLY
+        # off. requester is the hop principal, org from the edge SESSION (never a free body field); the document body
+        # and the question are body data, tenant-scoped by the per-org corpus and re-admitted per org server-side.
+        if action in ("knowledge_ingest", "knowledge_list", "knowledge_query"):
+            from .. import config as _config
+            if not _config.customer_knowledge_enabled():
+                return None
+            org = str(body.get("org_id", ""))
+            if action == "knowledge_list":
+                return p.customer_knowledge_list(requester, org, ip=ip)
+            if action == "knowledge_query":
+                return p.customer_knowledge_query(requester, org, str(body.get("question", "")), ip=ip)
+            data = body.get("data")
+            raw = data.encode("utf-8") if isinstance(data, str) else (data if isinstance(data, (bytes, bytearray)) else b"")
+            return p.customer_knowledge_ingest(requester, org, str(body.get("filename", "")), bytes(raw), ip=ip)
         # Consumer PR-C — the unified CONNECT surface. Absent (unknown action -> 404) unless VIGIL_CUSTOMER_CONNECT is on
         # (the cloud actions also need VIGIL_CUSTOMER_CLOUD_CONNECT), the same flags that gate the edge routes; requester
         # is the hop principal, org from the edge SESSION (never a free body field). Booleans are strict (`is True`): a

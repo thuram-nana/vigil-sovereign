@@ -4502,16 +4502,41 @@ class Provisioner:
         owner_key = getattr(self.orgs, "owner_key", None)
         if owner_key is None or not getattr(owner_key, "private_key_b64", ""):  # gitleaks:allow — attr name, not a key
             raise ProvisionDenied("the assistant needs the owner key to mint its model grant")
+        # PR-K - when the customer knowledge corpus is on, ground the turn ADDITIONALLY in this org's OWN uploaded
+        # documents (server-derived for requester_org_id - never a body value; tenant-scoped by the per-org corpus).
+        # It degrades to findings-only on any corpus fault, but a cross-tenant anomaly fails CLOSED (never served).
+        docs = self._assistant_knowledge_documents(requester_org_id, q)
         if accounted:
-            return self._assistant_ask_accounted(requester, requester_org_id, q, owner_key)
+            return self._assistant_ask_accounted(requester, requester_org_id, q, owner_key, documents=docs)
         token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
         call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
         reply = _assistant.answer(self.store, requester_org_id, q, model_call=call, now=_t.time(),
                                   model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
-                                  limit=config.assistant_finding_limit())
+                                  limit=config.assistant_finding_limit(), documents=docs)
         return reply.as_dict()
 
-    def _assistant_ask_accounted(self, requester: str, org_id: str, q: str, owner_key: Any) -> dict:
+    def _assistant_knowledge_documents(self, org_id: str, question: str) -> "Optional[list]":
+        """PR-K - the org's OWN uploaded document hits for ``question`` when ``customer_knowledge_enabled()``, else
+        None (findings-only, byte-identical to pre-PR-K). Tenant-scoped by the per-org corpus (``org_id`` is the
+        hop-bound session org the caller already admitted, never a body value). Fail-SOFT for a retrieval fault (the
+        assistant still answers grounded in findings - a missing corpus must never take the turn down), but fail-CLOSED
+        on a cross-tenant anomaly (``KnowledgeIsolationError`` propagates - the turn is refused, never served with
+        another tenant's document). Documents are context only here; they never become findings (the firewall is in
+        ``ui.assistant``: a document never enters ``grounded_in`` and the reply carries no certificate)."""
+        from .. import config
+        if not config.customer_knowledge_enabled():
+            return None
+        from .. import tenant_knowledge
+        try:
+            hits = tenant_knowledge.query(org_id, question, k=config.customer_knowledge_query_limit())
+        except tenant_knowledge.KnowledgeIsolationError:
+            raise                                     # fail closed: a cross-tenant anomaly is never served
+        except Exception:  # noqa: BLE001 - any other corpus fault degrades to findings-only, never breaks the turn
+            return None
+        return hits or None
+
+    def _assistant_ask_accounted(self, requester: str, org_id: str, q: str, owner_key: Any,
+                                 *, documents: "Optional[list]" = None) -> dict:
         """PR-J2 — ONE assistant turn ACCOUNTED to the session org (``VIGIL_CUSTOMER_ASSISTANT_WALLET`` on).
         ``requester`` / ``org_id`` are the hop-bound session principal :meth:`customer_assistant_ask` has ALREADY
         admitted (view_assessments) — never a body field — so every record written and every credit moved is that
@@ -4554,7 +4579,7 @@ class Provisioner:
         try:
             reply = _assistant.answer(self.store, org_id, q, model_call=call, now=_t.time(),
                                       model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
-                                      limit=config.assistant_finding_limit())
+                                      limit=config.assistant_finding_limit(), documents=documents)
         except TurnRateLimited as e:
             self._audit("assistant_ask", requester=requester, org_id=org_id, outcome="refused", reason="rate_limited")
             raise ProvisionRateLimited(e.retry_after) from None
@@ -4585,6 +4610,67 @@ class Provisioner:
                            cap_nano_usd=cap_nano_usd if cap_nano_usd is not None else config.assistant_cap_nano_usd(),
                            not_after=now + 300.0, issued_at=now)
         return encode_token(grant, owner_key.private_key_b64)
+
+    # ---- PR-K: the per-tenant customer KNOWLEDGE corpus actions (``tenant_knowledge``) --------------------------------
+    def customer_knowledge_ingest(self, requester: str, requester_org_id: str, filename: str, data_bytes: bytes,
+                                  *, ip: str = "") -> dict:
+        """PR-K - upload ONE organization document into the SESSION org's own knowledge corpus. Absent unless
+        VIGIL_CUSTOMER_KNOWLEDGE is on (gated at the dispatch; refused here too). ``requester``/``requester_org_id`` are
+        the hop-bound session principal, NEVER a body field; the write is gated on ``admit_customer(run_engagement)``
+        for THAT org (the one per-org write permission). The document is chunked + appended to the org's OWN signed
+        spine and embedded into the org's OWN vector index - NEVER the owner's global stores and NEVER another tenant's
+        corpus (``tenant_knowledge`` scopes every store by a one-way hash of org_id). Caps (max document size, max docs
+        per org) are enforced server-side. Returns ``{"org_id", "filename", "chunks", "bytes"}``; mints no finding."""
+        from .. import config
+        if not config.customer_knowledge_enabled():
+            raise ProvisionDenied("the customer knowledge corpus is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("knowledge_ingest", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not upload documents for this org (run_engagement)")
+        from .. import tenant_knowledge
+        try:
+            out = tenant_knowledge.ingest_document(requester_org_id, filename, data_bytes)
+        except tenant_knowledge.KnowledgeCapError as e:
+            self._audit("knowledge_ingest", requester=requester, org_id=requester_org_id, outcome="refused",
+                        reason="cap")
+            raise ProvisionDenied(str(e)) from None
+        except (ValueError, tenant_knowledge.KnowledgeError) as e:
+            self._audit("knowledge_ingest", requester=requester, org_id=requester_org_id, outcome="refused",
+                        reason="invalid")
+            raise ProvisionDenied(str(e)) from None
+        self._audit("knowledge_ingest", requester=requester, org_id=requester_org_id,
+                    target=str(out.get("filename", ""))[:64], outcome="ingested")
+        return out
+
+    def customer_knowledge_list(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """PR-K - the SESSION org's uploaded documents (filename + chunk count). Absent unless VIGIL_CUSTOMER_KNOWLEDGE
+        is on. Gated like the assessments read (``admit_customer(view_assessments)`` on the hop-bound session org, no
+        global leg); a pure read of the org's OWN per-org spine - never the owner's global store, never another
+        tenant's - that mints nothing and touches no owner key."""
+        from .. import config
+        if not config.customer_knowledge_enabled():
+            raise ProvisionDenied("the customer knowledge corpus is not enabled")
+        from .. import tenant_knowledge
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda _s, org: tenant_knowledge.list_documents(org))
+
+    def customer_knowledge_query(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
+        """PR-K - grounded document hits for ``question``, scoped to the SESSION org ONLY. Absent unless
+        VIGIL_CUSTOMER_KNOWLEDGE is on. Gated on ``admit_customer(view_assessments)`` for the hop-bound session org
+        (never a body field). Tenant isolation is structural (the per-org corpus) AND re-asserted fail-closed in
+        ``tenant_knowledge.query`` (a hit for another org raises and serves nothing). Returns inert citation hits;
+        mints no finding."""
+        from .. import config
+        if not config.customer_knowledge_enabled():
+            raise ProvisionDenied("the customer knowledge corpus is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not query documents for this org (view_assessments)")
+        from .. import tenant_knowledge
+        try:
+            hits = tenant_knowledge.query(requester_org_id, question)
+        except tenant_knowledge.KnowledgeError as e:
+            raise ProvisionDenied(str(e)) from None
+        return {"org_id": requester_org_id, "hits": hits, "count": len(hits)}
 
     def customer_launches(self, requester: str, requester_org_id: str, *, ip: str = "",
                           now: "Optional[float]" = None) -> dict:
