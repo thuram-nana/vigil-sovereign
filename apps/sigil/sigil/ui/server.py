@@ -1838,6 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "monitor_authorize":
                 return p.monitor_authorize(requester, str(body.get("org_id", "")), str(body.get("host", "")),
                                            mode=str(body.get("mode", "observe")), window_s=body.get("window_s"),
+                                           keep_window=bool(body.get("keep_window")),
                                            ip=ip, mfa_at=body.get("mfa_at"))
             if action == "monitor_revoke":
                 return p.monitor_revoke(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)

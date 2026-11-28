@@ -253,8 +253,10 @@ out.post = calls[calls.length - 1]; out.toasts = toasts; out.renders = renders;
     assert out["asked"] == ["Yes, release to enforce", "Keep observing"]
     assert "Release a.example to enforce?" in out["question"] and "BLOCKING" in out["question"]
     assert out["sentWhileAsking"] == 0                                   # nothing is sent while the guard asks
-    # the SAME authorize write in the ENFORCE mode ("block") with NO window_s (window bounded by the server cap) and no org
-    assert out["post"] == ["POST", "api/customer/monitoring/authorize", {"host": "a.example", "mode": "block"}]
+    # the SAME authorize write in the ENFORCE mode ("block") with keep_window (flip the mode, DO NOT renew the window),
+    # NO window_s and no org — AS-29 red-pen: the dialog promises the window is unchanged, so the write must preserve it.
+    assert out["post"] == ["POST", "api/customer/monitoring/authorize",
+                           {"host": "a.example", "mode": "block", "keep_window": True}]
     assert "window_s" not in out["post"][2] and "org_id" not in out["post"][2]
     assert out["toasts"] == ["Monitoring for a.example is now enforcing (Respond)."] and out["renders"] == 1
 

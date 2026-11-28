@@ -1554,6 +1554,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             payload["mode"] = body.get("mode", "observe")
             if body.get("window_s") is not None:
                 payload["window_s"] = body.get("window_s")
+            if body.get("keep_window"):              # AS-29: release-to-enforce flips mode WITHOUT renewing the window
+                payload["keep_window"] = True
             c, r = self._provision("monitor_authorize", requester, payload)
         else:
             c, r = self._provision("monitor_revoke", requester, payload)
