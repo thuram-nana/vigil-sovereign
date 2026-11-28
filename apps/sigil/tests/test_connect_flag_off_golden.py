@@ -36,7 +36,9 @@ def _off(monkeypatch):
     monkeypatch.setenv("VIGIL_BASE_DIR", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_SPINE_DIR", tempfile.mkdtemp())
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
-    monkeypatch.delenv("VIGIL_CUSTOMER_CONNECT", raising=False)
+    # VIGIL_CUSTOMER_CONNECT is now DEFAULT-ON, so the golden off-path FORCES it off with the explicit operator
+    # override (=0): this file pins that the forced-OFF reach is byte-identical to a build without PR-C.
+    monkeypatch.setenv("VIGIL_CUSTOMER_CONNECT", "0")
     monkeypatch.delenv("VIGIL_CUSTOMER_CLOUD_CONNECT", raising=False)
 
 
@@ -64,14 +66,17 @@ def _seat(orgs, org, user, role):
     orgs.grant_membership(org, user, role, issued_at=float(next(_iss)))
 
 
-def test_both_flags_are_off_by_default_and_cloud_needs_the_master(monkeypatch):
-    assert config.customer_connect_enabled() is False
-    assert config.customer_cloud_connect_enabled() is False
-    monkeypatch.setenv("VIGIL_CUSTOMER_CLOUD_CONNECT", "1")             # the cloud flag ALONE turns nothing on
-    assert config.customer_cloud_connect_enabled() is False
-    monkeypatch.setenv("VIGIL_CUSTOMER_CONNECT", "1")
+def test_connect_defaults_on_cloud_leg_stays_off_and_the_override_forces_off(monkeypatch):
+    # DEFAULT-ON: UNSET ⇒ the connect master surface is ENABLED for the hosted deployment, while the cloud leg
+    # keeps its own DEFAULT-OFF flag and can never be on without the master.
+    monkeypatch.delenv("VIGIL_CUSTOMER_CONNECT", raising=False)
+    monkeypatch.delenv("VIGIL_CUSTOMER_CLOUD_CONNECT", raising=False)
+    assert config.customer_connect_enabled() is True
+    assert config.customer_cloud_connect_enabled() is False            # the cloud leg is still DEFAULT-OFF
+    monkeypatch.setenv("VIGIL_CUSTOMER_CLOUD_CONNECT", "1")            # cloud flag on, master still on by default
     assert config.customer_cloud_connect_enabled() is True
-    for v in ("0", "", "no", "maybe"):
+    # the explicit operator override forces the master OFF byte-identically, and the cloud leg follows it down.
+    for v in ("0", "", "no", "maybe", "false", "off"):
         monkeypatch.setenv("VIGIL_CUSTOMER_CONNECT", v)
         assert config.customer_connect_enabled() is False and config.customer_cloud_connect_enabled() is False, v
 
