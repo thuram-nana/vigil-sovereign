@@ -35,6 +35,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from ..bridge.daemon import bind_ok  # noqa: E402  (the ONE loopback/private bind invariant — reused, not re-authored)
+from . import input_safety  # noqa: E402  (the ONE central request-boundary sanitizer, applied in _parse_access_fields)
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402  (stdlib-only graceful stop)
 from .static_site import IMMUTABLE, Asset, SiteSnapshot, normalize_rel, not_modified  # noqa: E402  (stdlib-only)
 
@@ -68,6 +69,14 @@ _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site i
 # The Security & Trust Center access-request endpoint (the ONE same-origin POST this plane answers).
 _ACCESS_REQUEST_PATH = "/api/trust/access-request"
 _MAX_POST_BYTES = 16 * 1024    # an access request body over 16 KiB is refused (the five fields are small)
+# Central input sanitization for the one public POST (defense-in-depth ON TOP of trust_access_requests_store.validate,
+# which still does the authoritative length / format / control-char validation — the two compose, never conflict).
+# The access-request fields (full_name / organisation / email / job_title / reason) are all plain text, so NOTHING is
+# passed through byte-exact; the structure guard still rejects a JSON-bomb before the fields are read.
+_PUB_PASSTHROUGH: "frozenset[str]" = frozenset()
+_PUB_FIELD_MAX = _MAX_POST_BYTES         # never truncates (the whole body is already capped below this); strips only
+_PUB_MAX_DEPTH = 6
+_PUB_MAX_NODES = 256
 # The neutral acknowledgement: it promises ONLY that the request was received and queued for review. It never
 # states that access was granted or that any document was sent (the public plane grants nothing and sends nothing).
 _ACCESS_ACK = ("Thank you. Your request has been received and queued for review. If it is approved, a member of the "
@@ -122,13 +131,26 @@ def _parse_access_fields(body: bytes, content_type: str) -> "dict[str, str] | No
             return None
         if not isinstance(obj, dict):
             return None
+        # central sanitization pass (defense-in-depth): strip dangerous characters from every string value and
+        # reject a JSON-bomb (too deep / too many nodes) before the fields are read — a clean None here is answered
+        # as a 400 "malformed" by the caller.
+        try:
+            obj = input_safety.sanitize_body(obj, passthrough=_PUB_PASSTHROUGH, max_chars=_PUB_FIELD_MAX,
+                                             max_depth=_PUB_MAX_DEPTH, max_nodes=_PUB_MAX_NODES)
+        except ValueError:
+            return None
         return {k: v for k, v in obj.items() if isinstance(k, str) and isinstance(v, str)}
     if ctype in ("application/x-www-form-urlencoded", ""):
         try:
             parsed = parse_qs(text, keep_blank_values=True, strict_parsing=False)
         except ValueError:
             return None
-        return {k: (v[0] if v else "") for k, v in parsed.items()}
+        flat = {k: (v[0] if v else "") for k, v in parsed.items()}
+        try:
+            return input_safety.sanitize_body(flat, passthrough=_PUB_PASSTHROUGH, max_chars=_PUB_FIELD_MAX,
+                                              max_depth=_PUB_MAX_DEPTH, max_nodes=_PUB_MAX_NODES)
+        except ValueError:
+            return None
     return None
 
 
