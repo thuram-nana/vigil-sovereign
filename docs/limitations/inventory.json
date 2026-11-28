@@ -1132,6 +1132,12 @@
    "note": "AS-6a SsmSecretDelivery: the real AWS SSM client is owner-provided and deploy-gated; offline the channel is an injected transport, so the SSM-only delivery path is exercised without an AWS call."
   },
   {
+   "file": "engine/crucible/framework/v2/aegis/aegis_fleet_rolling.py",
+   "snippet": "deploy-gated",
+   "kind": "non-debt",
+   "note": "AS-6e RolloutHealth injection seam, not deferred work: the live per-worker health signal is the AS-6a health_probe (readyz/ping over the worker socket), which AS-6a itself treats as owner-provided deploy CONFIG and never registers as a limitation. The rolling layer ships a complete zero-external-dependency default (ElapsedTickHealth), so the rolling advancement LOGIC is fully implemented and deterministically exercised offline with an injected RolloutHealth double; the owner-provided probe is a pluggable signal source (the AS-6a SnapshotSink/SsmCredentialChannel DI pattern), not an unfinished capability."
+  },
+  {
    "file": "engine/crucible/framework/v2/aegis/job_runner.py",
    "snippet": "deploy-gated",
    "kind": "debt",

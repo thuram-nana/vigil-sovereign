@@ -357,6 +357,13 @@ body.cust-handoff-page { display: flex; min-height: 100vh; align-items: center; 
 .cust-mon-confirm p { margin: 0; }
 .cust-mon-events { overflow-x: auto; }
 
+/* AS-6d — the AEGIS onboarding flow (#/monitoring/onboarding): the step checklist + explore-next links */
+.cust-mon-onboard-complete { border-left: 3px solid var(--ok, #6cd08a); }
+.cust-mon-onboard-steps { margin-top: 12px; }
+.cust-mon-onboard-actions { margin-top: 10px; }
+.cust-mon-onboard-explore { margin-top: 14px; }
+.cust-mon-onboard-explore-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
 /* W6 / C5 — the Billing dashboard: the low-balance notice, the per-charge statement */
 .cust-lowbal { border-left: 3px solid var(--st-queued, #e8b64c); }
 .cust-lowbal strong { display: block; margin-bottom: 4px; }

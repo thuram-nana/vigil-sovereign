@@ -106,6 +106,9 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/monitoring/settings": ("Monitoring settings", ("api/customer/monitoring",)),   # AS-2k (same reads/writes)
+    "#/monitoring/preview": ("Protection preview", ("api/customer/monitoring/preview",)),   # AS-4b (read-only preview)
+    "#/monitoring/control": ("Defense control", ("api/customer/monitoring/control",)),   # AS-27b (read-only control)
+    "#/monitoring/onboarding": ("AEGIS onboarding", ("api/customer/monitoring/onboarding",)),   # AS-6d (guided flow)
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/command": ("Command", ()),   # B2/B3 — the engagement command box (fires no read on arrival; it POSTs on submit)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
@@ -142,11 +145,22 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # one, Disconnect a connected one, Connect a cloud account
     "#/connect": {"Continue": 2, "Prove again": 1, "Connect a website": 1, "Connect GitHub": 1, "Open Code": 1,
                   "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
+    # AS-3d adds a Host health section (health badge + last report) and an Acknowledge button, but Acknowledge renders
+    # only for a host whose LATEST event is a confirmed attack — and this walk's monitoring/events fixture is empty, so
+    # it renders zero buttons here (its guard/mark-as-seen is pinned by test_customer_monitoring_health_ui.py).
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
     # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls;
-    # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row.
-    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Turn off": 1},
+    # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row; AS-29 adds the guarded Release
+    # to enforce in its own row — shown because a.example is in Observe and the plan entitles Respond (respond: True).
+    # AS-4b adds one read-only link out to the Protection preview (the preview screen itself renders no button).
+    # AS-27b adds one more read-only link out to Defense control (the control screen itself renders no button).
+    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1,
+                              "View protection preview": 1, "View defense control": 1,
+                              "Set up AEGIS monitoring": 1},   # AS-6d: one read-only link out to the onboarding flow
+    # AS-6d AEGIS onboarding: the journey is complete here, so every step card is done (no step button); the two
+    # read-only explore-next links out to the AS-4b preview + AS-27b control are the screen's only controls.
+    "#/monitoring/onboarding": {"See what enforcing would add": 1, "Review defense control": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
@@ -193,7 +207,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"overview": "1", "onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "command": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"overview": "1", "onboarding": "1", "aegisOnboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "command": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
@@ -209,7 +223,8 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_OVERVIEW",   # C7 — the home-screen aggregate (i
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
               "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
               "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS",   # + S2, S3 (legal/governance)
-              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY")   # + S5, S7 (legal/governance)
+              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY",   # + S5, S7 (legal/governance)
+              "VIGIL_CUSTOMER_AEGIS_ONBOARDING")   # + AS-6d (the strict onboarding gate, on top of monitoring)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -462,6 +477,36 @@ _FAKE_SERVER = {
                                           {"host": "a.example", "expires_at": 1800000000.0}],
                                 "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
     "api/customer/monitoring/events": {"org_id": "org_acme", "events": []},
+    # AS-4b — the read-only protection preview for the same two hosts: a.example armed in Observe (a release would be
+    # permitted), b.example proven but not yet armed (the preview names the honest blocker). Pure display, no button.
+    "api/customer/monitoring/preview": {"org_id": "org_acme", "can_manage": True, "previews": [
+        {"host": "a.example", "headline": "observing", "mode": "observe", "armed": True, "proof_current": True,
+         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"], "observe_adds_outcomes": [],
+         "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
+         "enforce_permitted": True, "enforce_blockers": [],
+         "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]},
+        # b.example is proven but NOT armed: honest server emits no live-detection claim; the detection is preview-only.
+        {"host": "b.example", "headline": "inactive", "mode": "observe", "armed": False, "proof_current": True,
+         "respond_entitled": True, "observe_outcomes": [], "observe_adds_outcomes": ["detected_without_enforcement"],
+         "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
+         "enforce_permitted": False, "enforce_blockers": ["not_armed"],
+         "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]}]},
+    # AS-27b — the read-only defense-control view: a.example enforcing (Respond) so a stand-down would apply, b.example
+    # proven but not armed so there is nothing to stand down. can_manage_defense: a defense manager (founder). No button.
+    "api/customer/monitoring/control": {"org_id": "org_acme", "can_manage": True, "can_manage_defense": True, "controls": [
+        {"host": "a.example", "mode": "block", "armed": True, "proof_current": True, "respond_entitled": True,
+         "enforcing": True, "override_active": False, "standdown_available": True, "standdown_blockers": []},
+        {"host": "b.example", "mode": "observe", "armed": False, "proof_current": True, "respond_entitled": True,
+         "enforcing": False, "override_active": False, "standdown_available": False, "standdown_blockers": ["not_enforcing"]}]},
+    # AS-6d — the onboarding journey over the SAME state: both hosts proven, a.example monitored (observe), on an
+    # AEGIS plan -> the journey is complete, every step done (no step button), and the two explore-next links show.
+    "api/customer/monitoring/onboarding": {"org_id": "org_acme", "can_manage": True, "journey": {
+        "proven_host_count": 2, "active_host_count": 1, "enforcing_host_count": 0,
+        "has_plan": True, "respond_entitled": True,
+        "steps": [{"key": "prove_host", "status": "done", "done": True},
+                  {"key": "plan", "status": "done", "done": True},
+                  {"key": "turn_on_observe", "status": "done", "done": True}],
+        "complete": True, "next_step": None, "explore_available": True}},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
     # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
     "api/customer/preferences": {"ok": True, "preferences": {
@@ -976,7 +1021,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
         for p in ("overview",   # C7 — the home-screen aggregate route is gone with VIGIL_CUSTOMER_OVERVIEW off
-                  "members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
+                  "members", "monitoring", "monitoring/events", "monitoring/preview", "monitoring/control", "monitoring/onboarding", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3

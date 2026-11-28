@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON) && (route !== "#/monitoring/control" || MONITORING_ON) && (route !== "#/monitoring/onboarding" || AEGIS_ONBOARDING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -3132,8 +3132,12 @@
   // server answers 401 step_up_required); turning it off never does, and is confirmed here first. The page shows only
   // what the server sent, and nothing internal of an event (no record number, report id, certificate hash or org id).
   var MONITORING_ON = pageFlag("monitoring");
+  // AS-6d — the AEGIS onboarding flow (#/monitoring/onboarding). A SECOND, independent gate on top of monitoring:
+  // the screen, its Monitoring-settings link and its route are shown only when BOTH the monitoring flag and the
+  // onboarding flag are on; off, #/monitoring/onboarding is the home screen exactly as any unknown route.
+  var AEGIS_ONBOARDING_ON = MONITORING_ON && pageFlag("aegisOnboarding");
   var MON_POLL_MS = 30000;                                // the events refresh this often while the screen is in view
-  var mon = { timer: null, gen: 0, loaded: false };
+  var mon = { timer: null, gen: 0, loaded: false, list: null };
   var MON_MODE = { observe: "Observe", block: "Respond" };
   var MON_ACTION = { block: "Blocked", observe: "Observed", challenge: "Challenged", throttle: "Slowed down",
                      allow: "Allowed" };
@@ -3169,6 +3173,7 @@
   }
 
   function monitoringBody(d) {
+    mon.list = d;                                          // AS-3d — the Host health section reads these grants/hosts on each poll
     var rows = monHostRows(d);
     var top = d.can_manage ? monPlanCard(d)
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can turn monitoring on or "
@@ -3177,8 +3182,11 @@
       : h("div.card.cust-soon", { text: d.can_manage
           ? "No host of this workspace has a current proof of control. Monitoring needs a host that shows Verified in Assets."
           : "No host of this workspace is monitored." });
-    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts, h("h3", { text: "Events" }),
-      h("div#mon-events", {}, loadingHolder("Loading events…"))]);
+    // AS-3d health+ack: the Host health section is rendered now from the armed grants (so it is never stuck loading if
+    // the events read fails) and ENRICHED with the last report + acknowledge on each events poll (pollMonEvents).
+    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts,
+      h("h3", { text: "Host health" }), h("div#mon-health", {}, monHealthBody(d, [])),
+      h("h3", { text: "Events" }), h("div#mon-events", {}, loadingHolder("Loading events…"))]);
   }
 
   // One row per host: each host with a current proof (sent to a manager only) and each host with monitoring.
@@ -3346,6 +3354,115 @@
     return h("div.card.cust-mon-events", {}, h("table.cust-table", {}, [h("thead", {}, head), h("tbody", {}, rows)]));
   }
 
+  // ---- AS-3d: Host health + acknowledge ------------------------------------------------------------------------------
+  // "health + ack" — the UI-chain increment after AS-29 (chain 4a->2f->2g->2k->21a->29->3d). A customer-facing HEALTH
+  // view of each monitored host and a per-viewer ACKNOWLEDGE of its latest reported attack, built ENTIRELY over the two
+  // reads the Monitoring screen already makes: GET api/customer/monitoring (the armed grants, and — for a manager — the
+  // hosts whose ownership proof is current) and GET api/customer/monitoring/events (the gateway-reported attacks). It
+  // adds NO route, NO write, NO flag and NO new authority; it is default-OFF behind the SAME
+  // VIGIL_CUSTOMER_MONITORING_ENABLED as the rest of the screen (off: the screen and these reads are absent).
+  //
+  // HONESTY. The events stream is ATTACK reports, not a telemetry heartbeat, so "no events" means "no attacks reported"
+  // (good), never "telemetry down". The health badge is therefore grounded ONLY in whether the monitoring AUTHORITY is
+  // live (active) and, for a manager, whether the host's ownership PROOF is still current — an armed host whose proof
+  // lapsed cannot be renewed until it is verified again (a real, honest health signal). The last-report line is a plain
+  // fact (when AEGIS last reported on the host, and whether that report was a confirmed attack).
+  //
+  // ACKNOWLEDGE is a PER-VIEWER mark-as-seen in THIS browser's storage (namespaced by the signed-in user, capped) — the
+  // same honest, convenience-not-a-ledger pattern the notification centre uses for read-state. It makes NO server call,
+  // changes nothing for the workspace or the team, and says so. CSP-safe: addEventListener only, no inline handler.
+  var MON_ACK_CAP = 300;                                   // the per-viewer ack set is a convenience, not a ledger
+  function monAckStore() { try { return window.localStorage; } catch (e) { return null; } }
+  function monAckKey() { var w = (state.get() || {}).who || {}; return "vigil.mon.ack." + (w.username || "anon"); }
+  function monAckSet() {
+    var s = monAckStore(), out = {};
+    if (!s) { return out; }
+    try { var a = JSON.parse(s.getItem(monAckKey()) || "[]"); } catch (e) { return out; }
+    (Array.isArray(a) ? a : []).forEach(function (id) { if (id != null) { out[String(id)] = 1; } });
+    return out;
+  }
+  function monAckSeen(id) { return id != null && Object.prototype.hasOwnProperty.call(monAckSet(), String(id)); }
+  function monAckMark(id) {
+    var s = monAckStore();
+    if (!s || id == null) { return false; }                // storage off: nothing can be remembered — report that
+    var cur = Object.keys(monAckSet());
+    if (cur.indexOf(String(id)) < 0) { cur.push(String(id)); }
+    if (cur.length > MON_ACK_CAP) { cur = cur.slice(cur.length - MON_ACK_CAP); }
+    try { s.setItem(monAckKey(), JSON.stringify(cur)); return true; } catch (e) { return false; }
+  }
+  // the latest event per host BY ITS ts (attack/report time) — NOT by the server's spine-insertion (seq) order. A
+  // report can be written to the spine out of ts order (a delayed or backfilled report lands later in the spine but
+  // describes an EARLIER attack), so the first record in the insertion-ordered list is not necessarily the latest
+  // ATTACK. Keep, per host, the event with the greatest ts; on a tie, the later-inserted (higher seq) wins — a
+  // deterministic choice independent of the input order. So "Last report" shows the latest by real time and
+  // Acknowledge targets that same record.
+  function monLatestByHost(events) {
+    var by = Object.create(null);
+    (Array.isArray(events) ? events : []).forEach(function (ev) {
+      if (!ev || typeof ev !== "object" || ev.host == null) { return; }
+      var host = String(ev.host);
+      if (!(host in by) || monEventLater(ev, by[host])) { by[host] = ev; }
+    });
+    return by;
+  }
+  function monEventLater(a, b) {
+    var ta = Number(a.ts) || 0, tb = Number(b.ts) || 0;
+    if (ta !== tb) { return ta > tb; }                    // the greater attack/report TIME is the latest
+    return (Number(a.seq) || 0) > (Number(b.seq) || 0);   // tie on ts: the later-inserted (higher seq) record wins
+  }
+  // the health section's OWN button, kept distinct from monButton (so the Monitoring screen's guide-button census is
+  // not widened) and from the settings screen's monSettingsButton; CSP-safe — addEventListener, never an inline handler.
+  function monHealthButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // The Host health section: one card per ARMED (active) host, sorted, each showing its monitoring health and last
+  // report. Rendered from the monitoring list (grants + verified hosts) and the events the poll already fetched.
+  function monHealthBody(d, events) {
+    var grants = ((d && d.grants) || []).filter(function (g) { return g && g.active && g.host; })
+      .sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+    if (!grants.length) { return h("div"); }               // nothing armed: the Hosts section already says so
+    var latest = monLatestByHost(events);
+    return h("div.cust-grid", {}, grants.map(function (g) { return monHealthCard(g, latest[String(g.host)]); }));
+  }
+  function monHealthCard(g, ev) {
+    // Every host shown here is ARMED and active, which by construction means its ownership proof is still current: an
+    // expired or revoked proof makes the grant inert, so a lapsed host is simply ABSENT from this section (it shows as
+    // expired in Assets instead) rather than flagged here. So the badge states only that honest fact — it is watched.
+    var badge = h("span.cust-badge.cust-badge-on", { text: "Watching · " + (own(MON_MODE, g.mode) || "On") });
+    var body = [h("div.cust-asset-head", {}, [h("span.cust-mon-health-host", { text: String(g.host) }), badge])];
+    // last report — a plain fact about the gateway-reported attacks, NEVER a claim that telemetry is or is not flowing.
+    if (ev && ev.ts != null) {
+      var confirmed = ev.decision === "confirmed";
+      body.push(kv("Last report", fmtWhen(ev.ts) + (confirmed ? " — confirmed attack" : " — unconfirmed signal")));
+      if (confirmed && !monAckSeen(ev.report_id)) {
+        var acts = h("div.cust-mon-health-actions", {});
+        VUI.mount(acts, [h("p.cust-mon-health-attn", { text: "A confirmed attack on this host is not acknowledged." }),
+          monHealthButton("Acknowledge", function () { monAcknowledge(ev.report_id, acts); })]);
+        body.push(acts);
+      } else if (confirmed) {
+        body.push(h("p.cust-muted", { text: "Its last confirmed attack is acknowledged on this device." }));
+      }
+    } else {
+      body.push(kv("Last report", "No attacks reported yet"));
+    }
+    return h("div.card.cust-mon-health-card", { dataset: { host: String(g.host) } }, body);
+  }
+  // Acknowledge is a PER-VIEWER mark-as-seen in this browser only: it makes no server call and changes nothing for the
+  // workspace. It updates this card's cue in place (no full re-render, no re-read), and the next poll shows it seen.
+  function monAcknowledge(id, acts) {
+    if (monAckMark(id)) {
+      VUI.toast("Acknowledged on this device.");
+      VUI.mount(acts, h("p.cust-muted", { text: "Acknowledged on this device." }));
+    } else {
+      // storage is off/blocked (e.g. private browsing): nothing was remembered, so say so honestly rather than claim
+      // an acknowledgement that the next poll would silently undo.
+      VUI.toast("This device can't save acknowledgements (storage is off).");
+      VUI.mount(acts, h("p.cust-muted", { text: "Could not be saved on this device — storage is off." }));
+    }
+  }
+
   // The events refresh politely: every MON_POLL_MS, and only while the Monitoring screen is shown to someone signed in
   // and the page is visible. render() and the page's visibility changes re-decide, so leaving the screen, hiding the
   // page or signing out stops it; an answer that comes back after any of those is dropped (the generation moved on).
@@ -3372,6 +3489,10 @@
     if (!holder) { return; }
     mon.loaded = true;
     VUI.mount(holder, monEventsList(d && d.events));
+    // AS-3d — enrich the Host health section with the freshly-read last report + acknowledge (same gen guard above, so
+    // a stale or cross-account answer never renders here). No extra read: it reuses this poll's events.
+    var hbox = VUI.$("#mon-health");
+    if (hbox && mon.list) { VUI.mount(hbox, monHealthBody(mon.list, (d && d.events) || [])); }
   }
 
   // ---- Monitoring settings (AS-2k): #/monitoring/settings, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED -------
@@ -3420,16 +3541,35 @@
   function monSettingsBody(d) {
     var rows = monSettingsRows(d);
     var head = d.can_manage
-      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, or turn its "
-          + "monitoring off here. VIGIL never extends a window beyond its standard length." })
+      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, release it "
+          + "into enforce, or turn its monitoring off here. VIGIL never extends a window beyond its standard length." })
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
           + "settings. You can see what each monitored host is set to." });
-    if (!rows.length) {
-      return h("div", {}, [head, h("div.card.cust-soon", { text: d.can_manage
-        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
-        : "No host of this workspace is monitored." })]);
+    // AS-4b — a manager can open the read-only Protection preview (what enforcing would do, before it is armed) from
+    // here, beside Release to enforce. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+    var children = [head];
+    if (d.can_manage) {
+      children.push(h("div.cust-mon-settings-preview-link", {}, monSettingsButton("View protection preview",
+        function () { nav("#/monitoring/preview"); })));
+      // AS-27b — a manager can open the read-only Defense control view (live-enforcement posture + where a
+      // stand-down applies) from here. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+      children.push(h("div.cust-mon-settings-control-link", {}, monSettingsButton("View defense control",
+        function () { nav("#/monitoring/control"); })));
+      // AS-6d — a manager can open the AEGIS onboarding flow (connected host -> monitored) from here, shown only
+      // while the strict onboarding flag is on. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+      if (AEGIS_ONBOARDING_ON) {
+        children.push(h("div.cust-mon-settings-onboarding-link", {}, monSettingsButton("Set up AEGIS monitoring",
+          function () { nav("#/monitoring/onboarding"); })));
+      }
     }
-    return h("div", {}, [head, h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); }))]);
+    if (!rows.length) {
+      children.push(h("div.card.cust-soon", { text: d.can_manage
+        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
+        : "No host of this workspace is monitored." }));
+      return h("div", {}, children);
+    }
+    children.push(h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); })));
+    return h("div", {}, children);
   }
   function monSettingsCard(g, d) {
     var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(g.host) }),
@@ -3438,29 +3578,43 @@
     body.push(kv("Armed since", fmtDate(g.not_before)));
     if (d.can_manage) {
       var actions = h("div.cust-mon-settings-actions", {});
-      VUI.mount(actions, monSettingsActions(g, actions));
+      // AS-29 enforce release: whether this workspace's plan ENTITLES enforce (Respond). Strict — only a real
+      // respond:true plan permits a release into enforce; Observe is the always-safe base and needs no release.
+      var respond = !!(d.plan && d.plan.respond === true);
+      VUI.mount(actions, monSettingsActions(g, actions, respond));
       body.push(actions);
     }
     return h("div.card.cust-mon-settings-card", { dataset: { host: String(g.host) } }, body);
   }
   // A manager's controls for one armed host: shorten the armed window (re-arm, same mode, a shorter window the server
-  // caps), RE-ARM it to the full standard window (AS-21a, below), and turn the host off (confirmed in place first, like
-  // the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host), and every
-  // action is an addEventListener, never an inline handler. Re-arm sits in its OWN row (cust-mon-rearm), so the window
-  // controls (cust-mon-actions) are byte-identical to AS-2k.
-  function monSettingsActions(g, holder) {
+  // caps), RE-ARM it to the full standard window (AS-21a), RELEASE it into enforce (AS-29, below — only when the plan
+  // entitles Respond and the host is still in the always-safe Observe base), and turn the host off (confirmed in place
+  // first, like the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host),
+  // and every action is an addEventListener, never an inline handler. Re-arm and Release to enforce each sit in their
+  // OWN row, so the window controls (cust-mon-actions) are byte-identical to AS-2k.
+  function monSettingsActions(g, holder, respond) {
     var input = h("input.cust-mon-window", { type: "number", min: "1", step: "1", inputmode: "numeric",
       "aria-label": "Armed window in days for " + String(g.host) });
-    return [
+    var rows = [
       h("label.cust-field", {}, [h("span", { text: "Armed window (days)" }), input]),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Shorten window", function (b) { monShortenWindow(g, input, b); }, "primary"),
-        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder); }, "danger"),
+        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder, respond); }, "danger"),
       ]),
       // AS-21a retest guard: re-arm (renew) this host's authority to the full standard window — the privilege-raising
       // counterpart to Shorten window, so it is GUARDED (asked in place first, like Turn off) before anything is sent.
-      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder); })),
+      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder, respond); })),
     ];
+    // AS-29 ENFORCE RELEASE: the deliberate, guarded control that RELEASES a host from the always-safe Observe base into
+    // enforce (Respond) — AEGIS begins BLOCKING confirmed attacks, not only reporting them. Shown only when the plan
+    // ENTITLES Respond (respond === true, strict) AND the host is still in Observe (there is nothing to release once it
+    // already enforces). It is the mode-raising counterpart to AS-21a's window-raising Re-arm. Standing a host back down
+    // to Observe stays on the Monitoring screen, so this adds exactly one new settings control, in its own row.
+    if (respond === true && g.mode === "observe") {
+      rows.push(h("div.cust-mon-enforce", {},
+        monSettingsButton("Release to enforce", function () { monSettingsConfirmReleaseEnforce(g, holder, respond); })));
+    }
+    return rows;
   }
   async function monShortenWindow(g, input, btn) {
     clearErr();
@@ -3481,13 +3635,13 @@
     } catch (e) { btn.disabled = false; await monFailed(e); }
   }
   // Turning a host off is asked here first, in place of its controls; nothing is sent until it is confirmed.
-  function monSettingsConfirmOff(g, holder) {
+  function monSettingsConfirmOff(g, holder, respond) {
     VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
       h("p", { text: "Stop monitoring " + g.host + "? Its traffic then passes through AEGIS uninspected, and attacks "
         + "on it are no longer reported." }),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Yes, turn off", function (b) { monSettingsTurnOff(g.host, b); }, "danger"),
-        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
       ]),
     ]));
   }
@@ -3507,14 +3661,14 @@
   // clamped to the plan period), and the re-authorize re-checks that the host's proof of control is still current (a
   // lapsed proof is refused, surfaced honestly). Because it LENGTHENS the armed window, it is guarded: asked in place
   // first, like Turn off, and nothing is sent until it is confirmed. CSP-safe: addEventListener, never an inline handler.
-  function monSettingsConfirmReArm(g, holder) {
+  function monSettingsConfirmReArm(g, holder, respond) {
     VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Re-arm monitoring" }, [
       h("p", { text: "Re-arm " + g.host + "? This renews its monitoring to VIGIL's full standard window from now, in "
         + "the same mode, and confirms its proof of control is still current. VIGIL never extends it beyond that "
         + "standard length." }),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Yes, re-arm", function (b) { monReArm(g, b); }, "primary"),
-        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
       ]),
     ]));
   }
@@ -3528,6 +3682,318 @@
       VUI.toast("Monitoring for " + g.host + " was re-armed.");
       if (here() === "#/monitoring/settings") render();
     } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // AS-29 — ENFORCE RELEASE. The deliberate, guarded control that RELEASES a host from the always-safe Observe base into
+  // enforce (Respond): AEGIS stops only reporting confirmed attacks on it and begins BLOCKING them. It reuses the SAME
+  // monitoring/authorize write in the enforce mode ("block") with keep_window — so the sovereign flips the mode ONLY and
+  // leaves the armed window UNCHANGED (its existing not_before/not_after, never renewed to the cap), and the host keeps
+  // its place; it mints no new authority and opens no new route. Enforce is RELEASE-GATED: the sovereign admits it only for a plan that
+  // entitles Respond (a plan without it is refused, surfaced honestly via monFailed), so the control is shown only for
+  // such a plan and only while the host is still in Observe. Because it RAISES enforcement (live blocking), it is guarded
+  // like Turn off: asked in place first, nothing sent until confirmed; a lost session or step-up changes nothing.
+  // Standing a host back DOWN to Observe stays on the Monitoring screen (Switch to Observe). CSP-safe: addEventListener.
+  function monSettingsConfirmReleaseEnforce(g, holder, respond) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Release to enforce" }, [
+      h("p", { text: "Release " + g.host + " to enforce? AEGIS will begin BLOCKING confirmed attacks on it, not only "
+        + "reporting them. Its armed window and proof of control are unchanged, and you can switch it back to Observe "
+        + "on the Monitoring screen at any time." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, release to enforce", function (b) { monReleaseEnforce(g, b); }, "primary"),
+        monSettingsButton("Keep observing", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
+      ]),
+    ]));
+  }
+  async function monReleaseEnforce(g, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write — re-authorized in the ENFORCE mode ("block") with keep_window, so the
+      // sovereign flips the mode ONLY and leaves the armed window UNCHANGED (its existing not_before/not_after), exactly
+      // as the dialog promises — never silently renewed to the full cap. NO window_s is sent (keep_window preserves,
+      // it does not shorten). The ORG is the session's at the edge (never a body field); enforce is refused unless the
+      // plan entitles Respond.
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: "block", keep_window: true });
+      VUI.toast("Monitoring for " + g.host + " is now enforcing (Respond).");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+
+  // ---- AS-4b: Protection preview (#/monitoring/preview) --------------------------------------------------------------
+  // "contract + preview" — the customer-facing protection-contract evaluator + preview, the UI-chain increment after
+  // AS-3d (chain 4a->2f->2g->2k->21a->29->3d->4b). A READ-ONLY screen that shows, per host, what AEGIS does now (observe:
+  // inspect + report) and what releasing it to enforce (Respond) WOULD add (block before execution / withhold the
+  // response), BEFORE anything is armed — plus whether a release would be permitted now and, honestly, why not, and what
+  // AEGIS does NOT inspect. It owns its OWN read, GET api/customer/monitoring/preview (so no existing screen's "reads
+  // nothing new / opens no new route" invariant is touched), gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED as the
+  // rest of monitoring (off: the route is the home screen exactly as any unknown route, and the Settings link is absent).
+  //
+  // HONEST BY CONSTRUCTION. The grade comes entirely from the SERVER (the AS-4b core evaluator, over the same gated
+  // monitoring reads a manager already sees): the page RENDERS fixed copy from the server's semantic fields and INVENTS
+  // nothing. It mints nothing, arms nothing, releases nothing — the actual Release stays behind AS-29's gate on
+  // #/monitoring/settings. It renders NO button (read-only), so the Monitoring screens' button census is unchanged.
+  // CSP-safe: it uses no handler at all (pure display).
+  var MON_HEADLINE = { unsupported: "Not monitored", inactive: "Not monitored", degraded: "Degraded",
+                       unverified: "Proof of control lapsed", observing: "Observing", enforcing: "Enforcing · Respond" };
+  var MON_OUTCOME = { prevented_before_execution: "block attacks before they reach your app",
+                      response_withheld_after_execution: "withhold the response after your app has run",
+                      interrupted_after_partial_execution: "interrupt a request part-way through",
+                      contained_after_compromise: "contain a compromise", detected_without_enforcement: "detect and report attacks" };
+  var MON_BLOCKER = {
+    respond_not_in_plan: "Your plan does not include Respond, so this host cannot be released to enforce.",
+    proof_lapsed: "Its proof of control has lapsed — verify it again in Assets before it can be released to enforce.",
+    already_enforcing: "This host is already enforcing (Respond).",
+    not_armed: "Turn monitoring on for this host on the Monitoring screen before it can be released to enforce." };
+  var MON_NOT_OBSERVED = { direct_to_origin: "traffic sent straight to your origin, bypassing AEGIS",
+                           cache_hits: "responses served from a cache", chunked: "chunked request bodies",
+                           over_2_mib: "request bodies larger than 2 MiB", multipart: "multipart uploads",
+                           websocket: "WebSocket traffic", non_http: "non-HTTP traffic" };
+  // AS-27b — why an authorized stand-down would be a no-op for a host (the honest closed vocabulary the server sends).
+  var MON_STANDDOWN = { not_enforcing: "This host is not enforcing, so there is nothing to stand down.",
+                        already_stood_down: "Enforcement is already stood down for this host." };
+  function monPreviewOutcomeText(list) {
+    var parts = (Array.isArray(list) ? list : []).map(function (c) { return own(MON_OUTCOME, c); })
+      .filter(function (s) { return !!s; });
+    return parts.length ? parts.join("; ") : "";
+  }
+  function viewMonitoringPreview() {
+    var holder = h("div#mon-preview-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/preview"); }
+      catch (e) {
+        if (here() !== "#/monitoring/preview") return;      // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the preview claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load the protection preview just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/preview") return;
+      VUI.mount(holder, monPreviewBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Protection preview" }),
+      h("p.cust-muted", { text: "A read-only preview of what AEGIS does for each host now and what releasing it to "
+        + "enforce (Respond) would add. It shows only — it arms nothing. Release a host on Monitoring settings." }),
+      holder]), "#/monitoring/preview");
+  }
+  function monPreviewBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can see the protection "
+        + "preview. It shows what enforcing would do for each host, before it is armed." });
+    }
+    var rows = (d.previews || []).filter(function (p) { return p && p.host; });
+    if (!rows.length) {
+      return h("div.card.cust-soon", { text: "No host of this workspace has a current proof of control yet. Prove a "
+        + "host in Assets, then it appears here with what AEGIS would do for it." });
+    }
+    return h("div.cust-grid", {}, rows.map(monPreviewCard));
+  }
+  function monPreviewCard(p) {
+    var badge = h("span.cust-badge.cust-badge-" + (p.headline === "enforcing" ? "on" : (p.headline === "observing"
+      ? "signal" : "off")), { text: own(MON_HEADLINE, p.headline) || "Not monitored" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(p.host) }), badge])];
+    var nowText = monPreviewOutcomeText(p.observe_outcomes);
+    body.push(kv("Now", nowText ? ("AEGIS can " + nowText + ".") : "AEGIS does not inspect this host yet."));
+    // AS-4b honesty: detection is a LIVE claim. For a host that is not armed, "Now" claims nothing — what arming
+    // it WOULD make live is shown as a preview-only "would…" line, never as detection that is already in effect.
+    var observeAdds = monPreviewOutcomeText(p.observe_adds_outcomes);
+    if (!nowText && observeAdds) {
+      body.push(kv("Once monitoring is armed", "AEGIS would " + observeAdds + "."));
+    }
+    var adds = monPreviewOutcomeText(p.enforce_adds_outcomes);
+    if (p.enforce_permitted) {
+      body.push(kv("Release to enforce would add", adds ? ("AEGIS would also " + adds + ".") : "live blocking."));
+      body.push(h("p.cust-muted", { text: "You can release this host to enforce on Monitoring settings. Nothing is "
+        + "armed from this preview." }));
+    } else {
+      var why = (p.enforce_blockers || []).map(function (b) { return own(MON_BLOCKER, b); })
+        .filter(function (s) { return !!s; });
+      if (p.headline !== "enforcing" && adds) {
+        body.push(kv("Enforce would add", "AEGIS would " + adds + " — once this host can be released."));
+      }
+      body.push(h("p.cust-muted", { text: why.length ? why.join(" ") : "This host cannot be released to enforce yet." }));
+    }
+    var limits = (p.not_observed || []).map(function (n) { return own(MON_NOT_OBSERVED, n); })
+      .filter(function (s) { return !!s; });
+    if (limits.length) {
+      body.push(h("p.cust-muted.cust-mon-preview-limits", { text: "AEGIS does not inspect: " + limits.join(", ") + "." }));
+    }
+    return h("div.card.cust-mon-preview-card", { dataset: { host: String(p.host) } }, body);
+  }
+
+  // ---- AS-27b: Defense control (#/monitoring/control) ----------------------------------------------------------------
+  // "override + manage_defense" — the UI-chain increment after AS-4b (chain ...->3d->4b->27b). The SAFE-direction MIRROR
+  // of the Protection preview: where the preview shows whether a host could be RELEASED to enforce (observe -> enforce,
+  // the dangerous direction, AS-29's gate), this shows, per host, whether AEGIS is enforcing live blocking (Respond)
+  // RIGHT NOW and whether an authorized STAND-DOWN (the safe-direction return to observe) would have any effect. The
+  // grade comes entirely from the SERVER (the AS-27b core evaluator, over the SAME gated monitoring reads a manager
+  // already sees): the page RENDERS fixed copy from the server's semantic fields and INVENTS nothing.
+  //
+  // It owns its OWN read, GET api/customer/monitoring/control, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED as the
+  // rest of monitoring (off: the route is the home screen exactly as any unknown route, and the Settings link is absent).
+  // It renders NO button (read-only, pure display): it mints nothing, arms nothing and STANDS NOTHING DOWN — a real
+  // stand-down stays behind the owner-signed gate. TWO server-decided capabilities shape it: `can_manage`
+  // (manage_monitoring) gates the host rows (a non-manager sees only an honest note, never the hosts); `can_manage_defense`
+  // (manage_defense — the founder, never a billing-only admin) only shapes the copy (who may OPERATE the live defense).
+  // CSP-safe: no handler at all on the cards (pure display); the Settings link uses addEventListener via onClick.
+  function viewDefenseControl() {
+    var holder = h("div#mon-control-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/control"); }
+      catch (e) {
+        if (here() !== "#/monitoring/control") return;      // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the view claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load defense control just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/control") return;
+      VUI.mount(holder, monControlBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Defense control" }),
+      h("p.cust-muted", { text: "A read-only view of which hosts AEGIS is actively enforcing and where an authorized "
+        + "stand-down (pausing enforcement back to observe) would apply. It shows only — it stands nothing down." }),
+      holder]), "#/monitoring/control");
+  }
+  function monControlBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can see defense control. "
+        + "It shows which hosts are enforcing and where a stand-down would apply." });
+    }
+    var rows = (d.controls || []).filter(function (c) { return c && c.host; });
+    if (!rows.length) {
+      return h("div", {}, [
+        monControlOperatorNote(d),
+        h("div.card.cust-soon", { text: "No host of this workspace has a current proof of control yet. Prove a host "
+          + "in Assets, then its defense posture appears here." })]);
+    }
+    return h("div", {}, [monControlOperatorNote(d), h("div.cust-grid", {}, rows.map(monControlCard))]);
+  }
+  // The honest operate-vs-view line, decided by the SERVER (can_manage_defense): a defense manager (founder) is told
+  // they may operate the live defense; a view-only manager (a billing admin) is told, honestly, that operating it
+  // needs the defense-manager capability. Either way this screen performs nothing — it is read-only.
+  function monControlOperatorNote(d) {
+    return d.can_manage_defense
+      ? h("p.cust-muted.cust-mon-control-op", { text: "You may operate the live defense for this workspace. A "
+          + "stand-down pauses enforcement back to observe for a host — the safe direction; it never widens scope. "
+          + "This screen shows only: a stand-down is issued under the owner-signed gate, not from here." })
+      : h("p.cust-muted.cust-mon-control-op", { text: "Operating the live defense (standing enforcement down) needs "
+          + "the defense-manager capability, which the founder holds. You can see each host's enforcement here." });
+  }
+  function monControlCard(c) {
+    var enforcing = !!c.enforcing;
+    var badge = h("span.cust-badge.cust-badge-" + (enforcing ? "on" : "off"),
+      { text: enforcing ? "Enforcing · Respond" : "Observing" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(c.host) }), badge])];
+    if (enforcing) {
+      body.push(kv("Now", "AEGIS is blocking confirmed attacks on this host before they reach your app."));
+      body.push(h("p.cust-muted", { text: c.standdown_available
+        ? "An authorized stand-down would pause enforcement back to observe for this host. Nothing is stood down "
+          + "from this screen."
+        : "This host is enforcing." }));
+    } else {
+      var why = (c.standdown_blockers || []).map(function (b) { return own(MON_STANDDOWN, b); })
+        .filter(function (s) { return !!s; });
+      body.push(kv("Now", c.armed ? "AEGIS is observing this host: inspecting and reporting, never blocking."
+        : "AEGIS is not monitoring this host yet."));
+      body.push(h("p.cust-muted", { text: why.length ? why.join(" ")
+        : "This host is not enforcing, so there is nothing to stand down." }));
+    }
+    return h("div.card.cust-mon-control-card", { dataset: { host: String(c.host) } }, body);
+  }
+
+  // ---- AS-6d: AEGIS onboarding (#/monitoring/onboarding) --------------------------------------------------------------
+  // "tenant onboarding" — the final UI-chain increment (chain ...->4b->27b->6d). A guided flow that COMPOSES the
+  // already-built monitoring surfaces (it re-implements none of them): it walks a tenant from a connected (proven) host
+  // to a monitored (observe) one as an ordered checklist, then surfaces the AS-4b Protection preview and the AS-27b
+  // Defense control read-only views as the explore-next steps. It owns its OWN read, GET api/customer/monitoring/onboarding,
+  // gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED AND the strict VIGIL_CUSTOMER_AEGIS_ONBOARDING (a second gate):
+  // off, the route is the home screen exactly as any unknown route and the Monitoring-settings link is absent.
+  //
+  // HONEST BY CONSTRUCTION. The grade comes entirely from the SERVER (the AS-6d core evaluator, over the same gated
+  // monitoring reads a manager already sees): the page RENDERS fixed copy from the server's semantic step keys + status
+  // and INVENTS nothing. It mints nothing, arms nothing and releases nothing — turning monitoring on stays behind the
+  // existing gated monitoring/authorize write on #/monitoring. Its only controls are plain NAV links to the screens that
+  // perform each step (CSP-safe addEventListener via onClick); it writes nothing and reads ONLY its own endpoint.
+  var MON_ONBOARD_STEP = {
+    prove_host: { title: "Connect a host", route: "#/assets", go: "Go to Assets",
+                  todo: "Prove you control a host in Assets, so AEGIS can watch its live traffic.",
+                  done: "A host of this workspace has a current proof of control." },
+    plan: { title: "Choose an AEGIS plan", route: "#/billing", go: "Go to Billing",
+            todo: "An AEGIS plan is needed before monitoring can be turned on for a host.",
+            done: "This workspace has an active AEGIS plan." },
+    turn_on_observe: { title: "Turn monitoring on", route: "#/monitoring", go: "Go to Monitoring",
+                       todo: "Turn monitoring on for a proven host on the Monitoring screen. It starts in Observe — "
+                         + "AEGIS watches its traffic and reports attacks, never blocking.",
+                       done: "At least one host of this workspace is monitored." } };
+  var MON_ONBOARD_STATUS = { done: "Done", current: "Next", todo: "To do" };
+  function monOnboardButton(label, route) {
+    var b = h("button.btn", { type: "button", text: label });
+    b.addEventListener("click", function () { nav(route); });
+    return b;
+  }
+  function viewMonitoringOnboarding() {
+    var holder = h("div#mon-onboarding-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/onboarding"); }
+      catch (e) {
+        if (here() !== "#/monitoring/onboarding") return;   // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the flow claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load onboarding just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/onboarding") return;
+      VUI.mount(holder, monOnboardingBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "AEGIS onboarding" }),
+      h("p.cust-muted", { text: "A short, guided walk from a connected host to a monitored one. Each step links to the "
+        + "screen that does it — this page arms nothing itself." }),
+      holder]), "#/monitoring/onboarding");
+  }
+  function monOnboardingBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can set up AEGIS "
+        + "monitoring. They can walk a host from connected to monitored here." });
+    }
+    var j = d.journey || {};
+    var steps = (j.steps || []).filter(function (s) { return s && own(MON_ONBOARD_STEP, s.key); });
+    var children = [];
+    if (j.complete) {
+      children.push(h("div.card.cust-mon-onboard-complete", {}, [
+        h("div.cust-asset-head", {}, [h("span", { text: "Your workspace is monitored" }),
+          h("span.cust-badge.cust-badge-on", { text: "Monitoring on" })]),
+        h("p.cust-muted", { text: "AEGIS is watching the hosts you turned on and reporting attacks as they happen. "
+          + "The steps below are done." })]));
+    }
+    children.push(h("div.cust-grid.cust-mon-onboard-steps", {}, steps.map(monOnboardingStepCard)));
+    // The explore-next read-only views (AS-4b preview + AS-27b defense control) are meaningful once a host is
+    // monitored. They are plain nav links to the already-built screens — this page performs nothing.
+    if (j.explore_available) {
+      children.push(h("div.card.cust-mon-onboard-explore", {}, [
+        h("h3", { text: "Explore next" }),
+        h("p.cust-muted", { text: "Read-only views of what AEGIS does for each host — neither arms or stands anything "
+          + "down." }),
+        h("div.cust-mon-onboard-explore-links", {}, [
+          monOnboardButton("See what enforcing would add", "#/monitoring/preview"),
+          monOnboardButton("Review defense control", "#/monitoring/control")])]));
+    }
+    return h("div", {}, children);
+  }
+  function monOnboardingStepCard(s) {
+    var meta = own(MON_ONBOARD_STEP, s.key);
+    var status = String(s.status || "todo");
+    var kind = status === "done" ? "on" : (status === "current" ? "signal" : "off");
+    var body = [h("div.cust-asset-head", {}, [h("span", { text: meta.title }),
+      h("span.cust-badge.cust-badge-" + kind, { text: own(MON_ONBOARD_STATUS, status) || "To do" })])];
+    body.push(h("p.cust-muted", { text: s.done ? meta.done : meta.todo }));
+    // The current step gets a plain nav link to the screen that performs it; a done or later step shows no button, so
+    // the flow surfaces exactly one next action at a time. Pure nav — nothing is armed or written from here.
+    if (status === "current") {
+      body.push(h("div.cust-mon-onboard-actions", {}, monOnboardButton(meta.go, meta.route)));
+    }
+    return h("div.card.cust-mon-onboard-card", { dataset: { step: s.key } }, body);
   }
 
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
@@ -5780,6 +6246,12 @@
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // AS-2k monitoring settings off (same flag as #/monitoring): #/monitoring/settings is the home screen, as any unknown route
     "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
+    // AS-4b protection preview off (same flag as #/monitoring): #/monitoring/preview is the home screen, as any unknown route
+    "#/monitoring/preview": function () { return authed() ? (MONITORING_ON ? viewMonitoringPreview() : viewDashboard()) : viewLogin(); },
+    // AS-27b defense control off (same flag as #/monitoring): #/monitoring/control is the home screen, as any unknown route
+    "#/monitoring/control": function () { return authed() ? (MONITORING_ON ? viewDefenseControl() : viewDashboard()) : viewLogin(); },
+    // AS-6d onboarding off (monitoring AND the strict onboarding flag): #/monitoring/onboarding is the home screen, as any unknown route
+    "#/monitoring/onboarding": function () { return authed() ? (AEGIS_ONBOARDING_ON ? viewMonitoringOnboarding() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // Command box off (VIGIL_CUSTOMER_ASSISTANT): #/command is the home screen, exactly as any unknown route is

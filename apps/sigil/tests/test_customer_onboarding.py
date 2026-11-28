@@ -462,6 +462,9 @@ def test_the_guide_covers_every_screen_of_the_app():
         "#/security": (("start", "security"), "Open Account security from your name in the top bar"),
         "#/settings/authorizations": (("start", "authorizations"), "Authorizations"),
         "#/monitoring/settings": (("aegis", "settings"), "Open Monitoring settings from the Settings menu"),  # AS-2k
+        "#/monitoring/preview": (("aegis", "settings"), "View protection preview"),   # AS-4b
+        "#/monitoring/control": (("aegis", "settings"), "View defense control"),   # AS-27b
+        "#/monitoring/onboarding": (("aegis", "settings"), "Set up AEGIS monitoring"),   # AS-6d
         "#/data-rights": (("workspace", "datarights"), "Open Data rights from Settings"),   # legal/governance S3
         "#/ai-governance": (("workspace", "ai_governance"), "How VIGIL uses AI"),      # legal/governance S5
         "#/command": (("assess", "command"), "Command box"),   # B2/B3 — the engagement command box (no top-bar tab yet)

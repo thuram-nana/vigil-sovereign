@@ -34,8 +34,8 @@ hot file or a token cannot merge in the same wave.
 | **MA** | Authority (control plane) | `apps/sigil/sigil/governor/monitoring_authority.py` |
 | **SC** | Supply chain | image + closure (AS-28) |
 | **INFRA** | AWS platform | `infra/aws/…` |
-| **CON** | Contract evaluator | AS-4b |
-| **RBAC** | Roles | `apps/sigil/.../governor` RBAC (AS-27b) |
+| **CON** | Contract evaluator | AS-4b (built — `vigil_core/contract_eval.py`) |
+| **RBAC** | Roles | `packages/core/vigil_core/vigil_core/rbac.py` (AS-27b built — `manage_defense`) |
 | **VERIFY** (token) | Oracle/verifier core | `engine/crucible/framework/v2/verify/`, `aegis/registry.py` |
 | **GP** (token) | Gate path | needs `make gate` evidence (`Makefile`) |
 
@@ -108,7 +108,22 @@ realized by distinct signing domains.
 
 - **Hot set:** MA. **Tokens:** —. **UI chain** carries the enforce-release step.
 - **Slices:** AS-2a authority contracts · AS-2f sovereign v2 · AS-2h sealing · AS-7a
-  licence gate · AS-29 enforce release · AS-27b override + `manage_defense`.
+  licence gate · **AS-29 enforce release (built — the UI-chain increment: the customer
+  **Release to enforce** control on `#/monitoring/settings`, a confirmed in-place release
+  of a host from the always-safe Observe base into enforce/Respond, reusing the gated
+  `monitoring/authorize` write in the enforce mode `block` with no `window_s`; shown only
+  on a Respond-entitled plan and only while the host is in Observe; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`. The offline release signer `enforce_release.py`
+  above [separate release root, D30] remains future work on this slice)** · **AS-27b
+  override + `manage_defense` (built — the `manage_defense` RBAC capability in
+  `vigil_core/rbac.py` [owner + founder, disjoint from offense and from billing-only
+  org_admin] + the read-only defense-control evaluator `vigil_core/defense_control.py`
+  grading, over the SAME gated monitoring reads, each host's live-enforcement posture and
+  whether an authorized safe-direction STAND-DOWN [the `override`] would apply; surfaced on
+  the customer **Defense control** screen `#/monitoring/control`, which stands nothing down —
+  a real stand-down stays behind the owner-signed gate; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`. The FLEET-level override/relocate over the AS-6a/AS-6e
+  reconciler remains future work on this slice)**.
 
 ## Domain 3 — Drain / spool (sovereign ingest of data-plane reports)
 
@@ -140,12 +155,18 @@ placement, never enforcement, and renders enforcement only after a release.
 | Routing-edge verification | `apps/sigil/sigil/governor/shard_routing.py` | yes |
 | Fleet model (authority side) | `engine/crucible/framework/v2/authority/fleet.py` | yes |
 | AEGIS fleet / reconciler + worker-kind registry | `aegis_fleet.py` **(to build — AS-6a)** | — |
+| AEGIS rolling reconcile (staged, health-gated rollout over AS-6a) | `aegis_fleet_rolling.py` **(AS-6e, built)** | yes |
 | AWS platform (zones, keys, roles, EIPs, edge) | `infra/aws/…` **(platform CFN to build — AS-26/AS-34)** | dir yes; platform empty |
 
 - **Hot set:** FLEET. **Tokens:** INFRA (for the AWS stacks).
-- **Slices:** AS-6a placement+reconciler · AS-6c edge automation · AS-6e rolling ·
-  AS-26 OPS-1 (staging platform) · AS-34 production + rollout. FLEET chain:
-  6a → 29 → 6e → 27b; INFRA chain: 26 → 6c → 34.
+- **Slices:** AS-6a placement+reconciler · AS-6c edge automation · **AS-6e rolling (built — the
+  staged, health-gated ROLLING reconcile over AS-6a: converges the fleet in deterministic
+  `max_surge` batches, admitting the next batch only once the prior rolled workers land HEALTHY,
+  where AS-6a rolls the whole fleet at once in one pass; renders NO enforcement (release-gating
+  stays in AS-6a) and adds NO WorkerKind/OracleKind; engine module `aegis_fleet_rolling.py`, off
+  the `aegis/__init__` / `__main__` gate path; default-OFF `VIGIL_AEGIS_FLEET_ROLLING`, byte-identical
+  no-op when off — AS-6a stays big-bang)** · AS-26 OPS-1 (staging platform) · AS-34 production +
+  rollout. FLEET chain: 6a → 29 → 6e → 27b; INFRA chain: 26 → 6c → 34.
 
 ## Domain 5 — Ingest / receiver (inbound findings/telemetry endpoint)
 
@@ -242,9 +263,42 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
 - **Slices:** AS-4a overclaims copy · AS-2f/2g/2k sovereign v2 / binding+publish /
   settings · **AS-21a retest guard (built — the guarded Re-arm on `#/monitoring/settings`:
   a confirmed renew of a host's authority to the full standard window, reusing the gated
-  `monitoring/authorize`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-3d
-  health+ack · AS-4b contract+preview · AS-27b override · AS-6d onboarding. UI chain:
-  4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
+  `monitoring/authorize`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-29 enforce release (built — the guarded Release to enforce on
+  `#/monitoring/settings`: a confirmed release of a Respond-entitled host from Observe
+  into enforce/Respond, reusing the gated `monitoring/authorize` in the `block` mode with
+  no `window_s`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-3d health+ack (built — a Host health section + a per-viewer Acknowledge on the
+  `#/monitoring` screen, DERIVED entirely from the two reads the screen already makes
+  [`monitoring` grants/hosts + `monitoring/events`]: an honest health badge [live authority;
+  lapsed proof] and last-report fact, plus a client-side mark-as-seen of a host's latest
+  confirmed attack — no route, no write, no new authority; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-4b contract+preview (built — the AS-4b protection-contract EVALUATOR
+  [`vigil_core/contract_eval.py`: the headline as the FLOOR of the six dimensions, enforcement
+  `effective` as the fail-closed AND of its terms, and a per-host enforce/observe preview] + a
+  READ-ONLY **Protection preview** screen `#/monitoring/preview` that renders the SERVER's grade,
+  over the SAME gated monitoring reads, of what AEGIS does now [observe] and what releasing to
+  enforce WOULD add [derived from the provider registry], whether a release would be permitted and
+  why not — it mints/arms/releases nothing [the Release stays behind AS-29's gate], owns its own
+  read `api/customer/monitoring/preview`, manager-only, no button, default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · **AS-27b override (built — the read-only
+  **Defense control** screen `#/monitoring/control`, the SAFE-direction mirror of AS-4b:
+  per host the manager can act on, whether AEGIS is enforcing now and whether an authorized
+  stand-down [the safe-direction override] would apply, graded by `vigil_core/defense_control.py`
+  over the SAME gated monitoring reads; `manage_defense` [vigil_core/rbac.py] names who may
+  OPERATE the live defense. Stands nothing down, renders no button, owns its read
+  `api/customer/monitoring/control`, default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-6d onboarding (built — the TENANT-ONBOARDING increment, the final UI-chain link: a customer-facing
+  **AEGIS onboarding** screen `#/monitoring/onboarding` that COMPOSES the already-built monitoring surfaces
+  into a guided flow. The AS-6d core evaluator [`vigil_core/onboarding.py`: `onboarding_journey`, a pure,
+  deterministic grader] computes, over the SAME already-gated monitoring reads `monitor_list` uses, a LINEAR
+  journey from a connected (proven) host to a monitored (observe) one [prove a host → choose an AEGIS plan →
+  turn monitoring on, reusing the existing gated `monitoring/authorize` toggle], then surfaces the AS-4b
+  preview + AS-27b defense-control read-only views as the explore-next steps. Read-only: it mints/arms/releases
+  nothing, owns its read `api/customer/monitoring/onboarding`, manager-only, renders no write, and is STRICT
+  default-OFF behind a NEW second gate `VIGIL_CUSTOMER_AEGIS_ONBOARDING` on top of
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)**. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
 

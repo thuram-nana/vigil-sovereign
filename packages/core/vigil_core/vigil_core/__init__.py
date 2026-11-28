@@ -104,6 +104,17 @@ from .protection_contract import (
     RevocationProjection, RevocationState, SignerRole, TrustAssumptions, ViewerTls,
     baseline_provider_registry,
 )
+from .contract_eval import (
+    HEADLINE_LADDER, NOT_OBSERVED_BASELINE, HostProtectionPreview, enforcement_reasons, grade_contract,
+    grade_enforcement, grade_headline, headline_floor, preview_host,
+)
+from .defense_control import (
+    STANDDOWN_ALREADY_STOOD_DOWN, STANDDOWN_NOT_ENFORCING, HostDefenseControl, defense_control_host,
+)
+from .onboarding import (
+    ONBOARDING_STEPS, STATUS_CURRENT, STATUS_DONE, STATUS_TODO, STEP_PLAN, STEP_PROVE_HOST, STEP_TURN_ON,
+    OnboardingJourney, OnboardingStep, onboarding_journey,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -232,4 +243,14 @@ __all__ = [
     "Dimensions", "Budgets", "ProtectionContract",
     "ProviderDescriptor", "ProviderRegistry", "DuplicateProviderError",
     "BASELINE_SIGIL_PROVIDER", "baseline_provider_registry",
+    # AS-4b — protection-contract evaluator + enforce/observe preview (contract_eval.py):
+    "HEADLINE_LADDER", "NOT_OBSERVED_BASELINE", "HostProtectionPreview",
+    "headline_floor", "grade_headline", "enforcement_reasons", "grade_enforcement", "grade_contract",
+    "preview_host",
+    # AS-27b — defense-control (manage_defense) posture + stand-down preview (defense_control.py):
+    "STANDDOWN_NOT_ENFORCING", "STANDDOWN_ALREADY_STOOD_DOWN", "HostDefenseControl", "defense_control_host",
+    # AS-6d — customer tenant onboarding-journey evaluator (onboarding.py):
+    "STEP_PROVE_HOST", "STEP_PLAN", "STEP_TURN_ON", "ONBOARDING_STEPS",
+    "STATUS_DONE", "STATUS_CURRENT", "STATUS_TODO",
+    "OnboardingStep", "OnboardingJourney", "onboarding_journey",
 ]

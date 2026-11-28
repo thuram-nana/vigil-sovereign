@@ -1831,19 +1831,37 @@ class Handler(BaseHTTPRequestHandler):
                             ip=ip, mfa_at=body.get("mfa_at"))
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
-        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
+        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events", "monitor_preview",
+                      "monitor_control"):
             from .. import config as _config
             if not _config.customer_monitoring_enabled():
                 return None
             if action == "monitor_authorize":
                 return p.monitor_authorize(requester, str(body.get("org_id", "")), str(body.get("host", "")),
                                            mode=str(body.get("mode", "observe")), window_s=body.get("window_s"),
+                                           keep_window=bool(body.get("keep_window")),
                                            ip=ip, mfa_at=body.get("mfa_at"))
             if action == "monitor_revoke":
                 return p.monitor_revoke(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
+            # AS-4b — the read-only protection-contract preview (what enforce would do vs observe), grounded in
+            # the SAME gated monitoring reads; the org is the edge SESSION's, never a body field.
+            if action == "monitor_preview":
+                return p.monitor_preview(requester, str(body.get("org_id", "")), ip=ip)
+            # AS-27b — the read-only DEFENSE-CONTROL view (manage_defense): live-enforcement posture + whether an
+            # authorized stand-down would apply, over the SAME gated reads; org from the edge SESSION, never a body.
+            if action == "monitor_control":
+                return p.monitor_control(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
+        # AEGIS AS-6d — the read-only tenant ONBOARDING-JOURNEY read (connected host -> monitored), over the
+        # SAME gated monitoring reads. Absent (unknown action -> 404) unless BOTH the monitoring master flag AND
+        # the strict onboarding flag are ON; org from the edge SESSION, never a body field. It reads only.
+        if action == "monitor_onboarding":
+            from .. import config as _config
+            if not (_config.customer_monitoring_enabled() and _config.customer_aegis_onboarding_enabled()):
+                return None
+            return p.monitor_onboarding(requester, str(body.get("org_id", "")), ip=ip)
         # AEGIS AS-2f — SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a contracts). Absent (unknown
         # action -> 404) unless BOTH the monitoring master flag AND the strict v2 flag are ON; requester is the
         # hop principal, org from the edge SESSION (never a free body field), step-up stamp from the session.

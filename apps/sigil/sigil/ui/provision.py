@@ -3453,13 +3453,21 @@ class Provisioner:
         return float(sub.period_end)
 
     def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
-                          window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+                          window_s=None, keep_window: bool = False, ip: str = "", mfa_at=0.0,
+                          now: "Optional[float]" = None) -> dict:
         """Owner-sign + publish a DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag →
         ``admit_customer(manage_monitoring)`` (org_admin; never run_engagement/offense) → step-up → registry
         grant (requires a CURRENT ownership proof, clamped to its expiry) → owner-signed
         ``SignedMonitoringAuthority`` published atomically for the keyless gateway. The window is SERVER-
         decided (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it. A BLOCK grant turns
-        on NO enforcement by itself (AE-3 gates enforcement per request)."""
+        on NO enforcement by itself (AE-3 gates enforcement per request).
+
+        ``keep_window`` (AS-29 release-to-enforce) is a MODE change that must NOT renew the armed window: when
+        set AND an active grant already covers (org, host), the re-authorize REUSES that grant's existing
+        ``not_before``/``not_after`` (only the mode changes), so the window the dialog promises is unchanged
+        stays exactly that — never silently renewed to the full cap. It never EXTENDS a window (the reused
+        ``not_after`` is still clamped to the plan period and the ownership proof); with no active grant to
+        preserve it falls back to the normal server window. ``keep_window`` ignores ``window_s``."""
         t = self._now() if now is None else float(now)
         from .. import config
         from ..governor.monitoring_authority import MonitoringAuthorityRegistry, _check_mode
@@ -3481,7 +3489,16 @@ class Provisioner:
                 m = _check_mode(mode)
                 reg = MonitoringAuthorityRegistry(self.store)
                 period_end = self._monitor_plan_admit(reg, requester_org_id, host, m, t)
-                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=min(t + window, period_end),
+                not_before, not_after = t, min(t + window, period_end)
+                if keep_window:
+                    # AS-29: a mode flip (release to enforce) preserves the EXISTING armed window — re-authorize
+                    # over the active grant's own not_before/not_after instead of minting a fresh one from now, so
+                    # the window is not renewed. Clamp not_after to the plan period (never extends). No active
+                    # grant to preserve => the normal server window (there is nothing to keep).
+                    existing = reg.active_at(requester_org_id, host, now=t)
+                    if existing is not None:
+                        not_before, not_after = existing.not_before, min(existing.not_after, period_end)
+                g = reg.grant(requester_org_id, host, mode=m, not_before=not_before, not_after=not_after,
                               now=t, issued_at=self._next_issued())
             except ValueError as e:
                 self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=host,
@@ -3959,6 +3976,135 @@ class Provisioner:
         with self._lock:
             self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
         return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
+
+    def monitor_preview(self, requester: str, requester_org_id: str, *, ip: str = "",
+                        now: "Optional[float]" = None) -> dict:
+        """AS-4b — the SESSION org's READ-ONLY protection-contract PREVIEW: for each host the manager can act on,
+        what AEGIS does now (observe) and what releasing it to enforce WOULD add, GRADED by the AS-4b core
+        evaluator (``vigil_core.preview_host``) from the SAME already-gated reads ``monitor_list`` uses — the
+        active grants, the hosts whose ownership proof is current, and whether the plan entitles Respond. It
+        is READ-ONLY: it mints nothing, arms nothing and opens no release; a release stays behind AS-29's
+        owner-signed gate. ``enforce_permitted`` only PREVIEWS whether that gate would admit a release right
+        now, and ``enforce_blockers`` names, honestly, why not.
+
+        Manager-only, exactly like ``monitor_list``'s ``hosts``/``plan``: the preview needs the verified hosts
+        and the plan, which the org gives only to someone who may manage monitoring (the founder or an
+        org_admin). Anyone else is told ``can_manage: False`` and gets no rows (the screen shows an honest
+        note) — the hosts and the plan never cross to a read-only role."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import preview_host
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_preview", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False, "previews": []}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = {g.host: g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None}
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+            proven = {str(h["host"]) for h in hosts}
+            respond = bool(plan and plan.get("respond"))
+        previews = []
+        for host in sorted(proven | set(active)):
+            g = active.get(host)
+            mode = MonitoringMode(g.mode) if g is not None else MonitoringMode.OBSERVE
+            p = preview_host(host, mode=mode, armed=g is not None, proof_current=host in proven,
+                             respond_entitled=respond)
+            previews.append(p.customer_safe())
+        return {"org_id": requester_org_id, "can_manage": True, "previews": previews}
+
+    def monitor_control(self, requester: str, requester_org_id: str, *, ip: str = "",
+                        now: "Optional[float]" = None) -> dict:
+        """AS-27b — the SESSION org's READ-ONLY DEFENSE-CONTROL view: for each host the manager can act on,
+        whether AEGIS is enforcing live blocking (Respond) right now and whether an authorized STAND-DOWN (the
+        safe-direction override back to Observe) would have any effect — GRADED by the AS-27b core evaluator
+        (``vigil_core.defense_control_host``) over the SAME already-gated monitoring reads ``monitor_list`` /
+        ``monitor_preview`` use. It is READ-ONLY: it mints nothing, arms nothing and STANDS NOTHING DOWN; a real
+        stand-down stays behind the owner-signed gate (the safe direction — a stand-down only ever REDUCES
+        enforcement, never widens scope).
+
+        TWO capability gates, both decided HERE (never by the client) and both admit-gated so a tenant only ever
+        reads ITS OWN org (cross-tenant => ProvisionDenied => 403):
+          * ``can_manage`` (``manage_monitoring``: the founder or an org_admin) — whether the host rows are
+            returned at all. The verified hosts + plan this needs are the SAME a non-manager never sees on the
+            Monitoring screen, so a read-only role gets ``can_manage: False`` and NO rows.
+          * ``can_manage_defense`` (``manage_defense``: the founder — NOT a billing-only org_admin, and never
+            offense) — whether this viewer may OPERATE the live defense (the stand-down). It only shapes the
+            copy; the view performs no stand-down either way (defense-authz != billing-authz, surfaced
+            honestly). A view-only manager is told, honestly, that operating the live defense needs the
+            defense-manager capability."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import defense_control_host
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_control", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            can_manage_defense = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                               permission="manage_defense"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False,
+                        "can_manage_defense": can_manage_defense, "controls": []}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = {g.host: g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None}
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+            proven = {str(h["host"]) for h in hosts}
+            respond = bool(plan and plan.get("respond"))
+        controls = []
+        for host in sorted(proven | set(active)):
+            g = active.get(host)
+            mode = MonitoringMode(g.mode) if g is not None else MonitoringMode.OBSERVE
+            c = defense_control_host(host, mode=mode, armed=g is not None, proof_current=host in proven,
+                                     respond_entitled=respond)
+            controls.append(c.customer_safe())
+        return {"org_id": requester_org_id, "can_manage": True,
+                "can_manage_defense": can_manage_defense, "controls": controls}
+
+    def monitor_onboarding(self, requester: str, requester_org_id: str, *, ip: str = "",
+                           now: "Optional[float]" = None) -> dict:
+        """AS-6d — the SESSION org's READ-ONLY onboarding JOURNEY: where the workspace is on the walk from a
+        connected (proven) host to a monitored (observe) one, GRADED by the AS-6d core evaluator
+        (``vigil_core.onboarding_journey``) over the SAME already-gated monitoring reads ``monitor_list`` /
+        ``monitor_preview`` / ``monitor_control`` use — the hosts whose ownership proof is current, the active
+        grants (and whether any enforces), and whether the plan entitles Respond. It COMPOSES those surfaces
+        into a guided flow; it re-implements none of them. It is READ-ONLY: it mints nothing, arms nothing and
+        releases nothing — turning monitoring on stays behind the existing gated ``monitoring/authorize`` write.
+
+        Manager-only, exactly like ``monitor_preview`` / ``monitor_control``: the journey needs the verified
+        hosts and the plan, which the org gives only to someone who may manage monitoring (the founder or an
+        org_admin). Anyone else is told ``can_manage: False`` and gets no journey (the screen shows an honest
+        note) — the hosts and the plan never cross to a read-only role. Admit-gated, so a tenant only ever reads
+        ITS OWN org (cross-tenant => ProvisionDenied => 403)."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import onboarding_journey
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_onboarding", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False, "journey": None}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = [g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None]
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+        proven = {str(h["host"]) for h in hosts}
+        active_hosts = {g.host for g in active}
+        enforcing_hosts = {g.host for g in active if MonitoringMode(g.mode) is MonitoringMode.BLOCK}
+        journey = onboarding_journey(
+            proven_host_count=len(proven),
+            active_host_count=len(active_hosts),
+            enforcing_host_count=len(enforcing_hosts),
+            has_plan=plan is not None,
+            respond_entitled=bool(plan and plan.get("respond")),
+        )
+        return {"org_id": requester_org_id, "can_manage": True, "journey": journey.customer_safe()}
 
     def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                              now: "Optional[float]" = None) -> dict:

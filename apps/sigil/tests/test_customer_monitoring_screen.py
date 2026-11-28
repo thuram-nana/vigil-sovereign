@@ -172,9 +172,12 @@ const out = {};
 _APP_FUNCS = ("pageFlag", "loadingHolder", "kv", "fmtDate", "err", "clearErr", "here", "isMonitoringOffer",
               "aegisPlanName", "offerLine", "offerShown", "own", "fmtWhen", "viewMonitoring", "monitoringBody",
               "monHostRows", "monActive", "monPlanCard", "monPlanHelp", "monHostCard", "monActions", "monButton",
-              "monConfirmOff", "monTurnOn", "monTurnOff", "monFailed", "monEventsList", "monVisible", "startMonPoll",
-              "stopMonPoll", "syncMonPoll", "onMonVisibility", "pollMonEvents", "routeShown")
-_APP_VARS = ("API", "TOPUP", "MONITORING_ON", "MON_POLL_MS", "mon", "MON_MODE", "MON_ACTION")
+              "monConfirmOff", "monTurnOn", "monTurnOff", "monFailed", "monEventsList",
+              # AS-3d Host health + acknowledge (health is derived from the SAME reads; ack is a per-viewer mark-as-seen)
+              "monAckStore", "monAckKey", "monAckSet", "monAckSeen", "monAckMark", "monLatestByHost", "monEventLater",
+              "monHealthButton", "monHealthBody", "monHealthCard", "monAcknowledge",
+              "monVisible", "startMonPoll", "stopMonPoll", "syncMonPoll", "onMonVisibility", "pollMonEvents", "routeShown")
+_APP_VARS = ("API", "TOPUP", "MONITORING_ON", "MON_POLL_MS", "mon", "MON_MODE", "MON_ACTION", "MON_ACK_CAP")
 
 
 def _harness(flag: str = "1") -> str:

@@ -154,7 +154,7 @@ _APP_FUNCS = ("pageFlag", "loadingHolder", "kv", "fmtDate", "err", "clearErr", "
               "monFailed", "viewMonitoringSettings", "monSettingsRows", "monSettingsBody", "monSettingsCard",
               "monSettingsActions", "monShortenWindow", "monSettingsConfirmOff", "monSettingsTurnOff",
               "monSettingsConfirmReArm", "monReArm", "routeShown")
-_APP_VARS = ("API", "MONITORING_ON", "MON_MODE", "MON_DAY_S")
+_APP_VARS = ("API", "MONITORING_ON", "AEGIS_ONBOARDING_ON", "MON_MODE", "MON_DAY_S")
 
 
 def _harness(flag: str = "1") -> str:
