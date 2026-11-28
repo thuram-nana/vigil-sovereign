@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from .attribution import AttributionMeter
     from .capacity import CapacityBudget, CapacityGovernor
     from .coraza_source import CorazaAttestationMeter, CorazaCorpus
+    from .detection_kit import DetectionKit, DetectionKitMeter
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
@@ -238,6 +239,24 @@ def _coraza_flag() -> bool:
     return (os.environ.get(CORAZA_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-10c (detection kit): the default-OFF switch for the deterministic read-only DETECTION-CONTENT KIT SUPPLY-CHAIN
+# ATTESTATION — whether the detection content a tenant would SHIP (the CRS-derived + Sigma-derived rules of the
+# ``pushed-rules`` bundle) is licence-admitted for DISTRIBUTION (AS-7a §7 gate) AND both corpora are pinned (AS-28-style
+# digests), so a kit hit's rule_refs may be admitted as a LEAD. Kept in LOCKSTEP with ``detection_kit.KIT_ENV`` (a test
+# asserts they match) and read here directly so the detection_kit module (and, through it, coraza_source / license_gate
+# / defender.sigma) is NOT eagerly import-reachable from __init__/__main__.
+KIT_ENV = "VIGIL_AEGIS_KIT"
+
+
+def _kit_flag() -> bool:
+    """AS-10c detection-kit switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read per
+    snapshot so a live flip-OFF stops surfacing the attestation at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The attestation is ALSO
+    inert whenever its dependency — a configured kit (a CRS corpus + a Sigma corpus) — is absent (nothing to attest)."""
+    import os
+    return (os.environ.get(KIT_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -303,6 +322,7 @@ class GatewaySettings:
                  capacity_budget: "CapacityBudget | None" = None,
                  impact_budget: "ImpactBudget | None" = None,
                  coraza_corpus: "CorazaCorpus | None" = None,
+                 detection_kit: "DetectionKit | None" = None,
                  probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
@@ -403,6 +423,23 @@ class GatewaySettings:
             from .coraza_source import CorazaAttestationMeter
             from .license_gate import load_ledger
             self.coraza_meter = CorazaAttestationMeter(coraza_corpus, ledger=load_ledger())
+        # AS-10c (detection kit) — the deterministic, READ-ONLY DETECTION-CONTENT KIT SUPPLY-CHAIN ATTESTATION:
+        # whether the detection content a tenant would SHIP (the CRS-derived + Sigma-derived rules of the pushed-rules
+        # bundle) is licence-admitted for DISTRIBUTION (AS-7a §7 gate) AND both corpora are pinned (AS-28-style
+        # digests), sealed by a single kit digest, so a kit hit's typed rule_refs may be admitted as a LEAD. Built
+        # ONCE, only when the default-OFF VIGIL_AEGIS_KIT flag is on at construction AND its dependency — a configured
+        # kit (a CRS corpus + a Sigma corpus) — exists (mirroring AS-7b's configured CRS corpus). It holds NO mutable
+        # state and NEVER mutates the licence ledger or the corpora: it only READS. It MEASURES and never acts — the
+        # attestation drives no admit/shed/allow/block decision (only a fired oracle blocks; a kit rule_ref is a LEAD,
+        # never a block). OFF (or no kit configured) ⇒ no meter is built, nothing is computed, and the gateway data
+        # path (and the probe snapshot) are byte-identical. Importing the module lazily here keeps it (and, through
+        # it, the AS-7b coraza_source / AS-7a license_gate / AS-17a defender.sigma) OFF the eager __init__/__main__
+        # import path (make-gate byte-identity).
+        self.kit_meter: "DetectionKitMeter | None" = None
+        if _kit_flag() and detection_kit is not None:
+            from .detection_kit import DetectionKitMeter
+            from .license_gate import load_ledger
+            self.kit_meter = DetectionKitMeter(detection_kit, ledger=load_ledger())
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -536,6 +573,19 @@ class GatewaySettings:
             if cm is not None and self.coraza_active:
                 snap["coraza_active"] = True
                 snap["coraza"] = cm.snapshot()
+        except Exception:
+            pass
+        # AS-10c (detection kit): surface the deterministic read-only detection-content kit supply-chain attestation —
+        # whether the CRS-derived + Sigma-derived content a tenant would ship is licence-admitted for distribution
+        # (AS-7a) AND both corpora are pinned (AS-28-style digests), sealed by the kit digest, so a kit hit's rule_refs
+        # may be admitted as a LEAD — ONLY when the meter is active, so a gateway without the feature answers a probe
+        # byte-identically. Metadata only (counts + digests, no address, no secret). It MEASURES, it never acts. Total:
+        # any read error degrades this field, never the probe.
+        try:
+            km = self.kit_meter
+            if km is not None and self.kit_active:
+                snap["kit_active"] = True
+                snap["kit"] = km.snapshot()
         except Exception:
             pass
         return snap
@@ -710,6 +760,14 @@ class GatewaySettings:
         AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing the attestation live.
         Read-only / observational: it never gates enforcement (a CRS rule_ref is a LEAD, never a block)."""
         return self.coraza_meter is not None and _coraza_flag()
+
+    @property
+    def kit_active(self) -> bool:
+        """Is the AS-10c detection-content kit supply-chain attestation active for THIS snapshot? Only when the meter
+        was built (the default-OFF VIGIL_AEGIS_KIT flag was on at construction AND a kit — a CRS corpus + a Sigma
+        corpus — was configured) AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing
+        the attestation live. Read-only / observational: it never gates enforcement (a kit rule_ref is a LEAD)."""
+        return self.kit_meter is not None and _kit_flag()
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
@@ -1454,6 +1512,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   capacity_budget: "CapacityBudget | None" = None,
                   impact_budget: "ImpactBudget | None" = None,
                   coraza_corpus: "CorazaCorpus | None" = None,
+                  detection_kit: "DetectionKit | None" = None,
                   probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
@@ -1475,6 +1534,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
                                      on_authority_event=on_authority_event, capacity_budget=capacity_budget,
                                      impact_budget=impact_budget, coraza_corpus=coraza_corpus,
+                                     detection_kit=detection_kit,
                                      probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
