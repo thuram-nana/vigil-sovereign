@@ -914,11 +914,11 @@ def test_viewing_every_screen_reads_only_edge_routes_and_writes_nothing():
 # =====================================================================================================================
 def _stack_gate5(tmp_path, monkeypatch, on=True):
     from test_custui import _stack
+    # Several of these are now DEFAULT-ON (live control / launch UI / connect / assistant), so turning the screens
+    # OFF means FORCING the explicit operator override (=0), not merely unsetting: a delenv would leave the
+    # default-on ones ON. "0" is byte-identical to the historical unset-off for the still-default-off flags.
     for env in _GATE5_ENV:
-        if on:
-            monkeypatch.setenv(env, "1")
-        else:
-            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv(env, "1" if on else "0")
     return _stack(tmp_path, monkeypatch)
 
 

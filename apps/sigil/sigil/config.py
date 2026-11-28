@@ -165,6 +165,14 @@ CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
 COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
 PUBLIC_UI_PORT = _int_env("VIGIL_PUBLIC_PORT", 8735)    # the keyless/cookieless public marketing+tools site
 CVE_CATALOG_PATH = SIGIL_HOME / "cve" / "catalog.db"    # the public CVE catalog (populated by `sigil cve ingest`)
+# Security & Trust Center: the "Request security documentation" queue + its per-source rate-limit markers. The
+# public plane is keyless and cookieless, so a request is NOT owner-signed and mints nothing: it is an off-spine,
+# operational owner-review queue (one 0600 file per request in a 0700 dir, filename carries NO submitted field), the
+# owner-side intake acts on it, and nothing here is money or authority. Protected at rest by filesystem permissions
+# and never logged (pubui never logs). The limiter dir is a disjoint LoginRateLimiter marker dir, so it never
+# interferes with any customer-plane limiter.
+TRUST_ACCESS_REQUESTS_DIR = SIGIL_HOME / "trust_access_requests"
+TRUST_ACCESS_RATELIMIT_DIR = SIGIL_HOME / "trust_access_ratelimit"
 _customer = SIGIL_HOME / "customer"
 
 
@@ -454,16 +462,17 @@ def customer_blind_vuln_enabled() -> bool:
 
 
 def customer_assistant_enabled() -> bool:
-    """True iff the customer security ASSISTANT (PR-J) is ON (`VIGIL_CUSTOMER_ASSISTANT` affirmative). OFF by default
-    (mirrors `redpen_enabled` / `customer_monitoring_enabled`): with it off the `assistant_ask` edge route and the
-    provisioner action are ABSENT (404 exactly as an unknown route/action), NO model grant is minted for the
-    assistant and NO model request is made — so the server is byte-identical to a build without the assistant. The
-    assistant is a metered NL chat grounded ONLY in the tenant's own oracle-confirmed findings: it summarises /
-    explains / prioritises existing findings as ADVICE, never asserts a new vulnerability and never mints a FACT (the
-    oracle is the sole minter), and every model request goes through the sovereign model gateway (it holds no provider
-    key). Read at call time. Even ON, a turn still fails closed unless the model gateway is reachable and an owner key
-    is present to mint the turn's grant."""
-    return (os.environ.get("VIGIL_CUSTOMER_ASSISTANT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+    """True iff the customer security ASSISTANT (PR-J) is ON. DEFAULT-ON for the hosted deployment: UNSET reads
+    ENABLED, and an explicit ``VIGIL_CUSTOMER_ASSISTANT=0`` (or any non-affirmative token) forces it OFF
+    byte-identically to the pre-default-on build - off, the `assistant_ask` edge route and the provisioner action are
+    ABSENT (404 exactly as an unknown route/action), NO model grant is minted for the assistant and NO model request
+    is made, so the server is byte-identical to a build without the assistant. The assistant is a metered NL chat
+    grounded ONLY in the tenant's own oracle-confirmed findings: it summarises / explains / prioritises existing
+    findings as ADVICE, never asserts a new vulnerability and never mints a FACT (the oracle is the sole minter), and
+    every model request goes through the sovereign model gateway (it holds no provider key). Read at call time. Even
+    ON, a turn still fails closed unless the model gateway is reachable and an owner key is present to mint the turn's
+    grant."""
+    return _default_on_flag("VIGIL_CUSTOMER_ASSISTANT")
 
 
 def customer_assistant_wallet_enabled() -> bool:
@@ -644,22 +653,25 @@ def github_app_slug() -> str:
 
 
 def customer_pause_resume_enabled() -> bool:
-    """True iff the customer pause/resume launch routes are ON (`VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED`
-    affirmative). OFF by default (pause/resume PR-4b): the edge routes and provisioner actions are absent (404)
-    exactly as an unknown route, and NOTHING records or clears a lease pause — so the whole PR-1..PR-4a pause
-    substrate stays INERT until the owner turns this on. Pausing moves NO money (it is money-doctrine-neutral);
+    """True iff the customer pause/resume launch routes are ON (pause/resume PR-4b). DEFAULT-ON for the hosted
+    deployment: UNSET reads ENABLED, and an explicit ``VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED=0`` (or any
+    non-affirmative token) forces it OFF byte-identically to the pre-default-on build - off, the edge routes and
+    provisioner actions are absent (404) exactly as an unknown route, and NOTHING records or clears a lease pause,
+    so the whole PR-1..PR-4a pause substrate stays INERT. Pausing moves NO money (it is money-doctrine-neutral);
     this flag gates only the CUSTOMER-facing ability to record/clear a reversible pause on their own lease."""
-    return (os.environ.get("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+    return _default_on_flag("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED")
 
 
 def customer_live_control_enabled() -> bool:
-    """True iff the customer Live Control routes are ON (`VIGIL_CUSTOMER_LIVE_CONTROL` affirmative). OFF by
-    default: the edge route /api/customer/launch/instruct + its provisioner action `launch_instruct` and the
-    #/live SPA screen are all absent (404 / tab hidden) exactly as an unknown route, so the whole mission-
-    steering surface stays INERT until the owner turns this on. A customer instruction is ADVISORY ONLY — it is
-    folded into the running engine's untrusted think context (it fires no tool, relaxes no scope, mints no
-    fact); this flag gates only the CUSTOMER-facing ability to enqueue such guidance for THEIR own engagement."""
-    return (os.environ.get("VIGIL_CUSTOMER_LIVE_CONTROL") or "").strip().lower() in _OIDC_AFFIRMATIVE
+    """True iff the customer Live Control routes are ON. DEFAULT-ON for the hosted deployment: UNSET reads
+    ENABLED, and an explicit ``VIGIL_CUSTOMER_LIVE_CONTROL=0`` (or any non-affirmative token) forces it OFF
+    byte-identically to the pre-default-on build - off, the edge route /api/customer/launch/instruct + its
+    provisioner action `launch_instruct`, the activity read and the #/live SPA screen are all absent (404 / tab
+    hidden) exactly as an unknown route, so the whole mission-steering surface stays INERT. A customer instruction
+    is ADVISORY ONLY - it is folded into the running engine's untrusted think context (it fires no tool, relaxes no
+    scope, mints no fact); this flag gates only the CUSTOMER-facing ability to enqueue such guidance for THEIR own
+    engagement."""
+    return _default_on_flag("VIGIL_CUSTOMER_LIVE_CONTROL")
 
 
 def trial_preview_enabled() -> bool:
@@ -755,10 +767,11 @@ def customer_launch_ui_enabled() -> bool:
     (Start and Cancel before a launch starts; Pause and Resume while it runs, when VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED
     is on too), read from the edge's ``api/customer/launches`` route; the provisioner keeps each lease reserved while
     it is on (``ui/customer_launches.py``) so the app can start or cancel it after a reload.
-    OFF by default: that route and its provisioner read are absent (404), nothing is kept, and the Assessments screen
-    is exactly as before. Read by the customer edge when it starts (it is written into the page) and by the cockpit
-    on each request."""
-    return (os.environ.get("VIGIL_CUSTOMER_LAUNCH_UI") or "").strip().lower() in _OIDC_AFFIRMATIVE
+    DEFAULT-ON for the hosted deployment: UNSET reads ENABLED, and an explicit ``VIGIL_CUSTOMER_LAUNCH_UI=0`` (or any
+    non-affirmative token) forces it OFF byte-identically to the pre-default-on build - off, that route and its
+    provisioner read are absent (404), nothing is kept, and the Assessments screen is exactly as before. Read by the
+    customer edge when it starts (it is written into the page) and by the cockpit on each request."""
+    return _default_on_flag("VIGIL_CUSTOMER_LAUNCH_UI")
 
 
 def customer_retest_ui_enabled() -> bool:
@@ -787,11 +800,12 @@ def customer_retest_reproof_enabled() -> bool:
 
 
 def customer_connect_enabled() -> bool:
-    """True iff the unified customer CONNECT surface is ON (`VIGIL_CUSTOMER_CONNECT` affirmative; consumer PR-C).
-    OFF by default (mirrors `redpen_enabled`): with it off EVERY connect action is absent (404 exactly as an
-    unknown route) — the one-screen connect overview, the single-asset ownership poll, and the read-only cloud-grant
-    connect / verify / disconnect all refuse, nothing is minted and no cloud grant is recorded — so the server is
-    byte-identical to a build without PR-C.
+    """True iff the unified customer CONNECT surface is ON (consumer PR-C). DEFAULT-ON for the hosted deployment:
+    UNSET reads ENABLED, and an explicit ``VIGIL_CUSTOMER_CONNECT=0`` (or any non-affirmative token) forces it OFF
+    byte-identically to the pre-default-on build - off, EVERY connect action is absent (404 exactly as an unknown
+    route): the one-screen connect overview, the single-asset ownership poll, and the read-only cloud-grant connect /
+    verify / disconnect all refuse, nothing is minted and no cloud grant is recorded, so the server is byte-identical
+    to a build without PR-C.
 
     This flag gates only the one-screen connect site/repo/cloud SURFACE; it never changes how an asset is TESTED.
     CONNECTING RECORDS AN OWNER-VERIFIED ASSET; IT NEVER BY ITSELF AUTHORIZES LIVE OFFENSE: a live customer run
@@ -799,8 +813,10 @@ def customer_connect_enabled() -> bool:
     owner gate PLUS a current host-ownership proof PLUS the owner-signed EngagementAuthority, and a cloud grant is
     READ-ONLY (running cloud posture against it is a separate, separately-gated engagement — not unlocked here).
 
-    The cloud leg has its OWN flag on top of this one (`customer_cloud_connect_enabled`). Read at call time."""
-    return (os.environ.get("VIGIL_CUSTOMER_CONNECT") or "").strip().lower() in _OIDC_AFFIRMATIVE
+    The cloud leg has its OWN flag on top of this one (`customer_cloud_connect_enabled`), which stays DEFAULT-OFF:
+    the cloud leg never turns on without being explicitly set, even though its master now defaults on. Read at call
+    time."""
+    return _default_on_flag("VIGIL_CUSTOMER_CONNECT")
 
 
 def customer_cloud_connect_enabled() -> bool:
@@ -1429,6 +1445,20 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _default_on_flag(name: str) -> bool:
+    """A DEFAULT-ON feature-flag read for the consumer surfaces that ship ENABLED for the hosted deployment
+    while KEEPING an explicit operator override to force OFF. An UNSET env var reads ENABLED; a SET value is
+    parsed EXACTLY as the opt-in readers parse it (``_OIDC_AFFIRMATIVE`` ⇒ on, any other token ⇒ off). So
+    forcing the feature OFF (``VIGIL_...=0`` / ``false`` / ``no`` / ``off`` / ``""`` / any non-affirmative token)
+    returns ``False`` BYTE-IDENTICALLY to the pre-default-on reader - the only behaviour that changes is the
+    UNSET case flipping from off to on. The explicit-OFF path is unchanged, so every flag-off golden stays green
+    once it forces the override instead of relying on the old unset-is-off default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return True
+    return raw.strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def _float_env(name: str, default: float) -> float:
     """A fail-safe float env read: a missing / empty / non-numeric value falls back to `default` (never
     raises). Used for the owner-set EC-5 pool band fractions, which must deploy with safe defaults."""
@@ -1640,10 +1670,11 @@ def email_sender():
                            username=os.environ.get("SIGIL_EMAIL_USER") or None,
                            password=os.environ.get("SIGIL_EMAIL_PASSWORD") or None)
 def ownership_verify_enabled() -> bool:
-    """True iff the operator enabled self-serve asset-ownership verification (`VIGIL_OWNERSHIP_VERIFY`). OFF
-    by default — the sovereign plane makes NO outbound fetch to a customer-named host unless the operator
-    explicitly opts into this egress (mirrors the email / OIDC opt-ins). While off, target_verify fail-closed."""
-    return _bool_env("VIGIL_OWNERSHIP_VERIFY", False)
+    """True iff self-serve asset-ownership verification is enabled. DEFAULT-ON for the hosted deployment: UNSET
+    reads ENABLED (the SSRF-hardened ownership fetcher is armed so customers can prove a domain), and an explicit
+    ``VIGIL_OWNERSHIP_VERIFY=0`` (or any non-affirmative token) forces it OFF byte-identically to the pre-default-on
+    build - off, the sovereign plane makes NO outbound fetch to a customer-named host and target_verify fail-closed."""
+    return _default_on_flag("VIGIL_OWNERSHIP_VERIFY")
 
 
 def ownership_fetcher():

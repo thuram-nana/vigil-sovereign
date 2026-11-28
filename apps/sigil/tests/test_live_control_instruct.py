@@ -127,8 +127,9 @@ def test_provisioner_instruct_accepts_for_admin_then_is_flag_gated(monkeypatch):
     r = p.launch_instruct("alice", "org_a", host="api.example.com", text="focus on auth")
     assert r["slug"] == _slug("org_a", "api.example.com") and isinstance(r["seq"], int)
     assert instructions.drain(r["slug"]) == ["focus on auth"]
-    # flag OFF -> the action is refused (the whole surface is inert by default)
-    monkeypatch.delenv("VIGIL_CUSTOMER_LIVE_CONTROL")
+    # flag FORCED OFF -> the action is refused (the whole surface is inert). DEFAULT-ON now, so the explicit
+    # operator override (=0) is what makes it byte-identical to the surface not existing.
+    monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_CONTROL", "0")
     with pytest.raises(ProvisionDenied):
         p.launch_instruct("alice", "org_a", host="api.example.com", text="focus on auth")
 
@@ -202,8 +203,8 @@ def test_provisioner_activity_reads_and_is_flag_and_admit_gated(monkeypatch):
     # a non-member cannot view another's activity
     with pytest.raises(ProvisionDenied):
         p.launch_activity("mallory", "org_a", host="api.example.com")
-    # flag OFF -> refused
-    monkeypatch.delenv("VIGIL_CUSTOMER_LIVE_CONTROL")
+    # flag FORCED OFF -> refused (DEFAULT-ON now; the explicit =0 override forces it off)
+    monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_CONTROL", "0")
     with pytest.raises(ProvisionDenied):
         p.launch_activity("alice", "org_a", host="api.example.com")
 

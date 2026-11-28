@@ -53,7 +53,10 @@ def _iso(monkeypatch):
     # (org, host), so tests reusing org_a/apme.cm would otherwise share one kept-launch file).
     monkeypatch.setattr(config, "CUSTOMER_LAUNCHES_DIR", Path(tempfile.mkdtemp()) / "launches")
     monkeypatch.setenv("VIGIL_CUSTOMER_LAUNCH_UI", "1")
-    for v in ("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", "VIGIL_TIERED_PRODUCTS", "VIGIL_TRIAL_PRODUCT_ID",
+    # VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED is now DEFAULT-ON, so FORCE it off here (the explicit =0 override) to keep
+    # this file's pause-off baseline; the tests that exercise pause/resume set it to "1" themselves afterward.
+    monkeypatch.setenv("VIGIL_CUSTOMER_PAUSE_RESUME_ENABLED", "0")
+    for v in ("VIGIL_TIERED_PRODUCTS", "VIGIL_TRIAL_PRODUCT_ID",
               "VIGIL_TRIAL_PREVIEW_ENABLED", "VIGIL_METERED_BILLING", "VIGIL_ONE_LAUNCH_PER_HOST"):
         monkeypatch.delenv(v, raising=False)
 

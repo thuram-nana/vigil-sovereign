@@ -144,6 +144,8 @@ distribution, with caps and authenticated transport.
 | AEGIS ingest service (own distribution; caps; HMAC/mTLS) | `apps/aegis-ingest/` **(to build — AS-9b)** | — |
 | Connector secrets broker | `connector_secrets.py` **(AS-9a, on consumer registry)** | yes |
 | AWS CloudTrail telemetry source (provider reader; pushes LEADs through the AS-9b receiver) | `framework/v2/aegis/cloudtrail_source.py` **(AS-17b, built)** | yes |
+| IdP (Okta System Log) sign-in/audit telemetry source (provider reader; pushes LEADs through the AS-9b receiver) | `framework/v2/aegis/idp_source.py` **(AS-17c, built)** | yes |
+| Telemetry-provider runtime (unified append-only provider inventory + fault-isolated fan-out over the armed sources) | `framework/v2/aegis/provider_runtime.py` **(AS-10a, built)** | yes |
 | SIEM/notify connector emitter (the broker CONSUMER side) | `notify.py` **(AS-20 — outbound SIEM/notify push client)** | yes |
 
 - **Hot set:** SPOOL (receiver shares the spool chain tail).
@@ -153,7 +155,13 @@ distribution, with caps and authenticated transport.
   `finding_receiver.py`) · **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
   provider reader normalizes CloudTrail, pushes INERT LEADs through the AS-9b receiver (no new
   customer route → no Gate-5 census row), and tamper-evidences each record via AS-9c anchor-1;
-  DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`.
+  DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`. · **AS-17c IdP sign-in/audit telemetry source (built)** —
+  the sibling engine-leg reader for identity-provider (Okta System Log) telemetry; same INERT-LEAD /
+  AS-9b-receiver / AS-9c-anchor-1 path, DEFAULT-OFF `VIGIL_AEGIS_IDP`. · **AS-10a telemetry-provider
+  runtime (built)** — the unified, append-only provider INVENTORY (EDR + CloudTrail + IdP
+  descriptors, each class-5 `detected_without_enforcement` / `reported`) plus a fault-isolated
+  fan-out over the armed sources; adds no OracleKind / fleet WorkerKind, DEFAULT-OFF
+  `VIGIL_AEGIS_PROVIDER_RUNTIME`.
 
 ## Domain 6 — Benchmark (scorecard engine for comparative claims)
 
@@ -217,7 +225,7 @@ Two supporting areas that every domain leans on:
 
 | Area | Path | Verified | Note |
 |------|------|:---:|------|
-| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-7b Coraza |
+| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-17c IdP (Okta System Log) normalizer + gated `detect_format` (`parse_idp`); AS-7b Coraza |
 | CODEOWNERS trust domains (`_CRITICAL_PREFIXES`) | `.github/CODEOWNERS`, `integration/tests/test_codeowners_coverage.py` | yes | AS-0: `aegis/`, `verify/`, `veracity/`, `vigil_core/` are critical prefixes |
 | Slice graph (acyclicity, levels, disjoint manifests) | `engine/crucible/framework/v2/aegis/slice_graph.json` + `aegis/tests/test_aegis_slice_graph.py` | yes | AS-0 graph gate (72 slices, 24 waves) |
 
