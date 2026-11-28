@@ -367,7 +367,7 @@ def test_the_edge_routes_are_absent_when_the_assistant_flag_is_forced_off(monkey
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         port = srv.server_address[1]
-        for route in ("assistant/command", "customer/flow"):
+        for route in ("assistant/command", "flow"):              # the real paths: /api/customer/{assistant/command,flow}
             c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             c.request("POST", "/api/customer/" + route, body=b"{}",
                       headers={"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}",
@@ -407,3 +407,96 @@ def test_the_prod_execution_execution_boundary_gate_is_intact():
         assert "customer_prod_execution_enabled" in text
         assert "TargetEnvironment.LIVE" in text and "not enabled()" in text
     assert "VIGIL_CUSTOMER_PROD_EXECUTION is explicitly enabled" in worker
+
+
+# ===================================================== EDGE-level fail-open regression: string confirm/authorized ==
+# The edge handlers (_flow, _target) must coerce the confirm / authorized affirmations with STRICT identity, never
+# bool(): bool("false")/bool("0") are True in Python, and the edge serialises the hop payload BEFORE the loopback
+# hop, so a bool() there would turn a non-affirmative JSON string into a real True and defeat every downstream
+# `is True` guard - reserving the org's OWN credits with no deliberate confirm (money doctrine) and recording the
+# "I am authorized to test this asset" attestation from a non-affirmed value. These tests drive the REAL EDGE
+# (the provisioner-level tests above pass Python bools, so they never exercised the edge coercion).
+
+
+def _signed_in_operator_with_verified_host(sov, edge, ep, *, host="apme.cm"):
+    """Sign up + confirm through the edge (returns a logged-in opener), then seat the session org as an operator
+    with wallet credits and a verified host (ownership proof + EngagementAuthority) on the sovereign store, so the
+    engagement flow can reach the launch / verify transitions over the edge."""
+    import time as _time
+    from test_custui import _opener, _post
+    from sigil.governor.asset_ownership import METHOD_DNS_TXT, AssetOwnershipRegistry
+    from sigil.governor.orgs import OrgRegistry
+    from sigil.governor.wallet import WalletRegistry
+    from sigil.ui.target_authorization import add_customer_target
+    op = _opener()
+    tok = _post(op, ep, "/api/customer/signup/request", {"email": "own@acme.com"})[1]["dev_token"]
+    conf = _post(op, ep, "/api/customer/signup/confirm",
+                 {"token": tok, "password": "customer-pw-1", "org_name": "Acme"})[1]
+    u, oid = conf["username"], conf["org_id"]
+    store = sov.store()
+    OrgRegistry(store).grant_membership(oid, u, "operator", issued_at=_time.time() + 1e6)   # run_engagement
+    WalletRegistry(store).grant(oid, 100, "trial", entry_id=f"trial:{oid}", issued_at=_time.time())
+    now = _time.time()
+    reg = AssetOwnershipRegistry(store)
+    ch = reg.issue_challenge(oid, host, issued_at=now)
+    reg.verify_and_record(oid, host, method=METHOD_DNS_TXT, observed=[ch.marker], now=now, ttl_seconds=1e12)
+    assert add_customer_target(host, org_id=oid, store=store, now=now)["ok"]
+    return op, u, oid
+
+
+def _avail_store(sov, oid):
+    from sigil.governor.wallet import WalletRegistry
+    return WalletRegistry(sov.store()).available(oid)
+
+
+@pytest.mark.parametrize("bad_confirm", ["false", "0", "no", "off"])
+def test_edge_a_string_confirm_never_reserves_credits(tmp_path, monkeypatch, bad_confirm):
+    """A launch with a non-affirmative STRING confirm must stay at awaiting_confirm and spend NOTHING - the edge's
+    strict `is True` neutralises bool('false')==True before the hop (money doctrine)."""
+    from test_custui import _post, _stack
+    sov, edge, ep, _sp = _stack(tmp_path, monkeypatch)
+    try:
+        op, _u, oid = _signed_in_operator_with_verified_host(sov, edge, ep)
+        c, r = _post(op, ep, "/api/customer/flow",
+                     {"intent": "launch", "host": "apme.cm", "confirm": bad_confirm})
+        assert c == 200 and r["state"] == "awaiting_confirm", (bad_confirm, c, r)
+        assert "reserved" not in r and "started" not in r, (bad_confirm, r)
+        assert _avail_store(sov, oid) == 100, bad_confirm            # not one credit was reserved
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_edge_a_real_true_confirm_does_reserve(tmp_path, monkeypatch):
+    """Positive control: an explicit JSON true confirm DOES advance past awaiting_confirm and reserves - the strict
+    coercion does not break the legitimate confirmed launch."""
+    from test_custui import _post, _stack
+    sov, edge, ep, _sp = _stack(tmp_path, monkeypatch)
+    try:
+        op, _u, oid = _signed_in_operator_with_verified_host(sov, edge, ep)
+        c, r = _post(op, ep, "/api/customer/flow",
+                     {"intent": "launch", "host": "apme.cm", "confirm": True})
+        assert c == 200 and r["state"] != "awaiting_confirm" and r.get("reserved"), (c, r)
+        assert _avail_store(sov, oid) < 100                          # credits were reserved under the real confirm
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+@pytest.mark.parametrize("bad_authorized", ["false", "0", "no", "off"])
+def test_edge_a_string_authorized_never_records_the_attestation(tmp_path, monkeypatch, bad_authorized):
+    """A target/verify with a non-affirmative STRING authorized must be refused at the explicit-affirmation gate
+    (before any fetch or attestation) - the edge's strict `is True` neutralises bool('false')==True before the hop,
+    so the 'I am authorized to test this asset' attestation can never be recorded from a non-affirmed value."""
+    from test_custui import _post, _stack
+    monkeypatch.setenv("VIGIL_OWNERSHIP_VERIFY", "1")               # the fetcher is armed; the affirmation gate is first
+    sov, edge, ep, _sp = _stack(tmp_path, monkeypatch)
+    try:
+        op, _u, _oid = _signed_in_operator_with_verified_host(sov, edge, ep)   # operator seat (run_engagement)
+        _post(op, ep, "/api/customer/target/challenge", {"host": "newhost.example"})   # a fresh unverified host
+        c, r = _post(op, ep, "/api/customer/target/verify",
+                     {"host": "newhost.example", "method": "well-known", "authorized": bad_authorized})
+        # the affirmation gate fires BEFORE the fetch: a non-affirmed value is refused, nothing attested. The fixed
+        # (strict) path returns "confirm that you are authorized ..."; the buggy bool() path would pass the gate and
+        # fail later on the fetch with a DIFFERENT message that does not mention authorization.
+        assert c == 403 and "authorized" in (r.get("error") or ""), (bad_authorized, c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()

@@ -1278,7 +1278,7 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._assistant(body)
         if action == "assistant/command" and _assistant_on():        # B2 deterministic command box (OFF -> 404)
             return self._command(body)
-        if action == "customer/flow" and _assistant_on():            # B3 engagement flow machine (OFF -> 404)
+        if action == "flow" and _assistant_on():                     # B3 engagement flow machine (OFF -> 404)
             return self._flow(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
@@ -1357,8 +1357,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             payload["method"] = body.get("method", "")
             # The customer's inline "I am authorized to test this asset" affirmation. Unlike requester/org (which
             # are session-bound, never body), this is the customer's OWN statement, so it legitimately rides the
-            # body; the provisioner requires it fail-closed before it will mint the target authority.
-            payload["authorized"] = bool(body.get("authorized"))
+            # body; the provisioner requires it fail-closed before it will mint the target authority. STRICT identity
+            # (never bool()): bool("false")/bool("0") are True in Python, so only an explicit JSON true affirms here
+            # - a non-affirmative string can never record the authorization attestation before the hop.
+            payload["authorized"] = body.get("authorized") is True
             c, r = self._provision("target_verify", requester, payload)
         return self._json(r, c)
 
@@ -1550,7 +1552,7 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         from the SERVER session, never the body (a body org_id is ignored): a customer drives only THEIR bound org.
         Only the typed ``line`` travels. The sovereign classifies it over a closed verb allowlist and, for an advice
         intent, answers through the grounded read-only assistant, never an action, never a mint. The box drives any
-        non-advice intent through ``customer/flow`` (behind the explicit affirm/confirm gates)."""
+        non-advice intent through ``/api/customer/flow`` (behind the explicit affirm/confirm gates)."""
         rec = self._session()
         if rec is None or not rec.get("org_id"):
             return self._deny(401, "login required")
@@ -1576,7 +1578,12 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             "mfa_at": rec.get("mfa_at"),                 # E3c step-up stamp from the SESSION, never body
             "intent": body.get("intent", ""), "host": body.get("host", ""), "depth": body.get("depth", ""),
             "product_id": body.get("product_id", ""), "method": body.get("method", ""),
-            "authorized": bool(body.get("authorized")), "confirm": bool(body.get("confirm")),
+            # STRICT identity (never bool()): bool("false")/bool("0") are True in Python, so a bool() coercion here
+            # would turn a non-affirmative JSON string into a real True BEFORE the hop, defeating every downstream
+            # `is True` guard (dispatch, provisioner, engagement_flow.decide) and letting a non-affirmed confirm
+            # reserve the org's own credits (money doctrine) or a non-affirmed value record the authorization
+            # attestation. Only an explicit JSON true affirms; everything else fails closed.
+            "authorized": body.get("authorized") is True, "confirm": body.get("confirm") is True,
             "text": body.get("text", ""), "idem_key": body.get("idem_key", ""), "since": body.get("since", "")}
         c, r = self._provision("customer_flow_step", str(rec.get("username") or ""), payload)
         return self._json(r, c)
