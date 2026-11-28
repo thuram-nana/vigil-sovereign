@@ -188,6 +188,26 @@ def test_derive_and_decide_are_pure_over_the_named_states():
     assert flow.derive_state(verified, running, "h.com")["state"] == "running"
 
 
+def test_a_reserved_lease_blocks_a_second_reserve_money_safety():
+    # MONEY-SAFETY: a host that already holds a RESERVED lease (reserved-but-not-started: a failed start, or a
+    # reserve via the separate launch UI) must never be reserved a SECOND time by the chat flow, which would
+    # double-hold the host's launch credits. decide() must BLOCK, not return reserve_start.
+    verified = [{"host": "h.com", "status": "verified"}]
+    reserved = {"launches": [{"host": "h.com", "state": "reserved"}]}
+    derived = flow.derive_state(verified, reserved, "h.com")
+    assert derived["active"] is not None and str(derived["active"]["state"]) == "reserved"
+    d = flow.decide({"intent": "launch", "confirm": True}, derived)
+    assert d["action"] == "none" and d["blocked"], d            # NOT reserve_start => no second launch_reserve
+    assert "reserved or running" in d["blocked"]
+    # running / paused still block (unchanged), and a clean verified host still reserves under the confirm
+    for st in ("running", "paused"):
+        dr = flow.decide({"intent": "launch", "confirm": True},
+                         flow.derive_state(verified, {"launches": [{"host": "h.com", "state": st}]}, "h.com"))
+        assert dr["action"] == "none" and dr["blocked"]
+    clean = flow.decide({"intent": "launch", "confirm": True}, flow.derive_state(verified, {}, "h.com"))
+    assert clean["action"] == "reserve_start"
+
+
 def test_flow_verifies_an_unproven_host_only_on_the_explicit_affirmation(monkeypatch):
     # real time throughout (the recorded proof's default TTL is relative to it, so customer_assets reads verified).
     store = _store()

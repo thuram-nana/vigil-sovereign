@@ -176,9 +176,14 @@ def decide(signal: dict, derived: dict) -> dict:
         if not verified:
             return {"action": "none", "state": NEED_VERIFY,
                     "blocked": "verify ownership of this domain before launching", "need": "verify"}
-        if active is not None and active_state in ("running", "paused"):
-            return {"action": "none", "state": RUNNING,
-                    "blocked": "an assessment is already running on this host", "need": None}
+        if active is not None and active_state in ("running", "paused", "reserved"):
+            # MONEY-SAFETY: never reserve a SECOND launch for a host that already holds a lease. A reserved lease
+            # already holds this host's credits (reserve_start reserves then starts under one confirm, and a
+            # reserved-but-not-started lease can persist from a failed start or the separate launch UI), so a
+            # re-reserve here would double-hold credits. running/paused shows RUNNING; a reserved host keeps its
+            # derived state and is left to its own start, never re-reserved.
+            return {"action": "none", "state": RUNNING if active_state in ("running", "paused") else state,
+                    "blocked": "an assessment is already reserved or running on this host", "need": None}
         if signal.get("confirm") is not True:
             # NEVER reserve on the typed command alone: stop at awaiting_confirm, carrying the server-decided
             # depth/product for the box to show, until the customer explicitly confirms the spend.
