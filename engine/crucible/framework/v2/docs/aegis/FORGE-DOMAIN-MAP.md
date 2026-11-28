@@ -252,7 +252,16 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
   over the SAME gated monitoring reads; `manage_defense` [vigil_core/rbac.py] names who may
   OPERATE the live defense. Stands nothing down, renders no button, owns its read
   `api/customer/monitoring/control`, default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
-  AS-6d onboarding. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
+  **AS-6d onboarding (built — the TENANT-ONBOARDING increment, the final UI-chain link: a customer-facing
+  **AEGIS onboarding** screen `#/monitoring/onboarding` that COMPOSES the already-built monitoring surfaces
+  into a guided flow. The AS-6d core evaluator [`vigil_core/onboarding.py`: `onboarding_journey`, a pure,
+  deterministic grader] computes, over the SAME already-gated monitoring reads `monitor_list` uses, a LINEAR
+  journey from a connected (proven) host to a monitored (observe) one [prove a host → choose an AEGIS plan →
+  turn monitoring on, reusing the existing gated `monitoring/authorize` toggle], then surfaces the AS-4b
+  preview + AS-27b defense-control read-only views as the explore-next steps. Read-only: it mints/arms/releases
+  nothing, owns its read `api/customer/monitoring/onboarding`, manager-only, renders no write, and is STRICT
+  default-OFF behind a NEW second gate `VIGIL_CUSTOMER_AEGIS_ONBOARDING` on top of
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)**. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
 

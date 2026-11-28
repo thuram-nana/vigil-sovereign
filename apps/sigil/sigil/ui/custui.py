@@ -232,6 +232,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # serves its two reads; a non-secret on/off value written into the page, counting in the build id.
     posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
+    # AEGIS AS-6d — the customer AEGIS onboarding flow (#/monitoring/onboarding). A SECOND strict gate on top of
+    # monitoring: the page shows the onboarding screen + its Monitoring-settings link only when BOTH are on. Like
+    # every switch here, a non-secret on/off value written into the page, counting in the build id.
+    aegis_onboarding = monitoring and _config.customer_aegis_onboarding_enabled()
     team = _config.customer_team_ui_enabled()
     # Live Control (VIGIL_CUSTOMER_LIVE_CONTROL) — the #/live screen: watch the live engagement (phase activity)
     # and steer it with an advisory instruction. The SAME flag that serves /api/customer/launch/instruct +
@@ -316,6 +320,7 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_RETEST__": "1" if retest_ui else "0",
                                      "__VIGIL_POSTURE__": "1" if posture else "0",
                                      "__VIGIL_MONITORING__": "1" if monitoring else "0",
+                                     "__VIGIL_AEGIS_ONBOARDING__": "1" if aegis_onboarding else "0",
                                      "__VIGIL_TEAM__": "1" if team else "0",
                                      "__VIGIL_LIVE_CONTROL__": "1" if live_control else "0",
                                      "__VIGIL_SETTINGS__": "1" if settings else "0",
@@ -787,6 +792,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_preview")
         if path == "/api/customer/monitoring/control" and _monitoring_on():   # AS-27b (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_control")
+        if path == "/api/customer/monitoring/onboarding" and _monitoring_on() and _aegis_onboarding_on():   # AS-6d (OFF -> 404)
+            return self._customer_read_relay("monitor_onboarding")
         if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
             return self._live_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
@@ -1879,6 +1886,13 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _aegis_onboarding_on() -> bool:
+    # AS-6d — the customer AEGIS onboarding flow. A SECOND strict gate on top of monitoring: the route serves
+    # only when BOTH are on; off, /api/customer/monitoring/onboarding is an unknown route (404).
+    from .. import config as _config
+    return _config.customer_aegis_onboarding_enabled()
 
 
 def _onboarding_on() -> bool:

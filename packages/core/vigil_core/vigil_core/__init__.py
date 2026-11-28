@@ -111,6 +111,10 @@ from .contract_eval import (
 from .defense_control import (
     STANDDOWN_ALREADY_STOOD_DOWN, STANDDOWN_NOT_ENFORCING, HostDefenseControl, defense_control_host,
 )
+from .onboarding import (
+    ONBOARDING_STEPS, STATUS_CURRENT, STATUS_DONE, STATUS_TODO, STEP_PLAN, STEP_PROVE_HOST, STEP_TURN_ON,
+    OnboardingJourney, OnboardingStep, onboarding_journey,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -245,4 +249,8 @@ __all__ = [
     "preview_host",
     # AS-27b — defense-control (manage_defense) posture + stand-down preview (defense_control.py):
     "STANDDOWN_NOT_ENFORCING", "STANDDOWN_ALREADY_STOOD_DOWN", "HostDefenseControl", "defense_control_host",
+    # AS-6d — customer tenant onboarding-journey evaluator (onboarding.py):
+    "STEP_PROVE_HOST", "STEP_PLAN", "STEP_TURN_ON", "ONBOARDING_STEPS",
+    "STATUS_DONE", "STATUS_CURRENT", "STATUS_TODO",
+    "OnboardingStep", "OnboardingJourney", "onboarding_journey",
 ]

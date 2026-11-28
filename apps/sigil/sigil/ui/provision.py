@@ -4042,6 +4042,47 @@ class Provisioner:
         return {"org_id": requester_org_id, "can_manage": True,
                 "can_manage_defense": can_manage_defense, "controls": controls}
 
+    def monitor_onboarding(self, requester: str, requester_org_id: str, *, ip: str = "",
+                           now: "Optional[float]" = None) -> dict:
+        """AS-6d — the SESSION org's READ-ONLY onboarding JOURNEY: where the workspace is on the walk from a
+        connected (proven) host to a monitored (observe) one, GRADED by the AS-6d core evaluator
+        (``vigil_core.onboarding_journey``) over the SAME already-gated monitoring reads ``monitor_list`` /
+        ``monitor_preview`` / ``monitor_control`` use — the hosts whose ownership proof is current, the active
+        grants (and whether any enforces), and whether the plan entitles Respond. It COMPOSES those surfaces
+        into a guided flow; it re-implements none of them. It is READ-ONLY: it mints nothing, arms nothing and
+        releases nothing — turning monitoring on stays behind the existing gated ``monitoring/authorize`` write.
+
+        Manager-only, exactly like ``monitor_preview`` / ``monitor_control``: the journey needs the verified
+        hosts and the plan, which the org gives only to someone who may manage monitoring (the founder or an
+        org_admin). Anyone else is told ``can_manage: False`` and gets no journey (the screen shows an honest
+        note) — the hosts and the plan never cross to a read-only role. Admit-gated, so a tenant only ever reads
+        ITS OWN org (cross-tenant => ProvisionDenied => 403)."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import onboarding_journey
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_onboarding", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False, "journey": None}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = [g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None]
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+        proven = {str(h["host"]) for h in hosts}
+        active_hosts = {g.host for g in active}
+        enforcing_hosts = {g.host for g in active if MonitoringMode(g.mode) is MonitoringMode.BLOCK}
+        journey = onboarding_journey(
+            proven_host_count=len(proven),
+            active_host_count=len(active_hosts),
+            enforcing_host_count=len(enforcing_hosts),
+            has_plan=plan is not None,
+            respond_entitled=bool(plan and plan.get("respond")),
+        )
+        return {"org_id": requester_org_id, "can_manage": True, "journey": journey.customer_safe()}
+
     def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                              now: "Optional[float]" = None) -> dict:
         """AS-2g — the SESSION org's v2 origin-binding status (org-scoped, read-only). For each ACTIVE v2 grant:

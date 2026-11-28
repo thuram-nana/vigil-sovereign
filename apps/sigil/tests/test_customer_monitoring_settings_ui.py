@@ -120,6 +120,7 @@ function button(root, label) { return root.querySelectorAll("button").filter(b =
 # The app's world, stubbed: who is signed in, where the page is, what the server answers, and every call made.
 _WORLD = r"""
 document.body.dataset.monitoring = %(flag)s;
+document.body.dataset.aegisOnboarding = %(onb)s;   // AS-6d onboarding flag (default OFF: the settings screen renders as before)
 let who = { authenticated: true, username: "ana" };
 const state = { get: () => ({ who }) };
 function authed() { return !!(who && who.authenticated); }
@@ -152,18 +153,18 @@ const out = {};
 _APP_FUNCS = ("pageFlag", "loadingHolder", "kv", "fmtDate", "err", "clearErr", "here", "own", "monSettingsButton",
               "monFailed", "viewMonitoringSettings", "monSettingsRows", "monSettingsBody", "monSettingsCard",
               "monSettingsActions", "monShortenWindow", "monSettingsConfirmOff", "monSettingsTurnOff", "routeShown")
-_APP_VARS = ("API", "MONITORING_ON", "MON_MODE", "MON_DAY_S")
+_APP_VARS = ("API", "MONITORING_ON", "AEGIS_ONBOARDING_ON", "MON_MODE", "MON_DAY_S")
 
 
-def _harness(flag: str = "1") -> str:
+def _harness(flag: str = "1", onb: str = "0") -> str:
     src = _src()
     return "\n".join([_DOM, f"require({json.dumps(str(UI_JS))});", "const h = window.VUI.h;",
-                      _WORLD % {"flag": json.dumps(flag)}]
+                      _WORLD % {"flag": json.dumps(flag), "onb": json.dumps(onb)}]
                      + [_fn(src, n) for n in _APP_FUNCS] + [_var(src, n) for n in _APP_VARS])
 
 
-def _node(script: str, *, flag: str = "1") -> dict:
-    prog = (_harness(flag) + "\n(async () => {\n" + script + "\n})().then(() => process.stdout.write(JSON.stringify(out)),"
+def _node(script: str, *, flag: str = "1", onb: str = "0") -> dict:
+    prog = (_harness(flag, onb) + "\n(async () => {\n" + script + "\n})().then(() => process.stdout.write(JSON.stringify(out)),"
             " e => { console.error(e && e.stack || e); process.exit(3); });")
     r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
@@ -186,10 +187,10 @@ const acts = host => buttons(card(host).querySelector("div.cust-mon-actions"));
 """
 
 
-def _screen(listing: dict, then: str = "", *, extra: "dict | None" = None) -> dict:
+def _screen(listing: dict, then: str = "", *, extra: "dict | None" = None, onb: str = "0") -> dict:
     srv = {"GET api/customer/monitoring": {"data": listing}}
     srv.update(extra or {})
-    return _node(f"server = {json.dumps(srv)};" + _SCREEN + "await flush();\n" + then)
+    return _node(f"server = {json.dumps(srv)};" + _SCREEN + "await flush();\n" + then, onb=onb)
 
 
 # --- the screen -----------------------------------------------------------------------------------------------------
@@ -339,6 +340,20 @@ def test_the_route_and_hub_link_are_behind_the_monitoring_flag():
                      r'MONITORING_ON\)[^\n]*; \}', src)
     # the Settings hub links it through settingsLink (which checks routeShown) — on only when monitoring is on
     assert 'settingsLink("Monitoring", "#/monitoring/settings")' in src
+
+
+def test_the_aegis_onboarding_link_is_shown_only_when_its_flag_is_on_and_navigates():
+    # AS-6d — a manager sees a "Set up AEGIS monitoring" link only while the strict onboarding flag is on; off,
+    # the settings screen is byte-identical to before (no onboarding link). It is a plain nav link (reads nothing).
+    off = _screen(_MANAGER, 'out.links = buttons(document.querySelector("#mon-settings-body"));', onb="0")
+    assert "Set up AEGIS monitoring" not in off["links"]
+    on = _screen(_MANAGER, r"""
+const link = document.querySelector("div.cust-mon-settings-onboarding-link").querySelector("button");
+out.label = text(link); link.click(); out.navs = navs; out.calls = calls;
+""", onb="1")
+    assert on["label"] == "Set up AEGIS monitoring"
+    assert on["navs"] == ["#/monitoring/onboarding"]                     # a plain nav link to the AS-6d flow
+    assert on["calls"] == [["GET", "api/customer/monitoring"]]           # the settings read only; the link reads nothing
 
 
 def test_the_screen_only_touches_the_existing_monitoring_routes():
