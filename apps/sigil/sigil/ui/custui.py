@@ -90,6 +90,9 @@ _SLOW_HOP_TIMEOUTS_S = {
     # verification / reset email sent INLINE over SMTP: connect, EHLO, STARTTLS, AUTH, DATA at 10 s each.
     "signup_request": 60.0,
     "recover_request": 60.0,
+    # the team invite email is sent INLINE over SMTP (connect, EHLO, STARTTLS, AUTH, DATA at 10 s each), exactly like
+    # the verification email -> the same 60 s budget so a slow-but-healthy send is never reported as failed.
+    "member_invite": 60.0,
     # Confirm a sign-up / reset by its 6-digit CODE: the cockpit's code check waits up to email_channel._HASH_WAIT_S
     # (30 s) for a hash slot, then scrypt (~tens of ms) + the commit. The edge MUST outlast that: a hop that gives up
     # first lets the cockpit set the new password (and, on recover, the edge then never severs the old sessions,
@@ -762,6 +765,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._security_status()
         if path == "/api/customer/members" and _team_on():              # the Team screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("members_list")
+        if path == "/api/customer/member/invites" and _team_invite_on():   # pending invites (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("member_invites_list")
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
         if path == "/api/customer/billing/auto-topup" and _auto_topup_on():   # A1 (flag OFF -> unknown-route 404)
@@ -1225,15 +1230,28 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                     "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
                 self._mint(r["username"], r.get("org_id"))     # the new org_admin's session, bound to their org
+                # redeem a presented invite token (if any): the new account joins the inviting org too, with the capped
+                # role. Best-effort — a bad token never fails the sign-up it rides; the session stays bound to their own
+                # new workspace (org switch is a later slice).
+                invite = self._redeem_invite_token(r["username"], body.get("invite_token", ""))
+                if invite is not None:
+                    r = {**r, "invite": invite}
             return self._json(r, c)
         if action == "login":
             c, r = self._provision("login", "", {"email": body.get("email", ""),
                     "password": body.get("password", ""), "ip": self._ip()})
             if c == 200 and isinstance(r, dict) and r.get("username"):
-                orgs = r.get("orgs") or []
+                # redeem a presented invite token (if any) BEFORE binding the active org, so an invited person with no
+                # workspace of their own lands in the one the invite just granted them.
+                invite = self._redeem_invite_token(r["username"], body.get("invite_token", ""))
+                orgs = list(r.get("orgs") or [])
+                if invite and invite.get("accepted") and invite.get("org_id") and invite["org_id"] not in orgs:
+                    orgs.append(invite["org_id"])              # the invite just added this org (their own come first)
                 active = orgs[0] if orgs else None             # server-bound active org (switch is a later slice)
                 self._mint(r["username"], active)
                 r = {**r, "active_org": active}
+                if invite is not None:
+                    r = {**r, "invite": invite}
             return self._json(r, c)
         if action == "recover/request":
             c, r = self._provision("recover_request", "", {"email": body.get("email", ""), "ip": self._ip()})
@@ -1256,6 +1274,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._member(action, body)
         if action == "member/add" and _team_on():                    # the Team screen (flag OFF -> unknown-action 404)
             return self._member_add(body)
+        if action == "member/invite" and _team_invite_on():          # invite a non-account (flag OFF -> unknown-action 404)
+            return self._member_invite(body)
+        if action == "member/invite/revoke" and _team_invite_on():   # cancel a pending invite (flag OFF -> 404)
+            return self._member_invite_revoke(body)
         if action in ("target/challenge", "target/verify"):
             return self._target(action, body)
         if action in ("launch/reserve", "launch/cancel", "launch/start"):
@@ -1333,6 +1355,43 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                    "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
         c, r = self._provision("member_add", requester, payload)
         return self._json(r, c)
+
+    def _member_invite(self, body: dict):
+        """Invite a person who has NO VIGIL account yet, by email. As ``_member_add``, the acting REQUESTER, the ORG and
+        the step-up stamp come from the SERVER-side session -- never the body (a body ``org_id``/``requester`` is
+        ignored); only the email and the role travel. No session (or no bound org) is refused before the hop fires."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
+                   "email": body.get("email", ""), "role": body.get("role", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
+        c, r = self._provision("member_invite", requester, payload)
+        return self._json(r, c)
+
+    def _member_invite_revoke(self, body: dict):
+        """Cancel a pending invitation of the SESSION org by its opaque invite_id. The acting REQUESTER, the ORG and the
+        step-up stamp come from the SERVER-side session -- never the body; only the invite_id travels."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
+                   "invite_id": body.get("invite_id", ""), "ip": self._ip(),
+                   "mfa_at": rec.get("mfa_at")}                 # E3c step-up stamp from the SESSION, never body
+        c, r = self._provision("member_invite_revoke", requester, payload)
+        return self._json(r, c)
+
+    def _redeem_invite_token(self, username: str, token: str) -> "dict | None":
+        """After a sign-up / sign-in minted this session, redeem a presented invite token (if any) to a capped
+        membership in the inviting org. The principal is the just-authenticated account (never a body field); only the
+        token travels. Best-effort and gated by the invite flag: a bad / expired / used token never fails the sign-in
+        it rides. Returns the provisioner's ``{"accepted": ...}`` verdict, or None when nothing was attempted."""
+        if not token or not _team_invite_on():
+            return None
+        c, r = self._provision("member_invite_accept", str(username or ""), {"token": token, "ip": self._ip()})
+        return r if c == 200 and isinstance(r, dict) else {"accepted": False, "reason": "unavailable"}
 
     def _target(self, action: str, body: dict):
         """Asset-ownership target registration (Slice G0). Like `_member`, the acting REQUESTER and the active
@@ -1776,6 +1835,13 @@ def _security_on() -> bool:
 def _team_on() -> bool:
     from .. import config as _config
     return _config.customer_team_ui_enabled()
+
+
+def _team_invite_on() -> bool:
+    # DEFAULT ON -- the team email-invite backend ships enabled; only an explicit off value disables it. Re-checked on
+    # every request so the edge and the cockpit (which re-checks the same flag) are never out of step.
+    from .. import config as _config
+    return _config.customer_team_invite_enabled()
 
 
 def _settings_on() -> bool:
