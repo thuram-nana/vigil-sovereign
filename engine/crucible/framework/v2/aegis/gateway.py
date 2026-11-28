@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from .detection_kit import DetectionKit, DetectionKitMeter
     from .detection_mirror import DetectionMirrorMeter
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
+    from .observe_1b import Observe1bMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
 
@@ -279,6 +280,27 @@ def _detection_mirror_flag() -> bool:
     return (os.environ.get(DETECTION_MIRROR_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-18a (1b observe): the default-OFF switch for the deterministic read-only 1b OBSERVE view — over the
+# path-1b received events (AS-9b), reflected through the AS-31 detection mirror and graded by the AS-4b
+# contract evaluator (``headline_floor``) into an honest OBSERVE headline (detect + report, never block; the
+# 1b ENFORCE leg is the separate AS-18b slice). Kept in LOCKSTEP with ``observe_1b.OBSERVE_1B_ENV`` (a test
+# asserts they match) and read here directly so the observe_1b module (and, through it, vigil_core) is NOT
+# eagerly import-reachable from the gateway (it is imported only when the flag is on AND its dependency — the
+# AS-31 detection mirror meter — exists).
+OBSERVE_1B_ENV = "VIGIL_AEGIS_OBSERVE_1B"
+
+
+def _observe_1b_flag() -> bool:
+    """AS-18a 1b-observe switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and
+    re-read per snapshot so a live flip-OFF stops surfacing the view at once). OFF ⇒ no meter is built,
+    nothing is computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The
+    view is ALSO inert whenever its dependency — the AS-31 detection mirror (``VIGIL_AEGIS_DETECTION_MIRROR``
+    + the AS-7b Coraza attestation + a configured CRS corpus) — is off; AS-4b is a flagless pure grader, so
+    there is no further dep flag to arm."""
+    import os
+    return (os.environ.get(OBSERVE_1B_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -477,6 +499,22 @@ class GatewaySettings:
         if _detection_mirror_flag() and self.coraza_meter is not None and coraza_corpus is not None:
             from .detection_mirror import DetectionMirrorMeter
             self.detection_mirror_meter = DetectionMirrorMeter(self.coraza_meter, coraza_corpus.rule_ids)
+        # AS-18a (1b observe) — the deterministic, READ-ONLY 1b OBSERVE view: over the path-1b received events
+        # (AS-9b), reflected through the AS-31 detection mirror and graded by the AS-4b contract evaluator
+        # (``headline_floor``) into an honest OBSERVE headline (detect + report, never block; the 1b ENFORCE
+        # leg is the separate AS-18b slice). Built ONCE, only when the default-OFF VIGIL_AEGIS_OBSERVE_1B flag
+        # is on at construction AND the AS-31 detection mirror meter — its DEPENDENCY — exists (there is no
+        # detection posture to observe through otherwise). It holds NO mutable state and NEVER mutates the
+        # inventory, the licence ledger, the corpus, the spool, or any state: it only READS. It
+        # REFLECTS / GRADES and never acts — a reflected finding is a LEAD, never a block (only a fired oracle
+        # blocks), the headline is capped at ``observing``, and it drives no admit/shed/allow/block decision.
+        # OFF (or the AS-31 dep off) ⇒ no meter is built, nothing is computed, and the gateway data path (and
+        # the probe snapshot) are byte-identical. Importing the module lazily here keeps it (and, through it,
+        # vigil_core) OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        self.observe_1b_meter: "Observe1bMeter | None" = None
+        if _observe_1b_flag() and self.detection_mirror_meter is not None:
+            from .observe_1b import Observe1bMeter
+            self.observe_1b_meter = Observe1bMeter(self.detection_mirror_meter)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -635,6 +673,19 @@ class GatewaySettings:
             if dm is not None and self.detection_mirror_active:
                 snap["detection_mirror_active"] = True
                 snap["detection_mirror"] = dm.snapshot()
+        except Exception:
+            pass
+        # AS-18a (1b observe): surface the deterministic read-only 1b OBSERVE view — the standing observe
+        # posture graded by AS-4b over the AS-31 detection mirror (the AS-30 source catalog × the AS-7b
+        # content admissibility), address-free and hygiene-clean — ONLY when the meter is active, so a gateway
+        # without the feature answers a probe byte-identically. Metadata only (counts + a headline + a digest,
+        # no address, no secret). It REFLECTS + GRADES, it never acts (the headline is capped at ``observing``;
+        # a reflected finding is a LEAD). Total: any read error degrades this field, never the probe.
+        try:
+            ob = self.observe_1b_meter
+            if ob is not None and self.observe_1b_active:
+                snap["observe_1b_active"] = True
+                snap["observe_1b"] = ob.snapshot()
         except Exception:
             pass
         return snap
@@ -828,6 +879,19 @@ class GatewaySettings:
         return (self.detection_mirror_meter is not None
                 and _detection_mirror_flag()
                 and self.coraza_active)
+
+    @property
+    def observe_1b_active(self) -> bool:
+        """Is the AS-18a 1b observe view active for THIS snapshot? Only when the meter was built (the
+        default-OFF VIGIL_AEGIS_OBSERVE_1B flag was on at construction AND the AS-31 detection mirror meter
+        exists) AND the flag is STILL on AND its DEPENDENCY (the AS-31 detection mirror,
+        ``detection_mirror_active``) is STILL active — so flipping EITHER the observe-1b or the
+        detection-mirror/coraza flag off at runtime stops surfacing the view live. Read-only / observational:
+        it never gates enforcement (a reflected finding is a LEAD, never a block; the headline is capped at
+        ``observing``)."""
+        return (self.observe_1b_meter is not None
+                and _observe_1b_flag()
+                and self.detection_mirror_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
