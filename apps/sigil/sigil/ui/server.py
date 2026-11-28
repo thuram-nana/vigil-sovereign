@@ -1831,7 +1831,7 @@ class Handler(BaseHTTPRequestHandler):
                             ip=ip, mfa_at=body.get("mfa_at"))
         # AEGIS-SaaS AE-1 — DEFENSIVE monitoring authority. Absent (unknown action -> 404) unless the flag is ON;
         # requester is the hop principal, org from the edge SESSION (never a free body field).
-        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events"):
+        if action in ("monitor_authorize", "monitor_revoke", "monitor_list", "monitor_events", "monitor_preview"):
             from .. import config as _config
             if not _config.customer_monitoring_enabled():
                 return None
@@ -1843,6 +1843,10 @@ class Handler(BaseHTTPRequestHandler):
                 return p.monitor_revoke(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
             if action == "monitor_events":
                 return p.monitor_events(requester, str(body.get("org_id", "")), ip=ip)
+            # AS-4b — the read-only protection-contract preview (what enforce would do vs observe), grounded in
+            # the SAME gated monitoring reads; the org is the edge SESSION's, never a body field.
+            if action == "monitor_preview":
+                return p.monitor_preview(requester, str(body.get("org_id", "")), ip=ip)
             return p.monitor_list(requester, str(body.get("org_id", "")), ip=ip)
         # AEGIS AS-2f — SOVEREIGN v2 authority (grant/revoke/renew over the AS-2a contracts). Absent (unknown
         # action -> 404) unless BOTH the monitoring master flag AND the strict v2 flag are ON; requester is the

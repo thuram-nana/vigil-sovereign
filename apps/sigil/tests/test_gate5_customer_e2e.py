@@ -106,6 +106,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/monitoring/settings": ("Monitoring settings", ("api/customer/monitoring",)),   # AS-2k (same reads/writes)
+    "#/monitoring/preview": ("Protection preview", ("api/customer/monitoring/preview",)),   # AS-4b (read-only preview)
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
@@ -149,7 +150,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls;
     # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row; AS-29 adds the guarded Release
     # to enforce in its own row — shown because a.example is in Observe and the plan entitles Respond (respond: True).
-    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1},
+    # AS-4b adds one read-only link out to the Protection preview (the preview screen itself renders no button).
+    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1,
+                              "View protection preview": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
@@ -446,6 +449,19 @@ _FAKE_SERVER = {
                                           {"host": "a.example", "expires_at": 1800000000.0}],
                                 "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
     "api/customer/monitoring/events": {"org_id": "org_acme", "events": []},
+    # AS-4b — the read-only protection preview for the same two hosts: a.example armed in Observe (a release would be
+    # permitted), b.example proven but not yet armed (the preview names the honest blocker). Pure display, no button.
+    "api/customer/monitoring/preview": {"org_id": "org_acme", "can_manage": True, "previews": [
+        {"host": "a.example", "headline": "observing", "mode": "observe", "armed": True, "proof_current": True,
+         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"],
+         "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
+         "enforce_permitted": True, "enforce_blockers": [],
+         "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]},
+        {"host": "b.example", "headline": "inactive", "mode": "observe", "armed": False, "proof_current": True,
+         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"],
+         "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
+         "enforce_permitted": False, "enforce_blockers": ["not_armed"],
+         "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]}]},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
     # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
     "api/customer/preferences": {"ok": True, "preferences": {
@@ -955,7 +971,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
+        for p in ("members", "monitoring", "monitoring/events", "monitoring/preview", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3

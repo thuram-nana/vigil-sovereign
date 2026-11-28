@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2968,12 +2968,21 @@
           + "into enforce, or turn its monitoring off here. VIGIL never extends a window beyond its standard length." })
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
           + "settings. You can see what each monitored host is set to." });
-    if (!rows.length) {
-      return h("div", {}, [head, h("div.card.cust-soon", { text: d.can_manage
-        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
-        : "No host of this workspace is monitored." })]);
+    // AS-4b — a manager can open the read-only Protection preview (what enforcing would do, before it is armed) from
+    // here, beside Release to enforce. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+    var children = [head];
+    if (d.can_manage) {
+      children.push(h("div.cust-mon-settings-preview-link", {}, monSettingsButton("View protection preview",
+        function () { nav("#/monitoring/preview"); })));
     }
-    return h("div", {}, [head, h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); }))]);
+    if (!rows.length) {
+      children.push(h("div.card.cust-soon", { text: d.can_manage
+        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
+        : "No host of this workspace is monitored." }));
+      return h("div", {}, children);
+    }
+    children.push(h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); })));
+    return h("div", {}, children);
   }
   function monSettingsCard(g, d) {
     var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(g.host) }),
@@ -3118,6 +3127,99 @@
       VUI.toast("Monitoring for " + g.host + " is now enforcing (Respond).");
       if (here() === "#/monitoring/settings") render();
     } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+
+  // ---- AS-4b: Protection preview (#/monitoring/preview) --------------------------------------------------------------
+  // "contract + preview" — the customer-facing protection-contract evaluator + preview, the UI-chain increment after
+  // AS-3d (chain 4a->2f->2g->2k->21a->29->3d->4b). A READ-ONLY screen that shows, per host, what AEGIS does now (observe:
+  // inspect + report) and what releasing it to enforce (Respond) WOULD add (block before execution / withhold the
+  // response), BEFORE anything is armed — plus whether a release would be permitted now and, honestly, why not, and what
+  // AEGIS does NOT inspect. It owns its OWN read, GET api/customer/monitoring/preview (so no existing screen's "reads
+  // nothing new / opens no new route" invariant is touched), gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED as the
+  // rest of monitoring (off: the route is the home screen exactly as any unknown route, and the Settings link is absent).
+  //
+  // HONEST BY CONSTRUCTION. The grade comes entirely from the SERVER (the AS-4b core evaluator, over the same gated
+  // monitoring reads a manager already sees): the page RENDERS fixed copy from the server's semantic fields and INVENTS
+  // nothing. It mints nothing, arms nothing, releases nothing — the actual Release stays behind AS-29's gate on
+  // #/monitoring/settings. It renders NO button (read-only), so the Monitoring screens' button census is unchanged.
+  // CSP-safe: it uses no handler at all (pure display).
+  var MON_HEADLINE = { unsupported: "Not protected", inactive: "Not monitored", degraded: "Degraded",
+                       unverified: "Proof of control lapsed", observing: "Observing", enforcing: "Enforcing · Respond" };
+  var MON_OUTCOME = { prevented_before_execution: "block attacks before they reach your app",
+                      response_withheld_after_execution: "withhold the response after your app has run",
+                      interrupted_after_partial_execution: "interrupt a request part-way through",
+                      contained_after_compromise: "contain a compromise", detected_without_enforcement: "detect and report attacks" };
+  var MON_BLOCKER = {
+    respond_not_in_plan: "Your plan does not include Respond, so this host cannot be released to enforce.",
+    proof_lapsed: "Its proof of control has lapsed — verify it again in Assets before it can be released to enforce.",
+    already_enforcing: "This host is already enforcing (Respond).",
+    not_armed: "Turn monitoring on for this host on the Monitoring screen before it can be released to enforce." };
+  var MON_NOT_OBSERVED = { direct_to_origin: "traffic sent straight to your origin, bypassing AEGIS",
+                           cache_hits: "responses served from a cache", chunked: "chunked request bodies",
+                           over_2_mib: "request bodies larger than 2 MiB", multipart: "multipart uploads",
+                           websocket: "WebSocket traffic", non_http: "non-HTTP traffic" };
+  function monPreviewOutcomeText(list) {
+    var parts = (Array.isArray(list) ? list : []).map(function (c) { return own(MON_OUTCOME, c); })
+      .filter(function (s) { return !!s; });
+    return parts.length ? parts.join("; ") : "";
+  }
+  function viewMonitoringPreview() {
+    var holder = h("div#mon-preview-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/preview"); }
+      catch (e) {
+        if (here() !== "#/monitoring/preview") return;      // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the preview claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load the protection preview just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/preview") return;
+      VUI.mount(holder, monPreviewBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Protection preview" }),
+      h("p.cust-muted", { text: "A read-only preview of what AEGIS does for each host now and what releasing it to "
+        + "enforce (Respond) would add. It shows only — it arms nothing. Release a host on Monitoring settings." }),
+      holder]), "#/monitoring/preview");
+  }
+  function monPreviewBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can see the protection "
+        + "preview. It shows what enforcing would do for each host, before it is armed." });
+    }
+    var rows = (d.previews || []).filter(function (p) { return p && p.host; });
+    if (!rows.length) {
+      return h("div.card.cust-soon", { text: "No host of this workspace has a current proof of control yet. Prove a "
+        + "host in Assets, then it appears here with what AEGIS would do for it." });
+    }
+    return h("div.cust-grid", {}, rows.map(monPreviewCard));
+  }
+  function monPreviewCard(p) {
+    var badge = h("span.cust-badge.cust-badge-" + (p.headline === "enforcing" ? "on" : (p.headline === "observing"
+      ? "signal" : "off")), { text: own(MON_HEADLINE, p.headline) || "Not protected" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(p.host) }), badge])];
+    var nowText = monPreviewOutcomeText(p.observe_outcomes);
+    body.push(kv("Now", nowText ? ("AEGIS can " + nowText + ".") : "AEGIS does not inspect this host yet."));
+    var adds = monPreviewOutcomeText(p.enforce_adds_outcomes);
+    if (p.enforce_permitted) {
+      body.push(kv("Release to enforce would add", adds ? ("AEGIS would also " + adds + ".") : "live blocking."));
+      body.push(h("p.cust-muted", { text: "You can release this host to enforce on Monitoring settings. Nothing is "
+        + "armed from this preview." }));
+    } else {
+      var why = (p.enforce_blockers || []).map(function (b) { return own(MON_BLOCKER, b); })
+        .filter(function (s) { return !!s; });
+      if (p.headline !== "enforcing" && adds) {
+        body.push(kv("Enforce would add", "AEGIS would " + adds + " — once this host can be released."));
+      }
+      body.push(h("p.cust-muted", { text: why.length ? why.join(" ") : "This host cannot be released to enforce yet." }));
+    }
+    var limits = (p.not_observed || []).map(function (n) { return own(MON_NOT_OBSERVED, n); })
+      .filter(function (s) { return !!s; });
+    if (limits.length) {
+      body.push(h("p.cust-muted.cust-mon-preview-limits", { text: "AEGIS does not inspect: " + limits.join(", ") + "." }));
+    }
+    return h("div.card.cust-mon-preview-card", { dataset: { host: String(p.host) } }, body);
   }
 
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
@@ -5302,6 +5404,8 @@
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // AS-2k monitoring settings off (same flag as #/monitoring): #/monitoring/settings is the home screen, as any unknown route
     "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
+    // AS-4b protection preview off (same flag as #/monitoring): #/monitoring/preview is the home screen, as any unknown route
+    "#/monitoring/preview": function () { return authed() ? (MONITORING_ON ? viewMonitoringPreview() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)

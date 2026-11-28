@@ -34,7 +34,7 @@ hot file or a token cannot merge in the same wave.
 | **MA** | Authority (control plane) | `apps/sigil/sigil/governor/monitoring_authority.py` |
 | **SC** | Supply chain | image + closure (AS-28) |
 | **INFRA** | AWS platform | `infra/aws/…` |
-| **CON** | Contract evaluator | AS-4b |
+| **CON** | Contract evaluator | AS-4b (built — `vigil_core/contract_eval.py`) |
 | **RBAC** | Roles | `apps/sigil/.../governor` RBAC (AS-27b) |
 | **VERIFY** (token) | Oracle/verifier core | `engine/crucible/framework/v2/verify/`, `aegis/registry.py` |
 | **GP** (token) | Gate path | needs `make gate` evidence (`Makefile`) |
@@ -228,7 +228,16 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
   [`monitoring` grants/hosts + `monitoring/events`]: an honest health badge [live authority;
   lapsed proof] and last-report fact, plus a client-side mark-as-seen of a host's latest
   confirmed attack — no route, no write, no new authority; default-OFF
-  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-4b contract+preview · AS-27b override ·
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-4b contract+preview (built — the AS-4b protection-contract EVALUATOR
+  [`vigil_core/contract_eval.py`: the headline as the FLOOR of the six dimensions, enforcement
+  `effective` as the fail-closed AND of its terms, and a per-host enforce/observe preview] + a
+  READ-ONLY **Protection preview** screen `#/monitoring/preview` that renders the SERVER's grade,
+  over the SAME gated monitoring reads, of what AEGIS does now [observe] and what releasing to
+  enforce WOULD add [derived from the provider registry], whether a release would be permitted and
+  why not — it mints/arms/releases nothing [the Release stays behind AS-29's gate], owns its own
+  read `api/customer/monitoring/preview`, manager-only, no button, default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-27b override ·
   AS-6d onboarding. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
