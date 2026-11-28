@@ -207,9 +207,11 @@ class TenantKnowledge:
 
     # --- writes -------------------------------------------------------------------------------------------------
     def ingest_document(self, filename: object, data_bytes: object) -> dict:
-        """Chunk + append ``data_bytes`` to THIS org's spine, then embed + index the chunks. Enforces the caps BEFORE
-        any write (fail-closed). Returns ``{"org_id", "filename", "chunks", "bytes"}``. The org tag ``org_id`` is
-        written into every chunk's payload as defence-in-depth so a reader can re-assert tenancy."""
+        """Chunk + append ``data_bytes`` to THIS org's spine, then embed + index the chunks. Enforces the caps AND the
+        fail-closed content-safety gate (``content_safety``: optional malware scan, magic-byte structural allowlist,
+        STRICT text decode, Unicode sanitiser, chunk cap) BEFORE any write - the server is authoritative, the client is
+        never trusted. Returns ``{"org_id", "filename", "chunks", "bytes"}``. The org tag ``org_id`` is written into
+        every chunk's payload as defence-in-depth so a reader can re-assert tenancy."""
         name = _valid_filename(filename)
         if not isinstance(data_bytes, (bytes, bytearray)):
             raise KnowledgeError("a document body must be bytes")
@@ -225,10 +227,23 @@ class TenantKnowledge:
             raise KnowledgeCapError(
                 f"document limit reached: this workspace already holds {len(existing)} documents "
                 f"(max {config.customer_knowledge_max_docs_per_org()}) - remove one before adding another")
-        text = data.decode("utf-8", errors="replace")
+        # CONTENT SAFETY (fail-closed, defence-in-depth), BEFORE any decode / chunk / spine write - the server is
+        # authoritative, the client is never trusted. Imported lazily to keep this module (and the provisioner that
+        # loads it) free of the content-safety dependency surface until an actual upload is processed.
+        from . import content_safety
+        content_safety.scan(data, name)                       # (1) optional external malware scan; fail-closed hook
+        content_safety.assert_allowed(data, name)             # (2) structural allowlist: reject binary by MAGIC bytes
+        text = content_safety.decode_text(data)               # (3) STRICT decode (no lossy replacement) - the old hole
+        text = content_safety.sanitize_text(text)             # (4) strip NUL/controls/zero-width/bidi, NFC-normalise
         chunks = _chunks(text)
         if not chunks:
             raise KnowledgeError("the document has no indexable text")
+        # (5) bound index growth: the byte cap already bounds the decoded text length; this refuses a pathological
+        # under-the-byte-cap document that chunks into an unreasonable number of pieces (fail-closed, before any write).
+        max_chunks = config.customer_knowledge_max_chunks()
+        if len(chunks) > max_chunks:
+            raise KnowledgeCapError(
+                f"document produced too many chunks: {len(chunks)} exceeds the {max_chunks}-chunk limit")
         store = self._store()
         seqs: "list[int]" = []
         for j, chunk in enumerate(chunks):
