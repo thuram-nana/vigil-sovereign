@@ -2395,7 +2395,19 @@
   }
   function renderGraphDetail() {
     if (!lg.detailEl) return;
+    // Preserve an in-progress per-node steer draft (value + focus + caret) across a poll-driven re-mount
+    // of the SAME node's detail panel: the panel re-renders every graph poll to refresh live status, and a
+    // naive re-mount would wipe a multi-word nudge mid-type and drop focus. Carried over only when the
+    // selection is unchanged, so switching to a different node still starts from an empty box.
+    var _keepDraft = null;
+    if (lg.detailSel === lg.sel && lg.detailEl.querySelector) {
+      var _oldTa = lg.detailEl.querySelector("textarea.live-instruct");
+      if (_oldTa) _keepDraft = { value: _oldTa.value,
+        focused: (typeof document !== "undefined" && document.activeElement === _oldTa),
+        start: _oldTa.selectionStart, end: _oldTa.selectionEnd };
+    }
     var n = lgSelNode();
+    lg.detailSel = lg.sel;
     if (!n) { VUI.mount(lg.detailEl, h("p.cust-muted", { text: "Select a node to see its activity and steer just "
       + "that part of the assessment." })); return; }
     var kids = [
@@ -2422,6 +2434,16 @@
         + "work, or use the box below to steer the whole assessment." }));
     }
     VUI.mount(lg.detailEl, h("div", {}, kids));
+    if (_keepDraft && n.kind === "agent" && lg.detailEl.querySelector) {
+      var _newTa = lg.detailEl.querySelector("textarea.live-instruct");
+      if (_newTa) {
+        _newTa.value = _keepDraft.value;
+        if (_keepDraft.focused) {
+          try { _newTa.focus(); if (_newTa.setSelectionRange) _newTa.setSelectionRange(_keepDraft.start, _keepDraft.end); }
+          catch (e) {}
+        }
+      }
+    }
   }
   async function sendGraphInstruction(ta, note, node) {
     var t = (ta && ta.value ? ta.value : "").trim();

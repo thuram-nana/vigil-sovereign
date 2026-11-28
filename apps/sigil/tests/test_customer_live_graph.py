@@ -290,3 +290,15 @@ def test_the_poll_is_tightened_for_the_graph_view():
     m_graph = re.search(r"GRAPH_POLL_MS\s*=\s*(\d+)", _APP_JS)
     m_live = re.search(r"LIVE_POLL_MS\s*=\s*(\d+)", _APP_JS)
     assert m_graph and m_live and int(m_graph.group(1)) < int(m_live.group(1))
+
+
+def test_the_detail_panel_preserves_an_in_progress_steer_draft_across_a_poll():
+    # renderGraphDetail re-mounts the selected-node detail panel every graph poll (to refresh live status).
+    # It MUST carry an in-progress per-node steer draft (value + focus + caret) across that re-mount, or a
+    # multi-word nudge is wiped mid-type and focus is dropped — making node-level steering unusable. Guard the
+    # preservation so a refactor cannot silently reintroduce the wipe.
+    assert "renderGraphDetail" in _APP_JS and "_keepDraft" in _APP_JS
+    assert re.search(r"lg\.detailSel\s*===\s*lg\.sel", _APP_JS)                   # carried only when selection unchanged
+    assert _APP_JS.count('querySelector("textarea.live-instruct")') >= 2         # capture the old, restore into the new
+    assert re.search(r"_newTa\.value\s*=\s*_keepDraft\.value", _APP_JS)          # the typed draft is carried over
+    assert "setSelectionRange" in _APP_JS and "_newTa.focus()" in _APP_JS        # caret + focus preserved
