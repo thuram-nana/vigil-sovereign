@@ -256,6 +256,14 @@
                    "If your credits run out, it pauses instead of failing. Add credits in Billing, then resume it.",
                    "When it ends, it moves to Finished assessments. The bell in the top bar tells you when it finds something and when it ends."],
           why: "You stay in control of every run." },
+        // The Command box (#/command): the one-line engagement control surface. `when` names its page switch
+        // (data-command, VIGIL_CUSTOMER_ASSISTANT); the step appears only where the deployment serves the screen.
+        { id: "command", title: "Drive an engagement from one box", where: "Command", route: "#/command", when: "command",
+          clicks: ["The Command box drives a whole engagement from one line — select Go to Command, then type, for example, \"verify example.com\", \"launch example.com\", \"status\" or \"pause\".",
+                   "A question like \"what should I fix first?\" is answered as grounded advice from your own confirmed findings, and launches nothing.",
+                   "A launch always stops and asks you to confirm before any credits are reserved, and verifying a host asks you to tick that you are authorized to test it — neither step is ever taken for you.",
+                   "No price appears: VIGIL never estimates assessment costs."],
+          why: "One box reads your line, tells a question from a command, and takes every spend or authorization step only when you say so — the same checks the rest of the app makes still apply." },
         // Live Control (#/live): `when` names its page switch (data-live-control); all three steps appear only where
         // the deployment serves the Live Control screen, so with the switch off the guide is unchanged.
         { id: "watch", title: "Watch VIGIL work live", where: "Live Control", route: "#/live", when: "liveControl",

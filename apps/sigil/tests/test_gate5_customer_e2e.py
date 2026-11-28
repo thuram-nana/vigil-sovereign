@@ -106,6 +106,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
+    "#/command": ("Command", ()),   # B2/B3 — the engagement command box (fires no read on arrival; it POSTs on submit)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
     "#/settings": ("Settings", ("api/customer/preferences",)),
@@ -145,6 +146,8 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
+    # Command box: the one always-present control is Send (the input's submit). Everything else is conjured by a reply.
+    "#/command": {"Send": 1},
     "#/attack-path": {"View findings": 1},                          # F1's one chain card (its steps unlisted)
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
@@ -185,7 +188,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "command": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity

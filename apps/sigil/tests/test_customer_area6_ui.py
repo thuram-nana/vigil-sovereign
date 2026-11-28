@@ -487,8 +487,8 @@ def test_the_guide_walks_through_plans_and_reports():
     gated = sorted([f"{ch['id']}/{st['id']}" for ch in out["chapters"] for st in ch["steps"] if st.get("when")]
                    + [f"faq/{f['q']}" for f in out["faq"] if f.get("when")]
                    + [f"{ch['id']}/{st['id']}:alt" for ch in out["chapters"] for st in ch["steps"] if st.get("alt")])
-    assert gated == ["assess/fixfirst", "assess/pause", "assess/report", "assess/standards", "assess/steer",
-                     "assess/watch", "credits/compare", "credits/plans:alt",
+    assert gated == ["assess/command", "assess/fixfirst", "assess/pause", "assess/report", "assess/standards",
+                     "assess/steer", "assess/watch", "credits/compare", "credits/plans:alt",
                      "faq/Can I give our results to an auditor or a customer?", "workspace/ai_governance",
                      "workspace/datarights", "workspace/organization", "workspace/organization:alt",
                      "workspace/privacy", "workspace/seller"]
