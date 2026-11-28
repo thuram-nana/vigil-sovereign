@@ -35,10 +35,12 @@ APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
 UI_JS = APP / "ui.js"
 
 # app.js's own command-box code, run verbatim.
-_CMD_FUNCS = ("pageFlag", "own", "cmdIdem", "cmdAdd", "cmdNote", "cmdSay", "cmdPlanLabel", "cmdError", "cmdKV",
-              "cmdAdvice", "cmdVerifyCard", "cmdConfirmCard", "cmdActivityCard", "cmdDomainCard", "cmdRender",
-              "cmdFlow", "cmdCommand", "cmdSubmit", "viewCommandBox")
-_CMD_VARS = ("API", "COMMAND_ON", "cmdbox")
+_CMD_FUNCS = ("pageFlag", "own", "here", "cmdIdem", "cmdAdd", "cmdNote", "cmdSay", "cmdRenderHostbar", "cmdSetHost",
+              "cmdPlanLabel", "cmdError", "cmdKV", "cmdAdvice", "cmdVerifyCard", "cmdConfirmCard", "cmdStepRow",
+              "cmdRunLive", "cmdActivityCard", "cmdPollBind", "cmdLoadActivity", "cmdSchedulePoll", "cmdStopPoll",
+              "cmdPausePoll", "onCmdRoute", "onCmdVisibility", "cmdDomainCard", "cmdRender", "cmdFlowBody", "cmdFlow",
+              "cmdCommand", "cmdSayYou", "cmdEnqueue", "cmdDrain", "cmdSubmit", "cmdLoadTranscript", "viewCommandBox")
+_CMD_VARS = ("API", "LIVE_POLL_MS", "COMMAND_ON", "CHAT_MEMORY_ON", "cmdbox", "cmdPoll")
 
 # The app's world, stubbed: who is signed in, where the page is, what the edge answers, and every call made. A POST
 # answer may be a FUNCTION of the body (so one path can answer differently per flow step — confirm=false vs true, or
