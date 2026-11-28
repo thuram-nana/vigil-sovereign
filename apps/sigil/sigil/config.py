@@ -165,6 +165,18 @@ CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
 COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
 PUBLIC_UI_PORT = _int_env("VIGIL_PUBLIC_PORT", 8735)    # the keyless/cookieless public marketing+tools site
 CVE_CATALOG_PATH = SIGIL_HOME / "cve" / "catalog.db"    # the public CVE catalog (populated by `sigil cve ingest`)
+# The live public THREAT-FEED cache (threat_feed/) that drives the consumer-app Overview globe + the public
+# hero globe at the keyless same-origin GET /api/threatfeed. A tiny JSON doc written on a CADENCE by
+# `sigil threatfeed refresh` (the one standing outbound path: CISA KEV, keyless + public-domain) and read
+# READ-ONLY at page-request time (no egress on the edge). Absent cache ⇒ an honest "warming up" feed.
+THREAT_FEED_CACHE_PATH = SIGIL_HOME / "threat_feed" / "feed.json"
+# How long a cached snapshot is considered FRESH. Past it the edge still serves the last-good numbers but
+# flags them `stale` (the frontend labels them "as of HH:MM"); it never shows a fabricated number.
+THREAT_FEED_TTL_SECONDS = _int_env("VIGIL_THREATFEED_TTL_SECONDS", 3600)
+# The descriptive User-Agent the cadence refresh sends. ISC/DShield asks callers to identify themselves — the
+# operator MAY set a contact here per the ISC AUP, but NEVER a personal detail (it rides every outbound request).
+THREAT_FEED_USER_AGENT = os.environ.get(
+    "VIGIL_THREATFEED_UA", "vigil-threatfeed/1.0 (+https://sigilsovereign.com; public-threat-feed-aggregator)")
 _customer = SIGIL_HOME / "customer"
 
 
@@ -2277,6 +2289,17 @@ def apex_oob_enabled() -> bool:
     FACT still requires the full collector provisioning (an owner-pinned collector pubkey + the deployment
     collector private key + a verified owner-signed authority), exactly like every other out-of-band class."""
     return (os.environ.get("VIGIL_APEX_OOB") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def threat_feed_dshield_enabled() -> bool:
+    """True iff the OPTIONAL SANS ISC / DShield country-aggregated geo source is ON (`VIGIL_THREATFEED_DSHIELD`
+    affirmative). OFF BY DEFAULT and read at call time: with it off, `sigil threatfeed refresh` fetches ONLY the
+    keyless, public-domain CISA KEV feed and the globe's geo-points are ILLUSTRATIVE (the frontend's own hub
+    animation), never fabricated geolocation presented as real. The operator should turn this on ONLY after
+    verifying the ISC Acceptable-Use terms permit their use of the data (commercial use is not clearly granted),
+    and SHOULD set a contact in `VIGIL_THREATFEED_UA` per the ISC User-Agent policy. Enabling it changes only
+    which sources the CADENCE refresh pulls — never any request-time egress."""
+    return (os.environ.get("VIGIL_THREATFEED_DSHIELD") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 # ---- consumer PR-G (Area 6): the Plans screen + plan change, the report export, the compliance view ----------

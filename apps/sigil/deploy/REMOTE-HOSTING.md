@@ -253,8 +253,22 @@ static files plus a read-only `/api/cve` over the local catalog — on its own p
 ```bash
 sigil cve ingest                                   # optional: populate the CVE catalog (the ONE
                                                    # standing outbound path; never at request time)
+sigil threatfeed refresh                           # optional: the live globe feed (keyless CISA KEV;
+                                                   # US-gov public domain). Also a cadence outbound path,
+                                                   # never at request time — the edge only READS the cache.
+                                                   # Add --dshield ONLY after verifying the SANS ISC AUP
+                                                   # permits your use (geo stays illustrative otherwise).
 sigil serve-public --host 127.0.0.1 --port 8735    # binds loopback; fails closed on a public bind
 ```
+
+Both `cve ingest` and `threatfeed refresh` make the one standing outbound request they need
+and then write a local cache/catalog; the keyless edge only ever READS those at request time,
+so the public/customer planes make **no** outbound request when a page is served. Schedule them
+on a cadence the way you already schedule other maintenance (e.g. an hourly cron for
+`sigil threatfeed refresh`, a daily one for `sigil cve ingest`). Egress is a **deploy-network**
+concern: the hosts are `www.cisa.gov` (KEV) and, only with `--dshield`, `isc.sans.edu`. On a
+blocked host or a feed hiccup the refresh keeps the last-good cache and the globe shows an honest
+"warming up"/"as of HH:MM" state — never a fabricated number.
 
 Front it with TLS on your **public** hostname using
 `deploy/reverse-proxy/vigil-public.Caddyfile` (or `vigil-public.nginx.conf`), which

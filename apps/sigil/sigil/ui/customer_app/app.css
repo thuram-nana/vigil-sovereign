@@ -706,3 +706,18 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .live-step-t { font-family: var(--font-mono, monospace); font-size: var(--fs-sm, 0.85em); color: var(--muted, #888); min-width: 6.5em; }
 .live-step-i { width: 1.2em; text-align: center; }
 .live-step-l { flex: 1; }
+
+/* Global activity — the REAL live threat counter under the Overview heading. Resting copy ("warming up") makes no
+   claim; app.js fills the live numbers via textContent (CSP-clean). Slots onto the hero globe when it lands. */
+.cust-threat { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 14px; margin: 0;
+  font-size: var(--fs-sm); color: var(--text-1); }
+.cust-threat-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-2); }
+.cust-threat.is-live .cust-threat-dot { background: var(--st-confirmed);
+  box-shadow: 0 0 10px 1px color-mix(in srgb, var(--st-confirmed) 55%, transparent); }
+.cust-threat.is-live .cust-threat-text { color: var(--text-0); font-weight: 600; }
+.cust-threat-text { font-variant-numeric: tabular-nums; }
+.cust-threat-src { font-size: var(--fs-xs); color: var(--text-2); }
+@media (prefers-reduced-motion: no-preference) {
+  .cust-threat.is-live .cust-threat-dot { animation: cust-threat-pulse 2.4s ease-in-out infinite; }
+}
+@keyframes cust-threat-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--st-confirmed) 30%, transparent); } }

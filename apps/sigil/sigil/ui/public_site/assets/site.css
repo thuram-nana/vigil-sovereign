@@ -326,6 +326,23 @@ code, kbd, pre { font-family: var(--font-mono); }
   #home-globe { right: -24%; top: 44%; width: 78%; opacity: .34; }
 }
 
+/* live global threat-feed counter under the hero CTAs — real, honestly-labelled network-wide activity.
+   Resting copy ("warming up") carries no claim; home.js fills the live numbers via textContent (CSP-clean). */
+.hero__live { display: flex; align-items: center; flex-wrap: wrap; gap: 8px var(--sp-3);
+  margin: var(--sp-5) 0 0; font-size: var(--fs-sm); color: var(--text-1); }
+.hero__live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--text-2); box-shadow: 0 0 0 0 transparent; }
+.hero__live.is-live .hero__live-dot { background: var(--st-confirmed);
+  box-shadow: 0 0 10px 1px color-mix(in srgb, var(--st-confirmed) 55%, transparent); }
+.hero__live.is-live .hero__live-text { color: var(--text-0); }
+.hero__live-text { font-variant-numeric: tabular-nums; }
+.hero__live-src { font-size: var(--fs-xs); color: var(--text-2); text-decoration: none;
+  border-bottom: 1px dotted var(--border-strong); }
+.hero__live-src:hover { color: var(--text-1); }
+@media (prefers-reduced-motion: no-preference) {
+  .hero__live.is-live .hero__live-dot { animation: dot-pulse 2.4s ease-in-out infinite; }
+}
+
 /* feed header: title on the left, "browse all" on the right, wraps on phones */
 .feed__head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--sp-4);
   flex-wrap: wrap; margin-bottom: var(--sp-5); }

@@ -716,6 +716,26 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         ok = bool(self.server.hop_key) and bool(addr) and _provisioner_ready_debounced(*addr)
         self._json({"ok": ok, "checks": [{"name": "provisioner", "ok": ok}]}, 200 if ok else 503)
 
+    # --- live public threat feed (keyless; reads the local cache + CVE catalog; NO egress at request time) --
+    def _threatfeed_api(self):
+        """GET /api/threatfeed — the REAL live-activity data behind the Overview globe, the SAME shape the
+        marketing site serves. UNAUTHENTICATED public data: no cookie is read, no org is taken, nothing is
+        minted/mutated/hop-relayed, and this edge holds no owner key. It reads ONLY the on-disk threat-feed
+        cache (written on a cadence by `sigil threatfeed refresh`) + the local CVE catalog — NO outbound request
+        at page time. A cold / unreadable cache answers honestly `populated: false` rather than erroring, and a
+        stale cache serves last-good numbers flagged `stale`, never a fabricated figure."""
+        from .. import config as _config
+        try:
+            from ..threat_feed import feed
+            body = feed.api_response(_config.THREAT_FEED_CACHE_PATH, _config.CVE_CATALOG_PATH,
+                                     ttl_seconds=_config.THREAT_FEED_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 — a broken cache/catalog must never 500 the customer edge
+            body = {"metrics": {"kev_total": 0, "kev_added_24h": 0, "kev_added_7d": 0,
+                                "cve_recent": 0, "cve_total": 0, "cve_kev": 0},
+                    "recent": [], "geo": [], "geo_source": "illustrative",
+                    "populated": False, "stale": True, "as_of": None, "sources": []}
+        return self._json(body)
+
     # --- routing -----------------------------------------------------------------------------------
     def do_GET(self):
         # the same catch-all do_POST has: an unexpected fault answers one clean JSON 500 (no internals), never a
@@ -740,6 +760,13 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         if path == "/version.json":
             # the build this edge serves (a content hash of the app): no auth, no cookie read, no-store (JSON)
             return self._json({"build": self.server.app.build})
+        # The REAL public THREAT FEED behind the Overview globe (CISA KEV totals + newly-added + the local CVE
+        # catalog counts). UNAUTHENTICATED PUBLIC data placed BEFORE the session reads: no cookie is read, no org
+        # is taken, nothing is minted/mutated/hop-relayed, and this edge holds no owner key. It READS ONLY the
+        # on-disk cache (written on a cadence by `sigil threatfeed refresh`) + the local catalog — NO egress at
+        # request time. A cold cache answers honestly `populated: false`, never a fabricated number.
+        if path == "/api/threatfeed":
+            return self._threatfeed_api()
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:

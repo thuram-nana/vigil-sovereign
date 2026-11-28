@@ -1235,6 +1235,47 @@ def cmd_cve(a) -> None:
     print(f"  done — catalog holds {store.count()} CVEs ({store.stats().get('kev', 0)} known-exploited)")
 
 
+def cmd_threatfeed(a) -> None:
+    """Refresh/inspect the live public THREAT FEED that drives the consumer-app Overview globe + the public
+    hero globe (keyless, same-origin GET /api/threatfeed).
+
+    `refresh` pulls the keyless public sources on a cadence and writes the small on-disk cache: CISA KEV
+    (US-gov public domain — the primary live-activity driver: total + newly-added-in-24h/7d + recent items).
+    Add --dshield (or $VIGIL_THREATFEED_DSHIELD) to ALSO pull SANS ISC/DShield country-aggregated geo points
+    — OFF by default because the ISC terms do not clearly grant commercial use; with it off the globe's
+    geo-points are illustrative, never fabricated geolocation. This is the one standing outbound path the feed
+    needs; the edge route only ever READS the cache (+ the local CVE catalog) — never at page-request time."""
+    import json as _json
+
+    from . import config
+    from .threat_feed import feed
+    from .threat_feed.store import ThreatFeedCache
+    cache = ThreatFeedCache(config.THREAT_FEED_CACHE_PATH)
+    if a.action == "stats":
+        body = feed.api_response(config.THREAT_FEED_CACHE_PATH, config.CVE_CATALOG_PATH,
+                                 ttl_seconds=config.THREAT_FEED_TTL_SECONDS)
+        print(_json.dumps({"populated": body["populated"], "stale": body["stale"], "as_of": body["as_of"],
+                           "metrics": body["metrics"], "geo_source": body["geo_source"],
+                           "geo_points": len(body["geo"]), "sources": body["sources"]}, indent=2))
+        return
+    # action == "refresh"
+    dshield = bool(getattr(a, "dshield", False)) or config.threat_feed_dshield_enabled()
+    print(f"  refreshing public threat feed → {config.THREAT_FEED_CACHE_PATH}"
+          f"{' (+DShield geo)' if dshield else ''}")
+    try:
+        snap = feed.refresh(cache, dshield=dshield, user_agent=config.THREAT_FEED_USER_AGENT)
+    except Exception as exc:  # noqa: BLE001 — a feed hiccup must keep last-good, not clobber it
+        print(f"  refresh FAILED ({exc}) — last-good cache kept untouched", file=sys.stderr)
+        sys.exit(1)
+    kev = snap.get("kev", {})
+    print(f"  CISA-KEV: {kev.get('total', 0)} known-exploited "
+          f"({kev.get('added_24h', 0)} added in 24h, {kev.get('added_7d', 0)} in 7d)")
+    if dshield:
+        geo_n = len(snap.get("geo", []))
+        print(f"  DShield geo: {geo_n} country points ({snap.get('geo_source')})")
+    print("  done — /api/threatfeed now serves this snapshot (geo illustrative unless DShield verified+on)")
+
+
 def cmd_bridge_serve(a) -> None:
     """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
     (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
@@ -5443,6 +5484,13 @@ def main(argv=None) -> None:
     pcve.add_argument("--nvd-enrich", type=int, default=0, metavar="N",
                       help="(ingest) enrich the N newest entries with CVSS from NVD (paced for its rate limit)")
     pcve.set_defaults(fn=cmd_cve)
+    ptf = sub.add_parser("threatfeed", help="refresh/inspect the live public threat feed the globes read "
+                                            "(keyless CISA KEV; /api/threatfeed)")
+    ptf.add_argument("action", choices=["refresh", "stats"])
+    ptf.add_argument("--dshield", action="store_true",
+                     help="(refresh) ALSO pull SANS ISC/DShield country-aggregated geo (OFF by default; "
+                          "also $VIGIL_THREATFEED_DSHIELD). Verify the ISC AUP permits your use first")
+    ptf.set_defaults(fn=cmd_threatfeed)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)

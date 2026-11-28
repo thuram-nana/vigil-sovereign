@@ -703,11 +703,69 @@
     cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
     var body = h("div.cust-overview", {}, [
       h("h2", { text: "Overview" }),
+      threatActivity(),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
         + "this workspace by the server. Open any card for its full screen." }),
       h("div.cust-grid", {}, cards),
     ]);
     return shell(body, "#/");
+  }
+
+  // The REAL "Global activity" live counter the Overview globe reads — public, network-wide threat activity from the
+  // keyless same-origin GET /api/threatfeed (CISA KEV totals + newly-exploited-in-24h, and the local CVE catalog's
+  // counts). It is PUBLIC data (no org, no tenant scope, no session semantics), so it reads through window.fetch
+  // directly rather than the tenant-scoped VUI.getJSON — it never sends an org id and never routes a 401 to sign-in.
+  // Honest by construction: cold or unreachable, it KEEPS its "warming up" resting copy — never a fabricated number;
+  // a stale cache shows the last-good figure flagged "as of HH:MM". When the deep-black hero globe lands
+  // (claude/app-frontend-wave) this strip slots onto it and its real numbers SUPERSEDE any ambient rotation.
+  function threatActivity() {
+    var line = h("span.cust-threat-text", { text: "Live global threat feed warming up…" });
+    var strip = h("div.cust-threat", {}, [
+      h("span.cust-threat-dot", { "aria-hidden": "true" }),
+      line,
+      h("span.cust-threat-src", { text: "Public network-wide activity (CISA KEV), not a per-customer guarantee" }),
+    ]);
+    loadThreatActivity(strip, line);
+    return strip;
+  }
+  // The counter's text from a /api/threatfeed body, or null when there is nothing REAL to show (keep the resting
+  // copy — never invent a number). Pure + side-effect-free so it is unit-tested directly.
+  function threatText(res) {
+    if (!res || res.populated === false) { return null; }
+    var m = res.metrics || {};
+    var kevTotal = +m.kev_total || 0, added24 = +m.kev_added_24h || 0, added7 = +m.kev_added_7d || 0, parts;
+    if (added24 > 0) {
+      parts = [fmtN(added24) + " newly-exploited " + (added24 === 1 ? "vuln" : "vulns") + " · 24h",
+               fmtN(kevTotal) + " known-exploited tracked"];
+    } else if (kevTotal > 0) {
+      parts = [fmtN(kevTotal) + " known-exploited vulnerabilities tracked"];
+      if (added7 > 0) { parts.push(fmtN(added7) + " added this week"); }
+    } else {
+      return null;
+    }
+    if (res.stale && res.as_of) { var c = fmtClock(res.as_of); if (c) { parts.push("as of " + c); } }
+    return parts.join(" · ");
+  }
+  function fmtN(n) {
+    n = (typeof n === "number" && isFinite(n)) ? Math.max(0, Math.floor(n)) : 0;
+    try { return n.toLocaleString("en-US"); } catch (e) { return String(n); }
+  }
+  function fmtClock(ts) {
+    try { return new Date(ts * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return ""; }
+  }
+  // Fill the strip from the public feed. window.fetch (not VUI.getJSON): public read, no org, no sign-in routing.
+  // Any failure / honest-empty leaves the resting "warming up" copy exactly as it is — never a fake number.
+  async function loadThreatActivity(strip, line) {
+    if (!strip || !line || typeof window.fetch !== "function") { return; }
+    var res;
+    try {
+      var r = await window.fetch("/api/threatfeed", { headers: { "Accept": "application/json" } });
+      if (!r || !r.ok) { return; }
+      res = await r.json();
+    } catch (e) { return; }
+    var txt = threatText(res);
+    if (txt) { line.textContent = txt; strip.classList.add("is-live"); }
   }
 
   // One async summary card: render the card + a loading holder now, then fetch its OWN tenant-scoped read and fill it.

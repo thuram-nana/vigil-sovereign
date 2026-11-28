@@ -15,6 +15,11 @@
   try { reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
   catch (e) { reduceMotion = false; }
 
+  // REAL country-aggregated threat points from /api/threatfeed, when the feed is enabled + populated.
+  // Each is { lat, lon, w } with w normalized 0..1. Empty = no real geo (the globe keeps its illustrative
+  // hub arcs, which make no claim about real attack origins). The globe's render loop reads this live.
+  var liveGeo = [];
+
   function cssVar(name, fallback) {
     try {
       var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -189,6 +194,24 @@
         ctx.fillStyle = rgba(factRgb, 0.45 + 0.45 * edge);
         ctx.fill();
       }
+
+      // REAL geo points (only when the feed provided country-aggregated data) plotted on the front
+      // hemisphere, sized by weight. When liveGeo is empty the globe stays its illustrative self.
+      for (var g2 = 0; g2 < liveGeo.length; g2++) {
+        var gp = liveGeo[g2];
+        var pv = project(v3([gp.lat, gp.lon]), spin);
+        if (pv.z <= 0.03) continue;
+        var rr = Math.max(1.4, dpr * (1.6 + 2.8 * gp.w));
+        ctx.beginPath();
+        ctx.arc(pv.x, pv.y, rr * (0.85 + 0.3 * pv.z), 0, Math.PI * 2);
+        ctx.fillStyle = rgba(factRgb, 0.3 + 0.55 * pv.z);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(pv.x, pv.y, rr * 2.1, 0, Math.PI * 2);
+        ctx.strokeStyle = rgba(factRgb, 0.10 + 0.14 * pv.z);
+        ctx.lineWidth = Math.max(0.8, dpr * 0.8);
+        ctx.stroke();
+      }
     }
 
     function render(t) { frame(spin0 + (reduceMotion ? 0 : t * 0.00004), t); }
@@ -264,9 +287,70 @@
       .catch(function () { /* leave the static resting copy; never surface an error */ });
   }
 
+  /* =====================================================================
+     THE LIVE THREAT COUNTER: real network-wide activity from /api/threatfeed.
+     Honestly labelled (public CISA-KEV activity, not a per-customer guarantee),
+     honest when cold (keeps the "warming up" resting copy — never a fake number),
+     and it feeds the globe's REAL geo points when the feed provides them.
+     ===================================================================== */
+  function fmt(n) {
+    n = (typeof n === "number" && isFinite(n)) ? Math.max(0, Math.floor(n)) : 0;
+    try { return n.toLocaleString("en-US"); } catch (e) { return String(n); }
+  }
+  function asOfClock(ts) {
+    try {
+      var d = new Date(ts * 1000);
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return ""; }
+  }
+  function plural(n, one, many) { return n === 1 ? one : many; }
+  function threatLine(res) {
+    var m = (res && res.metrics) || {};
+    var kevTotal = +m.kev_total || 0, added24 = +m.kev_added_24h || 0, added7 = +m.kev_added_7d || 0;
+    var parts;
+    if (added24 > 0) {
+      parts = [fmt(added24) + " newly-exploited " + plural(added24, "vulnerability", "vulnerabilities") + " · 24h",
+               fmt(kevTotal) + " known-exploited tracked"];
+    } else if (kevTotal > 0) {
+      parts = [fmt(kevTotal) + " known-exploited " + plural(kevTotal, "vulnerability", "vulnerabilities") + " tracked"];
+      if (added7 > 0) { parts.push(fmt(added7) + " added this week"); }
+    } else {
+      return null;   // nothing real to show — keep the resting copy
+    }
+    if (res && res.stale && res.as_of) { var t = asOfClock(res.as_of); if (t) parts.push("as of " + t); }
+    return parts.join(" · ");
+  }
+  function setLiveGeoFrom(res) {
+    var geo = (res && res.geo_source === "dshield" && res.geo) ? res.geo : [];
+    var max = 0, i;
+    for (i = 0; i < geo.length; i++) { if (+geo[i].weight > max) max = +geo[i].weight; }
+    var out = [];
+    for (i = 0; i < geo.length && i < 80; i++) {
+      var p = geo[i];
+      if (typeof p.lat !== "number" || typeof p.lon !== "number") continue;
+      out.push({ lat: p.lat, lon: p.lon, w: max > 0 ? Math.min(1, (+p.weight || 0) / max) : 0.4 });
+    }
+    liveGeo = out;   // the globe's render loop reads this; empty = illustrative (its own hub arcs)
+  }
+  function initThreatFeed() {
+    var mount = document.getElementById("home-threat");
+    if (!mount || typeof window.fetch !== "function") return;
+    var textEl = mount.querySelector(".hero__live-text");
+    window.fetch("/api/threatfeed", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (res) {
+        if (!res || res.populated === false) return;          // honest: keep the "warming up" resting copy
+        setLiveGeoFrom(res);
+        var line = threatLine(res);
+        if (line && textEl) { textEl.textContent = line; mount.classList.add("is-live"); }
+      })
+      .catch(function () { /* leave the resting copy; never surface an error or a fake number */ });
+  }
+
   function boot() {
     try { initGlobe(); } catch (e) {}
     try { initCveFeed(); } catch (e) {}
+    try { initThreatFeed(); } catch (e) {}
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();

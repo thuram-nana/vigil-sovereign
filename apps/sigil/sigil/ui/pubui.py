@@ -257,6 +257,8 @@ class PublicHandler(BaseHTTPRequestHandler):
             return self._version()
         if path == "/api/cve" or path.startswith("/api/cve/"):
             return self._cve_api(path)
+        if path == "/api/threatfeed":
+            return self._threatfeed_api()
         # pretty dynamic CVE routes map to a static shell that client-side JS then fills from /api/cve.
         if re.fullmatch(r"/cve/CVE-\d{4}-\d{4,}/?", path, re.IGNORECASE):
             return self._serve(head=False, override="cve/_detail.html")
@@ -344,6 +346,25 @@ class PublicHandler(BaseHTTPRequestHandler):
             rec = store.get(m.group(1))
             return self._json(rec) if rec is not None else self._json({"error": "not found"}, 404)
         return self._json({"error": "not found"}, 404)
+
+    # -- live public THREAT FEED (offense-free; reads the local cache + CVE catalog; NO egress at request time)
+    def _threatfeed_api(self):
+        """GET /api/threatfeed — the REAL, keyless live-activity data behind the hero globe (CISA KEV totals +
+        newly-added, plus the local CVE catalog's counts). Reads ONLY the on-disk cache (written on a cadence by
+        `sigil threatfeed refresh`) and the local catalog — this keyless plane makes NO outbound request at page
+        time. A cold / unreadable cache answers honestly `populated: false` (the globe shows "warming up"),
+        never a fabricated number."""
+        from .. import config
+        try:
+            from ..threat_feed import feed
+            body = feed.api_response(config.THREAT_FEED_CACHE_PATH, self.server.catalog_path,
+                                     ttl_seconds=config.THREAT_FEED_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 — a broken cache/catalog must never 500 the public plane
+            body = {"metrics": {"kev_total": 0, "kev_added_24h": 0, "kev_added_7d": 0,
+                                "cve_recent": 0, "cve_total": 0, "cve_kev": 0},
+                    "recent": [], "geo": [], "geo_source": "illustrative",
+                    "populated": False, "stale": True, "as_of": None, "sources": []}
+        return self._json(body)
 
     def _serve(self, head: bool, override: "str | None" = None):
         hit = self._resolve("/" + override) if override else self._resolve(self.path)

@@ -1,0 +1,8 @@
+[
+  {"ip": "203.0.113.10", "attacks": 1200, "count": 1200, "firstseen": "2024-11-20", "lastseen": "2024-11-27", "ascountry": "CN", "asname": "EXAMPLE-CN", "asn": "64500"},
+  {"ip": "198.51.100.7", "attacks": 950, "count": 950, "firstseen": "2024-11-21", "lastseen": "2024-11-27", "ascountry": "US", "asname": "EXAMPLE-US", "asn": "64501"},
+  {"ip": "192.0.2.44", "attacks": 500, "count": 500, "firstseen": "2024-11-22", "lastseen": "2024-11-27", "ascountry": "RU", "asname": "EXAMPLE-RU", "asn": "64502"},
+  {"ip": "203.0.113.90", "attacks": 300, "count": 300, "firstseen": "2024-11-23", "lastseen": "2024-11-27", "ascountry": "US", "asname": "EXAMPLE-US2", "asn": "64503"},
+  {"ip": "198.51.100.200", "attacks": 120, "count": 120, "firstseen": "2024-11-24", "lastseen": "2024-11-27", "ascountry": "DE", "asname": "EXAMPLE-DE", "asn": "64504"},
+  {"ip": "192.0.2.201", "attacks": 80, "count": 80, "firstseen": "2024-11-25", "lastseen": "2024-11-27", "ascountry": "ZZ", "asname": "UNKNOWN", "asn": "0"}
+]
