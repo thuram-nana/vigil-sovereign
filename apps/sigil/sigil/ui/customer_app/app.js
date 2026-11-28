@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2233,6 +2233,280 @@
   function onLiveVisibility() {
     if (document.hidden) pauseLivePoll();                     // hold, don't end: an in-flight answer still lands
     else if (here() === "#/live" && live.host) loadLiveActivity();
+  }
+
+  // ---- Command box (#/command): ONE box drives a whole engagement (VIGIL_CUSTOMER_ASSISTANT) -------------------------
+  // The deterministic ENGAGEMENT control surface, distinct from the read-only security Assistant. A customer types one
+  // line; the edge classifies it DETERMINISTICALLY (model-free, api/customer/assistant/command) over a closed verb
+  // allowlist, and only an `advice` intent reaches the grounded, read-only assistant. Every other intent drives the
+  // per-(org, session) flow machine ONE transition at a time (api/customer/flow), each calling an already-gated
+  // sovereign action. The money / safety doctrine is enforced HERE in the UI as well as on the server: a launch STOPS
+  // at awaiting_confirm until the customer clicks an EXPLICIT spend-confirm button (never auto-confirmed), and the "I
+  // am authorized to test this asset" affirmation on verify is an EXPLICIT checkbox, read live, NEVER inferred. The box
+  // posts STRICT booleans (`=== true`) for confirm / authorized, and NEVER puts requester / org / mfa_at in the body —
+  // the edge takes those from the server session. Behind the same page flag as this screen (absent => route is home).
+  var COMMAND_ON = pageFlag("command");
+  var cmdbox = { log: null, input: null, send: null, busy: false };
+
+  function cmdIdem() { return String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10); }
+  function cmdAdd(node) {
+    if (cmdbox.log && node) {
+      cmdbox.log.appendChild(node);
+      var last = cmdbox.log.lastChild;
+      if (last && last.scrollIntoView) { try { last.scrollIntoView(); } catch (e) { /* no-op off-DOM / in tests */ } }
+    }
+    return node;
+  }
+  function cmdNote(text, cls) { return h("p." + (cls || "cust-muted"), { text: String(text) }); }
+  function cmdSay(role, body) {
+    return cmdAdd(h("div.cmd-turn.cmd-" + role, {}, [
+      h("span.cmd-who", { text: role === "you" ? "You" : "VIGIL" }),
+      h("div.cmd-body", {}, body)]));
+  }
+  function cmdPlanLabel(r) {
+    var host = r.host || "";
+    var map = { verify: "Verify ownership of " + (host || "a domain"),
+                launch: "Launch an assessment" + (host ? " of " + host : ""),
+                status: "Show progress" + (host ? " for " + host : ""),
+                steer: "Steer the running assessment" + (host ? " of " + host : ""),
+                pause: "Pause the assessment" + (host ? " of " + host : ""),
+                resume: "Resume the assessment" + (host ? " of " + host : ""),
+                cancel: "Cancel the assessment" + (host ? " of " + host : "") };
+    return own(map, r.intent) || ("Command: " + String(r.intent || ""));
+  }
+  function cmdError(e) {
+    if (e && e.status === 401) { refreshWho().then(function () { nav("#/login"); }); return; }
+    // HONESTY: map the edge's STATUS to FIXED copy — NEVER echo the server's raw error string (it can carry internal
+    // exception wording) into the chat log. A 403 is an authorization refusal; a 404 is a feature that is off here.
+    var status = (e && e.status) || 0;
+    var msg = status === 403 ? "You are not authorized to do that here."
+      : status === 404 ? "That action is not available."
+        : "That could not be processed. Please try again, or contact support if it keeps happening.";
+    cmdSay("vigil", cmdNote(msg, "cmd-err"));
+  }
+
+  // the raw token a customer publishes, shown verbatim in a <code> (never display-renamed — it must read exactly).
+  function cmdKV(label, value) {
+    return h("div.cmd-kv", {}, [h("div.cmd-kv-k", { text: label }),
+      h("code.cmd-kv-v", {}, String(value == null ? "" : value))]);
+  }
+  function cmdAdvice(advice) {
+    var a = advice || {};
+    var body = [h("div.cmd-answer", { text: String(a.answer || "No advice was returned.") })];
+    var fc = Number(a.finding_count || 0), dc = Number(a.document_count || 0);
+    var foot = [];
+    if (fc > 0) { foot.push("Grounded in " + fc + " of your confirmed finding" + (fc === 1 ? "" : "s") + "."); }
+    if (dc > 0) { foot.push(dc + " of your document" + (dc === 1 ? "" : "s") + " cited."); }
+    foot.push("Advice only — never a new finding, and nothing was launched.");
+    body.push(cmdNote(foot.join(" "), "cmd-foot"));
+    return cmdSay("vigil", h("div.card.cmd-advice", {}, body));
+  }
+
+  // verify, step 1: the challenge to publish, the method the customer chose, the EXPLICIT authorization checkbox, and
+  // the Verify button that only ever posts authorized=true when the box is actually ticked (the affirmation is read
+  // live from the checkbox, never inferred from the text).
+  function cmdVerifyCard(r) {
+    var ch = r.challenge || {};
+    var host = r.host || "";
+    var methods = [["well-known", "well-known file"], ["dns-txt", "DNS TXT record"], ["meta-tag", "homepage meta tag"]];
+    var pick = { method: "well-known" };
+    var mbtns = Object.create(null);
+    function selectMethod(id) {
+      pick.method = id;
+      methods.forEach(function (m) { if (mbtns[m[0]]) { mbtns[m[0]].classList[m[0] === id ? "add" : "remove"]("cmd-on"); } });
+    }
+    var picker = h("div.cmd-methods", {}, methods.map(function (m) {
+      var b = h("button.btn.cmd-method" + (m[0] === pick.method ? ".cmd-on" : ""),
+                { type: "button", onClick: function () { selectMethod(m[0]); } }, m[1]);
+      mbtns[m[0]] = b;
+      return b;
+    }));
+    var placements = [];
+    if (ch.well_known_url) { placements.push(cmdKV("well-known file at " + ch.well_known_url, ch.well_known_body)); }
+    if (ch.dns_name) { placements.push(cmdKV("DNS TXT record at " + ch.dns_name, ch.dns_value)); }
+    if (ch.meta_tag) { placements.push(cmdKV("homepage <head> meta tag", ch.meta_tag)); }
+    var cb = h("input.cmd-affirm", { type: "checkbox" });
+    var affirm = h("label.cmd-affirm-row", {}, [cb, h("span", { text: "I am authorized to test this asset." })]);
+    var note = h("div.cmd-note", {});
+    var go = h("button.btn.cmd-verify", { type: "button", onClick: function () {
+      if (!(cb && cb.checked === true)) {           // the EXPLICIT affirmation is required; without it, send NOTHING
+        VUI.mount(note, cmdNote("Tick the box above to confirm you are authorized, then Verify.", "cmd-err"));
+        return;
+      }
+      go.disabled = true;
+      cmdFlow({ intent: "verify", host: host, method: pick.method, authorized: true })
+        .catch(function () { go.disabled = false; });
+    } }, "Verify ownership");
+    return cmdSay("vigil", h("div.card.cmd-verify-card", {}, [
+      h("h3", { text: "Prove you control " + host }),
+      cmdNote("Publish ONE of these, choose that method, confirm you are authorized, then Verify. VIGIL fetches the "
+        + "token itself — nothing here proves anything until the server re-checks it.", "cust-muted"),
+      h("div.cmd-placements", {}, placements),
+      cmdNote("Which did you publish?", "cust-muted"), picker,
+      affirm, h("div.cmd-verify-go", {}, [go]), note]));
+  }
+
+  // launch, awaiting_confirm: the SERVER-decided depth / product (a depth, never an amount), and the EXPLICIT
+  // spend-confirm button. Nothing is reserved until the customer clicks Confirm — a typed "launch" alone never spends.
+  function cmdConfirmCard(r, signal) {
+    var host = r.host || (signal && signal.host) || "";
+    var choices = (r.choices && r.choices.length) ? r.choices : [{ product_id: "", depth: null }];
+    var want = String((signal && signal.depth) || "").toLowerCase();
+    var chosen = (want && choices.filter(function (c) { return String(c.depth || "").toLowerCase() === want; })[0]) || choices[0];
+    var pick = { product_id: chosen.product_id || "", depth: chosen.depth || "" };
+    var pairs = [];
+    function selectDepth(c) {
+      pick.product_id = c.product_id || ""; pick.depth = c.depth || "";
+      pairs.forEach(function (p) { p[1].classList[p[0] === c ? "add" : "remove"]("cmd-on"); });
+    }
+    choices.forEach(function (c) {
+      var d = String(c.depth || "");
+      var label = (d ? (d.charAt(0).toUpperCase() + d.slice(1)) : "Standard") + " assessment";
+      var b = h("button.btn.cmd-depth" + (c === chosen ? ".cmd-on" : ""),
+                { type: "button", onClick: function () { selectDepth(c); } }, label);
+      pairs.push([c, b]);
+    });
+    var go = h("button.btn.cmd-confirm", { type: "button", onClick: function () {
+      go.disabled = true;                                     // the explicit click IS the spend confirmation
+      cmdFlow({ intent: "launch", host: host, product_id: pick.product_id, depth: pick.depth, confirm: true })
+        .catch(function () { go.disabled = false; });
+    } }, "Confirm and launch");
+    return cmdSay("vigil", h("div.card.cmd-confirm-card", {}, [
+      h("h3", { text: "Confirm the assessment of " + host }),
+      cmdNote("VIGIL has reserved nothing yet. Choose the depth, then Confirm — only then are your credits reserved. "
+        + "VIGIL decides the exact amount from the product; you never name a figure.", "cust-muted"),
+      pairs.length > 1 ? h("div.cmd-depths", {}, pairs.map(function (p) { return p[1]; })) : null,
+      h("div.cmd-confirm-go", {}, [go])]));
+  }
+
+  function cmdActivityCard(r) {
+    var feed = r.activity;
+    var rows = (feed && feed.rows) || [];
+    if (!rows.length) {
+      // HONESTY: an active launch whose feed is `null` is UNAVAILABLE on this deployment (Live Control off, or no
+      // control permission) — never a transient pending state, so it must NOT say "check back". Only an empty feed
+      // OBJECT (present, zero rows) is genuinely pending. No active launch at all => nothing is running.
+      var msg = r.launch
+        ? (feed == null ? "Live step activity isn't available here."
+            : "No step activity yet — check back in a moment.")
+        : "Nothing is running on " + (r.host || "this host") + " right now.";
+      return cmdSay("vigil", cmdNote(msg, "cust-muted"));
+    }
+    return cmdSay("vigil", h("div.card.cmd-activity", {}, [
+      h("h3", { text: "Live activity" }),
+      h("ul.cmd-feed", {}, rows.map(function (x) {
+        return h("li.cmd-step", {}, [h("span.cmd-step-l", { text: (x && (x.label || x.phase)) || "" })]);
+      }))]));
+  }
+
+  function cmdDomainCard(r) {
+    var assets = (r.assets || []).filter(function (a) { return a && a.host; });
+    var body = [cmdNote("Name a domain to act on — e.g. “verify example.com” or “launch example.com”.",
+                        "cust-muted")];
+    if (assets.length) {
+      body.push(cmdNote("Your domains:", "cust-muted"));
+      body.push(h("ul.cmd-assets", {}, assets.slice(0, 12).map(function (a) {
+        return h("li.cmd-asset", {}, [h("span.cmd-asset-h", { text: String(a.host) }), " ",
+          VUI.statusBadge(a.status || "")]);
+      })));
+    }
+    return cmdSay("vigil", h("div.card.cmd-domain", {}, body));
+  }
+
+  // Render ONE flow-step result. The explicit safety gates come back as `need` and are rendered as the EXPLICIT action
+  // UI (not an error): need=confirm => the spend-confirm card; the verify challenge => the affirm+verify card.
+  function cmdRender(r, signal) {
+    r = r || {};
+    if (r.challenge) { return cmdVerifyCard(r); }
+    if (r.need === "confirm") { return cmdConfirmCard(r, signal); }
+    if (r.need === "authorized") {
+      return cmdSay("vigil", cmdNote("Tick “I am authorized to test this asset”, then Verify.", "cmd-err"));
+    }
+    if (r.need === "verify") {
+      return cmdSay("vigil", cmdNote("Verify ownership of " + (r.host || "this domain")
+        + " first — type “verify " + (r.host || "<domain>") + "”.", "cust-muted"));
+    }
+    if (r.need === "domain") { return cmdDomainCard(r); }
+    if (r.verified) {
+      return cmdSay("vigil", [cmdNote("Ownership verified — " + (r.host || "") + " is ready to assess."),
+        cmdNote("Type “launch " + (r.host || "") + "” to begin.", "cust-muted")]);
+    }
+    if (r.started || r.reserved) {
+      return cmdSay("vigil", cmdNote("Assessment started on " + (r.host || "")
+        + ". Watch it step by step in Live Control.", "cmd-ok"));
+    }
+    if (r.instructed) { return cmdSay("vigil", cmdNote("Sent — VIGIL will weigh this in its next step.", "cmd-ok")); }
+    if (r.control) {
+      return cmdSay("vigil", cmdNote("Done — " + String((signal && signal.intent) || "control")
+        + " on " + (r.host || "") + ".", "cmd-ok"));
+    }
+    if (signal && (signal.intent === "status" || signal.intent === "watch")) { return cmdActivityCard(r); }
+    if (r.blocked) { return cmdSay("vigil", cmdNote(String(r.blocked), "cmd-blocked")); }
+    return cmdSay("vigil", cmdNote("State: " + (r.state || "—")
+      + (r.status ? " (" + r.status + ")" : "") + ".", "cust-muted"));
+  }
+
+  // advance the flow by one transition. STRICT booleans for confirm / authorized; NO org / requester / mfa_at in the
+  // body (the edge supplies those from the session); a fresh idem key only for a steer (idempotent re-send).
+  async function cmdFlow(signal) {
+    var body = { intent: signal.intent || "", host: signal.host || "", depth: signal.depth || "",
+                 product_id: signal.product_id || "", method: signal.method || "",
+                 authorized: signal.authorized === true, confirm: signal.confirm === true,
+                 text: signal.text || "", since: signal.since || "",
+                 idem_key: signal.idem_key || (signal.intent === "steer" ? cmdIdem() : "") };
+    var r;
+    try { r = await VUI.postJSON(API + "/flow", body); }
+    catch (e) { cmdError(e); return null; }
+    cmdRender(r, signal);
+    return r;
+  }
+
+  // classify ONE typed line, then route it. An advice intent is answered read-only; every other intent advances the
+  // flow (which still gates the explicit affirm on verify and the explicit spend confirm on launch).
+  async function cmdCommand(line) {
+    cmdSay("you", cmdNote(String(line), "cmd-you-text"));
+    var r;
+    try { r = await VUI.postJSON(API + "/assistant/command", { line: line }); }
+    catch (e) { cmdError(e); return; }
+    var intent = r && r.intent;
+    if (intent === "advice") { cmdAdvice(r.advice); return; }
+    cmdSay("vigil", cmdNote(cmdPlanLabel(r)));                 // show the deterministic classification as the plan
+    await cmdFlow({ intent: intent, host: r.host || "", depth: r.depth || "", text: r.text || "" });
+  }
+
+  async function cmdSubmit() {
+    var line = (cmdbox.input && cmdbox.input.value ? cmdbox.input.value : "").trim();
+    if (cmdbox.busy || !line) { return; }
+    cmdbox.busy = true;
+    if (cmdbox.send) { cmdbox.send.disabled = true; }
+    cmdbox.input.value = "";
+    try { await cmdCommand(line); }
+    finally {
+      cmdbox.busy = false;
+      if (cmdbox.send) { cmdbox.send.disabled = false; }
+    }
+  }
+
+  function viewCommandBox() {
+    cmdbox.busy = false;
+    cmdbox.log = h("div#cmd-log.cmd-log", {});
+    cmdbox.input = h("input.cmd-input", { type: "text", maxlength: "2000", autocomplete: "off",
+      "aria-label": "Command", placeholder: "verify example.com   launch example.com   status   what should I fix first?",
+      onKeydown: function (e) {
+        if (e && (e.key === "Enter" || e.keyCode === 13)) { if (e.preventDefault) { e.preventDefault(); } cmdSubmit(); }
+      } });
+    cmdbox.send = h("button.btn.cmd-send", { type: "button", onClick: function () { cmdSubmit(); } }, "Send");
+    cmdSay("vigil", cmdNote("Type one line to drive a whole engagement — for example “verify example.com”, "
+      + "“launch example.com”, “status” or “pause”. Ask a question (“what should I "
+      + "fix first?”) for grounded, read-only advice. Nothing launches or spends until you confirm it explicitly.",
+      "cust-muted"));
+    return shell(h("div.cmd-screen", {}, [
+      h("div.cmd-head", {}, [
+        h("h2", { text: "Command" }),
+        cmdNote("One box, one engagement. Each line is read deterministically: a question is answered as advice, a "
+          + "command drives the flow, and every spend or authorization step asks you explicitly.", "cust-muted")]),
+      h("div.card.cmd-card", {}, [cmdbox.log]),
+      h("div.cmd-inputrow", {}, [cmdbox.input, cmdbox.send])]), "#/command");
   }
 
   // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
@@ -5321,6 +5595,8 @@
     "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
+    // Command box off (VIGIL_CUSTOMER_ASSISTANT): #/command is the home screen, exactly as any unknown route is
+    "#/command": function () { return authed() ? (COMMAND_ON ? viewCommandBox() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
     "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is

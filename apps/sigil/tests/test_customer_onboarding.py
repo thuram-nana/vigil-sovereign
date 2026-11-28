@@ -464,6 +464,7 @@ def test_the_guide_covers_every_screen_of_the_app():
         "#/monitoring/settings": (("aegis", "settings"), "Open Monitoring settings from the Settings menu"),  # AS-2k
         "#/data-rights": (("workspace", "datarights"), "Open Data rights from Settings"),   # legal/governance S3
         "#/ai-governance": (("workspace", "ai_governance"), "How VIGIL uses AI"),      # legal/governance S5
+        "#/command": (("assess", "command"), "Command box"),   # B2/B3 — the engagement command box (no top-bar tab yet)
     }
     assert routes == top_bar | set(by_name), "a new screen in app.js must be added to the guide (and to this census)"
     assert top_bar - {"#/guide"} <= step_routes                                  # every tab has its steps

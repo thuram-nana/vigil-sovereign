@@ -280,6 +280,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # step; a non-secret on/off value written into the page, counting in the build id. The SPA front-end that reads
     # this flag ships in a later PR (another builder owns app.js); the placeholder + its injection are wired now.
     knowledge = _config.customer_knowledge_enabled()
+    # B2/B3: the chat-driven engagement COMMAND box (the #/command screen). The SAME VIGIL_CUSTOMER_ASSISTANT that
+    # serves the assistant/command + flow edge routes (and the read-only assistant), so the screen and its routes are
+    # never out of step; a non-secret on/off value written into the page, counting in the build id. Off, the route is
+    # the home screen exactly as any unknown route, and every command/flow route 404s (byte-identical). DEFAULT ON.
+    command = _config.customer_assistant_enabled()
     # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
     # routes, a non-secret on/off value written into the page and counting in the build id.
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
@@ -332,7 +337,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
-                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0", **area6})
+                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0",
+                                     "__VIGIL_COMMAND__": "1" if command else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
