@@ -325,7 +325,12 @@ def test_config_builds_the_fetcher_only_when_the_cloud_leg_is_fully_provisioned(
     assert isinstance(config.cloud_connect_fetcher(), AwsStsConnectFetcher)
     assert config.cloud_connect_aws_principal_arn() == env["VIGIL_CLOUD_CONNECT_AWS_PRINCIPAL_ARN"]
     for missing in env:
-        monkeypatch.delenv(missing)
+        # VIGIL_CUSTOMER_CONNECT is now DEFAULT-ON, so FORCE it off (=0) to prove the master still gates the
+        # fetcher; every other required piece is removed by unsetting it.
+        if missing == "VIGIL_CUSTOMER_CONNECT":
+            monkeypatch.setenv(missing, "0")
+        else:
+            monkeypatch.delenv(missing)
         assert config.cloud_connect_fetcher() is None, missing
         monkeypatch.setenv(missing, env[missing])
     for bad in ("arn:aws:iam::12:role/x", "arn:aws-cn:iam::111122223333:role/x", "role/x",

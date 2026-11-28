@@ -1963,6 +1963,29 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return p.customer_assistant_ask(requester, str(body.get("org_id", "")),
                                             str(body.get("question", "")), ip=ip)
+        # B2/B3 - the chat-driven engagement control surface, behind the SAME VIGIL_CUSTOMER_ASSISTANT flag (absent =>
+        # unknown action -> 404). ``customer_command`` classifies ONE typed line DETERMINISTICALLY (model-free) and
+        # only an advice intent reaches the model; ``customer_flow_step`` drives the per-(org, session) state machine
+        # over the EXISTING, already-gated actions, behind the explicit authorized affirmation on verify and the
+        # explicit spend confirm on launch. requester is the hop principal, org from the edge SESSION, the typed line
+        # / flow signal from the body, and mfa_at the session step-up stamp (never a body field a customer controls).
+        if action == "customer_command":
+            from .. import config as _config
+            if not _config.customer_assistant_enabled():
+                return None
+            return p.customer_command(requester, str(body.get("org_id", "")), str(body.get("line", "")), ip=ip)
+        if action == "customer_flow_step":
+            from .. import config as _config
+            if not _config.customer_assistant_enabled():
+                return None
+            return p.customer_flow_step(requester, str(body.get("org_id", "")),
+                                        intent=str(body.get("intent", "")), host=str(body.get("host", "")),
+                                        depth=str(body.get("depth", "")), product_id=str(body.get("product_id", "")),
+                                        method=str(body.get("method", "")),
+                                        authorized=body.get("authorized") is True,
+                                        confirm=body.get("confirm") is True, text=str(body.get("text", "")),
+                                        idem_key=str(body.get("idem_key", "")), since=str(body.get("since", "")),
+                                        ip=ip, mfa_at=body.get("mfa_at"))
         # PR-K - the per-tenant customer KNOWLEDGE corpus: upload / list / query the SESSION org's OWN organization
         # documents. DEFAULT ON (VIGIL_CUSTOMER_KNOWLEDGE); absent (unknown action -> 404) only when it is EXPLICITLY
         # off. requester is the hop principal, org from the edge SESSION (never a free body field); the document body
