@@ -93,6 +93,18 @@ def test_invisible_tag_prompt_injection_is_stripped():
     assert all(unicodedata.category(c) != "Cf" for c in out)
 
 
+def test_lone_surrogates_are_stripped_so_the_result_utf8_encodes():
+    # Lone surrogates (category Cs, U+D800..U+DFFF) are never valid in well-formed text; json.loads parses them
+    # from a hostile body, NFC passes them through unchanged, and a later ensure_ascii=False UTF-8 encode would
+    # raise UnicodeEncodeError (a self-inflicted 500). Both sanitizers must drop them.
+    from sigil.ui.input_safety import sanitize_input
+    for fn in (sanitize_text, sanitize_input):
+        out = fn("ap\ud800me.cm", max_chars=253)
+        assert out == "apme.cm", (fn.__name__, repr(out))
+        assert all(unicodedata.category(c) != "Cs" for c in out)
+        out.encode("utf-8")                                   # must not raise
+
+
 def test_nfc_reapplied_after_a_zero_width_separator_is_stripped():
     # a zero-width separator between a base letter and a combining mark BLOCKS NFC composition on the first pass; once
     # the separator is removed the result must be re-normalised so it is the precomposed (canonical) form, byte-equal

@@ -66,7 +66,7 @@ _REMOVE_CODEPOINTS = frozenset(
 #:     (U+2060), the invisible math operators (U+2061..U+2064), SOFT HYPHEN (U+00AD), the interlinear-annotation
 #:     anchors (U+FFF9..U+FFFB) and the Arabic/other format controls. The ordinary whitespace in ``_KEEP_WHITESPACE``
 #:     is category ``Cc`` but is restored by an explicit earlier check, so it survives this sweep.
-_REMOVE_CATEGORIES = frozenset({"Cc", "Cf"})
+_REMOVE_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})   # Cc controls + Cf invisible-format + Cs lone surrogates
 
 
 def sanitize_text(s: str, *, max_chars: int) -> str:
@@ -238,7 +238,9 @@ def sanitize_input(s: object, *, max_chars: int) -> str:
             continue
         if _is_removable_control(ch):
             continue
-        if unicodedata.category(ch) == "Cf":          # the whole invisible-format class (Tag chars, word joiner, ...)
+        if unicodedata.category(ch) in ("Cf", "Cs"):  # Cf: the whole invisible-format class (Tag chars, word
+            # joiner, ...). Cs: lone surrogates (U+D800..U+DFFF) - never valid in well-formed text, pass NFC
+            # unchanged, and would raise UnicodeEncodeError on a later ensure_ascii=False UTF-8 encode (a 500).
             continue
         out.append(ch)
     # Re-normalize after stripping: a removed zero-width separator can leave a base character adjacent to a combining
