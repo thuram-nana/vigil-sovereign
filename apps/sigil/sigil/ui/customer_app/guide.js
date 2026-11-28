@@ -382,6 +382,12 @@
                    "Select Turn off, then Yes, turn off, to stop monitoring it. Its traffic then passes through uninspected.",
                    "Monitoring carries on when your plan renews, and ends when the plan is cancelled. It also ends when the host's proof expires, so keep the proof current."],
           why: "You can turn monitoring off at any time." },
+        { id: "settings", title: "Fine-tune the armed window", where: "Monitoring settings", route: null,
+          clicks: ["Open Monitoring settings from the Settings menu. It lists each host you have monitoring turned on for.",
+                   "Each host shows the mode it is in and how long its authority stays armed before it must be renewed.",
+                   "Select Shorten window to re-arm a host for a shorter time. VIGIL never extends a window beyond its standard length.",
+                   "Select Turn off here, then Yes, turn off, to stop monitoring a host — the same as on the Monitoring screen."],
+          why: "A shorter armed window is least-privilege: the monitoring authority auto-expires sooner and is re-armed when you choose. It changes nothing a manager cannot already do on the Monitoring screen." },
       ],
     },
     {

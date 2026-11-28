@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2813,6 +2813,128 @@
     VUI.mount(holder, monEventsList(d && d.events));
   }
 
+  // ---- Monitoring settings (AS-2k): #/monitoring/settings, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED -------
+  // A THIN settings surface over the SAME reads/writes the Monitoring screen uses: it reads GET api/customer/monitoring
+  // for the SESSION workspace's per-(org, host) monitoring authorities and uses the EXISTING monitoring/authorize and
+  // monitoring/revoke writes. It mints no new authority and opens no new route. Where #/monitoring turns monitoring on
+  // and picks Observe/Respond, THIS screen configures an already-armed authority: it shows each monitored host's armed
+  // telemetry window (how long the authority stays armed before it must be renewed) and lets a manager SHORTEN that
+  // window or turn the host off. The armed window may only be SHORTENED — the customer asks for a shorter window, never
+  // a longer one, and the sovereign provisioner is the real cap (window_s only ever shortens the server window). The
+  // SERVER decides who may manage (can_manage); anyone else sees it read-only. Off, the route is the home screen exactly
+  // as any unknown route and the Settings hub shows no link to it (routeShown → MONITORING_ON).
+  var MON_DAY_S = 86400;                                   // the armed window is entered in whole days
+  // the settings screen's own button (a sibling of monButton, kept distinct so the Monitoring screen's guide-button
+  // census is not widened by this screen's labels); CSP-safe — addEventListener, never an inline handler.
+  function monSettingsButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  function viewMonitoringSettings() {
+    var holder = h("div#mon-settings-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring"); }
+      catch (e) {
+        if (here() !== "#/monitoring/settings") return;   // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Monitoring settings"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/monitoring/settings") return;
+      VUI.mount(holder, monSettingsBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Monitoring settings" }),
+      h("p.cust-muted", { text: "Configure how AEGIS monitors each host your workspace has turned on. Turning "
+        + "monitoring on and choosing Observe or Respond stays on the Monitoring screen." }),
+      holder]), "#/monitoring/settings");
+  }
+  // The per-(org, host) authorities that are currently armed (active), sorted by host: an authority that has ended has
+  // nothing left to configure, so it is not listed. The server decides can_manage; a non-manager sees the same list.
+  function monSettingsRows(d) {
+    return (d.grants || []).filter(function (g) { return g && g.active && g.host; })
+      .sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+  }
+  function monSettingsBody(d) {
+    var rows = monSettingsRows(d);
+    var head = d.can_manage
+      ? h("p.cust-muted", { text: "Shorten a host's armed window or turn its monitoring off here. VIGIL never "
+          + "extends a window beyond its standard length." })
+      : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
+          + "settings. You can see what each monitored host is set to." });
+    if (!rows.length) {
+      return h("div", {}, [head, h("div.card.cust-soon", { text: d.can_manage
+        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
+        : "No host of this workspace is monitored." })]);
+    }
+    return h("div", {}, [head, h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); }))]);
+  }
+  function monSettingsCard(g, d) {
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(g.host) }),
+      h("span.cust-badge.cust-badge-on", { text: "Monitoring · " + (own(MON_MODE, g.mode) || "On") })])];
+    body.push(kv("Armed until", fmtDate(g.not_after)));
+    body.push(kv("Armed since", fmtDate(g.not_before)));
+    if (d.can_manage) {
+      var actions = h("div.cust-mon-settings-actions", {});
+      VUI.mount(actions, monSettingsActions(g, actions));
+      body.push(actions);
+    }
+    return h("div.card.cust-mon-settings-card", { dataset: { host: String(g.host) } }, body);
+  }
+  // A manager's controls for one armed host: shorten the armed window (re-arm, same mode, a shorter window the server
+  // caps) and turn the host off (confirmed in place first, like the Monitoring screen). CSP-safe: the input is wrapped
+  // in its label (no id lookup across a dotted host), and every action is an addEventListener, never an inline handler.
+  function monSettingsActions(g, holder) {
+    var input = h("input.cust-mon-window", { type: "number", min: "1", step: "1", inputmode: "numeric",
+      "aria-label": "Armed window in days for " + String(g.host) });
+    return [
+      h("label.cust-field", {}, [h("span", { text: "Armed window (days)" }), input]),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Shorten window", function (b) { monShortenWindow(g, input, b); }, "primary"),
+        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder); }, "danger"),
+      ]),
+    ];
+  }
+  async function monShortenWindow(g, input, btn) {
+    clearErr();
+    var raw = input ? String(input.value || "").trim() : "";
+    var days = Number(raw);
+    if (!raw || !isFinite(days) || days <= 0) {
+      err("Enter the armed window as a positive number of days. Nothing was changed.");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write the Monitoring screen uses — re-armed in the host's CURRENT mode with a
+      // shorter window. The ORG is taken from the server session at the edge (never a body field), and the sovereign
+      // provisioner caps window_s (it only ever shortens the server window).
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: g.mode, window_s: days * MON_DAY_S });
+      VUI.toast("The armed window for " + g.host + " was shortened.");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // Turning a host off is asked here first, in place of its controls; nothing is sent until it is confirmed.
+  function monSettingsConfirmOff(g, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
+      h("p", { text: "Stop monitoring " + g.host + "? Its traffic then passes through AEGIS uninspected, and attacks "
+        + "on it are no longer reported." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, turn off", function (b) { monSettingsTurnOff(g.host, b); }, "danger"),
+        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+      ]),
+    ]));
+  }
+  async function monSettingsTurnOff(host, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/revoke", { host: host });
+      VUI.toast("Monitoring is off for " + host + ".");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
   // Shown only while the edge writes data-connect="1" — VIGIL_CUSTOMER_CONNECT, the switch that also serves
   // api/customer/connect and api/customer/connect/*, so the screen and its API are never out of step. Off: no Connect
@@ -4533,6 +4655,7 @@
       settingsLink("Account security & sign-in", "#/security"),
       settingsLink("Authorized administrators", "#/team"),
       settingsLink("Authorizations", "#/settings/authorizations"),
+      settingsLink("Monitoring", "#/monitoring/settings"),   // AS-2k: only while customer monitoring is on (routeShown)
       settingsLink("Billing", "#/billing"),
       settingsLink("Data rights", "#/data-rights"),
       AI_GOVERNANCE_ON ? settingsLink("How VIGIL uses AI", "#/ai-governance") : null,   // S5: only while its flag is on
@@ -4992,6 +5115,8 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // AS-2k monitoring settings off (same flag as #/monitoring): #/monitoring/settings is the home screen, as any unknown route
+    "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
