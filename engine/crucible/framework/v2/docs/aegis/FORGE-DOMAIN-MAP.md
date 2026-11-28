@@ -205,7 +205,12 @@ scenarios. The benchmark runs **lazily, off the gate path**.
 
 - **Tokens:** GP (gate path; needs `make gate` evidence).
 - **Slices:** AS-23a early benchmark (arms A/B/G1/G2; CRS & claims gates) · AS-23b full
-  benchmark · AS-8 content + coverage.
+  benchmark · **AS-8 content + coverage (BUILT: `aegis/detection_coverage.py`: deterministic
+  read-only detection-content COVERAGE measure over the AS-7b admissible CRS content, classifying
+  each rule-id into its CRS detection TECHNIQUE by the rule-id banding + a per-technique breakdown +
+  a `covered`/`known` ratio + a deterministic posture digest; surfaced read-only on the AS-5c probe,
+  address-free and hygiene-clean; MEASURES, never acts, a classified technique is a LEAD never a
+  block; default-OFF `VIGIL_AEGIS_COVERAGE`)**.
 
 ## Domain 7 — Evidence / records (the DONE record + audit export)
 
