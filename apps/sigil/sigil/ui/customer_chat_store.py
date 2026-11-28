@@ -101,8 +101,18 @@ def _org_root(org_id: str) -> Path:
 
 def _session_path(org_id: str, session_key: str) -> Path:
     """The append-only JSONL file for ONE (org, session), inside the org's own validated root. The file name is the
-    validated 64-hex session key, so it is a safe single component that can never traverse or name another session."""
-    return _org_root(org_id) / (_check_session_key(session_key) + ".jsonl")
+    validated 64-hex session key, so it is a safe single component that can never traverse or name another session.
+
+    Defence-in-depth at the single path chokepoint every read/write flows through: after building the file path we
+    ``resolve()`` it and REQUIRE it to stay inside the org root (the same ``resolve()`` + ``is_relative_to(root)``
+    barrier the UI file servers use - see ``static_site.py`` / ``pubui.py``). The 64-hex ``fullmatch`` already makes
+    traversal impossible, so this guard can only ever hold; it makes the containment explicit at the sink and keeps a
+    corrupt ``CUSTOMER_CHAT_DIR`` from ever landing a transcript op outside this tenant's own directory."""
+    root = _org_root(org_id)
+    path = (root / (_check_session_key(session_key) + ".jsonl")).resolve()
+    if not path.is_relative_to(root):
+        raise ChatStoreError("refusing a transcript path outside the org root")
+    return path
 
 
 def _clean_text(text: Any) -> str:
