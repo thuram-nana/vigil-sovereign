@@ -52,7 +52,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 13  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 14  # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
 #                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
 #                            the governor.invoice billing-history sub-state (invoice_row); v5 (Slice E2a) ADDED
@@ -69,7 +69,11 @@ _MAX_SNAPSHOT_SCHEMA = 13  # refuse-newer gate (W5-3): a snapshot schema above t
 #                            governor.monitoring_authority_v2 fold (monitoring_authority_v2_state/issued/epoch/row —
 #                            SEPARATE from the v1 governor.monitoring_authority line, carrying the per-(org,host)
 #                            EPOCH high-water a v2 grant mints strictly above, so a hard prune can never reset it to
-#                            0 and let the next grant mint a DUPLICATE epoch). Every bump is
+#                            0 and let the next grant mint a DUPLICATE epoch); v14 (C-WS) ADDED
+#                            governor.engagement_workspace (workspace_state/issued/row — the per-(org, workspace)
+#                            owner-signed per-engagement workspace INDEXES, so a hard prune can never strand an
+#                            active workspace nor reset its anti-replay high-water and resurrect an archived one via
+#                            a replayed create grant). Every bump is
 #                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
 #                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
 #                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
@@ -81,15 +85,16 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 13  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    schema_version: int = 14  # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
     #                           3->4 Slice H (governor.invoice billing history); 4->5 Slice E2a (customer_credential);
     #                           5->6 AEGIS-SaaS AE-0 (governor.monitoring_authority); 6->7 AEGIS fold
     #                           (governor.monitoring_subscription); 7->8 PP-1 (governor.postpaid account mode +
     #                           the postpaid arrears ledger); 8->9 EC-4 (the per-tenant cost envelope ledger);
     #                           9->10 pricing S2 (trial claims + report unlocks); 10->11 W2c-1 (the wallet's
     #                           exact metered usage total); 11->12 W5 (the billing reversal ledger); 12->13 AEGIS
-    #                           AS-2f (the SOVEREIGN governor.monitoring_authority_v2 fold + its EPOCH high-water).
-    #                           Every snapshot this build emits carries the v13 keys; a pre-bump build refuses it
+    #                           AS-2f (the SOVEREIGN governor.monitoring_authority_v2 fold + its EPOCH high-water);
+    #                           13->14 C-WS (the governor.engagement_workspace per-engagement workspace indexes).
+    #                           Every snapshot this build emits carries the v14 keys; a pre-bump build refuses it
     #                           cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
@@ -212,6 +217,19 @@ class SnapshotState(BaseModel):
     customer_credential_row: list = []  # [[username, cred_key, kind, cose_alg, public_key_spki_b64, uv,
     #                                   sealed_secret, federated_iss, federated_sub, issued_at], ...] — the fields
     #                                   to REBUILD an active CustomerCredential from the seed (state="active").
+    workspace_state: list = []        # [[org_id, workspace_id, "active"|"archived"], ...] —
+    #                                   governor.engagement_workspace LWW, keyed PER-(org_id, workspace_id). Keep
+    #                                   archived (C-WS schema v14; archive is the safe direction, like a revoke).
+    workspace_issued: list = []       # [[org_id, workspace_id, issued_at], ...] — PER-(org_id, workspace_id)
+    #                                   active-grant high-water. MUST cross a prune, or a captured owner-signed
+    #                                   create/rename grant becomes replay-resurrectable (an ARCHIVED workspace
+    #                                   flipped back to active by a replayed create) — the same invariant as
+    #                                   customer_credential_issued.
+    workspace_row: list = []          # [[org_id, workspace_id, title, engagement_id, created_at], ...] — the
+    #                                   fields to REBUILD a Workspace from the seed (updated_at joins from
+    #                                   workspace_issued; status from workspace_state). Carried for active AND
+    #                                   archived-with-prior-active workspaces so a pruned workspace stays
+    #                                   listed/gettable (archive is a status, not a deletion).
     wallet_granted: list = []         # [[org_id, granted_total], ...] — Σ honored SaaS credit GRANTS per
     #                                   tenant (governor.credit_grant). balance = granted - debited is a
     #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
@@ -367,6 +385,15 @@ class SnapshotState(BaseModel):
     #   customer_credential_row is a raw list-of-rows: `CustomerCredentialRegistry._fold` rebuilds the
     #   CustomerCredential objects from it, keyed PER-(username, cred_key), so a pruned passkey/TOTP/OIDC link
     #   survives and its anti-replay high-water is not reset.
+
+    def workspace_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.workspace_state}
+
+    def workspace_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.workspace_issued}
+    #   workspace_row is a raw list-of-rows: `WorkspaceRegistry._seed` rebuilds the Workspace objects from it,
+    #   keyed PER-(org_id, workspace_id), so a pruned active workspace survives (no stranding) and its
+    #   anti-replay high-water is not reset (no archive-then-replay resurrection).
 
     def wallet_granted_map(self) -> dict[Any, int]:
         return {row[0]: row[1] for row in self.wallet_granted}
@@ -678,6 +705,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                                     _CORE_REVOKE as _MA2_CORE_REVOKE, _cap_values as _ma2_caps)
     from ..governor.customer_credentials import SIGNAL as _CRED_SIGNAL
     from ..governor.customer_credentials import _cred_core as _cred_core_fields
+    # governor.engagement_workspace — the per-(org, workspace) owner-signed per-engagement workspace INDEXES
+    # (C-WS). Its signed core is FIXED; import it from the live module (same drift guard as the cred core above).
+    # The fold step below mirrors the live `WorkspaceRegistry._apply_record` EXACTLY so the seed can never diverge
+    # from the live read.
+    from ..governor.engagement_workspaces import WORKSPACE_SIGNAL as _WS_SIGNAL, _WS_CORE
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
@@ -799,6 +831,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     cc_issued: dict[tuple, float] = dict(s.customer_credential_issued_map()) if s else {}   # (user,cred_key) -> hw
     cc_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]
                                  for r in s.customer_credential_row} if s else {}   # ->[kind,alg,pk,uv,seal,iss,sub,at]
+    ws_state: dict[tuple, str] = dict(s.workspace_state_map()) if s else {}   # (org,workspace) -> state (LWW)
+    ws_issued: dict[tuple, float] = dict(s.workspace_issued_map()) if s else {}   # (org,workspace) -> high-water
+    ws_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4]]
+                                 for r in s.workspace_row} if s else {}   # ->[title, engagement_id, created_at]
+    ws_created: dict[tuple, float] = {(r[0], r[1]): r[4] for r in s.workspace_row} if s else {}   # first-create hw
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
@@ -1080,6 +1117,28 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         cc_row[cckey] = [p.get("kind"), p.get("cose_alg"), p.get("public_key_spki_b64"),
                                          p.get("uv"), p.get("sealed_secret"), p.get("federated_iss"),
                                          p.get("federated_sub"), at]
+        # --- governor.engagement_workspace LWW + PER-(org_id, workspace_id) high-water (mirrors the org fold
+        #     EXACTLY, so an active workspace whose only owner-signed create/rename grant is pruned survives and
+        #     its high-water is NOT reset — else the next hard prune below a workspace's grants would STRAND it
+        #     (list/get go empty) AND reset the per-pair high-water, re-opening the replay-RESURRECTION of an
+        #     ARCHIVED workspace by a captured owner-signed create grant). archive=any (safe direction, keep the
+        #     row); active=owner-verified under the per-seq key + FRESH. ---
+        if sig == _WS_SIGNAL:
+            wsu = p.get("org_id")
+            wsw = p.get("workspace_id")
+            if isinstance(wsu, str) and wsu and isinstance(wsw, str) and wsw:
+                wskey = (wsu, wsw)
+                wsst = p.get("status")
+                if wsst == "archived":
+                    ws_state[wskey] = "archived"              # safe direction; keep the carried row + high-water
+                elif wsst == "active" and verify_signed(p, _WS_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > ws_issued.get(wskey, NO_HIGHWATER):   # stale/replayed active ⇒ no effect
+                        ws_issued[wskey] = at
+                        ws_state[wskey] = "active"
+                        cat = ws_created.get(wskey, at)       # the FIRST create's issued_at (stable across renames)
+                        ws_created[wskey] = cat
+                        ws_row[wskey] = [p.get("title"), p.get("engagement_id"), cat]
         # --- W2c-1: the wallet's exact metered usage — THE shared fold step (the same function the wallet fold and its
         #     fold cache run), so the seed can never diverge from the live read. ---
         if sig == _LS_SIGNAL and p.get("v") == _LS_EXACT_V:
@@ -1289,6 +1348,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         customer_credential_issued=[[k[0], k[1], i] for k, i in cc_issued.items()],
         customer_credential_row=[[k[0], k[1], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]
                                  for k, r in cc_row.items()],
+        workspace_state=[[k[0], k[1], v] for k, v in ws_state.items()],
+        workspace_issued=[[k[0], k[1], i] for k, i in ws_issued.items()],
+        workspace_row=[[k[0], k[1], r[0], r[1], r[2]] for k, r in ws_row.items()],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],

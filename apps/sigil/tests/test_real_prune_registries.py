@@ -41,6 +41,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -59,6 +60,7 @@ from sigil.governor import capability as cap
 from sigil.governor import cost_ledger as cl
 from sigil.governor import customer_credentials as cc
 from sigil.governor import customers as cu
+from sigil.governor import engagement_workspaces as ew
 from sigil.governor import identity
 from sigil.governor import invoices as inv
 from sigil.governor import killswitch as ks
@@ -165,6 +167,7 @@ class _Regs:
         self.meter = mt.CreditMeter(self.wallet, self.plan, self.subs)
         self.accts = acc.AccountsRegistry(s, **kw)
         self.creds = cc.CustomerCredentialRegistry(s, **kw)
+        self.ws = ew.WorkspaceRegistry(s, **kw)
         self.inv = inv.InvoiceRegistry(s, **kw)
         self.cost = cl.CostEnvelopeLedger(s, **kw)
         self.pp = pp.PostpaidRegistry(s, **kw)
@@ -658,6 +661,65 @@ def _customer_credentials() -> Scenario:
         reads=reads)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _customer_workspaces_flag_on():
+    """The engagement-workspaces feature is flag-gated at the UI/provisioner seam (default-off, fail-closed via
+    `VIGIL_CUSTOMER_WORKSPACES`). Turn it ON for the whole module so the `customer_workspaces` scenario runs the
+    way the real feature-on path does; the `WorkspaceRegistry` writes themselves are not flag-gated, so the flag
+    is inert for every other scenario. Restored on teardown, so it never leaks to another test module."""
+    prev = os.environ.get("VIGIL_CUSTOMER_WORKSPACES")
+    os.environ["VIGIL_CUSTOMER_WORKSPACES"] = "1"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("VIGIL_CUSTOMER_WORKSPACES", None)
+        else:
+            os.environ["VIGIL_CUSTOMER_WORKSPACES"] = prev
+
+
+def _customer_workspaces() -> Scenario:
+    """Real-prune survival of the owner-signed `governor.engagement_workspace` per-engagement workspace indexes —
+    the same twin covered as `customer_credentials` above: an active workspace created below K SURVIVES the prune
+    (no stranding — list/get still see it), and a replayed owner-signed `active` create for an ARCHIVED workspace
+    stays inert (the seed keeps the per-(org, workspace) high-water, so no archive-replay resurrection). A rename
+    of a SEEDED workspace in the live window also proves the carried high-water admits a strictly-greater grant."""
+    def mk(org, eng, title, at):
+        def run(R):
+            R.ws.ensure_workspace(org, eng, title, issued_at=at)
+            return R.store.next_seq - 1                        # the create (active) record's seq, for _stash
+        return run
+
+    def arch(org, eng):
+        return lambda R: R.ws.archive_workspace(org, ew.derive_workspace_id(org, eng))
+
+    def wid(org, eng):
+        return ew.derive_workspace_id(org, eng)
+
+    def reads(R):
+        for o in ORGS:
+            yield _r(R.ws.list_workspaces, o)
+        for (o, e) in (("acme", "eng1"), ("acme", "eng2"), ("acme", "eng6"), ("globex", "eng3"),
+                       ("globex", "eng4"), ("globex", "eng7"), ("initech", "eng5"), ("initech", "eng8"),
+                       ("acme", "nope")):
+            yield _r(R.ws.get_workspace, o, wid(o, e))
+    return Scenario(
+        name="customer workspaces", defining=_signal(ew.WORKSPACE_SIGNAL),
+        below=[mk("acme", "eng1", "Run a1", 1.0),
+               mk("acme", "eng2", "Run a2", 2.0),
+               _stash("archws", mk("globex", "eng3", "Run g3", 3.0)),
+               arch("globex", "eng3"),                          # ARCHIVE g3 (safe direction, issued 0.0)
+               mk("globex", "eng4", "Run g4", 4.0)],
+        live=[mk("initech", "eng5", "Run i5", 5.0)],
+        after=[_replay("archws"),                               # pruned active create of an ARCHIVED workspace
+               mk("acme", "eng6", "Run a6", 6.0),
+               arch("acme", "eng2")],
+        later=[mk("globex", "eng7", "Run g7", 7.0), arch("globex", "eng4")],
+        latest=[_replay("archws"), mk("initech", "eng8", "Run i8", 8.0),
+                lambda R: R.ws.rename_workspace("acme", wid("acme", "eng1"), "Run a1 (renamed)", issued_at=9.0)],
+        reads=reads)
+
+
 def _invoice(R, org, iid, kind, amount, at, **kw):
     return R.inv.record(org, invoice_id=iid, kind=kind, price_id="pro", amount_minor=amount, currency="usd",
                         issued_at=at, **kw)
@@ -1027,6 +1089,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
                                                      "monitoring subscription"),
     "accounts": _accounts,
     "customer_credentials": _customer_credentials,
+    "customer_workspaces": _customer_workspaces,
     "invoices": _invoices,
     "cost_ledger": _cost_ledger,
     "postpaid": _postpaid,

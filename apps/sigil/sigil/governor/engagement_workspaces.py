@@ -50,11 +50,14 @@ descriptors, canonicalised and Ed25519-signed under the owner key), re-verifiabl
 the owner pubkey — tamper-evident like the evidence certificates, so a workspace can leave VIGIL and still prove it
 was the one VIGIL issued.
 
-DEFERRED (explicitly OUT of this slice, honest scoping): hard-prune SNAPSHOT SEEDING (``orgs`` seeds its fold from
-``spine.snapshot`` so an active grant survives a prune below it). This slice folds the LIVE spine from genesis, so
-the LWW replay/forgery guard is FULL, but a hard prune below a workspace's only grant would drop it (it does not
-re-open the replay — the high-water simply resets with the record). Adding workspace rows to the snapshot leaf +
-the prune tripwire is a follow-up, exactly as ``orgs`` added org rows in a later slice.
+HARD-PRUNE DURABILITY (mirrors ``orgs``/``customer_credentials`` EXACTLY): the fold is SEEDED from the committed
+``spine.snapshot`` leaf (schema v14 grew ``workspace_state``/``workspace_issued``/``workspace_row``) and then folds
+only the LIVE window (``iter_records(since_seq=base_seq-1)``). So an active workspace whose only owner-signed grant
+sits below a prune boundary SURVIVES (no stranding — list/get/export still see it), and the per-(org, workspace)
+anti-replay high-water is carried across the prune, so a captured owner-signed create grant can NEVER re-open an
+ARCHIVED workspace after a prune drops its records (no replay-resurrection). ``spine.prune.check_prune_safe`` refuses
+any prune that would strand an active workspace the seed does not carry. A rotated/empty trust anchor bypasses the
+seed and full-scans from genesis (byte-identical under an empty snapshot).
 
 FATAL-2: SOVEREIGN-side, ``assert_no_offense()`` at import. It imports NO ``framework``/``strix``/``engine`` module
 — the owner-signed-spine primitives (``authn``/``identity``/``key_history``) and ``vigil_core`` crypto are shared
@@ -76,6 +79,7 @@ from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # 
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 from .orgs import _check_org_id  # noqa: E402  (ONE tenant-id validator — org == tenant_id)
 from ..reuse import canonical_json, sign, verify_one  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors orgs._fold_orgs)
 
 __all__ = [
     "Workspace", "WorkspaceRegistry", "WorkspaceError", "WorkspaceCapError",
@@ -334,19 +338,49 @@ class WorkspaceRegistry:
         for w in active[:over]:
             self._append_archived(org_id, w.workspace_id)
 
-    # -- reads (owner-key-succession-aware fold; full genesis scan — see DEFERRED hard-prune note) --
+    # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune; tenant-isolated) --
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict, dict], int]":
+        """((state, issued, created, entities), since): the HARD-PRUNE SEED from ``snap`` (mirrors
+        ``orgs._org_seed`` / ``customer_credentials._seed``), or the empty genesis start when our trust anchor
+        differs from the snapshot's. ``entities`` holds rebuilt :class:`Workspace` objects for EVERY carried
+        workspace — active AND archived-with-prior-active — reconstructed with the SAME coercions ``_apply_record``
+        uses, so a post-prune ``_fold`` re-reads them (both the per-(org, workspace) anti-replay high-water AND the
+        workspace row survive): a pruned active workspace is not stranded, and a pruned archived workspace stays
+        listed/gettable. ``status`` joins from ``state``; ``updated_at`` joins from the per-pair high-water."""
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            return ({}, {}, {}, {}), -1
+        state = dict(snap.workspace_state_map())             # (org, workspace) -> "active"|"archived" (keep archived)
+        issued = dict(snap.workspace_issued_map())           # (org, workspace) -> per-pair active high-water
+        created: dict = {}
+        entities: dict = {}
+        # flat row [org_id, workspace_id, title, engagement_id, created_at] -> Workspace.
+        for row in snap.workspace_row:
+            key = (row[0], row[1])
+            cat = as_issued_at(row[4])
+            created[key] = cat
+            entities[key] = Workspace(
+                org_id=str(row[0]), workspace_id=str(row[1]), title=str(row[2] or ""),
+                engagement_id=str(row[3] or ""), created_at=cat,
+                updated_at=as_issued_at(issued.get(key, cat)), status=state.get(key, "active"))
+        return (state, issued, created, entities), snap.base_seq - 1
+
     def _fold(self, org_id: Optional[str] = None) -> "list[Workspace]":
         """Fold the spine into the workspaces whose latest state is known, optionally scoped to ONE org. Each
         ``active`` grant is authenticated under the owner pubkey valid AT ITS SEQ and the per-(org, workspace)
         high-water refuses any stale/replayed re-append. Archived workspaces are KEPT (listed, with
         ``status="archived"``) — archive is a status, not a deletion. Scoping to ``org_id`` is tenant isolation at
-        the read boundary: only that org's own records are ever returned."""
-        state: dict = {}
-        issued: dict = {}
-        created: dict = {}
-        entities: dict = {}
+        the read boundary: only that org's own records are ever returned.
+
+        HARD-PRUNE SEED (mirrors ``orgs._fold_orgs`` EXACTLY): seed the per-(org, workspace) state / anti-replay
+        high-water / created / rebuilt Workspace set from the committed :class:`SnapshotState`, then fold the LIVE
+        window only — so an active workspace whose only owner-signed grant was pruned SURVIVES and its high-water
+        is NOT reset (else the first hard prune below a workspace's grants strands it AND re-opens the archive-then-
+        replay resurrection). A rotated/empty anchor bypasses the seed and full-scans from genesis (byte-identical
+        under an empty snapshot)."""
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        for r in self.store.iter_records():
+        (state, issued, created, entities), since = self._seed(snap)
+        for r in self.store.iter_records(since_seq=since):
             _apply_record(r, resolver, state, issued, created, entities)
         out: "list[Workspace]" = []
         for key, w in entities.items():

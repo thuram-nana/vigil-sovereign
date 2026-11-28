@@ -272,6 +272,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active customer credential(s) {stranded_creds}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(username, cred_key) anti-replay high-water); lower K or resolve")
+    # (c, C-WS engagement workspaces) the SAME floor for governor.engagement_workspace: an active per-engagement
+    # workspace index whose only owner-signed active create/rename grant sits below K must be carried into the
+    # seed, or the prune drops it (list/get/export go empty — a run's work is stranded) AND resets the per-(org_id,
+    # workspace_id) high-water (re-opening the replay-resurrection of an ARCHIVED workspace by a captured create).
+    stranded_wss = stranded_active_workspaces(store, archived, K)
+    if stranded_wss:
+        raise PruneUnsafe(f"K={K} would strand active workspace(s) {stranded_wss}: their only owner-signed active "
+                          f"grant sits below K and would not be carried into the snapshot seed (resetting the "
+                          f"per-(org_id, workspace_id) anti-replay high-water); lower K or resolve")
     # (c, SaaS plan credits) the SAME floor for governor.plan_grant/plan_debit: a prune must carry every below-K
     # tenant's per-period tranche totals AND the consumed-entry_id set into the seed, or it would ZERO an
     # unexpired plan tranche (lose granted allotment) AND drop the anti-replay seen-set (re-opening plan-grant
@@ -905,6 +914,50 @@ def stranded_active_customer_credentials(store, archived: list[Segment], K: int)
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.customer_credential_state_map()
     carried = {(row[0], row[1]) for row in seed.customer_credential_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_workspaces(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, C-WS) — the ACTIVE engagement workspaces (`governor/engagement_workspaces.py`) whose only
+    owner-signed active create/rename grant sits in the pruned prefix [0..K) yet would NOT be carried into the
+    snapshot seed: the set a hard prune would silently vanish (list/get/export go empty — a run's indexed work is
+    stranded) AND whose per-(org_id, workspace_id) anti-replay high-water it would reset — re-opening the
+    replay-RESURRECTION (a captured owner-signed `active` create grant for an ARCHIVED workspace re-applying above
+    K because the high-water is gone, flipping it back to active). EMPTY in the happy path — `SnapshotState.build()`
+    carries every VERIFIED-active workspace. Mirrors `stranded_active_customer_credentials`. Returns keys as
+    ``workspace_id@org_id``. VERIFIED-active only (a forged/unsigned `active` grant is not counted, so it can never
+    block a prune); archive is the safe direction (like a revoke), honored even unsigned. Read-only."""
+    from ..governor.engagement_workspaces import WORKSPACE_SIGNAL as _WS_SIGNAL, _WS_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    ws_state: dict[tuple, str] = {}
+    ws_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _WS_SIGNAL:
+            continue
+        oid, wid, rst = p.get("org_id"), p.get("workspace_id"), p.get("status")
+        if not (isinstance(oid, str) and oid and isinstance(wid, str) and wid):
+            continue
+        key = (oid, wid)
+        if rst == "archived":
+            ws_state[key] = "archived"
+        elif rst == "active" and verify_signed(p, _WS_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > ws_issued.get(key, NO_HIGHWATER):
+                ws_issued[key], ws_state[key] = at, "active"
+    active = {k for k, v in ws_state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.workspace_state_map()
+    carried = {(row[0], row[1]) for row in seed.workspace_row
                if seed_state.get((row[0], row[1])) == "active"}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
