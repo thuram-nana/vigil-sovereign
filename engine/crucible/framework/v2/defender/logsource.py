@@ -516,11 +516,134 @@ def parse_cloudtrail(text: str) -> list[LogEvent]:
 
 
 # ---------------------------------------------------------------------------
+# Identity-provider sign-in / audit (AS-17c — the INGEST half of the IdP telemetry source)
+# ---------------------------------------------------------------------------
+
+# The salient sub-object scalars an IdP (Okta System Log) detection cares about, kept under the SAME dotted
+# names standard IdP Sigma rules (``logsource.product=okta, service=okta``) reference — so the normalized
+# ``idp`` event matches those rules directly (the opt-in field map in ``sigma.default_field_map`` only ever
+# ADDS canonical aliases on top). Mirrors ``_CLOUDTRAIL_IDENTITY``: a bounded, explicit allow-list per hop.
+_IDP_ACTOR = ("id", "type", "alternateId", "displayName")
+_IDP_CLIENT = ("ipAddress", "device", "zone", "id")
+_IDP_USER_AGENT = ("rawUserAgent", "os", "browser")
+_IDP_OUTCOME = ("result", "reason")
+_IDP_AUTHCTX = ("externalSessionId", "interface")
+_IDP_SECURITYCTX = ("asNumber", "isp", "domain", "isProxy")
+_IDP_TRANSACTION = ("id", "type")
+_IDP_TARGET = ("id", "type", "alternateId", "displayName")
+
+
+def _flatten_idp_record(rec: object) -> "Fields | None":
+    """Flatten ONE IdP sign-in/audit record (an Okta System Log event dict) into fields. Top-level scalars
+    are kept under their own names (``eventType``/``published``/``severity``/``displayMessage``/
+    ``legacyEventType``/``uuid``/``version`` and any other scalar); the nested ``actor``/``client``/``outcome``/
+    ``authenticationContext``/``securityContext``/``transaction`` objects' salient sub-fields are flattened
+    under dotted keys (``actor.alternateId``/``client.ipAddress``/``client.userAgent.rawUserAgent``/
+    ``outcome.result`` …) that match standard IdP Sigma; the ``target`` array's first entry is flattened under
+    ``target.*``. Returns None for a non-dict. Bounded + total (mirrors ``_flatten_cloudtrail_record``)."""
+    if not isinstance(rec, dict):
+        return None
+    fields: Fields = {}
+
+    def _put(key: object, val: object) -> None:
+        if len(fields) >= _MAX_FIELDS:
+            return
+        if not isinstance(key, str) or not key:
+            return
+        k = key.strip()
+        if not k or k in fields:
+            return
+        if isinstance(val, bool):
+            fields[k] = str(val)                 # a JSON bool -> "True"/"False" (Sigma match is case-insensitive)
+        elif isinstance(val, int):
+            fields[k] = val
+        elif isinstance(val, (str, float)):
+            fields[k] = _coerce(str(val))
+        # dict/list values are containers, not leaf fields — skipped (the nested hops are handled explicitly)
+
+    def _put_sub(prefix: str, obj: object, names: "tuple[str, ...]") -> None:
+        if not isinstance(obj, dict):
+            return
+        for sub in names:
+            v = obj.get(sub)
+            if isinstance(v, (str, int, float, bool)):
+                _put(f"{prefix}.{sub}", v)
+
+    for k, v in rec.items():
+        if k == "actor" and isinstance(v, dict):
+            _put_sub("actor", v, _IDP_ACTOR)
+        elif k == "client" and isinstance(v, dict):
+            _put_sub("client", v, _IDP_CLIENT)
+            _put_sub("client.userAgent", v.get("userAgent"), _IDP_USER_AGENT)
+        elif k == "outcome" and isinstance(v, dict):
+            _put_sub("outcome", v, _IDP_OUTCOME)
+        elif k == "authenticationContext" and isinstance(v, dict):
+            _put_sub("authenticationContext", v, _IDP_AUTHCTX)
+        elif k == "securityContext" and isinstance(v, dict):
+            _put_sub("securityContext", v, _IDP_SECURITYCTX)
+        elif k == "transaction" and isinstance(v, dict):
+            _put_sub("transaction", v, _IDP_TRANSACTION)
+        elif k == "target" and isinstance(v, list) and v and isinstance(v[0], dict):
+            _put_sub("target", v[0], _IDP_TARGET)       # the first target hop (the common single-target case)
+        elif isinstance(v, (str, int, float, bool)):
+            _put(k, v)
+        # other nested containers (debugContext, request, authenticationContext extras, …) are not leaf fields
+    return fields or None
+
+
+def parse_idp(text: str) -> list[LogEvent]:
+    """Parse an identity-provider sign-in/audit delivery into ``LogEvent``s (channel/source_format 'idp').
+    Accepts the Okta System Log shape — a top-level JSON array of events, a single record object, or
+    newline-delimited JSON (one record per line). Each record is flattened by :func:`_flatten_idp_record`.
+    ``json.loads`` only, bounded, TOTAL: an undecodable blob or record is skipped, never raised.
+    PURE/DETERMINISTIC; input order preserved — re-parsing the same bytes yields the same events (the
+    determinism the Sigma runtime + the AS-17c ingest both rely on)."""
+    records: list[object] = []
+    stripped = text.strip()
+    parsed_whole = False
+    if stripped[:1] in ("[", "{"):
+        try:
+            doc = json.loads(stripped)
+            parsed_whole = True
+            if isinstance(doc, list):
+                records = list(doc)                      # the common Okta System Log array delivery
+            elif isinstance(doc, dict):
+                for key in ("events", "value", "records", "Records"):  # a wrapped-list envelope (Okta/AzureAD)
+                    if isinstance(doc.get(key), list):
+                        records = list(doc[key])
+                        break
+                else:
+                    records = [doc]                      # a single bare record object
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            parsed_whole = False
+    if not parsed_whole:
+        for line in _iter_lines(text):                   # newline-delimited JSON (one record per line)
+            try:
+                records.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                continue
+
+    out: list[LogEvent] = []
+    for rec in records:
+        if len(out) >= _MAX_EVENTS:
+            break
+        try:                                             # total-parser contract: one bad record never raises
+            fields = _flatten_idp_record(rec)
+        except Exception:
+            continue
+        if fields is None:
+            continue
+        out.append(LogEvent(channel="idp", source_format="idp", fields=fields,
+                            raw=_clip(json.dumps(rec, default=str, sort_keys=True))))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # format detection + unified entry points
 # ---------------------------------------------------------------------------
 
 _PARSERS = {"syslog": parse_syslog, "cef": parse_cef, "evtx_json": parse_evtx_json,
-            "cloudtrail": parse_cloudtrail}
+            "cloudtrail": parse_cloudtrail, "idp": parse_idp}
 
 
 def _looks_like_cloudtrail(text: str) -> bool:
@@ -558,15 +681,54 @@ def _looks_like_cloudtrail(text: str) -> bool:
     )
 
 
+def _looks_like_idp(text: str) -> bool:
+    """A POSITIVE IdP (Okta System Log) marker, used to GATE the ``detect_format`` sniff (AS-17c): a top-level
+    JSON ARRAY (or single object, or a ``{events|value:[...]}`` envelope) whose first record is a dict carrying
+    ALL THREE Okta-specific fields — a string ``eventType`` AND ``published`` AND ``uuid`` (every genuine Okta
+    System Log event has them). Total; never raises. Deliberately STRICT: a top-level array / object is ALSO the
+    shape of a Windows evtx export and a CloudTrail record, so requiring this distinctive triple (which evtx —
+    ``EventID``/``System`` — and CloudTrail — ``eventID``/``eventTime``/``eventSource`` — lack) keeps every
+    non-IdP array/object on its byte-for-byte v1 ``evtx_json`` sniff (the additive-path discipline)."""
+    stripped = text.strip()
+    if stripped[:1] not in ("[", "{"):
+        return False
+    try:
+        doc = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return False
+    first: object
+    if isinstance(doc, list):
+        first = doc[0] if doc else None
+    elif isinstance(doc, dict):
+        first = doc
+        for key in ("events", "value", "records", "Records"):
+            val = doc.get(key)
+            if isinstance(val, list):
+                first = val[0] if val else None
+                break
+    else:
+        return False
+    if not isinstance(first, dict):
+        return False
+    return (
+        isinstance(first.get("eventType"), str)
+        and "published" in first
+        and "uuid" in first
+    )
+
+
 def detect_format(text: str) -> str:
     """Best-effort format sniff. An AWS CloudTrail delivery (a positive ``Records``+``eventSource``/
-    ``eventVersion`` marker, see :func:`_looks_like_cloudtrail`) -> 'cloudtrail'; other JSON-ish input
-    (starts with '{'/'[') -> 'evtx_json'; a 'CEF:' marker on the first non-empty line -> 'cef';
-    otherwise 'syslog'. Total and deterministic. The CloudTrail branch is GATED on the positive marker
-    so EVERY non-CloudTrail input keeps its v1 sniff byte-for-byte (the additive-path discipline)."""
+    ``eventVersion`` marker, see :func:`_looks_like_cloudtrail`) -> 'cloudtrail'; an IdP/Okta System Log
+    delivery (a positive ``eventType``+``published``+``uuid`` marker, see :func:`_looks_like_idp`) -> 'idp';
+    other JSON-ish input (starts with '{'/'[') -> 'evtx_json'; a 'CEF:' marker on the first non-empty line
+    -> 'cef'; otherwise 'syslog'. Total and deterministic. The CloudTrail and IdP branches are each GATED on
+    their positive marker so EVERY other input keeps its v1 sniff byte-for-byte (the additive-path discipline)."""
     s = text.lstrip()
     if s[:1] == "{" and _looks_like_cloudtrail(text):
         return "cloudtrail"
+    if s[:1] in ("[", "{") and _looks_like_idp(text):
+        return "idp"
     if s[:1] in ("[", "{"):
         return "evtx_json"
     for line in _iter_lines(text):
@@ -577,8 +739,8 @@ def detect_format(text: str) -> str:
 
 
 def parse_log(text: str, fmt: str = "auto") -> list[LogEvent]:
-    """Parse ``text`` in ``fmt`` ('syslog'|'cef'|'evtx_json'|'auto'). Unknown fmt -> [] (total).
-    Pure: same bytes in, same events out."""
+    """Parse ``text`` in ``fmt`` ('syslog'|'cef'|'evtx_json'|'cloudtrail'|'idp'|'auto'). Unknown fmt -> []
+    (total). Pure: same bytes in, same events out."""
     if not isinstance(text, str) or not text.strip():
         return []
     chosen = detect_format(text) if fmt == "auto" else fmt

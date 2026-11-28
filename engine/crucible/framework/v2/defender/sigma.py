@@ -574,7 +574,16 @@ def _eval_condition(tokens: list[str], selresults: dict[str, bool], names: list[
         else:
             picked = [resolve_name(target)]
         if not picked:
-            return False
+            # The ONLY way ``picked`` is empty is a prefix-glob (``1 of typo*``) that matches NONE
+            # of the rule's own selections — ``them`` is never empty (≥1 selection is required at
+            # parse) and the bare-name branch resolves to a single bool. Such an aggregation
+            # references nothing, so it is MALFORMED. Fail CLOSED by raising (the whole rule then
+            # does not match). The old ``return False`` fired on everything under a ``not`` — it
+            # inverted to ``not False = True`` for every event, fabricating a detection, which is
+            # exactly the fail-OPEN outcome this module forbids. Raising keeps BOTH the positive
+            # (``1 of typo*`` -> no match, as before) and the negated (``not 1 of typo*`` -> no
+            # match, was: match-everything) forms non-matching.
+            raise _Unsupported("aggregation prefix matched no selection")
         return any(picked) if quant == "1" else all(picked)
 
     def atom() -> bool:
@@ -856,7 +865,7 @@ def logsource_channels(logsource: object) -> "frozenset[str] | None":
 _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "CommandLine": ("CommandLine", "cmdline", "command_line", "exe"),
     "Image": ("Image", "image", "process", "proc", "exe"),
-    "User": ("User", "user", "username", "suser", "account"),
+    "User": ("User", "user", "username", "suser", "account", "actor.alternateId", "actor.displayName"),
     "DestinationIp": ("DestinationIp", "dst", "dest_ip", "dst_ip", "dstip"),
     "SourceIp": ("SourceIp", "src", "src_ip", "source_ip", "srcip"),
     "EventID": ("EventID", "event_id", "eventid", "cef_signature_id"),
@@ -869,6 +878,14 @@ _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "sourceIPAddress": ("sourceIPAddress", "SourceIp", "src_ip"),
     "UserAgent": ("UserAgent", "userAgent", "http_user_agent"),
     "AccountId": ("AccountId", "recipientAccountId", "userIdentity.accountId"),
+    # AS-17c — IdP (Okta System Log): the normalized ``idp`` event keeps Okta's own dotted field names
+    # (``eventType``/``outcome.result``/``actor.alternateId``/``client.ipAddress`` …), so a standard Okta
+    # Sigma rule matches directly; these rows are the pure, ADDITIVE fallbacks for a rule that spells the
+    # SAME datum differently (a direct field hit always wins, so they can only ever ADD a match, never suppress).
+    # The ``User`` row above is likewise extended with the Okta actor aliases — purely additive.
+    "ClientIP": ("ClientIP", "client.ipAddress", "SourceIp", "src_ip"),
+    "DisplayMessage": ("DisplayMessage", "displayMessage"),
+    "Outcome": ("Outcome", "outcome.result"),
 }
 
 

@@ -275,6 +275,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # standards chips / remediation) is on — the same VIGIL_APEX_PRESENTATION that serves its route; a non-secret
     # on/off value written into the page, counting in the build id.
     presentation = _config.presentation_enabled()
+    # PR-K: the per-tenant customer KNOWLEDGE corpus (upload org documents the assistant may cite). DEFAULT ON - the
+    # same VIGIL_CUSTOMER_KNOWLEDGE that serves the knowledge_* edge routes, so the screen and its API are never out of
+    # step; a non-secret on/off value written into the page, counting in the build id. The SPA front-end that reads
+    # this flag ships in a later PR (another builder owns app.js); the placeholder + its injection are wired now.
+    knowledge = _config.customer_knowledge_enabled()
     # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
     # routes, a non-secret on/off value written into the page and counting in the build id.
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
@@ -326,7 +331,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PRESENTATION__": "1" if presentation else "0",
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
-                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0", **area6})
+                                     "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
+                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -2014,6 +2020,12 @@ def _proof_badge_on() -> bool:
 def _assistant_on() -> bool:
     from .. import config as _config
     return _config.customer_assistant_enabled()
+
+
+def _knowledge_on() -> bool:
+    # PR-K - the per-tenant customer knowledge corpus (the same flag the cockpit knowledge_* actions read). DEFAULT ON.
+    from .. import config as _config
+    return _config.customer_knowledge_enabled()
 
 
 def _connect_on() -> bool:

@@ -57,6 +57,7 @@ class _P:
         self.store, self.orgs = store, orgs
 
     customer_assistant_ask = Provisioner.customer_assistant_ask
+    _assistant_knowledge_documents = Provisioner._assistant_knowledge_documents   # PR-K: findings-only unless enabled
     _mint_assistant_grant = Provisioner._mint_assistant_grant
 
 
