@@ -241,10 +241,29 @@ def test_negative_control_bounded_memory_evicts_recovered_idle_callers():
     gov = _gov(rate=1.0, burst=1, max_tracked=4, monotonic=lambda: clock["t"])
     for i in range(12):                               # 12 distinct one-shot callers, each admitted + released
         gov.release(gov.admit(f"c{i}", now=0.0))
-    assert gov.snapshot()["tracked_callers"] == 12    # all tracked so far (map not yet over the cap at create)
-    clock["t"] = 100.0                                # every idle caller's budget has fully recovered
-    gov.admit("fresh", now=100.0)                     # this create trips eviction of the recovered idle callers
+    # Bounded at ALL times: even mid-refill at t=0 (none "fully recovered") the hard-cap LRU fallback holds the map
+    # at the cap, never the full 12. (Before the fallback this read 12 — the unbounded-growth vulnerability.)
+    assert gov.snapshot()["tracked_callers"] <= 5     # <= max_tracked (+ the in-flight admit)
+    clock["t"] = 100.0                                # every surviving idle caller's budget has fully recovered
+    gov.admit("fresh", now=100.0)                     # the recovered-eviction pass still drops them on the next create
     assert gov.snapshot()["tracked_callers"] <= 5     # bounded (<= max_tracked + the fresh caller)
+
+
+def test_bounded_memory_hard_cap_holds_under_a_one_shot_ip_spray():
+    """Regression (red-pen): a spray of DISTINCT one-shot source IPs, all still MID-REFILL (none "fully recovered"),
+    must not grow the caller map past the cap. The recovered-only eviction pass finds nothing to drop in this window,
+    so the hard-cap LRU fallback must force-evict the least-recently-seen idle callers. Without that fallback the map
+    grew with the attacker-controlled distinct-IP arrival rate (a self-inflicted memory-pressure / soft-DoS vector in
+    the availability-protecting load-shedder, violating the module's non-negotiable BOUNDED MEMORY invariant)."""
+    clock = {"t": 0.0}
+    gov = _gov(rate=1.0, burst=8, max_tracked=4, monotonic=lambda: clock["t"])
+    for i in range(200):                              # 200 distinct one-shot callers, all inside one 1.0s refill window
+        clock["t"] = i * 0.0001                       # strictly increasing (LRU order) yet far below the refill time
+        gov.release(gov.admit(f"ip{i}", now=clock["t"]))
+        # each caller spent a token moments ago (tokens = burst-1 < burst), so NONE is ever "fully recovered";
+        # only the hard cap can bound the map. It must stay at the cap, not grow toward 200.
+        assert gov.snapshot()["tracked_callers"] <= 5, gov.snapshot()["tracked_callers"]
+    assert gov.snapshot()["tracked_callers"] <= 5     # final: bounded by max_tracked, not by the 200 sprayed IPs
 
 
 def test_shed_is_a_soft_retry_not_a_block():

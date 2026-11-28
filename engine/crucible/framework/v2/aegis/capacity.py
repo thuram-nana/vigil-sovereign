@@ -173,9 +173,12 @@ class CapacityGovernor:
         decision (a returning caller is recreated with a full bucket — identical). The recovery is computed with
         the injected clock (refill is lazy, so a stale stored-token count must not keep an idle caller pinned).
         NEVER evict an in-flight caller (that would lose a concurrency slot), nor ``exclude`` — the caller being
-        admitted right now, which starts with a full bucket and would otherwise evict itself. When no caller has
-        recovered (a frozen instant with many callers all mid-penalty) the map is left intact: evicting a caller
-        still carrying rate debt would silently reset its budget (a fairness bypass)."""
+        admitted right now, which starts with a full bucket and would otherwise evict itself. Recovered callers are
+        preferred for eviction (forgetting them resets nothing); but BOUNDED MEMORY is non-negotiable, so when the
+        recovered set alone cannot bring the map back under the cap — a spray of distinct one-shot source IPs all
+        still mid-refill — the least-recently-seen idle callers are force-evicted as a hard-cap fallback (see
+        below). The map is therefore bounded by ``max(_max_tracked, concurrent in-flight callers)``, never by the
+        attacker-controlled distinct-IP arrival rate."""
         if len(self._callers) <= self._max_tracked:
             return
         full = float(self._budget.burst)
@@ -184,6 +187,20 @@ class CapacityGovernor:
                 if k != exclude and b.inflight == 0 and (b.tokens + max(0.0, now - b.last) * rate) >= full]
         for k in drop:
             del self._callers[k]
+        # Hard cap — BOUNDED MEMORY is non-negotiable. If the recovered-only pass above did not get us back under
+        # the cap (distinct one-shot callers all still mid-refill, so none is "fully recovered"), force-evict the
+        # LEAST-RECENTLY-SEEN idle callers (smallest ``last`` first) until at the cap. An evicted caller still
+        # carrying rate debt is recreated with a full bucket only if it ever returns — a bounded fairness leak for
+        # the stalest callers that the availability-first doctrine accepts over unbounded state growth. In-flight
+        # callers (and ``exclude``) are never dropped, so the surviving map is bounded by the cap plus the number
+        # of concurrently in-flight callers — the latter itself capped by the global in-flight limit.
+        if len(self._callers) > self._max_tracked:
+            evictable = sorted((b.last, k) for k, b in self._callers.items()
+                               if k != exclude and b.inflight == 0)
+            for _last, k in evictable:
+                if len(self._callers) <= self._max_tracked:
+                    break
+                del self._callers[k]
 
     # -- the admission decision --------------------------------------------------------------------------
 
