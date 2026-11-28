@@ -174,8 +174,8 @@ _APP_FUNCS = ("pageFlag", "loadingHolder", "kv", "fmtDate", "err", "clearErr", "
               "monHostRows", "monActive", "monPlanCard", "monPlanHelp", "monHostCard", "monActions", "monButton",
               "monConfirmOff", "monTurnOn", "monTurnOff", "monFailed", "monEventsList",
               # AS-3d Host health + acknowledge (health is derived from the SAME reads; ack is a per-viewer mark-as-seen)
-              "monAckStore", "monAckKey", "monAckSet", "monAckSeen", "monAckMark", "monLatestByHost", "monHealthButton",
-              "monHealthBody", "monHealthCard", "monAcknowledge",
+              "monAckStore", "monAckKey", "monAckSet", "monAckSeen", "monAckMark", "monLatestByHost", "monEventLater",
+              "monHealthButton", "monHealthBody", "monHealthCard", "monAcknowledge",
               "monVisible", "startMonPoll", "stopMonPoll", "syncMonPoll", "onMonVisibility", "pollMonEvents", "routeShown")
 _APP_VARS = ("API", "TOPUP", "MONITORING_ON", "MON_POLL_MS", "mon", "MON_MODE", "MON_ACTION", "MON_ACK_CAP")
 

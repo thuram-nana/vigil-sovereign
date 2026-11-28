@@ -163,6 +163,7 @@ _APP_FUNCS = ("pageFlag", "loadingHolder", "kv", "fmtDate", "fmtWhen", "err", "c
               "aegisPlanName", "viewMonitoring", "monitoringBody", "monHostRows", "monActive", "monPlanCard", "monPlanHelp",
               "monHostCard", "monActions", "monButton", "monConfirmOff", "monTurnOn", "monTurnOff", "monFailed",
               "monEventsList", "monAckStore", "monAckKey", "monAckSet", "monAckSeen", "monAckMark", "monLatestByHost",
+              "monEventLater",
               "monHealthButton", "monHealthBody", "monHealthCard", "monAcknowledge", "monVisible", "startMonPoll",
               "stopMonPoll", "syncMonPoll", "onMonVisibility", "pollMonEvents", "routeShown")
 _APP_VARS = ("API", "MONITORING_ON", "MON_POLL_MS", "mon", "MON_MODE", "MON_ACTION", "MON_ACK_CAP")
@@ -253,6 +254,36 @@ out.a = [htext("a.example"), hbuttons("a.example")];
 """, events=evs)
     assert "unconfirmed signal" in out["a"][0] and "2023-11-14" in out["a"][0]   # fmtWhen stamped it, honestly labelled
     assert out["a"][1] == []                                                 # only a CONFIRMED attack can be acknowledged
+
+
+def _when(ts: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M") + " UTC"   # == app.js fmtWhen
+
+
+def test_last_report_and_acknowledge_key_off_ts_not_spine_insertion_order():
+    # RED-PEN AS-3d: the events read is in SPINE-INSERTION (seq) order, which can DIFFER from attack/report time
+    # (ts) — a delayed or backfilled report lands later in the spine (so it is first in this list) but describes an
+    # EARLIER attack. "Last report" and Acknowledge must key off ts (the real attack time), not the first record.
+    older_ts, newer_ts = 1_700_000_000.0, 1_700_050_000.0            # ~14h apart; distinct fmtWhen stamps
+    # server/insertion order: the earlier-ts report comes FIRST (it was written to the spine last), the later-ts one after.
+    evs = [_ev("a.example", older_ts, "confirmed", "RID-LATE-INSERT"),
+           _ev("a.example", newer_ts, "confirmed", "RID-NEWEST")]
+    out = _screen(_MANAGER, r"""
+out.text = htext("a.example"); out.buttons = hbuttons("a.example");
+// ack the OLDER (earlier-ts, first-inserted) record and re-poll: the card STILL offers Acknowledge, because the
+// record it shows/targets is the LATER-ts attack, not the first one in insertion order.
+monAckMark("RID-LATE-INSERT"); await pollMonEvents(); await flush();
+out.afterAckOld = hbuttons("a.example");
+// now ack the LATER-ts record and re-poll: the card is acknowledged — that IS the record the card targets.
+monAckMark("RID-NEWEST"); await pollMonEvents(); await flush();
+out.afterAckNew = hbuttons("a.example");
+""", events=evs)
+    assert _when(newer_ts) in out["text"]                           # Last report = the latest BY ts (the newer attack)
+    assert _when(older_ts) not in out["text"]                       # NOT the earlier-ts record that was inserted later
+    assert out["buttons"] == ["Acknowledge"]                        # a confirmed, unacknowledged latest attack
+    assert out["afterAckOld"] == ["Acknowledge"]                    # acking the first-inserted record is irrelevant
+    assert out["afterAckNew"] == []                                 # Acknowledge targets the ts-latest record
 
 
 # --- acknowledge: a per-viewer mark-as-seen, no server call -------------------------------------------------------
