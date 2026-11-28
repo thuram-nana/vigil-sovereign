@@ -81,7 +81,7 @@ def test_store_is_bounded_by_bytes_oldest_trimmed(chat_dir, monkeypatch):
         C.append("org_a", _SK, "user", "x" * 100, now=float(i))
     out = C.history("org_a", _SK)
     assert 0 < out["count"] < 20                                       # the oldest turns were trimmed to fit the bytes
-    on_disk = (chat_dir / __import__("hashlib").sha256(C._CHAT_CONTEXT + b"org_a").hexdigest() / (_SK + ".jsonl"))
+    on_disk = C._session_path("org_a", _SK)                            # the store's own hashed path (scheme-agnostic)
     assert on_disk.stat().st_size <= 400
     assert out["turns"][-1]["ts"] == 19.0                              # the NEWEST turn is always kept
 
@@ -106,7 +106,7 @@ def test_store_text_is_cleaned_and_capped(chat_dir, monkeypatch):
 
 def test_store_skips_a_torn_line_on_read_never_raises(chat_dir):
     C.append("org_a", _SK, "user", "good one", now=1.0)
-    path = chat_dir / __import__("hashlib").sha256(C._CHAT_CONTEXT + b"org_a").hexdigest() / (_SK + ".jsonl")
+    path = C._session_path("org_a", _SK)                               # the store's own hashed path (scheme-agnostic)
     with path.open("a", encoding="utf-8") as fh:
         fh.write("{ this is not json\n")                              # a torn/partial line
     out = C.history("org_a", _SK)
