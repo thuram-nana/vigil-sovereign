@@ -602,11 +602,19 @@ class FleetReconciler:
         self._release_source = None
 
     # -- the one public entrypoint -----------------------------------------------------------------
-    def reconcile(self, desired: "list[DesiredWorker]", state: FleetState, *, now: float) -> ReconcileResult:
+    def reconcile(self, desired: "list[DesiredWorker]", state: FleetState, *, now: float,
+                  hold_keys: "frozenset[str]" = frozenset()) -> ReconcileResult:
         """Converge ``state`` toward ``desired`` at the injected ``now``. DEFAULT-OFF: with the flag off
         this is INERT — it returns a fixed ``disabled`` result and changes nothing (flag-off golden
         byte-identical). Deterministic: the result is a pure function of (desired, state, now, the
-        injected deps)."""
+        injected deps).
+
+        ``hold_keys`` is the AS-6e rolling seam (default empty — byte-identical to AS-6a when unused): a
+        key in ``hold_keys`` is left UNTOUCHED this pass — it is neither converged toward its desired entry
+        nor retired for being absent from the desired set. The rolling reconciler
+        (:mod:`framework.v2.aegis.aegis_fleet_rolling`) uses it to HOLD a worker whose rollout is over the
+        per-tick surge budget, so a staged rollout keeps the held worker on its current, proven placement
+        until a later tick admits it — instead of this slice's big-bang (all workers roll at once)."""
         if not fleet_enabled():
             return ReconcileResult(disabled=True, state=state)
 
@@ -619,6 +627,8 @@ class FleetReconciler:
 
         # 1) Drive every desired worker toward its desired mode.
         for key in sorted(desired_by_key):
+            if key in hold_keys:
+                continue  # AS-6e: held this tick (over the rolling surge budget) — leave it untouched.
             w = desired_by_key[key]
             # Guard rail: only SIGIL TT origins before AS-2g.
             if w.tenant not in self._sigil_tt_tenants:
@@ -675,8 +685,8 @@ class FleetReconciler:
 
         # 2) Declarative convergence: any ACTIVE worker not in the desired set is Off -> retire it.
         for key in sorted(current):
-            if key in desired_by_key:
-                continue
+            if key in desired_by_key or key in hold_keys:
+                continue  # AS-6e: a held worker is NOT "absent from desired" — it is paused, not retired.
             cur = current[key]
             if cur.health == WorkerHealth.RETIRED:
                 continue
