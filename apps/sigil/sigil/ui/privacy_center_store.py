@@ -8,7 +8,8 @@ time, from the packaged ``public_site`` pages that ARE that published wording:
   * the strictly-necessary cookie inventory — the cookie table of ``public_site/cookies/index.html`` (three cookies,
     every one strictly necessary, zero optional, nothing to consent to);
   * the subprocessor list — the providers list of ``public_site/privacy/index.html`` (AWS, Cloudflare, Stripe, Google,
-    GitHub, Anthropic), each rendered as the canonical page words it;
+    GitHub, and a third-party AI processor — the AI subprocessor is disclosed but deliberately NOT named, so a
+    customer never sees the AI provider), each rendered as the canonical page words it;
   * links to the full published pages (``/cookies``, ``/privacy``, ``/trust``), the same paths the public site uses.
 
 There is no second copy of this wording to drift: edit the public page and the Privacy centre follows on the next read.

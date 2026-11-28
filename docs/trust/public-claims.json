@@ -104,7 +104,7 @@
       "owner": "Product (Reporting) and Compliance"
     },
     {
-      "claim": "VIGIL maintains documented privacy and data-governance practices for the hosted service: a published privacy notice naming the controller (SIGIL SARL), a named subprocessor list (AWS eu-west-1, Cloudflare, Stripe, Google, GitHub, Anthropic, with a US-transfer disclosure), strictly-necessary session cookies only with no analytics, advertising, cross-site tracking, or consent banner, stated retention and post-account-closure handling, and data-subject rights (access, correction, deletion, and the right to complain to a data-protection authority, with a data processing agreement available on request). Governing law is the Republic of Cameroon and the applicable OHADA Uniform Acts, with a mandatory-rules carve-out, not EU GDPR directly.",
+      "claim": "VIGIL maintains documented privacy and data-governance practices for the hosted service: a published privacy notice naming the controller (SIGIL SARL), a documented subprocessor list (AWS eu-west-1, Cloudflare, Stripe, Google, GitHub, and a third-party AI processor, with a US-transfer disclosure), strictly-necessary session cookies only with no analytics, advertising, cross-site tracking, or consent banner, stated retention and post-account-closure handling, and data-subject rights (access, correction, deletion, and the right to complain to a data-protection authority, with a data processing agreement available on request). Governing law is the Republic of Cameroon and the applicable OHADA Uniform Acts, with a mandatory-rules carve-out, not EU GDPR directly.",
       "status": "Partially Implemented",
       "category": "Privacy",
       "owner": "Privacy and Legal"
