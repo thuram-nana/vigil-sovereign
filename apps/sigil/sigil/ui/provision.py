@@ -3453,13 +3453,21 @@ class Provisioner:
         return float(sub.period_end)
 
     def monitor_authorize(self, requester: str, requester_org_id: str, host: str, *, mode: str = "observe",
-                          window_s=None, ip: str = "", mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+                          window_s=None, keep_window: bool = False, ip: str = "", mfa_at=0.0,
+                          now: "Optional[float]" = None) -> dict:
         """Owner-sign + publish a DEFENSIVE monitoring authority for ONE proven (org, host). Order: flag →
         ``admit_customer(manage_monitoring)`` (org_admin; never run_engagement/offense) → step-up → registry
         grant (requires a CURRENT ownership proof, clamped to its expiry) → owner-signed
         ``SignedMonitoringAuthority`` published atomically for the keyless gateway. The window is SERVER-
         decided (``config.MONITORING_WINDOW_SECONDS``); ``window_s`` may only SHORTEN it. A BLOCK grant turns
-        on NO enforcement by itself (AE-3 gates enforcement per request)."""
+        on NO enforcement by itself (AE-3 gates enforcement per request).
+
+        ``keep_window`` (AS-29 release-to-enforce) is a MODE change that must NOT renew the armed window: when
+        set AND an active grant already covers (org, host), the re-authorize REUSES that grant's existing
+        ``not_before``/``not_after`` (only the mode changes), so the window the dialog promises is unchanged
+        stays exactly that — never silently renewed to the full cap. It never EXTENDS a window (the reused
+        ``not_after`` is still clamped to the plan period and the ownership proof); with no active grant to
+        preserve it falls back to the normal server window. ``keep_window`` ignores ``window_s``."""
         t = self._now() if now is None else float(now)
         from .. import config
         from ..governor.monitoring_authority import MonitoringAuthorityRegistry, _check_mode
@@ -3481,7 +3489,16 @@ class Provisioner:
                 m = _check_mode(mode)
                 reg = MonitoringAuthorityRegistry(self.store)
                 period_end = self._monitor_plan_admit(reg, requester_org_id, host, m, t)
-                g = reg.grant(requester_org_id, host, mode=m, not_before=t, not_after=min(t + window, period_end),
+                not_before, not_after = t, min(t + window, period_end)
+                if keep_window:
+                    # AS-29: a mode flip (release to enforce) preserves the EXISTING armed window — re-authorize
+                    # over the active grant's own not_before/not_after instead of minting a fresh one from now, so
+                    # the window is not renewed. Clamp not_after to the plan period (never extends). No active
+                    # grant to preserve => the normal server window (there is nothing to keep).
+                    existing = reg.active_at(requester_org_id, host, now=t)
+                    if existing is not None:
+                        not_before, not_after = existing.not_before, min(existing.not_after, period_end)
+                g = reg.grant(requester_org_id, host, mode=m, not_before=not_before, not_after=not_after,
                               now=t, issued_at=self._next_issued())
             except ValueError as e:
                 self._audit("monitor_authorize", requester=requester, org_id=requester_org_id, target=host,

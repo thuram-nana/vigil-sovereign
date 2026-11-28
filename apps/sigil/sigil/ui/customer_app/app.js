@@ -3663,9 +3663,9 @@
   }
   // AS-29 — ENFORCE RELEASE. The deliberate, guarded control that RELEASES a host from the always-safe Observe base into
   // enforce (Respond): AEGIS stops only reporting confirmed attacks on it and begins BLOCKING them. It reuses the SAME
-  // monitoring/authorize write in the enforce mode ("block") with NO window_s — so the sovereign keeps the armed window
-  // within its cap (config.MONITORING_WINDOW_SECONDS, clamped to the plan period) and the host keeps its place; it mints
-  // no new authority and opens no new route. Enforce is RELEASE-GATED: the sovereign admits it only for a plan that
+  // monitoring/authorize write in the enforce mode ("block") with keep_window — so the sovereign flips the mode ONLY and
+  // leaves the armed window UNCHANGED (its existing not_before/not_after, never renewed to the cap), and the host keeps
+  // its place; it mints no new authority and opens no new route. Enforce is RELEASE-GATED: the sovereign admits it only for a plan that
   // entitles Respond (a plan without it is refused, surfaced honestly via monFailed), so the control is shown only for
   // such a plan and only while the host is still in Observe. Because it RAISES enforcement (live blocking), it is guarded
   // like Turn off: asked in place first, nothing sent until confirmed; a lost session or step-up changes nothing.
@@ -3685,10 +3685,12 @@
     clearErr();
     btn.disabled = true;
     try {
-      // the SAME monitoring/authorize write — re-authorized in the ENFORCE mode ("block") with NO window_s, so the
-      // sovereign keeps the armed window within its cap (never extended) and the host keeps its place. The ORG is the
-      // session's at the edge (never a body field); enforce is refused unless the plan entitles Respond.
-      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: "block" });
+      // the SAME monitoring/authorize write — re-authorized in the ENFORCE mode ("block") with keep_window, so the
+      // sovereign flips the mode ONLY and leaves the armed window UNCHANGED (its existing not_before/not_after), exactly
+      // as the dialog promises — never silently renewed to the full cap. NO window_s is sent (keep_window preserves,
+      // it does not shorten). The ORG is the session's at the edge (never a body field); enforce is refused unless the
+      // plan entitles Respond.
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: "block", keep_window: true });
       VUI.toast("Monitoring for " + g.host + " is now enforcing (Respond).");
       if (here() === "#/monitoring/settings") render();
     } catch (e) { btn.disabled = false; await monFailed(e); }

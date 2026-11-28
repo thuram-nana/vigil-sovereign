@@ -1,15 +1,15 @@
 """AS-29 — ENFORCE RELEASE's edge write path (release into / stand-down from enforce), over the REAL edge -> cockpit hop.
 
 The Monitoring settings screen's Release to enforce moves a host from the always-safe Observe base into enforce
-(Respond) by reusing the EXISTING monitoring/authorize action in the enforce mode ("block") with NO window_s. AS-2k's
+(Respond) by reusing the EXISTING monitoring/authorize action in the enforce mode ("block") with keep_window. AS-2k's
 edge suite pins the SHORTEN direction (window_s only ever shortens) and AS-21a's pins the RENEW direction (no window_s
 renews to full, never beyond the cap); this pins the RELEASE direction end to end — the enforce-release contract AS-29
-adds:
+adds (a mode flip that LEAVES THE WINDOW ALONE, distinct from AS-21a's deliberate renew):
 
-* Releasing an armed Observe host to enforce (authorize {host, mode: "block"}, no window_s) flips the mode to enforce
-  AND keeps the armed window BOUNDED by the server ceiling (config.MONITORING_WINDOW_SECONDS, clamped to the plan
-  period) — never extended beyond it, even from a shortened window — and the release is REVERSIBLE (authorize back to
-  observe stands the host down).
+* Releasing an armed Observe host to enforce (authorize {host, mode: "block", keep_window: true}) flips the mode to
+  enforce and leaves the armed window UNCHANGED (its existing not_before/not_after) — AS-29 red-pen: a release must
+  NOT silently renew the window to the full cap while the dialog promises it is unchanged — and the release is
+  REVERSIBLE (authorize back to observe stands the host down).
 * Enforce is RELEASE-GATED by the Respond entitlement: a workspace on an Observe-only plan cannot release a host to
   enforce (403, "respond"); Observe is the always-safe base and never needs a release.
 * The org is the SESSION's, never a body field: a body org_id cannot aim a release at another workspace.
@@ -24,7 +24,7 @@ from test_customer_monitoring_hop import _aegis_plan, _iss, _mon_env, _prove, _s
 
 from sigil import config
 
-_WINDOW = config.MONITORING_WINDOW_SECONDS       # the SERVER-decided ceiling; a release renews to it, never beyond
+_WINDOW = config.MONITORING_WINDOW_SECONDS       # the SERVER-decided ceiling; a release never extends beyond it
 
 
 def _grant(op, ep, host: str) -> dict:
@@ -51,15 +51,20 @@ def test_releasing_an_observe_host_to_enforce_flips_the_mode_and_stays_bounded_a
         obs = _grant(op, ep, host)
         assert obs["mode"] == "observe"
         assert abs((obs["not_after"] - obs["not_before"]) - 3600.0) < 2.0, obs
-        # RELEASE TO ENFORCE: the SAME action in the enforce mode ("block") with NO window_s. The mode flips to enforce
-        # and the window renews to the full server window — bounded by the server ceiling, never beyond it.
-        c, r = _post(op, ep, "/api/customer/monitoring/authorize", {"host": host, "mode": "block"})
+        obs_nb, obs_na = obs["not_before"], obs["not_after"]
+        # RELEASE TO ENFORCE: the SAME action in the enforce mode ("block") with keep_window. RED-PEN AS-29: only the
+        # MODE flips — the armed window is UNCHANGED (its existing not_before/not_after), NOT silently renewed to the
+        # full server window as the old write did (the dialog promises the window is unchanged).
+        c, r = _post(op, ep, "/api/customer/monitoring/authorize",
+                     {"host": host, "mode": "block", "keep_window": True})
         assert c == 200 and (r["org_id"], r["host"], r["mode"]) == (org, host, "block"), (c, r)
         enf = _grant(op, ep, host)
         assert enf["mode"] == "block"                               # now enforcing (Respond)
+        assert abs(enf["not_before"] - obs_nb) < 2.0, (enf, obs)    # window START unchanged (not re-based to now)
+        assert abs(enf["not_after"] - obs_na) < 2.0, (enf, obs)     # window END unchanged — NOT renewed to the full cap
         span = enf["not_after"] - enf["not_before"]
-        assert span > 20 * 86400.0, (span, enf)                     # renewed up from the shortened 3600s
-        assert span <= _WINDOW + 2.0, (span, enf)                   # but NEVER beyond the server ceiling (bounded)
+        assert abs(span - 3600.0) < 2.0, (span, enf)               # still the shortened ~3600s window, not renewed up
+        assert span <= _WINDOW + 2.0, (span, enf)                  # and never beyond the server ceiling
         # REVERSIBLE: standing the host back down to Observe is the same action in observe mode.
         c, r = _post(op, ep, "/api/customer/monitoring/authorize", {"host": host, "mode": "observe"})
         assert c == 200 and r["mode"] == "observe", (c, r)
