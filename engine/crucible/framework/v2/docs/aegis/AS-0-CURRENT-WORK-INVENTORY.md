@@ -133,7 +133,7 @@ map, not a status claim — none below has a signed DONE record.
 | 4 | AS-26 OPS-1 · AS-2d broker+lock · AS-30 job substrate |
 | 5 | AS-1b TT-STG runs · AS-2g binding+publish · AS-2e hygiene · AS-3c drain hardening · AS-17a Sigma v2 · AS-9a broker · AS-6c edge automation |
 | 6 | AS-2k settings · AS-3b v2 emission · AS-9c anchors · AS-9b receiver |
-| 7 | AS-21a retest guard · AS-5a capacity · AS-17b CloudTrail · AS-10b EDR · ~~AS-20 notify/SIEM~~ (BUILT — `aegis/notify.py` broker-sealed outbound emitter; default-OFF `VIGIL_AEGIS_NOTIFY`) |
+| 7 | AS-21a retest guard (BLOCKED — dep AS-2k settings not yet merged) · ~~AS-5a capacity~~ (BUILT — `aegis/capacity.py` per-caller availability-first load-shedding admission plane; default-OFF `VIGIL_AEGIS_CAPACITY`) · ~~AS-17b CloudTrail~~ (built) · ~~AS-10b EDR~~ (built) · ~~AS-20 notify/SIEM~~ (BUILT — `aegis/notify.py` broker-sealed outbound emitter; default-OFF `VIGIL_AEGIS_NOTIFY`) |
 | 8 | AS-29 enforce release · AS-5c probe socket · AS-10a provider runtime · AS-17c IdP |
 | 9 | AS-3d health+ack · AS-5d outcomes+receipts · AS-6e rolling |
 | 10 | AS-4b contract+preview · AS-5e ImpactBudget |
