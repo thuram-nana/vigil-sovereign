@@ -267,6 +267,31 @@ out.steps = document.querySelectorAll("li.cmd-step").map(li => li.textContent);
     assert out["steps"] == ["Scanning the surface", "Recording the evidence"]
 
 
+def test_status_distinguishes_an_unavailable_feed_from_a_pending_one():
+    # HONESTY: on an active launch whose feed is `null` (Live Control off here, or no control permission) the box must
+    # NOT frame a permanently-unavailable feed as "check back". Only a feed that is PRESENT with zero rows is pending.
+    out = _node(r"""
+server["POST api/customer/assistant/command"] = { data: { intent: "status", host: "apme.cm" } };
+server["POST api/customer/flow"] = { data: { intent: "status", host: "apme.cm", state: "running",
+  launch: { slug: "sl", state: "running" }, activity: null } };   // active launch, feed unavailable on this deployment
+show();
+await submit("status");
+out.unavailable = document.querySelectorAll("p.cust-muted").map(p => p.textContent).join(" | ");
+""")
+    assert "Live step activity isn't available here." in out["unavailable"]
+    assert "check back" not in out["unavailable"]       # never framed as transient
+
+    out2 = _node(r"""
+server["POST api/customer/assistant/command"] = { data: { intent: "status", host: "apme.cm" } };
+server["POST api/customer/flow"] = { data: { intent: "status", host: "apme.cm", state: "running",
+  launch: { slug: "sl", state: "running" }, activity: { rows: [] } } };   // active launch, feed present but empty
+show();
+await submit("status");
+out.pending = document.querySelectorAll("p.cust-muted").map(p => p.textContent).join(" | ");
+""")
+    assert "No step activity yet" in out2["pending"] and "check back in a moment" in out2["pending"]
+
+
 def test_control_with_no_running_launch_is_blocked_honestly():
     out = _node(r"""
 server["POST api/customer/assistant/command"] = { data: { intent: "pause", host: "apme.cm" } };
@@ -280,20 +305,43 @@ out.blocked = document.querySelectorAll("p.cmd-blocked").map(p => p.textContent)
 
 
 # --- honest error surfaces ----------------------------------------------------------------------------------------
-def test_error_from_the_edge_is_shown_and_a_401_bounces_to_sign_in():
+def test_error_maps_to_fixed_copy_and_never_echoes_the_servers_words():
+    # HONESTY: the edge's error body can carry internal exception wording ("provision failed: <str(e)>", "denied:
+    # could not read the published token: <raw>"). The box must render FIXED copy mapped from the status — never
+    # interpolate the server's string into the chat log.
     out = _node(r"""
-server["POST api/customer/assistant/command"] = { status: 403, data: { error: "not your engagement" } };
+// a 403 refusal carrying raw internal wording
+server["POST api/customer/assistant/command"] = { status: 403, data: { error: "denied: could not read the published token: boom" } };
 show();
 await submit("launch apme.cm");
-out.err = document.querySelectorAll("p.cmd-err").map(p => p.textContent).join(" ");
-// a 401 instead: refresh who, then bounce to sign in (no error card)
+out.forbidden = document.querySelectorAll("p.cmd-err").map(p => p.textContent).join(" | ");
+// a 500 on the FLOW step, with a raw server string
+server["POST api/customer/assistant/command"] = { data: { intent: "status", host: "apme.cm" } };
+server["POST api/customer/flow"] = { status: 500, data: { error: "provision failed: SECRET_TRACE_boom" } };
+await submit("status");
+out.generic = document.querySelectorAll("p.cmd-err").map(p => p.textContent).slice(-1)[0];
+out.anyRaw = document.body.textContent.indexOf("boom") >= 0 || document.body.textContent.indexOf("SECRET_TRACE") >= 0;
+// a 404 feature-off
+server["POST api/customer/assistant/command"] = { status: 404, data: { error: "unknown action" } };
+await submit("launch apme.cm");
+out.notavail = document.querySelectorAll("p.cmd-err").map(p => p.textContent).slice(-1)[0];
+""")
+    assert out["forbidden"] == "You are not authorized to do that here."
+    assert out["generic"] == "That could not be processed. Please try again, or contact support if it keeps happening."
+    assert out["notavail"] == "That action is not available."
+    assert out["anyRaw"] is False                      # not one character of the server's raw error reaches the chat
+
+
+def test_a_401_bounces_to_sign_in_without_an_error_card():
+    out = _node(r"""
 server["POST api/customer/assistant/command"] = { status: 401, data: { error: "login required" } };
+show();
 await submit("launch apme.cm");
 out.navs = navs;
 out.whoRefreshed = whoRefreshes;
+out.errCards = document.querySelectorAll("p.cmd-err").length;
 """)
-    assert "not your engagement" in out["err"]
-    assert out["navs"] == ["#/login"] and out["whoRefreshed"] == 1
+    assert out["navs"] == ["#/login"] and out["whoRefreshed"] == 1 and out["errCards"] == 0
 
 
 # --- the edge flag ------------------------------------------------------------------------------------------------

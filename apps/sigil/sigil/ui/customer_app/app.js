@@ -2142,8 +2142,13 @@
   }
   function cmdError(e) {
     if (e && e.status === 401) { refreshWho().then(function () { nav("#/login"); }); return; }
-    cmdSay("vigil", cmdNote("That could not be processed: "
-      + ((e && e.data && e.data.error) || "please try again."), "cmd-err"));
+    // HONESTY: map the edge's STATUS to FIXED copy — NEVER echo the server's raw error string (it can carry internal
+    // exception wording) into the chat log. A 403 is an authorization refusal; a 404 is a feature that is off here.
+    var status = (e && e.status) || 0;
+    var msg = status === 403 ? "You are not authorized to do that here."
+      : status === 404 ? "That action is not available."
+        : "That could not be processed. Please try again, or contact support if it keeps happening.";
+    cmdSay("vigil", cmdNote(msg, "cmd-err"));
   }
 
   // the raw token a customer publishes, shown verbatim in a <code> (never display-renamed — it must read exactly).
@@ -2241,10 +2246,17 @@
   }
 
   function cmdActivityCard(r) {
-    var rows = (r.activity && r.activity.rows) || [];
+    var feed = r.activity;
+    var rows = (feed && feed.rows) || [];
     if (!rows.length) {
-      return cmdSay("vigil", cmdNote((r.launch ? "No step activity yet — check back in a moment."
-        : "Nothing is running on " + (r.host || "this host") + " right now."), "cust-muted"));
+      // HONESTY: an active launch whose feed is `null` is UNAVAILABLE on this deployment (Live Control off, or no
+      // control permission) — never a transient pending state, so it must NOT say "check back". Only an empty feed
+      // OBJECT (present, zero rows) is genuinely pending. No active launch at all => nothing is running.
+      var msg = r.launch
+        ? (feed == null ? "Live step activity isn't available here."
+            : "No step activity yet — check back in a moment.")
+        : "Nothing is running on " + (r.host || "this host") + " right now.";
+      return cmdSay("vigil", cmdNote(msg, "cust-muted"));
     }
     return cmdSay("vigil", h("div.card.cmd-activity", {}, [
       h("h3", { text: "Live activity" }),
