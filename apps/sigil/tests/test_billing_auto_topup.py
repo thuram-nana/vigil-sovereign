@@ -212,6 +212,28 @@ def test_decide_charges_only_on_a_genuine_crossing_under_the_limit(settings, kw,
     assert decide(settings, **args).reason == reason
 
 
+@pytest.mark.parametrize("enabled", [1, "yes", "true", "1", [1], {"on": 1}, object(), 1.0, -1])
+def test_the_opt_in_gate_is_strict_is_true_a_truthy_value_never_arms(enabled):
+    """Money-safety (§11.13): the trigger arms ONLY on ``enabled is True`` — a truthy-but-not-True value (1, "yes",
+    a non-empty object, …) must NEVER arm an automatic charge. ``AutoTopUpSettings`` is a plain dataclass (no runtime
+    coercion), so this proves the GATE itself, not the writer's validation: a below-trigger crossing with a saved
+    method, a fresh crossing and room under the cap — everything else a charge needs — still refuses because the
+    opt-in is not the boolean True."""
+    s = _s(enabled=enabled)
+    assert s.enabled is not True                                   # the fixture really carries a non-True value
+    d = decide(s, available=1, has_method=True, already_charged=False, month_charged=0,
+               pack_credits=1000, pack_amount_minor=1000, pack_currency="USD")
+    assert d.reason == "disabled" and not d.should_charge          # fails CLOSED: nothing is charged
+
+
+def test_the_strict_true_gate_still_arms_on_a_real_boolean_true():
+    """The strict gate is not over-eager: a genuine ``enabled=True`` opt-in, below the trigger with a saved method and
+    a fresh crossing, DOES arm (the regression guard for the ``is True`` hardening)."""
+    d = decide(_s(enabled=True), available=1, has_method=True, already_charged=False, month_charged=0,
+               pack_credits=1000, pack_amount_minor=1000, pack_currency="USD")
+    assert d.reason == "charge" and d.should_charge is True
+
+
 # ---- the off-session charge ----------------------------------------------------------------------------------------
 def test_a_crossing_triggers_exactly_one_off_session_charge_and_mints_nothing():
     r = _below_trigger_rig()

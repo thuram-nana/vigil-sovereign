@@ -96,7 +96,7 @@ def _need_node() -> str:
 # Every customer screen MERGED on this branch: route -> (the screen's own <h2>, the reads it fires on arrival). The
 # pre-auth screens are walked signed out. The census test keeps (merged | pre-auth | pending stages) == app.js ROUTES.
 _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "#/": ("Overview", ()),
+    "#/": ("Overview", ("api/customer/overview",)),   # C7 — the home screen's ONE aggregate read (credits + hosts + assessments + monitoring)
     "#/billing": ("Billing", ("api/customer/billing", "api/customer/billing/offers")),
     "#/billing/return": ("Payment received", ("api/customer/billing",)),
     "#/invoices": ("Invoices", ("api/customer/invoices",)),
@@ -190,7 +190,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"overview": "1", "onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
@@ -199,7 +199,8 @@ _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveContr
 # api/customer/connect; VIGIL_CUSTOMER_CLOUD_CONNECT is the cloud leg the walk's cloudConnect flag stands for (the edge
 # writes data-cloud-connect="1" only with both on). Fix first (PR-B) is served only with its own switch AND its
 # master switch, VIGIL_APEX_PRESENTATION.
-_GATE5_ENV = ("VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LIVE_CONTROL", "VIGIL_CUSTOMER_LAUNCH_UI",
+_GATE5_ENV = ("VIGIL_CUSTOMER_OVERVIEW",   # C7 — the home-screen aggregate (its edge route + the data-overview page flag)
+              "VIGIL_CUSTOMER_TEAM_UI", "VIGIL_CUSTOMER_MONITORING_ENABLED", "VIGIL_CUSTOMER_LIVE_CONTROL", "VIGIL_CUSTOMER_LAUNCH_UI",
               "VIGIL_CUSTOMER_ONBOARDING", "VIGIL_CUSTOMER_CHECKOUT_ENABLED", "VIGIL_CUSTOMER_SECURITY_UI",
               "VIGIL_CUSTOMER_CONNECT", "VIGIL_CUSTOMER_CLOUD_CONNECT", "VIGIL_CUSTOMER_POSTURE", "VIGIL_APEX_PRESENTATION",
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
@@ -363,6 +364,22 @@ _FAKE_SERVER = {
     "api/customer/onboarding": {"ok": True, "state": "done"},
     "api/customer/data-rights": {"ok": True, "sla_days": 30, "contact": "info@sigilsovereign.com", "requests": []},
     "api/customer/notifications": {"notifications": [], "count": 0},
+    # C7 — the Overview home screen's ONE aggregate read: each section is the SAME shape its per-area read returns
+    # (the server composes them from those gated reads), so every card's fill renders its real controls. A role-
+    # forbidden section would be {"access": "forbidden"}; here the founder may read every one.
+    "api/customer/overview": {
+        "org_id": "org_acme",
+        "credits": {"credits": {"available": 12, "persistent": 10, "plan_live": 2}},
+        "assets": {"assets": [{"host": "a.example", "status": "verified"},
+                              {"host": "p.example", "status": "pending"}]},
+        "assessments": {"assessments": [{"slug": "cust_a", "host": "a.example", "findings": 2},
+                                        {"slug": "cust_b", "host": "b.example", "findings": 0}]},
+        "monitoring": {"org_id": "org_acme", "can_manage": True,
+                       "grants": [{"host": "a.example", "mode": "observe", "active": True}],
+                       "plan": {"host_slots": 5, "respond": True, "period_end": 1800000000.0}},
+        "posture": {"current": 59, "since": 1796200000, "change": 3,
+                    "points": [{"at": 1796200000, "posture_score": 59, "open": 2, "fixed": 1}]},
+        "notifications": {"notifications": [], "count": 0}},
     "api/customer/billing": {"org_id": "org_acme", "active": False, "subscription": None,
                              "credits": {"available": 12, "persistent": 10, "plan_live": 2},
                              "wallet": {"granted": 20, "debited": 8, "available": 12}},
@@ -644,7 +661,11 @@ function probeScreen(r, before, wants){{
   const census={{}}, tabs=[], probes={{}};
   for(const r of {json.dumps(routes or [])}){{
     const before=calls.length;
-    location.hash=r; await settle();
+    // Navigate the way a link does. When r is already the current hash — the home route #/ the boot settled on —
+    // assigning it fires no hashchange, so force one render, so the screen's OWN on-arrival reads (the Overview's
+    // aggregate) are observed in THIS route's window, not lost in the boot before `before`.
+    if(location.hash!==r){{ location.hash=r; }} else {{ fireWin("hashchange"); }}
+    await settle();
     census[r]=snap(r, before);
     if(Object.prototype.hasOwnProperty.call(PROBES,r)) probes[r]=probeScreen(r, before, PROBES[r]);
   }}
@@ -951,7 +972,8 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     from test_custui import _get, _opener
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
-        for p in ("members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
+        for p in ("overview",   # C7 — the home-screen aggregate route is gone with VIGIL_CUSTOMER_OVERVIEW off
+                  "members", "monitoring", "monitoring/events", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3

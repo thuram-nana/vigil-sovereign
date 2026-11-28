@@ -320,8 +320,9 @@ class AutoTopUpRegistry:
 
     def enabled_orgs(self) -> "list[str]":
         """Every org whose CURRENT settings are enabled, in org order — the sweep's work list (owner side only; a
-        per-tenant caller reads ``settings`` for its own org)."""
-        return sorted(o for o, s in self._fold()[0].items() if s.enabled)
+        per-tenant caller reads ``settings`` for its own org). STRICT ``is True`` (money-safety): only an explicit
+        boolean-True opt-in puts an org on the sweep's charge list."""
+        return sorted(o for o, s in self._fold()[0].items() if s.enabled is True)
 
     def payment_method(self, org_id: str) -> "Optional[SavedMethod]":
         """The org's saved Stripe method (ids only), or None."""
@@ -443,8 +444,14 @@ def decide(settings: "Optional[AutoTopUpSettings]", *, available: int, has_metho
     """The complete, PURE auto-top-up policy. Fail-closed: any missing precondition refuses with its reason, and
     only a genuine below-trigger crossing with a saved method, a fresh crossing and room under the monthly cap
     returns ``charge``. The monthly cap is checked against ``month_charged + pack_credits`` so the cap is NEVER
-    exceeded."""
-    if settings is None or not settings.enabled:
+    exceeded.
+
+    The opt-in gate is STRICT ``is True`` (money-safety, HANDOFF §11.13): only a settings record whose ``enabled`` is
+    exactly the boolean ``True`` arms an automatic charge — a truthy-but-not-True value (1, "yes", a non-empty object)
+    never does. The sanctioned write path already stores ``enabled`` as a real bool (``set_settings`` /
+    ``billing_auto_topup_set`` refuse a non-bool, and the fold coerces), so this is belt-and-braces: a hostile or
+    malformed value that reached here fails CLOSED rather than charging a card."""
+    if settings is None or settings.enabled is not True:
         return Decision("disabled")
     if int(available) >= int(settings.trigger_credits):
         return Decision("above_trigger")

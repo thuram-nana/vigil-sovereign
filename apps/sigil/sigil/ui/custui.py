@@ -417,6 +417,7 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
 _CODE_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
     "code/connect": ("redpen_connect", ()),
     "code/settings": ("redpen_set_settings", ("repo", "block_threshold", "monthly_limit_credits")),
+    "code/spend": ("redpen_set_org_spend", ("monthly_limit_credits",)),   # C6 §15.11 workspace-wide auto-fix cap
     "code/disconnect": ("redpen_disconnect", ("repo",)),
     "code/review": ("redpen_review", ("repo",)),
     "code/schedule": ("redpen_schedule", ("repo", "cadence")),
@@ -779,6 +780,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("billing_auto_topup")
         if path == "/api/customer/launches" and _launch_ui_on():         # C1a (flag OFF -> unknown-route 404)
             return self._customer_read_relay("launch_list")
+        if path == "/api/customer/overview" and _overview_on():         # C7 Overview aggregate (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("customer_overview_summary")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
@@ -805,6 +808,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
+        if path == "/api/customer/code/spend" and _redpen_on():          # C6 §15.11 workspace-wide auto-fix spend limit
+            return self._customer_read_relay("redpen_org_spend")
         if path == "/api/customer/connect" and _connect_on():           # PR-C Connect screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("connect_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
@@ -1875,6 +1880,14 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _overview_on() -> bool:
+    # C7 — the Overview home screen's aggregate read, the same VIGIL_CUSTOMER_OVERVIEW flag that writes
+    # data-overview into the page and that the cockpit dispatch re-checks, so the route and the screen are never out of
+    # step (flag OFF -> the route is genuinely absent, 404, and the home screen is the Account-only dashboard).
+    from .. import config as _config
+    return _config.customer_overview_enabled()
 
 
 def _onboarding_on() -> bool:

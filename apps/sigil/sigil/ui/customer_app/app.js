@@ -687,20 +687,26 @@
   // shows an estimate, a predicted cost or an engine name; the only amount shown is credits the customer holds.
   function viewOverview() {
     var w = state.get().who || {};
-    // One context per render: the route it was drawn for (each async fill checks the customer is still there) and
-    // whether a card already found the session ended (so sign-in is asked for once, not once per card).
+    // One context per render: the route it was drawn for (each async fill checks the customer is still there), a
+    // sign-in-asked-once latch (so an ended session asks for sign-in once, not once per card), and ONE aggregate read
+    // — credits, hosts, assessments and monitoring brought together — that EVERY card shares. The UI sends NO org id:
+    // the edge scopes the whole aggregate to the SESSION org (admit_customer), and the server composes each section
+    // from the SAME gated read its full screen uses, so a card whose section a role may not read degrades to an
+    // honest line while the sections the role may read still show. One round trip, not one per card.
     var view = { at: here(), ended: false };
+    view.summary = VUI.getJSON(API + "/overview");
     var cards = [
       VUI.card("Account", null, [kv("Signed in as", w.username), kv("Workspace", w.org_id)]),
-      overviewCard(view, "Credits", API + "/billing", "Billing", creditsFill),
-      overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
-      overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
+      overviewCard(view, "Credits", "credits", "Billing", creditsFill),
+      overviewCard(view, "Authorized hosts", "assets", "Assets", hostsFill),
+      overviewCard(view, "Assessments", "assessments", "Assessments", assessFill),
     ];
-    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does).
-    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
-    // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
-    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
-    cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
+    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does); the
+    // server includes its section under the same switch, so card and section are never out of step.
+    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", "posture", "Fix first", postureFill)); }
+    // Monitoring only while its screen is on (the same switch the server gates its section by); off, the card is absent.
+    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", "monitoring", "Monitoring", monFill)); }
+    cards.push(overviewCard(view, "Notifications", "notifications", "Notifications", ntfFill));
     var body = h("div.cust-overview", {}, [
       h("h2", { text: "Overview" }),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
@@ -710,28 +716,31 @@
     return shell(body, "#/");
   }
 
-  // One async summary card: render the card + a loading holder now, then fetch its OWN tenant-scoped read and fill it.
-  // A 401 means the session ended: the first card to see it asks who is signed in and routes to sign-in, the others
-  // stand down. A 403 is the honest role line; anything else (a read this deployment does not serve, a network
-  // failure) is an honest "could not load" line — never a raw error and never the server's own words. A read that
-  // resolves after the customer left the screen changes nothing.
-  function overviewCard(view, title, path, label, fill) {
+  // One summary card of the shared Overview aggregate: render the card + a loading holder now, then await the ONE
+  // session-org-scoped read and fill this card from its OWN section (data[key]). A 401 means the session ended: the
+  // first card to see it asks who is signed in and routes to sign-in, the others stand down. A section the role may
+  // not read is the honest role line (its section is {access:"forbidden"} — no data, no link); any read failure is an
+  // honest "could not load" line, never a raw error and never the server's own words. A read that resolves after the
+  // customer left the screen changes nothing.
+  function overviewCard(view, title, key, label, fill) {
     var holder = h("div.cust-ov-cell", {}, loadingHolder("Loading…"));
     (async function () {
       var data;
-      try { data = await VUI.getJSON(path); }
+      try { data = await view.summary; }
       catch (e) {
         if (here() !== view.at) { return; }
         if (e && e.status === 401) {
           if (!view.ended) { view.ended = true; await refreshWho(); nav("#/login"); }
           return;
         }
-        var msg = (e && e.status === 403) ? ("Your role does not have access to " + label + ".")
-                                          : ("Could not load " + label + " right now.");
-        return VUI.mount(holder, h("p.cust-muted", { text: msg }));
+        return VUI.mount(holder, h("p.cust-muted", { text: "Could not load " + label + " right now." }));
       }
       if (here() !== view.at) { return; }
-      VUI.mount(holder, fill(data));
+      var section = (data && data[key]) || {};
+      if (section.access === "forbidden") {
+        return VUI.mount(holder, h("p.cust-muted", { text: "Your role does not have access to " + label + "." }));
+      }
+      VUI.mount(holder, fill(section));
     })();
     return VUI.card(title, null, holder);
   }
@@ -905,7 +914,7 @@
       // the server sends no exact balance, the flat-billing cards are the accurate picture and are shown as always —
       // with the published Rates, the server's low-balance notice and Auto top-up, which hold in either mode.
       if (!ov || ov.exact_available_mc == null) {
-        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection(ov)]);
+        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection()]);
       }
       var usage = h("div#cust-bill-usage", {}, loadingHolder("Loading your usage…"));
       loadBillingUsage(usage);                                 // held / live / statement, from billing/usage
@@ -914,7 +923,7 @@
         h("div.cust-grid", {}, [billingCreditsCard(ov), billingSubscriptionCard(ov)]),
         usage,
         ratesSection(),                                        // the published rates, loaded on demand
-        autoTopupSection(ov),                                  // A1 settings when present, else "coming"
+        autoTopupSection(),                                    // A1 opt-in / edit (loaded on demand, step-up gated)
         buySection(),                                          // the existing CHK-2 buy surface (unchanged)
       ]);
     });
@@ -1064,22 +1073,147 @@
     if (per === 1000000) return "per million";
     return "per " + groupInt(per);
   }
-  // Auto top-up (A1). A1 is not merged in this build, so the section describes it and invents no endpoint. When A1
-  // adds its settings to the overview (`ov.auto_topup`) this shows them read-only; the EDIT form is A1's own slice
-  // (it owns the write endpoints and the step-up), gated behind A1's flag.
-  function autoTopupSection(ov) {
-    var at = ov && ov.auto_topup;
-    if (at && typeof at === "object") {
-      return VUI.card("Auto top-up", null, [
-        kv("Auto top-up", at.enabled ? "On" : "Off"),
-        kv("Starts when your balance falls below", at.trigger_mc != null ? mc2(at.trigger_mc) : "—"),
-        kv("Buys the pack", at.pack_name != null ? at.pack_name : "—"),
-        kv("Monthly limit", at.monthly_limit_credits != null ? String(at.monthly_limit_credits) : "—"),
-      ]);
+  // Auto top-up (A1). The customer OPTS IN (off by default) to auto-buy a chosen credit pack whenever their balance
+  // falls below a threshold, up to a monthly limit. The control reads the org's current settings from
+  // /billing/auto-topup ON DEMAND (like Rates) and a billing admin changes them through the SAME step-up the server
+  // demands (owner-signed, sovereign side). The money safety is the server's (A1): the arming is strictly opt-in,
+  // each low-balance crossing tops up AT MOST ONCE (idempotent), NEVER above the monthly cap, and CREDIT is minted
+  // solely by the verified webhook — never from this page. The page sends only the customer's choices (credits, never
+  // a money amount) and a STRICT boolean on/off. Absent (the feature off -> 404) or refused (a non-billing role ->
+  // 403): an honest note, no form. Shown only on the W6 dashboard; the classic screen never renders it.
+  function autoTopupSection() {
+    var holder = h("div#cust-bill-autotopup", {});
+    var btn = h("button.btn", { type: "button", text: "Set up auto top-up" });
+    var open = false;
+    btn.addEventListener("click", function () {
+      if (open) { VUI.mount(holder, h("div", {})); open = false; btn.textContent = "Set up auto top-up"; return; }
+      btn.disabled = true;
+      (async function () {
+        var d;
+        try { d = await VUI.getJSON(API + "/billing/auto-topup"); }
+        catch (e) {
+          btn.disabled = false;
+          if (here() !== "#/billing") return;
+          return VUI.mount(holder, h("p.cust-muted", { text: autoTopupUnavailableText(e) }));
+        }
+        btn.disabled = false;
+        if (here() !== "#/billing") return;
+        open = true; btn.textContent = "Hide auto top-up";
+        VUI.mount(holder, autoTopupForm(d || {}, holder, btn));
+      })();
+    });
+    return VUI.card("Auto top-up", null, [
+      h("div.cust-mon-actions", {}, [btn,
+        h("p.cust-muted", { text: "Add credits automatically so an assessment never pauses for credit. Choose the "
+          + "balance that starts it, the pack to buy and a monthly limit. It is off until you turn it on, and it "
+          + "never buys more than your monthly limit." })]),
+      holder,
+    ]);
+  }
+  function autoTopupUnavailableText(e) {
+    if (e && e.status === 403) return "Your role does not manage billing, so auto top-up is not shown.";
+    return "Auto top-up is not available on your account right now.";
+  }
+  // The on-demand settings + edit form. Credits only; no money amount, no model name, no reserved unit count. The
+  // on/off is a STRICT boolean (a checkbox), the trigger / monthly limit whole numbers of credits, the pack one of
+  // the offered top-ups — exactly what the server validates and owner-signs.
+  function autoTopupForm(d, holder, toggleBtn) {
+    var s = (d && d.settings) || {};
+    var packs = (d && d.packs) || [];
+    var armed = s.enabled === true;                     // strict: only an explicit true is "on"
+    if (!packs.length) {
+      return h("p.cust-muted", { text: "No credit packs are offered for auto top-up right now." });
     }
-    return VUI.card("Auto top-up", null, [h("p.cust-muted", {
-      text: "Auto top-up adds credits for you so an assessment never pauses for credit. Choose the balance that "
-        + "starts it, the pack to buy and a monthly limit. This is coming soon." })]);
+    var enBox = h("input#cust-at-enabled", { type: "checkbox" });
+    enBox.checked = armed;                              // reflect the current, owner-signed state
+    var trig = h("input#cust-at-trigger", { type: "text", inputmode: "numeric", autocomplete: "off",
+      spellcheck: "false" });
+    trig.value = (s.trigger_credits != null) ? String(s.trigger_credits) : "";
+    var cap = h("input#cust-at-cap", { type: "text", inputmode: "numeric", autocomplete: "off", spellcheck: "false" });
+    cap.value = (s.monthly_cap_credits != null) ? String(s.monthly_cap_credits) : "";
+    var sel = h("select#cust-at-pack", { "aria-label": "Credit pack to buy" });
+    packs.forEach(function (p) {
+      sel.appendChild(h("option", { value: p.price_id,
+        text: String(p.name || p.price_id) + " — " + groupInt(p.credits) + " credits" }));
+    });
+    if (s.pack_price_id) sel.value = s.pack_price_id;
+    var save = h("button.btn", { type: "button", text: "Save auto top-up" });
+    var refs = { enBox: enBox, trig: trig, cap: cap, sel: sel, holder: holder, toggleBtn: toggleBtn };
+    save.addEventListener("click", function () { saveAutoTopup(refs, save); });
+
+    var rows = [kv("Auto top-up", armed ? "On" : "Off"),
+                kv("Bought this month", groupInt((d && d.month_credits) || 0) + " credits")];
+    if (!(d && d.card_saved)) {
+      rows.push(h("p.cust-muted", { text: "Auto top-up uses the card you pay with when you buy credits. Buy credits "
+        + "once to save a card, then it can charge automatically." }));
+    }
+    rows.push(h("label", { for: "cust-at-enabled", text: "Turn auto top-up on" }), enBox,
+              h("label", { for: "cust-at-trigger", text: "Start when my balance falls below (credits)" }), trig,
+              h("label", { for: "cust-at-pack", text: "Buy this pack" }), sel,
+              h("label", { for: "cust-at-cap", text: "Never buy more than this per month (credits)" }), cap,
+              h("div.cust-mon-actions", {}, [save]));
+    var receipts = (d && d.receipts) || [];
+    if (receipts.length) {
+      rows.push(h("h3", { text: "Recent auto top-ups" }));
+      receipts.forEach(function (r) { rows.push(autoTopupReceiptRow(r)); });
+    }
+    return h("div", {}, rows);
+  }
+  function autoTopupReceiptRow(r) {
+    return h("div.cust-kv", {}, [h("span.k", { text: fmtDate(r.at) + " · " + autoTopupStatusText(r.status) }),
+      h("span", { text: ((r.credits != null) ? groupInt(r.credits) : "—") + " credits" })]);
+  }
+  function autoTopupStatusText(status) {
+    if (status === "charged") return "Added credits";
+    if (status === "declined") return "Card declined";
+    if (status === "cap_blocked") return "Held at your monthly limit";
+    return "Auto top-up";
+  }
+  function saveAutoTopup(refs, btn) {
+    var enabled = refs.enBox.checked === true;         // STRICT boolean: only a real true arms it
+    var trig = autoTopupInt(refs.trig.value);
+    var cap = autoTopupInt(refs.cap.value);
+    var pack = String(refs.sel.value || "");
+    if (trig == null || cap == null) {
+      return err("Enter the balance that starts auto top-up and the monthly limit as whole numbers of credits.");
+    }
+    if (!pack) return err("Choose the credit pack to buy.");
+    btn.disabled = true;
+    (async function () {
+      try {
+        // the SET needs a fresh second factor (server-enforced); withStepUp sends the change ONCE more after it
+        await withStepUp(function () {
+          return VUI.postJSON(API + "/billing/auto-topup", { enabled: enabled === true, trigger_credits: trig,
+            pack_price_id: pack, monthly_cap_credits: cap });
+        }, btn.parentNode);
+      } catch (e) {
+        btn.disabled = false;
+        if (e && e.stepUpCancelled) return;            // the person closed the check: nothing was changed
+        if (e && e.status === 401 && e.data && e.data.step_up_required) {
+          return err("For your security, changing auto top-up needs a fresh second-factor check. Verify with your "
+            + "authenticator, then try again.");
+        }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return err("Auto top-up could not be saved" + ((e && e.data && e.data.error) ? ": " + e.data.error : ".")
+          + " Nothing was charged.");
+      }
+      btn.disabled = false;
+      VUI.toast(enabled ? "Auto top-up is on." : "Auto top-up is off.");
+      if (here() !== "#/billing") return;
+      // re-read the owner-signed state so the form shows exactly what the server stored
+      try {
+        var fresh = await VUI.getJSON(API + "/billing/auto-topup");
+        if (here() === "#/billing") VUI.mount(refs.holder, autoTopupForm(fresh || {}, refs.holder, refs.toggleBtn));
+      } catch (e) { /* the save landed; the next open re-reads */ }
+    })();
+  }
+  // A whole number of credits >= 0, or null when the field is empty / not a clean integer (the server is the
+  // authority; this only keeps an obviously-bad value from being sent).
+  function autoTopupInt(v) {
+    var s = String(v == null ? "" : v).trim();
+    if (!/^\d+$/.test(s)) return null;
+    var n = parseInt(s, 10);
+    return (isFinite(n) && n >= 0) ? n : null;
   }
 
   // ---- CHK-2: buy (hosted checkout) -----------------------------------------------------------------
@@ -3825,10 +3959,11 @@
       VUI.mount(holder, codeBody(d || {}));
       codeLoadFindings(d || {});
     })();
+    var spend = codeSpendCard();                          // the workspace-wide monthly auto-fix spending limit (C6 §15.11)
     return shell(h("div", {}, [h("h2", { text: "Code" }),
       h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect and reports "
         + "only the problems it reproduced. Only this workspace sees them." }),
-      notice, holder]), "#/code");
+      notice, spend, holder]), "#/code");
   }
   // Back from GitHub (#/code?connected=…): one fixed sentence for what happened, then the hash loses its query so a
   // reload does not say it again.
@@ -4068,6 +4203,73 @@
     var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
       .replace(/\.$/, "");                                // as the server said it (it may start with a repository name)
     err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
+  }
+
+  // ---- C6 §15.11: the workspace-wide monthly auto-fix SPENDING LIMIT ------------------------------------------------
+  // Separate from each repository's per-review limit: this caps how much the merge-blocking auto-fix (Fix this) may
+  // spend ACROSS this workspace in a calendar month, so the automated fixing never goes over. Its own read and write,
+  // both scoped to the SESSION org and gated on managing code review server-side; the save goes through the same
+  // step-up the per-repo settings do. The card picks a pack (a preset ceiling) and/or sets the limit, and shows this
+  // month's usage against it. No price, estimate or engine name — only credits. On any error the main Code body states
+  // it, so this card just stays quiet (it never shows a half-working control).
+  function codeSpendCard() {
+    var holder = h("div#code-spend", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/code/spend"); }
+      catch (e) { if (here() === "#/code") VUI.mount(holder, h("div", {})); return; }
+      if (here() !== "#/code") return;                   // the person navigated away before the load resolved
+      VUI.mount(holder, codeSpendControl(d || {}));
+    })();
+    return holder;
+  }
+  function codeSpendControl(d) {
+    var n = ++codeUi.seq;
+    var limit = parseInt(d.monthly_limit_credits, 10) || 0;
+    var used = parseInt(d.used_this_month, 10) || 0;
+    var inp = h("input#code-spend-" + n + ".cust-code-limit", { type: "text", inputmode: "numeric",
+      autocomplete: "off", value: String(limit) });
+    var row = h("div.cust-mon-actions", {});
+    VUI.mount(row, codeButton("Save", function (b) { codeSpendSave(inp, b, row); }));
+    var out = [h("h3", { text: "Auto-fix spending" }),
+      h("p.cust-muted", { text: "VIGIL's merge-blocking auto-fix opens a pull request for a reproduced finding. Set "
+        + "the most this workspace may spend on it each month so the automated fixing never goes over. VIGIL never "
+        + "estimates what a fix costs; the limit is a ceiling in credits." })];
+    var packs = codeSpendPacks(d, inp);
+    if (packs) out.push(h("label", { text: "Pick a pack" }), packs);
+    out.push(h("label", { for: "code-spend-" + n, text: "Monthly spending limit in credits (0 for no limit)" }), inp);
+    if (limit > 0) {
+      out.push(kv("Used this month", used + " of " + limit + " credits"));
+      if (used >= limit) {
+        out.push(h("p.cust-muted", { text: "This workspace reached its monthly auto-fix limit: new fixes wait until "
+          + "next month, or until you raise the limit." }));
+      }
+    }
+    out.push(row);
+    return h("div.card", {}, out);
+  }
+  // The preset packs the read offers: picking one fills the limit field (a quick choice; the field is what is saved).
+  function codeSpendPacks(d, inp) {
+    var packs = (Array.isArray(d.packs) ? d.packs : []).filter(function (x) {
+      return typeof x === "number" && isFinite(x) && x > 0 && Math.floor(x) === x;
+    });
+    if (!packs.length) return null;
+    return h("div.cust-mon-actions", {}, packs.map(function (x) {
+      return codeButton(String(x) + " credits", function () { inp.value = String(x); });
+    }));
+  }
+  async function codeSpendSave(inp, btn, row) {
+    clearErr();
+    var raw = String(inp.value == null ? "" : inp.value).trim();
+    if (!/^[0-9]{1,9}$/.test(raw)) {
+      return err("Enter the monthly spending limit as a whole number of credits, or 0 for no limit. Nothing was changed.");
+    }
+    btn.disabled = true;
+    try {
+      await codePost("/code/spend", { monthly_limit_credits: parseInt(raw, 10) }, row);
+      VUI.toast("Auto-fix spending limit saved.");
+      if (here() === "#/code") render();
+    } catch (e) { btn.disabled = false; await codeFailed(e, "The auto-fix spending limit was not saved"); }
   }
 
   // ---- Plans, Reports and the standards mapping (PR-G, Area 6) -----------------------------------------------------

@@ -778,7 +778,8 @@ out.apiButtons = buttons(api);
 out.findings = api.querySelectorAll("div.cust-code-finding").map(f => [text(f.querySelector("strong")), buttons(f)]);
 out.webFindings = text(web.querySelector("div.cust-code-findings"));
 """)
-    assert out["calls"] == [["GET", "api/customer/code"], ["GET", "api/customer/assessments/findings"]]
+    assert out["calls"] == [["GET", "api/customer/code"], ["GET", "api/customer/code/spend"],
+                            ["GET", "api/customer/assessments/findings"]]   # + the workspace auto-fix spend read (§15.11)
     assert out["top"] == ["Connect GitHub"] and out["hosts"] == [API_REPO, WEB_REPO]
     assert out["thr"] == ["medium_up", "critical_high"] and out["options"] == ["Nothing", "Critical and High",
                                                                                "Medium and up"]
@@ -898,7 +899,8 @@ def test_a_role_that_cannot_manage_code_sees_an_honest_card():
         "error": "denied: requester may not manage code review for this org"}}},
         "out.body = text(root.querySelector('#code-body')); out.calls = calls;")
     assert out["body"].startswith("Only the founder of this workspace, or an Operator VIGIL has added")
-    assert out["calls"] == [["GET", "api/customer/code"]]         # and no findings read for someone refused
+    # the overview read, plus the workspace auto-fix spend read (§15.11); both refuse for this role, and no findings read
+    assert out["calls"] == [["GET", "api/customer/code"], ["GET", "api/customer/code/spend"]]
     out = _screen({"GET api/customer/code": {"status": 401, "data": {"error": "login required"}}},
                   "out.navs = navs; out.refreshed = refreshed;")
     assert out == {"navs": ["#/login"], "refreshed": 1}

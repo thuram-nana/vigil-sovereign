@@ -66,7 +66,10 @@ and blocks only on a fired oracle's certificate.
 - **Slices:** AS-27a break-glass (**merged**, PR #1228) · AS-2j isolated unit · AS-2c
   gateway v2 · AS-2d broker+lock · AS-2e hygiene · AS-3b v2 emission · **AS-5a capacity
   (built — `aegis/capacity.py` per-caller/global load-shedding admission; soft 503 +
-  Retry-After, never a block; default-OFF `VIGIL_AEGIS_CAPACITY`)** · AS-5c/5d/5e/5b
+  Retry-After, never a block; default-OFF `VIGIL_AEGIS_CAPACITY`)** · **AS-5c probe socket
+  (built — `aegis/probe_socket.py` LOCAL owner-only AF_UNIX operational probe socket surfacing the effective mode +
+  the AS-5a capacity/admission snapshot off the data-plane HTTP port; read-only, never a block; default-OFF
+  `VIGIL_AEGIS_PROBE_SOCKET`)** · AS-5d/5e/5b
   outcomes · AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
   5a → 5c → 5d → 5e → 5b → 13b (plan §9.4 chains).
 
