@@ -144,8 +144,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
     # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls;
-    # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row.
-    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Turn off": 1},
+    # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row; AS-29 adds the guarded Release
+    # to enforce in its own row — shown because a.example is in Observe and the plan entitles Respond (respond: True).
+    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},

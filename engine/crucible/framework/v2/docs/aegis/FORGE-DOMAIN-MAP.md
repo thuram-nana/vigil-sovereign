@@ -89,7 +89,14 @@ realized by distinct signing domains.
 
 - **Hot set:** MA. **Tokens:** —. **UI chain** carries the enforce-release step.
 - **Slices:** AS-2a authority contracts · AS-2f sovereign v2 · AS-2h sealing · AS-7a
-  licence gate · AS-29 enforce release · AS-27b override + `manage_defense`.
+  licence gate · **AS-29 enforce release (built — the UI-chain increment: the customer
+  **Release to enforce** control on `#/monitoring/settings`, a confirmed in-place release
+  of a host from the always-safe Observe base into enforce/Respond, reusing the gated
+  `monitoring/authorize` write in the enforce mode `block` with no `window_s`; shown only
+  on a Respond-entitled plan and only while the host is in Observe; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`. The offline release signer `enforce_release.py`
+  above [separate release root, D30] remains future work on this slice)** · AS-27b
+  override + `manage_defense`.
 
 ## Domain 3 — Drain / spool (sovereign ingest of data-plane reports)
 
@@ -211,7 +218,11 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
 - **Slices:** AS-4a overclaims copy · AS-2f/2g/2k sovereign v2 / binding+publish /
   settings · **AS-21a retest guard (built — the guarded Re-arm on `#/monitoring/settings`:
   a confirmed renew of a host's authority to the full standard window, reusing the gated
-  `monitoring/authorize`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-3d
+  `monitoring/authorize`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-29 enforce release (built — the guarded Release to enforce on
+  `#/monitoring/settings`: a confirmed release of a Respond-entitled host from Observe
+  into enforce/Respond, reusing the gated `monitoring/authorize` in the `block` mode with
+  no `window_s`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-3d
   health+ack · AS-4b contract+preview · AS-27b override · AS-6d onboarding. UI chain:
   4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 

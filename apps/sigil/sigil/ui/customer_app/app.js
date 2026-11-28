@@ -2859,8 +2859,8 @@
   function monSettingsBody(d) {
     var rows = monSettingsRows(d);
     var head = d.can_manage
-      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, or turn its "
-          + "monitoring off here. VIGIL never extends a window beyond its standard length." })
+      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, release it "
+          + "into enforce, or turn its monitoring off here. VIGIL never extends a window beyond its standard length." })
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
           + "settings. You can see what each monitored host is set to." });
     if (!rows.length) {
@@ -2877,29 +2877,43 @@
     body.push(kv("Armed since", fmtDate(g.not_before)));
     if (d.can_manage) {
       var actions = h("div.cust-mon-settings-actions", {});
-      VUI.mount(actions, monSettingsActions(g, actions));
+      // AS-29 enforce release: whether this workspace's plan ENTITLES enforce (Respond). Strict — only a real
+      // respond:true plan permits a release into enforce; Observe is the always-safe base and needs no release.
+      var respond = !!(d.plan && d.plan.respond === true);
+      VUI.mount(actions, monSettingsActions(g, actions, respond));
       body.push(actions);
     }
     return h("div.card.cust-mon-settings-card", { dataset: { host: String(g.host) } }, body);
   }
   // A manager's controls for one armed host: shorten the armed window (re-arm, same mode, a shorter window the server
-  // caps), RE-ARM it to the full standard window (AS-21a, below), and turn the host off (confirmed in place first, like
-  // the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host), and every
-  // action is an addEventListener, never an inline handler. Re-arm sits in its OWN row (cust-mon-rearm), so the window
-  // controls (cust-mon-actions) are byte-identical to AS-2k.
-  function monSettingsActions(g, holder) {
+  // caps), RE-ARM it to the full standard window (AS-21a), RELEASE it into enforce (AS-29, below — only when the plan
+  // entitles Respond and the host is still in the always-safe Observe base), and turn the host off (confirmed in place
+  // first, like the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host),
+  // and every action is an addEventListener, never an inline handler. Re-arm and Release to enforce each sit in their
+  // OWN row, so the window controls (cust-mon-actions) are byte-identical to AS-2k.
+  function monSettingsActions(g, holder, respond) {
     var input = h("input.cust-mon-window", { type: "number", min: "1", step: "1", inputmode: "numeric",
       "aria-label": "Armed window in days for " + String(g.host) });
-    return [
+    var rows = [
       h("label.cust-field", {}, [h("span", { text: "Armed window (days)" }), input]),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Shorten window", function (b) { monShortenWindow(g, input, b); }, "primary"),
-        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder); }, "danger"),
+        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder, respond); }, "danger"),
       ]),
       // AS-21a retest guard: re-arm (renew) this host's authority to the full standard window — the privilege-raising
       // counterpart to Shorten window, so it is GUARDED (asked in place first, like Turn off) before anything is sent.
-      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder); })),
+      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder, respond); })),
     ];
+    // AS-29 ENFORCE RELEASE: the deliberate, guarded control that RELEASES a host from the always-safe Observe base into
+    // enforce (Respond) — AEGIS begins BLOCKING confirmed attacks, not only reporting them. Shown only when the plan
+    // ENTITLES Respond (respond === true, strict) AND the host is still in Observe (there is nothing to release once it
+    // already enforces). It is the mode-raising counterpart to AS-21a's window-raising Re-arm. Standing a host back down
+    // to Observe stays on the Monitoring screen, so this adds exactly one new settings control, in its own row.
+    if (respond === true && g.mode === "observe") {
+      rows.push(h("div.cust-mon-enforce", {},
+        monSettingsButton("Release to enforce", function () { monSettingsConfirmReleaseEnforce(g, holder, respond); })));
+    }
+    return rows;
   }
   async function monShortenWindow(g, input, btn) {
     clearErr();
@@ -2920,13 +2934,13 @@
     } catch (e) { btn.disabled = false; await monFailed(e); }
   }
   // Turning a host off is asked here first, in place of its controls; nothing is sent until it is confirmed.
-  function monSettingsConfirmOff(g, holder) {
+  function monSettingsConfirmOff(g, holder, respond) {
     VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
       h("p", { text: "Stop monitoring " + g.host + "? Its traffic then passes through AEGIS uninspected, and attacks "
         + "on it are no longer reported." }),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Yes, turn off", function (b) { monSettingsTurnOff(g.host, b); }, "danger"),
-        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
       ]),
     ]));
   }
@@ -2946,14 +2960,14 @@
   // clamped to the plan period), and the re-authorize re-checks that the host's proof of control is still current (a
   // lapsed proof is refused, surfaced honestly). Because it LENGTHENS the armed window, it is guarded: asked in place
   // first, like Turn off, and nothing is sent until it is confirmed. CSP-safe: addEventListener, never an inline handler.
-  function monSettingsConfirmReArm(g, holder) {
+  function monSettingsConfirmReArm(g, holder, respond) {
     VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Re-arm monitoring" }, [
       h("p", { text: "Re-arm " + g.host + "? This renews its monitoring to VIGIL's full standard window from now, in "
         + "the same mode, and confirms its proof of control is still current. VIGIL never extends it beyond that "
         + "standard length." }),
       h("div.cust-mon-actions", {}, [
         monSettingsButton("Yes, re-arm", function (b) { monReArm(g, b); }, "primary"),
-        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
       ]),
     ]));
   }
@@ -2965,6 +2979,38 @@
       // renews it to the SERVER window (never longer). The ORG is the session's at the edge (never a body field).
       await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: g.mode });
       VUI.toast("Monitoring for " + g.host + " was re-armed.");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // AS-29 — ENFORCE RELEASE. The deliberate, guarded control that RELEASES a host from the always-safe Observe base into
+  // enforce (Respond): AEGIS stops only reporting confirmed attacks on it and begins BLOCKING them. It reuses the SAME
+  // monitoring/authorize write in the enforce mode ("block") with NO window_s — so the sovereign keeps the armed window
+  // within its cap (config.MONITORING_WINDOW_SECONDS, clamped to the plan period) and the host keeps its place; it mints
+  // no new authority and opens no new route. Enforce is RELEASE-GATED: the sovereign admits it only for a plan that
+  // entitles Respond (a plan without it is refused, surfaced honestly via monFailed), so the control is shown only for
+  // such a plan and only while the host is still in Observe. Because it RAISES enforcement (live blocking), it is guarded
+  // like Turn off: asked in place first, nothing sent until confirmed; a lost session or step-up changes nothing.
+  // Standing a host back DOWN to Observe stays on the Monitoring screen (Switch to Observe). CSP-safe: addEventListener.
+  function monSettingsConfirmReleaseEnforce(g, holder, respond) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Release to enforce" }, [
+      h("p", { text: "Release " + g.host + " to enforce? AEGIS will begin BLOCKING confirmed attacks on it, not only "
+        + "reporting them. Its armed window and proof of control are unchanged, and you can switch it back to Observe "
+        + "on the Monitoring screen at any time." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, release to enforce", function (b) { monReleaseEnforce(g, b); }, "primary"),
+        monSettingsButton("Keep observing", function () { VUI.mount(holder, monSettingsActions(g, holder, respond)); }),
+      ]),
+    ]));
+  }
+  async function monReleaseEnforce(g, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write — re-authorized in the ENFORCE mode ("block") with NO window_s, so the
+      // sovereign keeps the armed window within its cap (never extended) and the host keeps its place. The ORG is the
+      // session's at the edge (never a body field); enforce is refused unless the plan entitles Respond.
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: "block" });
+      VUI.toast("Monitoring for " + g.host + " is now enforcing (Respond).");
       if (here() === "#/monitoring/settings") render();
     } catch (e) { btn.disabled = false; await monFailed(e); }
   }

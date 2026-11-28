@@ -387,6 +387,7 @@
                    "Each host shows the mode it is in and how long its authority stays armed before it must be renewed.",
                    "Select Shorten window to re-arm a host for a shorter time. VIGIL never extends a window beyond its standard length.",
                    "Select Re-arm, then Yes, re-arm, to renew a host to the full standard window from now, in the same mode — its proof of control is re-checked, and the window is never extended beyond that standard length.",
+                   "On an AEGIS Respond plan, a host you are watching in Observe shows Release to enforce. Select it, then Yes, release to enforce, to have AEGIS begin blocking confirmed attacks on it — its armed window is unchanged, and you can switch it back to Observe on the Monitoring screen at any time.",
                    "Select Turn off here, then Yes, turn off, to stop monitoring a host — the same as on the Monitoring screen."],
           why: "A shorter armed window is least-privilege: the monitoring authority auto-expires sooner, and you re-arm it to full length when you choose. It changes nothing a manager cannot already do on the Monitoring screen." },
       ],
