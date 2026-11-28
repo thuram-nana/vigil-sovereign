@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from .capacity import CapacityBudget, CapacityGovernor
     from .coraza_source import CorazaAttestationMeter, CorazaCorpus
     from .detection_kit import DetectionKit, DetectionKitMeter
+    from .detection_mirror import DetectionMirrorMeter
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
@@ -257,6 +258,27 @@ def _kit_flag() -> bool:
     return (os.environ.get(KIT_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-31 (detection mirror): the default-OFF switch for the deterministic read-only DETECTION MIRROR — a reflected,
+# metadata-only view of the detection posture that unifies the AS-30 detection SOURCE catalog (the provider
+# inventory), the AS-7b detection CONTENT admissibility (the Coraza/CRS attestation + its admit gate), and the AS-3b
+# AS-2e output-hygiene leak gate. Kept in LOCKSTEP with ``detection_mirror.DETECTION_MIRROR_ENV`` (a test asserts
+# they match) and read here directly so the detection_mirror module (and, through it, provider_runtime /
+# coraza_source / monitoring_event_v2 / vigil_core) is NOT eagerly import-reachable from the gateway (it is imported
+# only when the flag is on AND its dependency — the AS-7b Coraza attestation meter — exists).
+DETECTION_MIRROR_ENV = "VIGIL_AEGIS_DETECTION_MIRROR"
+
+
+def _detection_mirror_flag() -> bool:
+    """AS-31 detection-mirror switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the mirror at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The mirror is ALSO inert
+    whenever its dependency — the AS-7b Coraza attestation (``VIGIL_AEGIS_CORAZA`` + a configured CRS corpus) — is
+    off; the AS-30 inventory and the AS-3b hygiene gate are flagless pure functions, so there is no further dep
+    flag to arm."""
+    import os
+    return (os.environ.get(DETECTION_MIRROR_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -440,6 +462,21 @@ class GatewaySettings:
             from .detection_kit import DetectionKitMeter
             from .license_gate import load_ledger
             self.kit_meter = DetectionKitMeter(detection_kit, ledger=load_ledger())
+        # AS-31 (detection mirror) — the deterministic, READ-ONLY reflection of the detection posture: the AS-30
+        # detection SOURCE catalog (the provider inventory) × the AS-7b detection CONTENT admissibility (the Coraza
+        # attestation + its admit gate), surfaced address-free / hygiene-clean (AS-3b) and read-only on the AS-5c
+        # probe snapshot. Built ONCE, only when the default-OFF VIGIL_AEGIS_DETECTION_MIRROR flag is on at
+        # construction AND the AS-7b Coraza meter — its DEPENDENCY — exists (there is no detection content to mirror
+        # otherwise). It holds NO mutable state and NEVER mutates the inventory, the licence ledger, or the corpus:
+        # it only READS. It MEASURES / REFLECTS and never acts — a mirrored detection hit is a LEAD, never a block
+        # (only a fired oracle blocks), and it drives no admit/shed/allow/block decision. OFF (or the AS-7b dep off)
+        # ⇒ no meter is built, nothing is computed, and the gateway data path (and the probe snapshot) are
+        # byte-identical. Importing the module lazily here keeps it (and, through it, provider_runtime / coraza_source
+        # / monitoring_event_v2) OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        self.detection_mirror_meter: "DetectionMirrorMeter | None" = None
+        if _detection_mirror_flag() and self.coraza_meter is not None and coraza_corpus is not None:
+            from .detection_mirror import DetectionMirrorMeter
+            self.detection_mirror_meter = DetectionMirrorMeter(self.coraza_meter, coraza_corpus.rule_ids)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -586,6 +623,18 @@ class GatewaySettings:
             if km is not None and self.kit_active:
                 snap["kit_active"] = True
                 snap["kit"] = km.snapshot()
+        except Exception:
+            pass
+        # AS-31 (detection mirror): surface the deterministic read-only reflection of the detection posture — the
+        # cataloged detection sources (AS-30) × the detection content admissibility + admissible leads (AS-7b),
+        # address-free and hygiene-clean (AS-3b) — ONLY when the meter is active, so a gateway without the feature
+        # answers a probe byte-identically. Metadata only (counts + tokens + a digest, no address, no secret). It
+        # REFLECTS, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            dm = self.detection_mirror_meter
+            if dm is not None and self.detection_mirror_active:
+                snap["detection_mirror_active"] = True
+                snap["detection_mirror"] = dm.snapshot()
         except Exception:
             pass
         return snap
@@ -768,6 +817,17 @@ class GatewaySettings:
         corpus — was configured) AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing
         the attestation live. Read-only / observational: it never gates enforcement (a kit rule_ref is a LEAD)."""
         return self.kit_meter is not None and _kit_flag()
+
+    @property
+    def detection_mirror_active(self) -> bool:
+        """Is the AS-31 detection mirror active for THIS snapshot? Only when the meter was built (the default-OFF
+        VIGIL_AEGIS_DETECTION_MIRROR flag was on at construction AND the AS-7b Coraza meter exists) AND the flag is
+        STILL on AND its DEPENDENCY (the AS-7b Coraza attestation, ``coraza_active``) is STILL active — so flipping
+        EITHER the detection-mirror or the coraza flag off at runtime stops surfacing the mirror live. Read-only /
+        observational: it never gates enforcement (a mirrored detection hit is a LEAD, never a block)."""
+        return (self.detection_mirror_meter is not None
+                and _detection_mirror_flag()
+                and self.coraza_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
