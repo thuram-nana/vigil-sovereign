@@ -708,38 +708,89 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .live-step-l { flex: 1; }
 
 /* =====================================================================================================================
-   CONSUMER FRONT-END WAVE — deep TRUE-BLACK theme + the Overview hero (globe + CVE feed), the Knowledge screen, the
-   Security assistant and the team-invite UI. The deep-black palette is applied HERE (scoped to the customer plane and
-   the DARK theme only) rather than in the byte-shared tokens.css, so the operator console, the shared kit and the
-   light theme are untouched. In light mode the tokens inherit the kit's light palette (no duplicated hex values).
+   CONSUMER FRONT-END WAVE — richer TRUE-BLACK + MONOCHROME-WHITE theme, the Overview hero (spinning globe + live
+   signal counter + CVE feed), the Knowledge screen, the Security assistant and the team-invite UI. The palette is
+   applied HERE (scoped to the customer plane and the DARK theme only) rather than in the byte-shared tokens.css, so
+   the operator console, the shared kit and the light theme are untouched. Colour is kept ONLY for real severity
+   (red = critical, amber = high, grey = medium / low / info); every decorative / success green or accent blue is
+   neutralised to white or grey by overriding its TOKEN (so every downstream usage follows). In light mode the tokens
+   inherit the kit's light palette (no duplicated hex values).
    ===================================================================================================================== */
 body[data-plane="customer"] {
-  --bg-0: #050507;   /* app background — near-pure black */
-  --bg-1: #0a0b0e;   /* panels / cards */
-  --bg-2: #0f1116;   /* raised */
-  --bg-3: #161922;   /* hover / inputs */
+  --bg-0: #060709;   /* app background — rich near-black */
+  --bg-1: #0a0c0f;   /* panels / cards */
+  --bg-2: #0f1216;   /* raised */
+  --bg-3: #161a20;   /* hover / inputs */
+  --border: rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .12);
+  --text-0: #f6f7f9;
+  --text-1: #b6bbc3;
+  --text-2: #797f89;
+  /* monochrome white: no decorative/success green, no accent blue */
+  --ok: #e9ebee;             /* "verified / on" reads bright-neutral, never green */
+  --st-confirmed: #e9ebee;   /* a proven FACT: bright white, not green */
+  --st-running: #b6bbc3;     /* running / active / links / focus: neutral grey, not blue */
+  --sev-medium: #8b919b;     /* medium severity: NEUTRAL GREY (not green / yellow-green) */
+  --sev-low: #797f89;
+  --sev-info: #797f89;
   background: var(--bg-0);
 }
+.cust-topbar { background: #08090b; }   /* the rail sits a touch deeper than the content column */
+/* light mode: every overridden token falls back to the kit's light value (no duplicated hex here) */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) body[data-plane="customer"] {
-    --bg-0: inherit; --bg-1: inherit; --bg-2: inherit; --bg-3: inherit;     /* light stays the kit's */
+    --bg-0: inherit; --bg-1: inherit; --bg-2: inherit; --bg-3: inherit;
+    --border: inherit; --border-strong: inherit; --text-0: inherit; --text-1: inherit; --text-2: inherit;
+    --ok: inherit; --st-confirmed: inherit; --st-running: inherit;
+    --sev-medium: inherit; --sev-low: inherit; --sev-info: inherit;
   }
+  :root:not([data-theme="dark"]) body[data-plane="customer"] .cust-topbar { background: var(--bg-1); }
 }
 :root[data-theme="light"] body[data-plane="customer"] {
   --bg-0: inherit; --bg-1: inherit; --bg-2: inherit; --bg-3: inherit;
+  --border: inherit; --border-strong: inherit; --text-0: inherit; --text-1: inherit; --text-2: inherit;
+  --ok: inherit; --st-confirmed: inherit; --st-running: inherit;
+  --sev-medium: inherit; --sev-low: inherit; --sev-info: inherit;
 }
+:root[data-theme="light"] body[data-plane="customer"] .cust-topbar { background: var(--bg-1); }
 
-/* ---- Overview hero: the dotted globe + the live CVE feed ---------------------------------------------------------- */
+/* ---- provider marks on the connect buttons / cloud tiles --------------------------------------------------------- */
+.cust-provider-mark { width: 18px; height: 18px; display: inline-block; flex: 0 0 auto; vertical-align: -4px; }
+.btn .cust-provider-mark { margin-right: 6px; }
+.cust-asset-head .cust-provider-mark { margin-right: 6px; align-self: center; }
+.cust-provider-row { display: flex; align-items: center; gap: 8px; }
+.cust-provider-row select { flex: 1; }
+.cust-provider-pick { display: inline-flex; align-items: center; justify-content: center; width: 20px; }
+
+/* ---- brand lockup: the real VIGIL mark ahead of the wordmark ----------------------------------------------------- */
+.vg-brand { display: inline-flex; align-items: center; gap: 8px; color: var(--text-0); text-decoration: none; }
+.vg-mark-wrap { display: inline-flex; align-items: center; color: var(--text-0); }
+.vg-mark { width: 24px; height: 22px; display: block; }
+.cust-mtop .vg-mark { width: 21px; height: 19px; }
+
+/* ---- Overview hero: the spinning wireframe globe + the live CVE feed ---------------------------------------------- */
 .cust-ov-hero {
   display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 24px; align-items: center;
   margin-bottom: 24px; padding: 20px; border: 1px solid var(--border); border-radius: var(--r-3, 16px);
   background:
-    radial-gradient(120% 140% at 18% 20%, color-mix(in srgb, var(--st-running) 10%, transparent), transparent 60%),
+    radial-gradient(120% 140% at 18% 18%, rgba(255, 255, 255, .045), transparent 58%),
     var(--bg-1);
   overflow: hidden;
 }
-.cust-ov-hero-globe { display: flex; justify-content: center; align-items: center; }
-.cust-globe { width: 100%; max-width: 340px; height: auto; aspect-ratio: 1 / 1; display: block; }
+.cust-ov-hero-globe { position: relative; display: flex; justify-content: center; align-items: center; }
+/* a fixed square display box (the backing store is 440x440); avoids the aspect-ratio/flex clip that showed only a dome */
+.cust-globe { width: 320px; height: 320px; max-width: 100%; display: block; color: #fff; }
+@media (max-width: 760px) { .cust-globe { width: 260px; height: 260px; } }
+/* the live network-activity badge over the globe: a rotating, comma-formatted counter (monochrome white) */
+.cust-globe-badge { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%);
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 11px; border-radius: var(--r-pill, 999px);
+  background: rgba(10, 12, 15, .6); border: 1px solid var(--border); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.cust-globe-n { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text-0); font-size: var(--fs-sm, 14px); }
+.cust-globe-l { font-size: var(--fs-micro, 11px); letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); }
+.cust-globe-dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; align-self: center;
+  box-shadow: 0 0 6px rgba(255, 255, 255, .8); animation: cust-globe-pulse 2.4s ease-in-out infinite; }
+@keyframes cust-globe-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cust-globe-dot { animation: none; opacity: .9; } }
 .cust-ov-kicker { font-size: var(--fs-micro, 11px); letter-spacing: var(--tracking-label, .08em); text-transform: uppercase;
   color: var(--text-2); margin: 0 0 6px; }
 .cust-ov-hero-title { margin: 0 0 8px; font-size: var(--fs-3xl, 40px); line-height: var(--lh-tight, 1.2); color: var(--text-0); }
@@ -747,7 +798,7 @@ body[data-plane="customer"] {
 .cust-cve { border-top: 1px solid var(--border); padding-top: 12px; }
 .cust-cve-head { display: flex; align-items: center; gap: 8px; color: var(--text-1); font-size: var(--fs-sm, 14px);
   font-weight: 600; margin-bottom: 8px; }
-.cust-cve-head .glyph { color: var(--st-running); }
+.cust-cve-head .glyph { color: var(--text-0); }
 .cust-cve-list { display: grid; gap: 4px; }
 .cust-cve-row { display: grid; grid-template-columns: auto auto auto 1fr; gap: 10px; align-items: baseline;
   padding: 6px 8px; border-radius: var(--r-1, 8px); text-decoration: none; color: var(--text-1);

@@ -67,6 +67,27 @@ code, kbd, pre { font-family: var(--font-mono); }
 .hero .btn-row { margin-top: var(--sp-5); }
 @media (max-width: 640px) { .hero h1 { font-size: var(--fs-2xl); } }
 
+/* -- brand mark (the real VIGIL "V" + tag, ahead of the wordmark) ------------ */
+.vg-mark-wrap { display: inline-flex; align-items: center; color: var(--text-0); }
+.vg-mark-wrap svg { width: 24px; height: 22px; display: block; }
+
+/* -- hero: the spinning wireframe globe + the live network-activity counter -- */
+.hero__wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: var(--sp-6); align-items: center; }
+.hero__text { min-width: 0; }
+.hero__globe { position: relative; display: flex; align-items: center; justify-content: center; min-height: 360px; }
+.hero__globe-canvas { width: 100%; max-width: 440px; height: auto; aspect-ratio: 1 / 1; display: block; color: #fff; }
+.hero__signal { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: inline-flex;
+  align-items: baseline; gap: 7px; padding: 6px 13px; border-radius: var(--r-pill, 999px);
+  background: rgba(8, 9, 11, .6); border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.hero__signal-dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; align-self: center;
+  box-shadow: 0 0 6px rgba(255, 255, 255, .8); animation: vg-signal-pulse 2.4s ease-in-out infinite; }
+.hero__signal-n { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text-0); font-size: var(--fs-sm); }
+.hero__signal-l { font-size: var(--fs-micro); letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); }
+@keyframes vg-signal-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .hero__signal-dot { animation: none; opacity: .9; } }
+@media (max-width: 900px) { .hero__wrap { grid-template-columns: 1fr; } .hero__globe { min-height: 280px; max-width: 360px; margin: 0 auto; } }
+
 /* -- generic grid + cards --------------------------------------------------- */
 .grid { display: grid; gap: var(--sp-4); }
 .grid--3 { grid-template-columns: repeat(3, 1fr); }

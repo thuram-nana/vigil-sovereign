@@ -327,6 +327,37 @@
       [googleMark(), h("span", { text: "Continue with Google" })]);
     return h("div.cust-google-block", {}, [btn, h("div.cust-or", {}, h("span", { text: "or use your email" }))]);
   }
+  // Official provider marks for the connect buttons/tiles, built as DOM (CSP-clean: no innerHTML, no remote image).
+  // Each follows the provider's brand usage: GitHub's Octocat monochrome (white via currentColor on the dark theme),
+  // AWS in its orange smile, Azure in its blues, Google Cloud in Google blue, Cloudflare in its orange. Returns null
+  // where there is no SVG DOM (the connect-screen unit harness), so the button falls back to its text label unchanged.
+  var PROVIDER_MARK = {
+    github: ["0 0 16 16", [["M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z", "currentColor"]]],
+    aws: ["0 0 24 24", [["M4 13.4c3.6 3.4 12.4 3.4 16-.1", "none", "#FF9900", "2.2"],
+      ["M20 13.3l-2.5-.2 1.7-1.9z", "#FF9900"]]],
+    azure: ["0 0 24 24", [["M11.4 3.6 5 19.2h4.1L13.5 7z", "#0078D4"],
+      ["M9.7 11 4.4 20.4H20L15.9 15l-6.6 1.2L12.3 11z", "#50E6FF"]]],
+    gcp: ["0 0 24 24", [["M12 6.3c2 0 3.7 1.2 4.4 3 .3-.1.6-.1.9-.1 2 0 3.6 1.6 3.6 3.6S19.3 16.4 17.3 16.4H7.4C5 16.4 3 14.4 3 12s2-4.4 4.4-4.4c.3 0 .6 0 .9.1.8-.9 1.9-1.4 3.7-1.4z", "#4285F4"]]],
+    cloudflare: ["0 0 24 24", [["M17.6 17.4H6.9c-2 0-3.6-1.6-3.6-3.6 0-1.8 1.3-3.3 3.1-3.6.1-2.5 2.2-4.5 4.8-4.5 2.1 0 3.9 1.4 4.6 3.3.4-.2.9-.3 1.4-.3 1.8 0 3.3 1.5 3.3 3.3 0 .2 0 .4-.1.6l-6.4 1.1-.3 2 4.1.1z", "#F38020"]]],
+  };
+  function providerMark(key) {
+    try {
+      if (!document.createElementNS) { return null; }
+      var spec = PROVIDER_MARK[String(key || "").toLowerCase()];
+      if (!spec) { return null; }
+      var svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("viewBox", spec[0]); svg.setAttribute("width", "18"); svg.setAttribute("height", "18");
+      svg.setAttribute("aria-hidden", "true"); svg.setAttribute("class", "cust-provider-mark");
+      spec[1].forEach(function (p) {
+        var el = document.createElementNS(SVG_NS, "path");
+        el.setAttribute("d", p[0]);
+        el.setAttribute("fill", p[1]);
+        if (p[2]) { el.setAttribute("stroke", p[2]); el.setAttribute("stroke-width", p[3] || "2"); el.setAttribute("stroke-linecap", "round"); }
+        svg.appendChild(el);
+      });
+      return svg;
+    } catch (e) { return null; }
+  }
   function startGoogle() {
     clearErr();
     if (handoffOn()) { startHandoff(); return; }
@@ -883,17 +914,23 @@
     ]));
   }
 
-  // ---- the Overview hero: a deep-black dotted globe (canvas) + a live CVE feed ------------------------------------
-  // CSP-clean: the canvas is drawn by this file's own code (no inline script), the CVE rows are set with textContent
-  // (never innerHTML), and /api/cve is a SAME-ORIGIN read of the public catalog the edge serves. The globe degrades to
-  // nothing where there is no 2d canvas (the unit harness), and the feed degrades to a quiet line if the read fails.
+  // ---- the Overview hero: a rich spinning wireframe globe + a live signal counter + a live CVE feed ----------------
+  // CSP-clean: the canvas is drawn by this file's own code (no inline script), the counter and the CVE rows are set
+  // with textContent (never innerHTML), and /api/cve is a SAME-ORIGIN read of the public catalog the edge serves.
+  // Monochrome white; both animations stop when the hero leaves the DOM and settle under prefers-reduced-motion. The
+  // globe/counter degrade to nothing where there is no 2d canvas / DOM (the unit harness); the feed degrades to a
+  // quiet line if the read fails.
   function overviewHero() {
-    var canvas = h("canvas.cust-globe", { width: "480", height: "480", "aria-hidden": "true" });
+    var canvas = h("canvas.cust-globe", { width: "440", height: "440", "aria-hidden": "true" });
     try { custGlobe(canvas); } catch (e) { /* no canvas context (unit harness): the hero still shows its copy + feed */ }
+    var nEl = h("span.cust-globe-n", { text: "1,200" });
+    try { custSignalCounter(nEl); } catch (e) { /* no DOM/timers: the counter shows a settled value */ }
+    var badge = h("div.cust-globe-badge", { "aria-hidden": "true" },
+      [h("span.cust-globe-dot"), nEl, h("span.cust-globe-l", { text: "live signals" })]);
     var cve = h("div.cust-cve-feed", {}, loadingHolder("Loading CVE feed…"));
     loadCveFeed(cve);
     return h("div.cust-ov-hero", {}, [
-      h("div.cust-ov-hero-globe", {}, canvas),
+      h("div.cust-ov-hero-globe", {}, [canvas, badge]),
       h("div.cust-ov-hero-body", {}, [
         h("p.cust-ov-kicker", { text: "VIGIL" }),
         h("h2.cust-ov-hero-title", { text: "Prove, don't guess." }),
@@ -905,6 +942,34 @@
         ]),
       ]),
     ]);
+  }
+  // A live, rotating "network activity" counter: an ambient enterprise-scale number that changes every few seconds
+  // with a short ease-out count animation, comma-formatted (en-US). It is a generic network-activity visual, never a
+  // per-workspace guarantee. Pure textContent; stops when detached; settles to a steady value under reduced-motion.
+  function custSignalCounter(nEl) {
+    if (!nEl) { return; }
+    var pool = [10, 20, 80, 120, 300, 500, 800, 1200, 1500, 2000, 3000, 5000, 7500, 10000];
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion:reduce)").matches); } catch (e) { reduce = false; }
+    function put(v) {
+      var n = Math.round(v);
+      try { nEl.textContent = n.toLocaleString("en-US"); } catch (e) { nEl.textContent = String(n); }
+    }
+    if (reduce) { put(1500); return; }                  // a settled value, no animation
+    var now = function () { return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now(); };
+    var raf = window.requestAnimationFrame || function (f) { return setTimeout(function () { f(); }, 16); };
+    var cur = 1200, from = 1200, to = 1200, t0 = now(), dur = 900, dueAt = now() + 1500, stopped = false;
+    put(cur);
+    function pick() { var v = pool[Math.floor(Math.random() * pool.length)]; return v === to ? pool[(pool.indexOf(v) + 3) % pool.length] : v; }
+    function tick() {
+      if (stopped || nEl.isConnected === false) { stopped = true; return; }
+      var t = now();
+      if (t >= dueAt) { from = to; to = pick(); t0 = t; dueAt = t + 2600 + Math.random() * 1600; }   // next every 2.6-4.2s
+      var p = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - p, 3);   // ease-out cubic over ~0.9s
+      cur = from + (to - from) * e; put(cur);
+      raf(tick);
+    }
+    raf(tick);     // defer: nEl is still detached when this runs during render (a synchronous tick would stop at once)
   }
   // A paginated read of the public CVE catalog, newest first; rows are set with textContent only.
   async function loadCveFeed(holder) {
@@ -930,83 +995,63 @@
       return row;
     })));
   }
-  // A lightweight rotating dotted globe with a few great-circle arc paths. Pure canvas 2d, requestAnimationFrame.
-  // Guarded so it is inert where there is no DOM/canvas (the extracted-function unit tests): it throws, the caller
-  // swallows it, and the hero still renders its copy and the CVE feed.
+  // A rich wireframe globe: a faint lat/long graticule (back half depth-culled), a depth-shaded point field, pulsing
+  // hub nodes, great-circle arcs each with a travelling bright pulse, and a soft rim atmosphere. Pure canvas 2d,
+  // monochrome white, DPR-aware. Returns inert where there is no 2d context (the unit harness); stops when detached;
+  // holds still under prefers-reduced-motion.
   function custGlobe(canvas) {
     var ctx = canvas && canvas.getContext && canvas.getContext("2d");
-    if (!ctx) { throw new Error("no 2d context"); }
-    var W = canvas.width, H = canvas.height, R = Math.min(W, H) * 0.42, cx = W / 2, cy = H / 2;
-    // a grid of lat/long points on the unit sphere
-    var pts = [];
-    for (var la = -80; la <= 80; la += 12) {
-      var rl = la * Math.PI / 180, step = Math.max(8, Math.round(24 * Math.cos(rl)));
-      for (var lo = 0; lo < 360; lo += 360 / step) {
-        var ro = lo * Math.PI / 180;
-        pts.push([Math.cos(rl) * Math.cos(ro), Math.sin(rl), Math.cos(rl) * Math.sin(ro)]);
-      }
-    }
-    // a few arc paths (great-circle-ish) that pulse along the surface, like connecting routes
-    var arcs = [];
-    for (var a = 0; a < 5; a++) {
-      var p0 = pts[(a * 53) % pts.length], p1 = pts[(a * 97 + 11) % pts.length];
-      arcs.push([p0, p1, a * 1.7]);
-    }
-    var t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
-    var raf = window.requestAnimationFrame || function (f) { return setTimeout(function () { f(Date.now()); }, 32); };
-    function slerp(p, q, u) {
-      var d = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
-      d = Math.max(-1, Math.min(1, d));
-      var om = Math.acos(d) || 1e-4, s = Math.sin(om);
-      var k0 = Math.sin((1 - u) * om) / s, k1 = Math.sin(u * om) / s;
-      var x = k0 * p[0] + k1 * q[0], y = k0 * p[1] + k1 * q[1], z = k0 * p[2] + k1 * q[2];
-      var n = Math.sqrt(x * x + y * y + z * z) || 1;
-      return [x / n, y / n, z / n];
-    }
-    function css(name, fallback) {
-      try {
-        var v = getComputedStyle(document.documentElement).getPropertyValue(name);
-        return (v && v.trim()) || fallback;
-      } catch (e) { return fallback; }
-    }
-    var stopped = false;
-    function frame(now) {
-      if (stopped || !canvas.isConnected) { stopped = true; return; }       // the screen was left: stop the loop
-      var ang = ((now - t0) / 1000) * 0.28;                                 // a slow, calm spin
-      var ca = Math.cos(ang), sa = Math.sin(ang);
+    if (!ctx) { return; }
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion:reduce)").matches); } catch (e) { reduce = false; }
+    // A FIXED square backing store (the canvas carries width/height attributes); CSS scales the display down. This
+    // avoids any dependency on the grid/flex layout's computed box, so the full sphere always renders (never a dome).
+    if (!(canvas.width > 1)) { canvas.width = 440; } if (!(canvas.height > 1)) { canvas.height = 440; }
+    var W = canvas.width, H = canvas.height, R = Math.min(W, H) * 0.44, cx = W / 2, cy = H / 2;
+    var tilt = -0.42, ct = Math.cos(tilt), st = Math.sin(tilt);
+    function rot3(p, a) { var x = p[0] * Math.cos(a) + p[2] * Math.sin(a), z = -p[0] * Math.sin(a) + p[2] * Math.cos(a), y = p[1]; return [x, y * ct - z * st, y * st + z * ct]; }
+    function proj(p, a) { var q = rot3(p, a); return [cx + q[0] * R, cy + q[1] * R, q[2]]; }
+    function sph(lat, lon) { var cl = Math.cos(lat); return [cl * Math.cos(lon), Math.sin(lat), cl * Math.sin(lon)]; }
+    var N = 560, pts = [];
+    for (var i = 0; i < N; i++) { var y = 1 - (i / (N - 1)) * 2; var rad = Math.sqrt(1 - y * y); var th = i * 2.399963; pts.push([Math.cos(th) * rad, y, Math.sin(th) * rad]); }
+    var parallels = [-60, -30, 0, 30, 60].map(function (d) { return d * Math.PI / 180; });
+    var meridians = []; for (var m = 0; m < 12; m++) { meridians.push(m / 12 * Math.PI * 2); }
+    var hubs = [sph(0.71, -2.0), sph(0.18, -0.4), sph(0.62, 1.1), sph(-0.35, 0.3), sph(0.05, 2.4), sph(-0.55, -1.3), sph(0.4, -3.0)];
+    var arcs = [[0, 1], [1, 2], [1, 3], [3, 4], [0, 5], [2, 6]].map(function (p, ix) { return { a: hubs[p[0]], b: hubs[p[1]], ph: ix * 0.17 }; });
+    function slerp(a, b, t) { var d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; d = Math.max(-1, Math.min(1, d)); var om = Math.acos(d); if (om < 1e-4) { return a; } var s = Math.sin(om), s0 = Math.sin((1 - t) * om) / s, s1 = Math.sin(t * om) / s; return [a[0] * s0 + b[0] * s1, a[1] * s0 + b[1] * s1, a[2] * s0 + b[2] * s1]; }
+    var rot = 0, tk = 0, stopped = false;
+    var raf = window.requestAnimationFrame || function (f) { return setTimeout(function () { f(); }, 32); };
+    function frame() {
+      if (stopped || canvas.isConnected === false) { stopped = true; return; }       // detached: stop the loop
       ctx.clearRect(0, 0, W, H);
-      // a faint rim glow so the near-black sphere reads as "shining", not flat
-      var glow = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, R * 1.15);
-      glow.addColorStop(0, "rgba(91,155,213,0.10)");
-      glow.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, R * 1.15, 0, Math.PI * 2); ctx.fill();
-      var dot = css("--st-running", "#5b9bd5"), faint = css("--text-2", "#626c7c");
-      function project(p) {
-        var x = p[0] * ca + p[2] * sa, z = -p[0] * sa + p[2] * ca, y = p[1];
-        return [cx + x * R, cy - y * R, z];                                 // z>0 faces the viewer
+      var g = ctx.createRadialGradient(cx, cy, R * 0.74, cx, cy, R * 1.12);
+      g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(0.82, "rgba(255,255,255,0.05)"); g.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R * 1.12, 0, 7); ctx.fill();
+      ctx.lineWidth = 1;
+      parallels.forEach(function (lat) {
+        ctx.beginPath(); var s2 = false;
+        for (var lon = 0; lon <= Math.PI * 2 + 0.01; lon += 0.12) { var p = proj(sph(lat, lon), rot); if (p[2] < -0.02) { s2 = false; continue; } s2 ? ctx.lineTo(p[0], p[1]) : (ctx.moveTo(p[0], p[1]), s2 = true); }
+        ctx.strokeStyle = "rgba(255,255,255,0.09)"; ctx.stroke();
+      });
+      meridians.forEach(function (lon) {
+        ctx.beginPath(); var s3 = false;
+        for (var lat = -Math.PI / 2; lat <= Math.PI / 2 + 0.01; lat += 0.1) { var p = proj(sph(lat, lon), rot); if (p[2] < -0.02) { s3 = false; continue; } s3 ? ctx.lineTo(p[0], p[1]) : (ctx.moveTo(p[0], p[1]), s3 = true); }
+        ctx.strokeStyle = "rgba(255,255,255,0.055)"; ctx.stroke();
+      });
+      for (var i2 = 0; i2 < pts.length; i2++) { var pp0 = proj(pts[i2], rot); if (pp0[2] < -0.1) { continue; } var depth = (pp0[2] + 1) / 2; ctx.beginPath(); ctx.arc(pp0[0], pp0[1], 0.5 + depth * 1.25, 0, 7); ctx.fillStyle = "rgba(255,255,255," + (0.08 + depth * 0.6).toFixed(3) + ")"; ctx.fill(); }
+      for (var r2 = 0; r2 < arcs.length; r2++) {
+        var A = arcs[r2].a, B = arcs[r2].b;
+        ctx.beginPath(); for (var t = 0; t <= 1.0001; t += 0.035) { var pa = proj(slerp(A, B, t), rot); t === 0 ? ctx.moveTo(pa[0], pa[1]) : ctx.lineTo(pa[0], pa[1]); }
+        ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = 1; ctx.stroke();
+        var tp = ((tk * 0.004) + arcs[r2].ph) % 1; var pu = proj(slerp(A, B, tp), rot);
+        if (pu[2] > -0.05) { var gg = ctx.createRadialGradient(pu[0], pu[1], 0, pu[0], pu[1], 9); gg.addColorStop(0, "rgba(255,255,255,0.9)"); gg.addColorStop(1, "rgba(255,255,255,0)"); ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(pu[0], pu[1], 9, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(pu[0], pu[1], 1.7, 0, 7); ctx.fillStyle = "#fff"; ctx.fill(); }
       }
-      for (var i = 0; i < pts.length; i++) {
-        var pr = project(pts[i]);
-        var front = pr[2] > 0;
-        ctx.globalAlpha = front ? (0.35 + pr[2] * 0.5) : 0.08;
-        ctx.fillStyle = front ? faint : faint;
-        ctx.beginPath(); ctx.arc(pr[0], pr[1], front ? 1.5 : 1.0, 0, Math.PI * 2); ctx.fill();
-      }
-      for (var k = 0; k < arcs.length; k++) {
-        var seg = 26, head = ((now - t0) / 1000 * 0.35 + arcs[k][2]) % 1;
-        for (var j = 0; j < seg; j++) {
-          var u = j / (seg - 1);
-          var pp = project(slerp(arcs[k][0], arcs[k][1], u));
-          if (pp[2] <= 0) { continue; }
-          var near = 1 - Math.min(1, Math.abs(u - head) * 3);
-          ctx.globalAlpha = 0.12 + near * 0.7;
-          ctx.fillStyle = dot;
-          ctx.beginPath(); ctx.arc(pp[0], pp[1], 1.1 + near * 1.6, 0, Math.PI * 2); ctx.fill();
-        }
-      }
-      ctx.globalAlpha = 1;
-      raf(frame);
+      for (var hb = 0; hb < hubs.length; hb++) { var ph = proj(hubs[hb], rot); if (ph[2] < -0.05) { continue; } var d2 = (ph[2] + 1) / 2; var puls = 0.6 + 0.4 * Math.sin(tk * 0.05 + hb); var rd = 2.1 + d2 * 1.3; var hg = ctx.createRadialGradient(ph[0], ph[1], 0, ph[0], ph[1], rd * 5); hg.addColorStop(0, "rgba(255,255,255," + (0.4 * puls).toFixed(3) + ")"); hg.addColorStop(1, "rgba(255,255,255,0)"); ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(ph[0], ph[1], rd * 5, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(ph[0], ph[1], rd, 0, 7); ctx.fillStyle = "rgba(255,255,255,0.95)"; ctx.fill(); }
+      tk++; rot += 0.0018;
+      if (!reduce) { raf(frame); }     // reduced-motion: one static frame, no spin
     }
+    // Defer the first frame: custGlobe runs while the canvas is still detached (built, not yet mounted), so a
+    // synchronous first frame would see isConnected === false and stop at once. raf fires after the mount.
     raf(frame);
   }
 
@@ -3064,8 +3109,12 @@
     return h("div", {}, [h("div.cust-grid.cust-connect-tiles", {}, tiles), h("div#connect-flow")]);
   }
   function connectFlowBox() { return VUI.$("#connect-flow"); }
-  function connectButton(label, act, kind) {
-    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+  function connectButton(label, act, kind, mark) {
+    // `mark` (optional) is a provider SVG shown ahead of the label; null (the unit harness) renders text-only, so the
+    // button's textContent stays exactly the label either way.
+    var b = mark
+      ? h("button.btn" + (kind ? "." + kind : ""), { type: "button" }, [mark, h("span", { text: label })])
+      : h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
     b.addEventListener("click", function () { act(b); });
     return b;
   }
@@ -3293,7 +3342,7 @@
         }))
       : h("p.cust-muted", { text: "No repository connected yet." }));
     var acts = [];
-    if (av.repo_connect) acts.push(connectButton("Connect GitHub", function (b) { codeConnect(b); }, "primary"));
+    if (av.repo_connect) acts.push(connectButton("Connect GitHub", function (b) { codeConnect(b); }, "primary", (typeof providerMark === "function" ? providerMark("github") : null)));
     else body.push(h("p.cust-muted", { text: "Connecting GitHub is not available on this deployment yet. Contact VIGIL." }));
     acts.push(connectButton("Open Code", function () { nav("#/code"); }));
     body.push(h("div.cust-mon-actions", {}, acts));
@@ -3393,7 +3442,8 @@
     idle();
     var badge = { connected: ["verified", "✓ Connected (read-only)"], expired: ["expired", "⚠ Expired — connect again"],
       pending: ["pending", "… Not finished"] }[st];
-    var rows = [h("div.cust-asset-head", {}, [h("span.host", { text: name + " " + String(c.account_id) }),
+    var rows = [h("div.cust-asset-head", {}, [(typeof providerMark === "function" ? providerMark(c.provider) : null),
+      h("span.host", { text: name + " " + String(c.account_id) }),
       h("span.cust-badge.cust-badge-" + badge[0], { text: badge[1] })])];
     if (st === "pending") {
       rows.push(h("p.cust-muted", { text: "You started connecting this account. Continue to see the same steps again." }));
@@ -3455,16 +3505,19 @@
     offered.forEach(function (p) { sel.appendChild(h("option", { value: p, text: cloudProviderName(p) })); });
     var acctLabel = h("label", { for: "connect-cloud-account" });
     var acct = h("input#connect-cloud-account", { type: "text", autocomplete: "off", spellcheck: "false" });
+    var markHost = h("span.cust-provider-pick", { "aria-hidden": "true" });   // the chosen provider's mark, beside the picker
     function apply() {
       var cfg = cloudProvider(sel.value);
       acctLabel.textContent = cfg.acctLabel;
       acct.setAttribute("placeholder", cfg.acctPlaceholder);
       if (cfg.inputmode) acct.setAttribute("inputmode", cfg.inputmode); else acct.removeAttribute("inputmode");
+      VUI.clear(markHost); var mk = (typeof providerMark === "function" ? providerMark(sel.value) : null); if (mk) { markHost.appendChild(mk); }
     }
     sel.addEventListener("change", apply);
     apply();
     var card = [h("h3", { text: "Connect a cloud account" })];
-    if (offered.length > 1) { card.push(h("label", { for: "connect-cloud-provider", text: "Cloud provider" }), sel); }
+    if (offered.length > 1) { card.push(h("label", { for: "connect-cloud-provider", text: "Cloud provider" }),
+      h("div.cust-provider-row", {}, [markHost, sel])); }
     card.push(acctLabel, acct, h("div.cust-mon-actions", {},
       connectButton("Continue", function (b) { connectCloudStart(b, sel, acct); }, "primary")));
     VUI.mount(box, h("div.card", {}, card));
@@ -5164,9 +5217,22 @@
         .concat([h("a.cust-nav-link.cust-nav-trust", { href: "/trust" },
           [VUI.icon("shield"), h("span.cust-nav-label", { text: "Trust Center" })])])
       : [];
-    // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
+    // The VIGIL brand lockup: the real mark (the "V" with a hanging tag/seal, drawn with currentColor) + the VIGIL
+    // wordmark. The tag-hole takes the rail's own surface colour (#08090b). CSP-clean: static inline SVG markup, built
+    // once here so a harness that extracts shell() needs no extra symbol. The wordmark artwork is kept as-is (white on
+    // the dark theme, the dark artwork on the light one — components.css); only the mark is added ahead of it.
     var brandDark = { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" };
     var brandLight = { src: "brand/vigil-wordmark.svg", alt: "VIGIL", width: "99", height: "22" };
+    var _vgMark = '<svg class="vg-mark" viewBox="0 0 120 108" aria-hidden="true">'
+      + '<path d="M24 20 L60 90 L96 20" fill="none" stroke="currentColor" stroke-width="19" stroke-linejoin="round" stroke-linecap="round"/>'
+      + '<path d="M60 40 L60 56" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>'
+      + '<rect x="50" y="54" width="20" height="24" rx="5.5" fill="currentColor"/>'
+      + '<rect x="56" y="59" width="8" height="8" rx="2.2" fill="#08090b"/></svg>';
+    function vgBrand() {
+      return h("span.brand.vg-brand", { "aria-label": "VIGIL" }, [
+        h("span.vg-mark-wrap", { html: _vgMark }),
+        h("img.vigil-logo.for-dark", brandDark), h("img.vigil-logo.for-light", brandLight)]);
+    }
     // a read-only workspace identity at the top of the rail — NOT a switcher: this app serves the one workspace the
     // server scopes every read to (admit_customer); it shows only the session's own workspace, never a list to pick.
     var wsName = String(w.org_id || w.username || "Workspace");
@@ -5179,10 +5245,10 @@
       authed() ? h("div.cust-mtop", {}, [
         h("button.cust-burger", { type: "button", "aria-label": "Menu", onClick: function () { toggleDrawer(); } },
           [h("span.cust-burger-bars"), h("span.cust-sr-only", { text: "Menu" })]),
-        h("span.brand", {}, [h("img.vigil-logo.for-dark", brandDark), h("img.vigil-logo.for-light", brandLight)]),
+        vgBrand(),
       ]) : null,
       h("div.cust-topbar", {}, [
-        h("span.brand", {}, [h("img.vigil-logo.for-dark", brandDark), h("img.vigil-logo.for-light", brandLight)]),
+        vgBrand(),
         authed() ? h("div.cust-ws", {}, [
           h("span.cust-ws-mark", { text: (wsName.slice(0, 1) || "W").toUpperCase() }),
           h("span.cust-ws-name", {}, [h("span.cust-ws-t", { text: wsName }), h("span.cust-ws-s", { text: "Workspace" })]),

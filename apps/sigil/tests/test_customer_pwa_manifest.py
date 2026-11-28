@@ -28,10 +28,15 @@ INDEX = (APP / "index.html").read_text(encoding="utf-8")
 
 
 def _bg0() -> tuple[str, str]:
-    """(dark, light) --bg-0 from tokens.css: the first definition, then the light theme's."""
+    """(dark, light) --bg-0. DARK is the consumer app's OWN base, set in app.css on body[data-plane="customer"]
+    (the richer true-black this wave applies, scoped to the customer plane so the shared kit stays the operator
+    console's); LIGHT is the kit's light-theme --bg-0 from tokens.css (the consumer app inherits it in light mode)."""
+    appcss = (APP / "app.css").read_text(encoding="utf-8")
+    m = re.search(r'body\[data-plane="customer"\]\s*\{[^}]*?--bg-0:\s*(#[0-9a-fA-F]{6})', appcss, re.S)
+    assert m is not None, "the consumer app's --bg-0 must be set on body[data-plane=customer] in app.css"
     tokens = (APP / "tokens.css").read_text(encoding="utf-8")
-    vals = re.findall(r"--bg-0:\s*(#[0-9a-fA-F]{6})", tokens)
-    return vals[0].lower(), vals[1].lower()
+    light = re.findall(r"--bg-0:\s*(#[0-9a-fA-F]{6})", tokens)[1].lower()   # the light theme's (second definition)
+    return m.group(1).lower(), light
 
 
 def _png(path: Path) -> tuple[int, int, int]:

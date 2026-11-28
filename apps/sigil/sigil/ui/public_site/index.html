@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VIGIL — sovereign, proof-carrying offensive security</title>
-<meta name="description" content="VIGIL is a source-available, self-hostable autonomous offensive-security engine. Every finding is a signed, oracle-confirmed FACT you can re-verify offline — zero false positives by construction. Your keys, your hardware, your LLM.">
+<meta name="description" content="VIGIL is an autonomous offensive-security engine. Every finding is a signed, oracle-confirmed FACT you re-verify independently from the evidence alone: zero false positives by construction. Scoped to exactly what you authorize.">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
@@ -16,7 +16,8 @@
 
 <header class="nav">
   <div class="wrap nav__row">
-    <a class="brand" href="/">
+    <a class="brand" href="/" aria-label="VIGIL">
+      <span class="vg-mark-wrap"><svg viewBox="0 0 120 108" aria-hidden="true"><path d="M24 20 L60 90 L96 20" fill="none" stroke="currentColor" stroke-width="19" stroke-linejoin="round" stroke-linecap="round"/><path d="M60 40 L60 56" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/><rect x="50" y="54" width="20" height="24" rx="5.5" fill="currentColor"/><rect x="56" y="59" width="8" height="8" rx="2.2" fill="#060709"/></svg></span>
       <img class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL" width="99" height="22">
     </a>
     <nav class="nav__links" aria-label="Primary">
@@ -35,19 +36,29 @@
 <main id="main">
 
   <section class="hero">
-    <div class="wrap">
-      <span class="chip chip--fact"><i class="dot"></i>Prove, don't guess</span>
-      <h1>Offensive security that proves every finding.</h1>
-      <p class="lede">VIGIL is a source-available, self-hostable autonomous pentesting engine. It doesn't
-        hand you a list of maybes — it mints a <strong>signed, oracle-confirmed FACT</strong> only when an
-        exploit actually fires, and that proof re-verifies <strong>offline, with zero VIGIL code installed</strong>.
-        Your keys, your hardware, your choice of LLM.</p>
-      <div class="btn-row">
-        <a class="btn btn--primary" href="/support">Request access</a>
-        <a class="btn btn--ghost" href="/vs">How VIGIL compares</a>
+    <div class="wrap hero__wrap">
+      <div class="hero__text">
+        <span class="chip chip--fact"><i class="dot"></i>Prove, don't guess</span>
+        <h1>Offensive security that proves every finding.</h1>
+        <p class="lede">VIGIL is an autonomous offensive-security engine. It doesn't hand you a list of maybes:
+          it mints a <strong>signed, oracle-confirmed FACT</strong> only when an exploit actually fires, and that
+          proof re-verifies <strong>independently, from the evidence alone</strong>. Scoped to exactly what you
+          authorize, nothing you don't.</p>
+        <div class="btn-row">
+          <a class="btn btn--primary" href="/support">Request access</a>
+          <a class="btn btn--ghost" href="/vs">How VIGIL compares</a>
+        </div>
+        <p class="muted" style="margin-top:var(--sp-5); font-size:var(--fs-xs)">
+          Self-serve: nothing to deploy. Every finding ships with evidence you can re-verify yourself.</p>
       </div>
-      <p class="muted" style="margin-top:var(--sp-5); font-size:var(--fs-xs)">
-        Source-available (PolyForm Noncommercial + Commercial). Self-hosted and air-gappable. No telemetry.</p>
+      <div class="hero__globe" aria-hidden="true">
+        <canvas id="vigil-hero-globe" class="hero__globe-canvas"></canvas>
+        <div class="hero__signal">
+          <span class="hero__signal-dot"></span>
+          <span id="vigil-hero-signal" class="hero__signal-n">1,200</span>
+          <span class="hero__signal-l">live signals</span>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -86,12 +97,12 @@
           </div>
         </div>
         <div class="proof">
-          <div class="proof__k">Sovereign</div>
+          <div class="proof__k">Scoped</div>
           <div>
-            <h3>Self-hostable, air-gappable, BYO-LLM</h3>
-            <p>Run it on your own hardware with your own model keys (Ollama, vLLM, Bedrock, Vertex, Azure,
-              Mistral). The owner holds the only signing keys. <span class="bound">A deployment tier is not,
-              by itself, a network control — pair it with your firewall.</span></p>
+            <h3>Self-serve, scoped to exactly what you authorize</h3>
+            <p>Nothing to deploy. VIGIL tests only the assets you prove you own and authorize, and every action
+              stays inside that authority. <span class="bound">The owner holds the only signing keys, so no
+              finding and no action takes effect without them.</span></p>
           </div>
         </div>
         <div class="proof">
@@ -162,6 +173,7 @@
     <div class="footer__cols">
       <div>
         <div class="brand" style="margin-bottom:var(--sp-3)">
+          <span class="vg-mark-wrap"><svg viewBox="0 0 120 108" aria-hidden="true"><path d="M24 20 L60 90 L96 20" fill="none" stroke="currentColor" stroke-width="19" stroke-linejoin="round" stroke-linecap="round"/><path d="M60 40 L60 56" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/><rect x="50" y="54" width="20" height="24" rx="5.5" fill="currentColor"/><rect x="56" y="59" width="8" height="8" rx="2.2" fill="#060709"/></svg></span>
           <img class="brand__logo" src="/assets/vigil-wordmark-white.svg" alt="VIGIL" width="99" height="22">
         </div>
         <p style="font-size:var(--fs-sm); max-width:34ch; margin:0">Sovereign, proof-carrying offensive
@@ -191,11 +203,11 @@
     </div>
     <div class="footer__legal">
       <span>© VIGIL</span>
-      <span>Source-available — PolyForm Noncommercial 1.0.0 + Commercial (public-sector excluded from the free grant)</span>
-      <span>No telemetry · self-hosted</span>
+      <span>Prove, don't guess.</span>
     </div>
   </div>
 </footer>
 
+<script src="/assets/home.js" defer></script>
 </body>
 </html>

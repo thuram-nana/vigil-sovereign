@@ -59,8 +59,8 @@
   /* -- functional six-state status vocabulary (desaturated to fit monochrome) */
   --st-idle: #6b7482;
   --st-queued: #e8b64c;     /* = owner gold: "waiting for you" */
-  --st-running: #5b9bd5;    /* calm blue, animated */
-  --st-confirmed: #4bbf8a;  /* proven FACT (oracle) */
+  --st-running: #b6bbc3;    /* running / active: neutral grey (monochrome white system, not blue) */
+  --st-confirmed: #e9ebee;  /* proven FACT (oracle): bright white, not green */
   --st-refuted: #7c8698;    /* slate, dimmed */
   --st-blocked: #e06a5e;    /* refusal / gate / danger */
 
