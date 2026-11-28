@@ -107,6 +107,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/monitoring/settings": ("Monitoring settings", ("api/customer/monitoring",)),   # AS-2k (same reads/writes)
     "#/monitoring/preview": ("Protection preview", ("api/customer/monitoring/preview",)),   # AS-4b (read-only preview)
+    "#/monitoring/control": ("Defense control", ("api/customer/monitoring/control",)),   # AS-27b (read-only control)
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/command": ("Command", ()),   # B2/B3 — the engagement command box (fires no read on arrival; it POSTs on submit)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
@@ -152,8 +153,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row; AS-29 adds the guarded Release
     # to enforce in its own row — shown because a.example is in Observe and the plan entitles Respond (respond: True).
     # AS-4b adds one read-only link out to the Protection preview (the preview screen itself renders no button).
+    # AS-27b adds one more read-only link out to Defense control (the control screen itself renders no button).
     "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1,
-                              "View protection preview": 1},
+                              "View protection preview": 1, "View defense control": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
@@ -483,6 +485,13 @@ _FAKE_SERVER = {
          "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
          "enforce_permitted": False, "enforce_blockers": ["not_armed"],
          "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]}]},
+    # AS-27b — the read-only defense-control view: a.example enforcing (Respond) so a stand-down would apply, b.example
+    # proven but not armed so there is nothing to stand down. can_manage_defense: a defense manager (founder). No button.
+    "api/customer/monitoring/control": {"org_id": "org_acme", "can_manage": True, "can_manage_defense": True, "controls": [
+        {"host": "a.example", "mode": "block", "armed": True, "proof_current": True, "respond_entitled": True,
+         "enforcing": True, "override_active": False, "standdown_available": True, "standdown_blockers": []},
+        {"host": "b.example", "mode": "observe", "armed": False, "proof_current": True, "respond_entitled": True,
+         "enforcing": False, "override_active": False, "standdown_available": False, "standdown_blockers": ["not_enforcing"]}]},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
     # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
     "api/customer/preferences": {"ok": True, "preferences": {
@@ -997,7 +1006,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
         for p in ("overview",   # C7 — the home-screen aggregate route is gone with VIGIL_CUSTOMER_OVERVIEW off
-                  "members", "monitoring", "monitoring/events", "monitoring/preview", "live/activity", "launches", "onboarding", "billing/offers", "connect",
+                  "members", "monitoring", "monitoring/events", "monitoring/preview", "monitoring/control", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3

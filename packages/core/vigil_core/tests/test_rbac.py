@@ -191,8 +191,10 @@ def test_founder_is_exactly_org_admin_plus_the_testing_permissions():
     assert "founder" not in ROLES                         # per-org only — never a global account role
     assert PERMISSIONS["founder"] == frozenset({
         "read", "view_billing", "view_usage", "view_invoices", "manage_billing", "manage_members",
-        "manage_monitoring", "run_engagement", "view_assessments", "manage_code"})   # +manage_code (Red-Pen R2, O-4)
-    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {"run_engagement", "view_assessments", "manage_code"}
+        "manage_monitoring", "run_engagement", "view_assessments", "manage_code",
+        "manage_defense"})   # +manage_code (Red-Pen R2, O-4); +manage_defense (AEGIS AS-27b)
+    assert PERMISSIONS["founder"] == PERMISSIONS["org_admin"] | {
+        "run_engagement", "view_assessments", "manage_code", "manage_defense"}
     assert PERMISSIONS["founder"] <= PERMISSIONS["owner"]  # owner remains the ceiling
 
 
@@ -211,3 +213,28 @@ def test_founder_carries_nothing_in_a_global_position():
     # and the operator-tier offense routes are therefore never reachable by a founder stamp
     for path in ("/api/v1/tool/invoke", "/api/launch/preview", "/api/launch/assessment", "/api/killswitch/s/trip"):
         assert role_can_global("founder", offense_perm_for(path)) is False
+
+
+# --- AEGIS AS-27b: the manage_defense capability (operate the live defensive response) ----------------
+def test_manage_defense_is_a_founder_and_owner_capability_only():
+    # The DEFENSE-CONTROL capability (the stand-down / override): the founder (the per-org security-responsible
+    # role) and the owner carry it; NOBODY else does. In particular it rides with the testing-domain set, NOT
+    # with the billing-only org_admin — defense-authz != billing-authz.
+    assert role_can("founder", "manage_defense") is True
+    assert role_can("owner", "manage_defense") is True
+    assert role_can("org_admin", "manage_defense") is False      # billing-authz != defense-authz
+    for role in ("viewer", "analyst", "operator"):
+        assert role_can(role, "manage_defense") is False, role
+    # owner remains the ceiling (founder ⊆ owner already asserted); no cumulative role below owner gained it
+    assert "manage_defense" in PERMISSIONS["owner"] and "manage_defense" not in PERMISSIONS["operator"]
+
+
+def test_manage_defense_is_disjoint_from_offense_and_carries_nothing_globally():
+    # Defense is not offense: a defense manager never gains offense authority, and the permission carries
+    # NOTHING in a global position (it is a per-org membership capability only, like run_engagement for a founder).
+    assert role_can("founder", "offense_authority") is False
+    assert role_can_global("founder", "manage_defense") is False
+    assert role_can_global("owner", "manage_defense") is True     # owner IS a global role and carries it
+    # it is also disjoint from manage_monitoring: a role may hold one without the other (org_admin holds
+    # manage_monitoring but NOT manage_defense), so the two gates are genuinely distinct.
+    assert role_can("org_admin", "manage_monitoring") is True and role_can("org_admin", "manage_defense") is False

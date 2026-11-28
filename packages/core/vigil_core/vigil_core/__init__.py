@@ -108,6 +108,9 @@ from .contract_eval import (
     HEADLINE_LADDER, NOT_OBSERVED_BASELINE, HostProtectionPreview, enforcement_reasons, grade_contract,
     grade_enforcement, grade_headline, headline_floor, preview_host,
 )
+from .defense_control import (
+    STANDDOWN_ALREADY_STOOD_DOWN, STANDDOWN_NOT_ENFORCING, HostDefenseControl, defense_control_host,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -240,4 +243,6 @@ __all__ = [
     "HEADLINE_LADDER", "NOT_OBSERVED_BASELINE", "HostProtectionPreview",
     "headline_floor", "grade_headline", "enforcement_reasons", "grade_enforcement", "grade_contract",
     "preview_host",
+    # AS-27b — defense-control (manage_defense) posture + stand-down preview (defense_control.py):
+    "STANDDOWN_NOT_ENFORCING", "STANDDOWN_ALREADY_STOOD_DOWN", "HostDefenseControl", "defense_control_host",
 ]

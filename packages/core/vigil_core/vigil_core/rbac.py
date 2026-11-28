@@ -63,7 +63,14 @@ _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offen
                       "manage_billing", "manage_members", "manage_org",
                       # AEGIS-SaaS AE-1 — request owner-signed DEFENSIVE monitoring of the org's own proven
                       # hosts. Disjoint from run_engagement/offense_authority (observe != offense-test).
-                      "manage_monitoring"}
+                      "manage_monitoring",
+                      # AEGIS AS-27b — OPERATE the live defensive response for the org's monitored hosts: the
+                      # DEFENSE-CONTROL capability behind the safe-direction stand-down (``override``). Disjoint
+                      # from offense_authority (defense != offense) and from manage_billing (defense-authz !=
+                      # billing-authz), so a pure billing tenant-admin may pay for monitoring yet never operate
+                      # the live defense. It grants NO new authority by itself — a stand-down only REDUCES
+                      # enforcement (never widens scope), and issuing one stays behind the owner-signed gate.
+                      "manage_defense"}
 
 # PER-ORG roles — NOT part of the global linear chain (viewer<analyst<operator<owner) and NEVER a grantable
 # global account role; each exists ONLY as an owner-signed per-org membership (governor/orgs.py), and the
@@ -89,7 +96,11 @@ _ORG_ADMIN = frozenset({"read", "view_billing", "view_usage", "view_invoices",
 # `offense_authority`, `approve_a2`/`approve_a3`, `toggle_guard`, `config_nonsecret`, `queue_proposal`,
 # `manage_org`, `manage_users`, `secrets`, `promote` or `kill_release`, and it is never a global role. Only
 # the service owner grants it or changes a founder's membership (customer member management refuses both).
-_FOUNDER = _ORG_ADMIN | {"run_engagement", "view_assessments", "manage_code"}
+# AS-27b adds `manage_defense` (operate the live defensive response — the stand-down/override) to the founder,
+# the ONE per-org role responsible for the org's security posture. It rides with the testing-domain permissions,
+# NOT with `org_admin`'s billing set: defense-authz != billing-authz (a billing tenant-admin never operates the
+# live defense). It is in `_OWNER` above, so owner stays the ceiling, and it is never a global role.
+_FOUNDER = _ORG_ADMIN | {"run_engagement", "view_assessments", "manage_code", "manage_defense"}
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
     "org_admin": _ORG_ADMIN, "founder": _FOUNDER,

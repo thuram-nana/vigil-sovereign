@@ -35,7 +35,7 @@ hot file or a token cannot merge in the same wave.
 | **SC** | Supply chain | image + closure (AS-28) |
 | **INFRA** | AWS platform | `infra/aws/…` |
 | **CON** | Contract evaluator | AS-4b (built — `vigil_core/contract_eval.py`) |
-| **RBAC** | Roles | `apps/sigil/.../governor` RBAC (AS-27b) |
+| **RBAC** | Roles | `packages/core/vigil_core/vigil_core/rbac.py` (AS-27b built — `manage_defense`) |
 | **VERIFY** (token) | Oracle/verifier core | `engine/crucible/framework/v2/verify/`, `aegis/registry.py` |
 | **GP** (token) | Gate path | needs `make gate` evidence (`Makefile`) |
 
@@ -100,8 +100,16 @@ realized by distinct signing domains.
   `monitoring/authorize` write in the enforce mode `block` with no `window_s`; shown only
   on a Respond-entitled plan and only while the host is in Observe; default-OFF
   `VIGIL_CUSTOMER_MONITORING_ENABLED`. The offline release signer `enforce_release.py`
-  above [separate release root, D30] remains future work on this slice)** · AS-27b
-  override + `manage_defense`.
+  above [separate release root, D30] remains future work on this slice)** · **AS-27b
+  override + `manage_defense` (built — the `manage_defense` RBAC capability in
+  `vigil_core/rbac.py` [owner + founder, disjoint from offense and from billing-only
+  org_admin] + the read-only defense-control evaluator `vigil_core/defense_control.py`
+  grading, over the SAME gated monitoring reads, each host's live-enforcement posture and
+  whether an authorized safe-direction STAND-DOWN [the `override`] would apply; surfaced on
+  the customer **Defense control** screen `#/monitoring/control`, which stands nothing down —
+  a real stand-down stays behind the owner-signed gate; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`. The FLEET-level override/relocate over the AS-6a/AS-6e
+  reconciler remains future work on this slice)**.
 
 ## Domain 3 — Drain / spool (sovereign ingest of data-plane reports)
 
@@ -242,7 +250,13 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
   enforce WOULD add [derived from the provider registry], whether a release would be permitted and
   why not — it mints/arms/releases nothing [the Release stays behind AS-29's gate], owns its own
   read `api/customer/monitoring/preview`, manager-only, no button, default-OFF
-  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-27b override ·
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · **AS-27b override (built — the read-only
+  **Defense control** screen `#/monitoring/control`, the SAFE-direction mirror of AS-4b:
+  per host the manager can act on, whether AEGIS is enforcing now and whether an authorized
+  stand-down [the safe-direction override] would apply, graded by `vigil_core/defense_control.py`
+  over the SAME gated monitoring reads; `manage_defense` [vigil_core/rbac.py] names who may
+  OPERATE the live defense. Stands nothing down, renders no button, owns its read
+  `api/customer/monitoring/control`, default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
   AS-6d onboarding. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
