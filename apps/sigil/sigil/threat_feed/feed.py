@@ -45,7 +45,10 @@ def build_snapshot(*, dshield: bool = False, now_epoch: "float | None" = None,
             geo = sources.fetch_dshield_points(fetch=fetch, user_agent=user_agent)
             geo_source = "dshield" if geo else "illustrative"
             source_states.append({"name": "dshield", "status": "ok" if geo else "empty"})
-        except (OSError, ValueError):
+        except Exception:  # noqa: BLE001 — DShield is OPTIONAL: ANY failure (network, parse, a hostile
+            # numeric that slips past the parser as OverflowError/TypeError, …) degrades geo to illustrative.
+            # It must NEVER abort the required KEV/CVE refresh. geo stays [] and geo_source stays illustrative.
+            geo, geo_source = [], "illustrative"
             source_states.append({"name": "dshield", "status": "unavailable"})
     return {"kev": kev, "geo": geo, "geo_source": geo_source, "sources": source_states}
 

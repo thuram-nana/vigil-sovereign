@@ -297,27 +297,36 @@
     n = (typeof n === "number" && isFinite(n)) ? Math.max(0, Math.floor(n)) : 0;
     try { return n.toLocaleString("en-US"); } catch (e) { return String(n); }
   }
-  function asOfClock(ts) {
+  function asOfLabel(ts) {
+    // An explicit, DATE-bearing staleness cue — never a bare clock that could read as "today": a frozen
+    // figure must carry the day it was captured.
     try {
       var d = new Date(ts * 1000);
-      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", "
+           + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
     } catch (e) { return ""; }
   }
   function plural(n, one, many) { return n === 1 ? one : many; }
   function threatLine(res) {
     var m = (res && res.metrics) || {};
     var kevTotal = +m.kev_total || 0, added24 = +m.kev_added_24h || 0, added7 = +m.kev_added_7d || 0;
+    var stale = !!(res && res.stale);
     var parts;
-    if (added24 > 0) {
-      parts = [fmt(added24) + " newly-exploited " + plural(added24, "vulnerability", "vulnerabilities") + " · 24h",
+    if (!stale && added24 > 0) {
+      // kev_added_24h is CISA's dateAdded (the day the CVE was CATALOGUED in KEV), NOT when it became newly
+      // exploited — a back-fill of old CVEs lands here too. On a LIVE (non-stale) cache this honestly is the
+      // last 24h of KEV catalogue additions, so it carries the "· 24h" window.
+      parts = [fmt(added24) + " added to the CISA KEV catalog · 24h",
                fmt(kevTotal) + " known-exploited tracked"];
     } else if (kevTotal > 0) {
+      // Stale ⇒ the frozen kev_added_24h is NOT a current 24h window: lead with the tracked total (which
+      // carries no live-window implication), drop the "· 24h" label, and date the staleness below.
       parts = [fmt(kevTotal) + " known-exploited " + plural(kevTotal, "vulnerability", "vulnerabilities") + " tracked"];
-      if (added7 > 0) { parts.push(fmt(added7) + " added this week"); }
+      if (!stale && added7 > 0) { parts.push(fmt(added7) + " added this week"); }
     } else {
       return null;   // nothing real to show — keep the resting copy
     }
-    if (res && res.stale && res.as_of) { var t = asOfClock(res.as_of); if (t) parts.push("as of " + t); }
+    if (stale && res.as_of) { var t = asOfLabel(res.as_of); if (t) parts.push("as of " + t); }
     return parts.join(" · ");
   }
   function setLiveGeoFrom(res) {

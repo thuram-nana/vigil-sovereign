@@ -97,7 +97,7 @@ const out = {};
 
 _APP_FUNCS = ("pageFlag", "here", "loadingHolder", "kv", "viewDashboard", "viewOverview", "overviewCard",
               "overviewLink", "creditsFill", "hostsFill", "assessFill", "monFill", "ntfFill",
-              "threatActivity", "loadThreatActivity", "threatText", "fmtN", "fmtClock",
+              "threatActivity", "loadThreatActivity", "threatText", "fmtN", "fmtAsOf",
               "seenSet", "seenIds", "seenKey", "lsGet")
 _APP_VARS = ("API", "GUIDE", "GUIDE_ON", "OVERVIEW_ON", "MONITORING_ON")
 

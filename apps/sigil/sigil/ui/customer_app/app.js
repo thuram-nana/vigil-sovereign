@@ -712,11 +712,12 @@
   }
 
   // The REAL "Global activity" live counter the Overview globe reads — public, network-wide threat activity from the
-  // keyless same-origin GET /api/threatfeed (CISA KEV totals + newly-exploited-in-24h, and the local CVE catalog's
-  // counts). It is PUBLIC data (no org, no tenant scope, no session semantics), so it reads through window.fetch
-  // directly rather than the tenant-scoped VUI.getJSON — it never sends an org id and never routes a 401 to sign-in.
-  // Honest by construction: cold or unreachable, it KEEPS its "warming up" resting copy — never a fabricated number;
-  // a stale cache shows the last-good figure flagged "as of HH:MM". When the deep-black hero globe lands
+  // keyless same-origin GET /api/threatfeed (CISA KEV totals + catalogue additions in the last 24h, and the local
+  // CVE catalog's counts). It is PUBLIC data (no org, no tenant scope, no session semantics), so it reads through
+  // window.fetch directly rather than the tenant-scoped VUI.getJSON — it never sends an org id and never routes a
+  // 401 to sign-in. Honest by construction: cold or unreachable, it KEEPS its "warming up" resting copy — never a
+  // fabricated number; a stale cache drops the live 24h window and shows the last-good figure dated "as of <date>".
+  // When the deep-black hero globe lands
   // (claude/app-frontend-wave) this strip slots onto it and its real numbers SUPERSEDE any ambient rotation.
   function threatActivity() {
     var line = h("span.cust-threat-text", { text: "Live global threat feed warming up…" });
@@ -733,26 +734,37 @@
   function threatText(res) {
     if (!res || res.populated === false) { return null; }
     var m = res.metrics || {};
-    var kevTotal = +m.kev_total || 0, added24 = +m.kev_added_24h || 0, added7 = +m.kev_added_7d || 0, parts;
-    if (added24 > 0) {
-      parts = [fmtN(added24) + " newly-exploited " + (added24 === 1 ? "vuln" : "vulns") + " · 24h",
+    var kevTotal = +m.kev_total || 0, added24 = +m.kev_added_24h || 0, added7 = +m.kev_added_7d || 0;
+    var stale = !!res.stale, parts;
+    if (!stale && added24 > 0) {
+      // kev_added_24h is CISA's dateAdded (the day the CVE was CATALOGUED in KEV), NOT when it became newly
+      // exploited — a back-fill of old CVEs lands here too. On a LIVE (non-stale) cache this honestly is the
+      // last 24h of KEV catalogue additions, so it carries the "· 24h" window.
+      parts = [fmtN(added24) + " added to the CISA KEV catalog · 24h",
                fmtN(kevTotal) + " known-exploited tracked"];
     } else if (kevTotal > 0) {
+      // Stale ⇒ the frozen kev_added_24h is NOT a current 24h window: lead with the tracked total (no live
+      // window), drop the "· 24h" label, and date the staleness below.
       parts = [fmtN(kevTotal) + " known-exploited vulnerabilities tracked"];
-      if (added7 > 0) { parts.push(fmtN(added7) + " added this week"); }
+      if (!stale && added7 > 0) { parts.push(fmtN(added7) + " added this week"); }
     } else {
       return null;
     }
-    if (res.stale && res.as_of) { var c = fmtClock(res.as_of); if (c) { parts.push("as of " + c); } }
+    if (stale && res.as_of) { var c = fmtAsOf(res.as_of); if (c) { parts.push("as of " + c); } }
     return parts.join(" · ");
   }
   function fmtN(n) {
     n = (typeof n === "number" && isFinite(n)) ? Math.max(0, Math.floor(n)) : 0;
     try { return n.toLocaleString("en-US"); } catch (e) { return String(n); }
   }
-  function fmtClock(ts) {
-    try { return new Date(ts * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }); }
-    catch (e) { return ""; }
+  function fmtAsOf(ts) {
+    // A DATE-bearing staleness stamp (never a bare clock that could read as "today"): a frozen figure must
+    // carry the day it was captured.
+    try {
+      var d = new Date(ts * 1000);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", "
+           + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return ""; }
   }
   // Fill the strip from the public feed. window.fetch (not VUI.getJSON): public read, no org, no sign-in routing.
   // Any failure / honest-empty leaves the resting "warming up" copy exactly as it is — never a fake number.

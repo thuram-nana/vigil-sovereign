@@ -291,9 +291,9 @@ class PublicHandler(BaseHTTPRequestHandler):
                 pass
 
     # -- read-only public CVE API (offense-free; reads the local catalog; no egress at request time) ---
-    def _json(self, obj, code: int = 200):
+    def _json(self, obj, code: int = 200, *, cache: str = "public, max-age=300"):
         body = json.dumps(obj).encode("utf-8")
-        self._send_headers(code, "application/json; charset=utf-8", len(body), cache="public, max-age=300")
+        self._send_headers(code, "application/json; charset=utf-8", len(body), cache=cache)
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -353,7 +353,9 @@ class PublicHandler(BaseHTTPRequestHandler):
         newly-added, plus the local CVE catalog's counts). Reads ONLY the on-disk cache (written on a cadence by
         `sigil threatfeed refresh`) and the local catalog — this keyless plane makes NO outbound request at page
         time. A cold / unreadable cache answers honestly `populated: false` (the globe shows "warming up"),
-        never a fabricated number."""
+        never a fabricated number. Served `no-store` (NOT the CVE API's cacheable policy): the body carries a
+        `stale` flag and a freshness window, so a CDN caching it could serve a stale-flagged body as fresh and
+        break the freshness guarantee — the keyless plane's no-store invariant applies."""
         from .. import config
         try:
             from ..threat_feed import feed
@@ -364,7 +366,7 @@ class PublicHandler(BaseHTTPRequestHandler):
                                 "cve_recent": 0, "cve_total": 0, "cve_kev": 0},
                     "recent": [], "geo": [], "geo_source": "illustrative",
                     "populated": False, "stale": True, "as_of": None, "sources": []}
-        return self._json(body)
+        return self._json(body, cache="no-store")
 
     def _serve(self, head: bool, override: "str | None" = None):
         hit = self._resolve("/" + override) if override else self._resolve(self.path)

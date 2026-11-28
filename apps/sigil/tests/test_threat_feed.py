@@ -122,6 +122,29 @@ def test_dshield_accepts_a_wrapped_sources_object():
     assert pts and pts[0]["cc"] == "US"
 
 
+def test_int_is_robust_against_nonfinite_and_overflow_numerics():
+    # red-pen finding 1: a huge/infinite JSON numeric must never raise (OverflowError) past the parser.
+    assert sources._int(1e400, 5) == 5                       # 1e400 → inf → rejected, returns default
+    assert sources._int(float("inf"), 5) == 5
+    assert sources._int(float("nan"), 5) == 5                # json.loads accepts NaN tokens
+    assert sources._int(10 ** 400, 5) == 5                   # an int too large to even float → default
+    assert sources._int("17", 5) == 17                       # a numeric string still parses
+    assert sources._int("junk", 5) == 5
+    assert sources._int(sources._INT_MAX * 1000, 0) == sources._INT_MAX   # a finite out-of-range value clamps
+
+
+def test_dshield_drops_a_row_with_a_nonfinite_or_overflow_count():
+    # a hostile count (1e400 → inf, or an int too large to float) is distrusted: the row is DROPPED, never
+    # fabricated onto a real country, and it never raises OverflowError past this pure parser.
+    pts = sources.dshield_country_points([
+        {"ascountry": "US", "attacks": 1e400},              # inf → dropped
+        {"ascountry": "CN", "attacks": 10 ** 400},          # int too large to float → dropped
+        {"ascountry": "DE", "attacks": 7},                  # the one honest row survives
+    ])
+    by_cc = {p["cc"]: p for p in pts}
+    assert set(by_cc) == {"DE"} and by_cc["DE"]["weight"] == 7
+
+
 # ===================================================================================================
 # fetch_json — the one outbound primitive: host-allowlisted + size-capped (no live network needed)
 # ===================================================================================================
@@ -200,6 +223,19 @@ def test_build_snapshot_degrades_geo_when_dshield_fails_but_kev_survives():
     snap = feed.build_snapshot(dshield=True, now_epoch=_NOW, fetch=_fetch)
     assert snap["kev"]["total"] == 4 and snap["geo"] == [] and snap["geo_source"] == "illustrative"
     assert {"name": "dshield", "status": "unavailable"} in snap["sources"]
+
+
+def test_build_snapshot_survives_a_hostile_dshield_numeric_and_keeps_kev():
+    # red-pen finding 1: a huge/infinite DShield count must NOT escape the guard as an OverflowError and abort
+    # the whole refresh — the KEV/CVE side survives and geo degrades to illustrative, never a crash.
+    hostile = [{"ascountry": "US", "attacks": 1e400},        # inf
+               {"ascountry": "CN", "attacks": 10 ** 400}]     # int too large to float
+
+    def _fetch(url, **k):
+        return hostile if "isc.sans.edu" in url else _kev_doc()
+    snap = feed.build_snapshot(dshield=True, now_epoch=_NOW, fetch=_fetch)
+    assert snap["kev"]["total"] == 4                          # the required KEV refresh survived — not aborted
+    assert snap["geo"] == [] and snap["geo_source"] == "illustrative"   # hostile geo dropped, honest fallback
 
 
 def test_refresh_keeps_last_good_when_kev_fetch_fails(tmp_path):
@@ -312,6 +348,9 @@ def test_pubui_threatfeed_route_shape_populated_and_cold(tmp_path, monkeypatch):
         d = json.loads(raw)
         assert status == 200 and hdrs.get("Content-Type", "").startswith("application/json")
         assert "Set-Cookie" not in hdrs and hdrs.get("X-Content-Type-Options") == "nosniff"
+        # red-pen finding 4: the threat feed carries a `stale` flag + a freshness window, so it must be
+        # no-store (NOT the CVE API's `public, max-age=300`) — a CDN must never serve a stale body as fresh.
+        assert hdrs.get("Cache-Control") == "no-store"
         assert set(d) >= {"metrics", "recent", "geo", "geo_source", "populated", "stale", "as_of", "sources"}
         assert d["metrics"]["kev_total"] == 0 and d["metrics"]["cve_total"] == 2   # catalog reused
         # now a refreshed cache: real KEV numbers show
@@ -382,7 +421,7 @@ def _need_node() -> str:
 
 def _run_counter_js(script: str) -> dict:
     src = _APP_JS.read_text(encoding="utf-8")
-    funcs = "\n".join(_fn(src, n) for n in ("threatText", "fmtN", "fmtClock", "loadThreatActivity"))
+    funcs = "\n".join(_fn(src, n) for n in ("threatText", "fmtN", "fmtAsOf", "loadThreatActivity"))
     prog = ("globalThis.window = globalThis;\n" + funcs
             + "\nconst out = {};\n(async () => {\n" + script
             + "\n})().then(() => process.stdout.write(JSON.stringify(out)),"
@@ -398,10 +437,12 @@ def test_globe_counter_renders_real_numbers_when_populated():
       out.onlyTotal = threatText({ populated: true, metrics: { kev_total: 1234, kev_added_24h: 0, kev_added_7d: 9 } });
       out.one = threatText({ populated: true, metrics: { kev_total: 1, kev_added_24h: 1, kev_added_7d: 1 } });
     """)
-    assert out["added"].startswith("3 newly-exploited vulns · 24h")
+    # honest wording: kev_added_24h is CISA's dateAdded (catalogued), never "newly-exploited" (red-pen finding 3)
+    assert "newly-exploited" not in out["added"] and "newly-exploited" not in out["one"]
+    assert out["added"].startswith("3 added to the CISA KEV catalog · 24h")
     assert "1,234 known-exploited tracked" in out["added"]
     assert out["onlyTotal"] == "1,234 known-exploited vulnerabilities tracked · 9 added this week"
-    assert out["one"].startswith("1 newly-exploited vuln · 24h")        # singular
+    assert out["one"].startswith("1 added to the CISA KEV catalog · 24h")   # live 24h window on a fresh cache
 
 
 def test_globe_counter_is_honestly_empty_and_never_fabricates():
@@ -411,6 +452,19 @@ def test_globe_counter_is_honestly_empty_and_never_fabricates():
       out.nullres = threatText(null);
     """)
     assert out["cold"] is None and out["zero"] is None and out["nullres"] is None   # keep the resting copy
+
+
+def test_globe_counter_stale_feed_drops_the_live_24h_window_and_dates_the_as_of():
+    # red-pen finding 2: on a STALE feed the frozen kev_added_24h must NOT be presented as a current 24h
+    # window, and the staleness cue must carry a DATE (not just a clock that could read as "today").
+    out = _run_counter_js(r"""
+      out.stale = threatText({ populated: true, stale: true, as_of: 1732708800,
+                               metrics: { kev_total: 1234, kev_added_24h: 3, kev_added_7d: 9 } });
+    """)
+    assert "· 24h" not in out["stale"]                       # no live "· 24h" label on a frozen count
+    assert "newly-exploited" not in out["stale"]                  # and never the dishonest "newly-exploited"
+    assert out["stale"].startswith("1,234 known-exploited vulnerabilities tracked")   # leads with the tracked total
+    assert re.search(r"as of [A-Z][a-z]{2} \d", out["stale"])     # an explicit DATE (e.g. "as of Nov 27"), not just a clock
 
 
 def test_globe_counter_load_sets_live_on_a_real_feed_and_leaves_resting_on_failure():
@@ -432,6 +486,56 @@ def test_globe_counter_load_sets_live_on_a_real_feed_and_leaves_resting_on_failu
       await loadThreatActivity(strip3, line3);
       out.emptyText = line3.textContent; out.emptyLive = strip3.classList.has("is-live");
     """)
-    assert out["live"] is True and out["liveText"].startswith("2 newly-exploited vulns")
+    assert out["live"] is True and out["liveText"].startswith("2 added to the CISA KEV catalog · 24h")
     assert out["failLive"] is False and out["failText"] == "warming up"
     assert out["emptyLive"] is False and out["emptyText"] == "warming up"
+
+
+# ===================================================================================================
+# the PUBLIC hero counter — home.js threatLine: same honest copy + stale semantics as the app (under node)
+# ===================================================================================================
+_HOME_JS = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site" / "assets" / "home.js"
+
+
+def _run_home_js(script: str) -> dict:
+    src = _HOME_JS.read_text(encoding="utf-8")
+    funcs = "\n".join(_fn(src, n) for n in ("fmt", "plural", "asOfLabel", "threatLine"))
+    prog = ("globalThis.window = globalThis;\n" + funcs
+            + "\nconst out = {};\n(() => {\n" + script
+            + "\n})();\nprocess.stdout.write(JSON.stringify(out));")
+    r = subprocess.run([_need_node(), "-e", prog], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_home_threat_line_live_copy_is_honest_about_catalogue_additions():
+    # red-pen finding 3: the public hero copy must reflect that kev_added_24h is CISA's dateAdded (catalogued),
+    # not "newly-exploited".
+    out = _run_home_js(r"""
+      out.live = threatLine({ metrics: { kev_total: 1234, kev_added_24h: 3, kev_added_7d: 9 } });
+      out.onlyTotal = threatLine({ metrics: { kev_total: 1234, kev_added_24h: 0, kev_added_7d: 9 } });
+    """)
+    assert "newly-exploited" not in out["live"]
+    assert out["live"].startswith("3 added to the CISA KEV catalog · 24h")
+    assert "1,234 known-exploited tracked" in out["live"]
+    assert out["onlyTotal"] == "1,234 known-exploited vulnerabilities tracked · 9 added this week"
+
+
+def test_home_threat_line_stale_drops_24h_window_and_dates_the_as_of():
+    # red-pen finding 2: a stale hero feed must not present the frozen count as a live 24h window, and the
+    # staleness cue must carry the DATE of as_of.
+    out = _run_home_js(r"""
+      out.stale = threatLine({ stale: true, as_of: 1732708800,
+                               metrics: { kev_total: 1234, kev_added_24h: 3, kev_added_7d: 9 } });
+    """)
+    assert "· 24h" not in out["stale"] and "newly-exploited" not in out["stale"]
+    assert out["stale"].startswith("1,234 known-exploited vulnerabilities tracked")
+    assert re.search(r"as of [A-Z][a-z]{2} \d", out["stale"])     # an explicit DATE, not just a clock
+
+
+def test_home_threat_line_is_honestly_empty():
+    out = _run_home_js(r"""
+      out.cold = threatLine({ metrics: { kev_total: 0 } });
+      out.nullres = threatLine(null);
+    """)
+    assert out["cold"] is None and out["nullres"] is None         # nothing real ⇒ keep the resting copy

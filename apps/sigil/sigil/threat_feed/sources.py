@@ -15,6 +15,7 @@ caller gates it OFF by default — its commercial-use terms are not clearly gran
 from __future__ import annotations
 
 import json
+import math
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
@@ -43,6 +44,7 @@ _MAX_PARSE_ITEMS = 500_000      # hard ceiling on entries we will even iterate (
 _MAX_RECENT = 25                # how many recent KEV items the summary carries (bounded list)
 _MAX_GEO = 60                   # how many country points the geo summary carries (bounded list)
 _STR_CAP = 300                  # every feed-derived string is clamped to this many chars
+_INT_MAX = 1_000_000_000        # a sane ceiling for any feed-supplied count (clamp, never trust an absurd one)
 
 # A descriptive User-Agent (the CVE ingest sends one too). ISC/DShield asks callers to identify themselves;
 # the operator can set a contact per the ISC AUP via VIGIL_THREATFEED_UA (config), never a personal detail.
@@ -74,12 +76,32 @@ def _s(v: Any, cap: int = _STR_CAP) -> str:
     return s[:cap]
 
 
-def _int(v: Any, default: int) -> int:
-    """Any value → a bounded int, or ``default`` on anything non-numeric (a feed count may be a str or junk)."""
+def _finite_number(v: Any) -> bool:
+    """True iff ``v`` is a REAL numeric value we can trust as a count — finite and representable. A JSON body
+    may carry ``1e400`` (→ float ``inf``), ``NaN``/``Infinity`` (``json.loads`` accepts those tokens), or an
+    integer so large ``float()`` itself overflows: all of those are hostile/garbage, not a count, so the caller
+    drops the row rather than fabricating a weight onto it."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
     try:
-        return int(float(v))
-    except (TypeError, ValueError):
+        return math.isfinite(float(v))
+    except (OverflowError, ValueError):     # an int too large to even convert to float
+        return False
+
+
+def _int(v: Any, default: int) -> int:
+    """Any value → a bounded int, or ``default`` on anything non-numeric, non-finite, or out of range (a feed
+    count may be a str, junk, or a hostile huge/infinite numeric). Catches ``OverflowError`` too: ``1e400`` is
+    ``inf`` (``int(inf)`` raises) and an enormous int overflows ``float()`` — both would otherwise escape the
+    caller's narrow guard and abort the whole refresh. A finite value is clamped to ``[-_INT_MAX, _INT_MAX]`` so
+    an absurd count can never blow up arithmetic downstream."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
         return default
+    if not math.isfinite(f):                # inf / -inf / NaN (e.g. JSON 1e400 → inf)
+        return default
+    return max(-_INT_MAX, min(_INT_MAX, int(f)))
 
 
 def _cve_id(v: Any) -> "str | None":
@@ -205,6 +227,11 @@ def dshield_country_points(doc: Any) -> "list[dict]":
         raw = r.get("attacks")
         if raw is None:
             raw = r.get("targets")
+        # A count that is PRESENT but non-finite / unrepresentable (1e400 → inf, NaN, an int too large to
+        # float) is hostile garbage: drop the row rather than fabricate a weight onto a real country, and
+        # never let it raise past this parser and abort the refresh. A missing count (None) still counts as 1.
+        if raw is not None and not _finite_number(raw):
+            continue
         w = max(0, _int(raw, 1))
         weights[cc] = weights.get(cc, 0) + max(1, w)
     ordered = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_GEO]
