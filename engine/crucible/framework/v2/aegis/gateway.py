@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from .detection_kit import DetectionKit, DetectionKitMeter
     from .detection_mirror import DetectionMirrorMeter
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
+    from .incidents import IncidentMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
 
@@ -300,6 +301,27 @@ def _coverage_flag() -> bool:
     return (os.environ.get(COVERAGE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-11a (incidents): the default-OFF switch for the deterministic read-only DETECTION-LEAD CORRELATION, grouping
+# the AS-31 mirror's admissible reflected leads into a bounded, address-free, de-duplicated set of INCIDENT records
+# keyed by their AS-8 detection technique (optionally annotated with the AS-5b denial-source pressure as context),
+# with a deterministic posture digest. Kept in LOCKSTEP with ``incidents.INCIDENTS_ENV`` (a test asserts they match)
+# and read here directly so the incidents module (and, through it, detection_coverage / monitoring_event_v2) is NOT
+# eagerly import-reachable from the gateway (it is imported only when the flag is on AND its dependency, the AS-31
+# detection mirror meter, exists).
+INCIDENTS_ENV = "VIGIL_AEGIS_INCIDENTS"
+
+
+def _incidents_flag() -> bool:
+    """AS-11a incident-correlation switch: strict, fail-closed, DEFAULT OFF (read when the gateway is built, and
+    re-read per snapshot so a live flip-OFF stops surfacing the correlation at once). OFF => no meter is built,
+    nothing is computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The
+    correlation is ALSO inert whenever its dependency, the AS-31 detection mirror (``VIGIL_AEGIS_DETECTION_MIRROR``
+    + the AS-7b Coraza attestation over a configured CRS corpus), is off; the AS-8 band classifier is a flagless
+    pure function and the AS-5b rollup is an optional enrichment, so there is no further hard dep flag to arm."""
+    import os
+    return (os.environ.get(INCIDENTS_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -514,6 +536,24 @@ class GatewaySettings:
         if _coverage_flag() and self.coraza_meter is not None and coraza_corpus is not None:
             from .detection_coverage import DetectionCoverageMeter
             self.coverage_meter = DetectionCoverageMeter(self.coraza_meter, coraza_corpus.rule_ids)
+        # AS-11a (incidents): the deterministic, READ-ONLY detection-lead CORRELATION over the AS-31 mirror's
+        # admissible reflected leads, grouping correlated leads into a bounded, address-free, de-duplicated set of
+        # INCIDENT records keyed by their AS-8 detection technique, with a deterministic posture digest, and
+        # annotated (when the AS-5b rollup is armed) with the denial-source pressure as read-only CONTEXT. Built
+        # ONCE, only when the default-OFF VIGIL_AEGIS_INCIDENTS flag is on at construction AND the AS-31 detection
+        # mirror meter (its DEPENDENCY, which carries the admissible reflected leads) exists. It holds NO mutable
+        # state and NEVER mutates the inventory, the licence ledger, or the corpus: it only READS. It CORRELATES
+        # and never acts, a correlated incident is a LEAD, never a block (only a fired oracle blocks), and it
+        # drives no admit/shed/allow/block decision. OFF (or the AS-31 dep off) => no meter is built, nothing is
+        # computed, and the gateway data path (and the probe snapshot) are byte-identical. Importing the module
+        # lazily here keeps it (and, through it, detection_coverage / monitoring_event_v2) OFF the eager
+        # __init__/__main__ import path (make-gate byte-identity). The AS-5b rollup is passed as an OPTIONAL
+        # enrichment: when present it adds aggregate denial-pressure context, never a new dependency to arm.
+        self.incident_meter: "IncidentMeter | None" = None
+        if _incidents_flag() and self.detection_mirror_meter is not None:
+            from .incidents import IncidentMeter
+            self.incident_meter = IncidentMeter(self.detection_mirror_meter,
+                                                attribution_meter=self.attribution_meter)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -684,6 +724,19 @@ class GatewaySettings:
             if cov is not None and self.coverage_active:
                 snap["coverage_active"] = True
                 snap["coverage"] = cov.snapshot()
+        except Exception:
+            pass
+        # AS-11a (incidents): surface the deterministic read-only correlation of the admissible reflected leads
+        # into a bounded, de-duplicated set of INCIDENT records (each a grouping of leads keyed by its AS-8
+        # technique), address-free and hygiene-clean (AS-2e) -- ONLY when the meter is active, so a gateway without
+        # the feature answers a probe byte-identically. Metadata only (labels + scrubbed ids + counts + a digest,
+        # no address, no secret). It CORRELATES, it never acts. Total: any read error degrades this field, never
+        # the probe.
+        try:
+            inc = self.incident_meter
+            if inc is not None and self.incidents_active:
+                snap["incidents_active"] = True
+                snap["incidents"] = inc.snapshot()
         except Exception:
             pass
         return snap
@@ -888,6 +941,18 @@ class GatewaySettings:
         return (self.coverage_meter is not None
                 and _coverage_flag()
                 and self.coraza_active)
+
+    @property
+    def incidents_active(self) -> bool:
+        """Is the AS-11a detection-lead correlation active for THIS snapshot? Only when the meter was built (the
+        default-OFF VIGIL_AEGIS_INCIDENTS flag was on at construction AND the AS-31 detection mirror meter exists)
+        AND the flag is STILL on AND its DEPENDENCY (the AS-31 detection mirror, ``detection_mirror_active``, which
+        itself requires the AS-7b Coraza attestation) is STILL active, so flipping EITHER the incidents or the
+        detection-mirror or the coraza flag off at runtime stops surfacing the correlation live. Read-only /
+        observational: it never gates enforcement (a correlated incident is a LEAD, never a block)."""
+        return (self.incident_meter is not None
+                and _incidents_flag()
+                and self.detection_mirror_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
