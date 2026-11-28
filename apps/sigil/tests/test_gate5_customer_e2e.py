@@ -105,6 +105,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/team": ("Team", ("api/customer/members",)),
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
+    "#/monitoring/settings": ("Monitoring settings", ("api/customer/monitoring",)),   # AS-2k (same reads/writes)
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
     "#/attack-path": ("Attack path", ("api/customer/assessments/findings",)),
@@ -142,6 +143,8 @@ _CONTROLS: dict[str, dict[str, int]] = {
                   "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
+    # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls
+    "#/monitoring/settings": {"Shorten window": 1, "Turn off": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
@@ -149,6 +152,7 @@ _CONTROLS: dict[str, dict[str, int]] = {
     "#/settings": {"Save": 1, "Account security & sign-in": 1,      # the General tab's one Save; the hub's links
                    "Authorized administrators": 1,
                    "Authorizations": 1,                             # S12: the hub's link to the Authorizations screen
+                   "Monitoring": 2,                                 # AS-2k: the hub's Monitoring link, and the top bar's tab
                    "Data rights": 1,                                # S3: the hub's Data-rights link
                    "How VIGIL uses AI": 1,                          # S5: the hub's link to the AI-governance sub-screen
                    "Billing": 2},                                   # the hub's Billing link, and the top bar's tab
