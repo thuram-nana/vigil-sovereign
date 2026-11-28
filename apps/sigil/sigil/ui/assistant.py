@@ -48,6 +48,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .assessments import assessment_findings, valid_org  # noqa: E402,F401  (valid_org re-exported for the route)
+from .input_safety import sanitize_input  # noqa: E402  (shared Unicode/obfuscation + length input hardening)
 
 __all__ = ["AssistantError", "AssistantReply", "MAX_QUESTION_CHARS", "ModelCall", "answer", "build_request",
            "gateway_model_call", "valid_org", "valid_question"]
@@ -72,6 +73,10 @@ _CARD_STR_FIELDS = ("finding_ref", "bug_class", "severity", "confidence", "surfa
 #: finding field (no severity / confidence / finding_ref): a document is context, structurally not a finding.
 _DOC_STR_FIELDS = ("filename", "snippet")
 _MAX_FIELD_CHARS = 1200
+#: The Unicode/obfuscation cleaning in :func:`_sanitize` scans the whole field (parked well above any real finding /
+#: document field length) so the delimiter redaction runs on the complete value; the real per-field cap is
+#: :data:`_MAX_FIELD_CHARS` (with an ellipsis), applied AFTER redaction. This only bounds a pathological input.
+_FIELD_SCAN_CAP = 1 << 20
 
 # The grounding contract, pinned as a module constant so a test can assert the load-bearing clauses are present and a
 # mutation that removes one is caught. It establishes: role, grounded-only, advice-not-finding, data-is-not-instructions,
@@ -124,24 +129,34 @@ class AssistantError(RuntimeError):
 
 def valid_question(q: object) -> Optional[str]:
     """Validate + normalise a customer question, FAIL-CLOSED (None on anything invalid): a non-empty ``str`` of at
-    most :data:`MAX_QUESTION_CHARS` characters, with control characters (except tab/newline) stripped and surrounding
-    whitespace trimmed. The question is the customer's; it is treated as data by the prompt, but it is still validated
-    so an oversized or binary blob never reaches the model."""
+    most :data:`MAX_QUESTION_CHARS` characters, hardened against Unicode obfuscation and with surrounding whitespace
+    trimmed. The question is the customer's; it is treated as data by the prompt, but it is still validated so an
+    oversized or binary blob - or an obfuscated paste - never reaches the model.
+
+    The hardening is the shared :func:`sanitize_input` (NFC-normalize; strip zero-width / bidi-override / isolate
+    characters; strip NUL and C0/C1 control characters except ordinary whitespace). The length CONTRACT is unchanged:
+    the sanitizer is capped one char ABOVE :data:`MAX_QUESTION_CHARS` purely so an over-cap question is still REJECTED
+    here (fail-closed), never silently truncated - this function's job is validation, not truncation. A control char
+    is STRIPPED, not a cause for rejection (``"ok\\x00bad"`` -> ``"okbad"``), as before."""
     if not isinstance(q, str):
         return None
-    cleaned = "".join(ch for ch in q if ch in ("\t", "\n") or ord(ch) >= 0x20).strip()
+    cleaned = sanitize_input(q, max_chars=MAX_QUESTION_CHARS + 1).strip()
     if not cleaned or len(cleaned) > MAX_QUESTION_CHARS:
         return None
     return cleaned
 
 
 def _sanitize(value: object) -> str:
-    """One finding string, made safe to embed as DATA: coerce to ``str``, strip control characters (except tab/
-    newline), remove the data-block delimiter tags (so a finding can never close the block early — the injection
-    defence), and cap the length. Returns ``""`` for a missing/None value."""
+    """One finding / document string, made safe to embed as DATA: coerce to ``str``, harden against Unicode
+    obfuscation (NFC-normalize; strip zero-width / bidi-override / isolate characters; strip NUL and C0/C1 control
+    characters except ordinary whitespace - the shared :func:`sanitize_input`), remove the data-block delimiter tags
+    (so a finding can never close the block early - the injection defence), and cap the length. Returns ``""`` for a
+    missing/None value. The character-class cleaning runs over the WHOLE string (``sanitize_input``'s own truncation
+    is parked above any real field length) so the delimiter redaction sees the full value; the field cap + ellipsis
+    is then applied exactly as before."""
     if value is None:
         return ""
-    s = "".join(ch for ch in str(value) if ch in ("\t", "\n") or ord(ch) >= 0x20)
+    s = sanitize_input(value, max_chars=_FIELD_SCAN_CAP)
     s = _DELIM_RE.sub("[redacted-delimiter]", s)
     if len(s) > _MAX_FIELD_CHARS:
         s = s[:_MAX_FIELD_CHARS] + "…"

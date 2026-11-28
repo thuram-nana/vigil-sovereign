@@ -69,6 +69,12 @@ LAUNCH_REFUND_HELD_DETAIL = ("this reservation cannot be released automatically 
                              "reserved, not spent, until the operator returns them (the operator has been alerted)")
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
+# Chat-engagement input-hardening caps (server-authoritative, applied by `customer_flow_step` through
+# `input_safety.sanitize_input`): the flow `host` is bounded to the RFC 1035 maximum hostname length, and the
+# steer/instruct `text` to the box-line bound. They bound a hostile paste's size BEFORE it is matched to a lease,
+# forwarded to an action, stored or echoed; the downstream actions keep their own validation (defense in depth).
+_MAX_FLOW_HOST_CHARS = 253
+_MAX_FLOW_TEXT_CHARS = 2000
 # The roles a customer org-admin may grant a teammate: deliberately EXCLUDES `operator` and `founder` (which
 # carry run_engagement) and `owner` — a customer can never hand a teammate any testing or global authority
 # (billing-authz != testing-authz). `org_admin` is included so an admin can delegate org admin.
@@ -4487,9 +4493,15 @@ class Provisioner:
         import time as _t
         from .. import config
         from . import assistant as _assistant
+        from . import input_safety as _input_safety
         if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
             raise ProvisionDenied("requester may not use the assistant for this org (view_assessments)")
-        q = _assistant.valid_question(question)
+        # INPUT HARDENING (defense in depth): the advice question is a SEPARATE untrusted input from the command line
+        # (the box hands it the classifier's advice text, but the assistant route also takes a raw question), so it is
+        # sanitized + hard-capped HERE too, BEFORE it reaches valid_question / the grounded model: NFC-normalized,
+        # zero-width / bidi-override / control chars stripped, and truncated to MAX_QUESTION_CHARS so the model input
+        # (and its cost) is bounded. valid_question then applies the fail-closed empty check.
+        q = _assistant.valid_question(_input_safety.sanitize_input(question, max_chars=_assistant.MAX_QUESTION_CHARS))
         if q is None:
             raise ProvisionDenied("the question is empty or too long")
         # MONEY-DOCTRINE (PR-J2): with VIGIL_CUSTOMER_ASSISTANT_WALLET on every turn is ACCOUNTED to the session org —
@@ -4677,7 +4689,15 @@ class Provisioner:
         from ..governor import asset_ownership as _own
         from . import customer_launches as _cl
         from . import engagement_flow as _flow
-        h = str(host or "").strip().lower()
+        from . import input_safety as _input_safety
+        # INPUT HARDENING (defense in depth): host and text are SEPARATE untrusted body inputs on the flow hop (the box
+        # relays the classifier's output, but the server never trusts the client to have cleaned it). Sanitize BEFORE
+        # they are matched against a lease, forwarded to an action, stored or echoed back: NFC-normalize, strip
+        # zero-width / bidi-override / control chars, and hard-cap (host to the RFC max label length; the steer/instruct
+        # text to the box line bound). So obfuscation cannot spoof the host↔lease match nor smuggle bytes into a
+        # forwarded instruction, and the echoed ``host`` in the reply is inert.
+        h = _input_safety.sanitize_input(host, max_chars=_MAX_FLOW_HOST_CHARS).strip().lower()
+        flow_text = _input_safety.sanitize_input(text, max_chars=_MAX_FLOW_TEXT_CHARS)
         control = self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement")
         assets = _own.assets_overview(self.store, requester_org_id, now=t).get("assets", [])
         launches = _cl.launches(self.store, requester_org_id, now=t,
@@ -4720,7 +4740,7 @@ class Provisioner:
             out["state"] = _flow.RUNNING
         elif action == "instruct":
             if config.customer_live_control_enabled():
-                out["instructed"] = self.launch_instruct(requester, requester_org_id, host=h, text=str(text or ""),
+                out["instructed"] = self.launch_instruct(requester, requester_org_id, host=h, text=flow_text,
                                                           idem_key=str(idem_key or ""), ip=ip, mfa_at=mfa_at)
             else:
                 out["blocked"] = "live control is not enabled on this deployment"

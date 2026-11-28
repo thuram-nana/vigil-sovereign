@@ -14,6 +14,14 @@ provisioner still requires an explicit authorization affirmation before any veri
 explicit spend confirm before any launch reserves credits (``engagement_flow`` / ``customer_flow_step``) - the
 classifier only NAMES the intent; it never authorizes or performs the act.
 
+INPUT HARDENING: a pasted box line is UNTRUSTED text. Before any classification :func:`classify` runs it through the
+shared :func:`sanitize_input` (NFC-normalize; strip zero-width / bidi-override / isolate characters; strip NUL and
+C0/C1 control characters except ordinary whitespace; hard-truncate to :data:`MAX_LINE_CHARS`). So a zero-width joiner
+inside a verb (``ve<zwj>rify``) can no longer make the rendered transcript and the classifier disagree, a bidi
+override can no longer reorder what is stored/returned away from what was rendered, a control-char paste cannot smuggle
+bytes into the returned ``host`` / ``text``, and an oversized paste is bounded. For ordinary input the sanitizer is a
+no-op, so a normal command still classifies exactly as before (honest behaviour).
+
 FATAL-2: sovereign-only, pure-stdlib, ``assert_no_offense`` at import. No offense import, no mint, no I/O.
 """
 from __future__ import annotations
@@ -21,6 +29,7 @@ from __future__ import annotations
 import re
 
 from ..reuse import assert_no_offense
+from .input_safety import sanitize_input
 
 assert_no_offense()
 
@@ -143,8 +152,13 @@ def classify(line: str) -> dict:
     wrapper; anything unrecognised (and the empty line) is ``advice`` - the read-only path. ``host`` (a domain-like
     token) and ``depth`` (quick / standard / deep) are lifted when present; ``text`` carries the steer instruction
     or, for advice, the whole question to hand to the grounded assistant. It NEVER returns a launch/verify/control
-    intent for a line whose head is not an allowlisted action verb, and it NEVER itself acts."""
-    text = (line or "").strip()[:MAX_LINE_CHARS]
+    intent for a line whose head is not an allowlisted action verb, and it NEVER itself acts.
+
+    The raw line is UNTRUSTED: :func:`sanitize_input` runs FIRST (NFC + zero-width/bidi/control strip + hard cap at
+    :data:`MAX_LINE_CHARS`) so the classifier - and the ``host`` / ``depth`` / ``text`` it returns - see inert,
+    display-stable text. Obfuscation can no longer spoof the rendered transcript or dodge the verb match, and the
+    returned text is already bounded; a normal line is unchanged by the sanitizer and classifies exactly as before."""
+    text = sanitize_input(line, max_chars=MAX_LINE_CHARS).strip()
     if not text:
         return {"intent": "advice", "text": ""}
     words = re.findall(r"[a-z]+", text.lower())
