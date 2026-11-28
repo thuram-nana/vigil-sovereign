@@ -71,13 +71,16 @@ def _line(src: str, pattern: str) -> str:
     return m.group(0)
 
 
-# the pure render functions (no fetch); `h` is the kit's own, kv/fmtDate are app.js's own
+# the pure render functions (no fetch); `h` is the kit's own, kv/fmtDate are app.js's own. autoTopupSection renders
+# its card + the on-demand control synchronously (the fetch + form are behind its button, like ratesSection); the
+# form's own render helpers are pure too.
 _RENDER = ["kv", "fmtDate", "mc2", "groupInt", "billingCreditsCard", "billingSubscriptionCard",
            "lowBalanceNotice", "billingUsageView", "billingUsageCard", "runningScansCard", "statementCard",
-           "chargeRow", "rateText", "shortId", "ratesList", "rateRow", "perPhrase", "autoTopupSection"]
-# the fetch-wiring functions on top of the render set
+           "chargeRow", "rateText", "shortId", "ratesList", "rateRow", "perPhrase", "autoTopupSection",
+           "autoTopupForm", "autoTopupReceiptRow", "autoTopupStatusText", "autoTopupUnavailableText"]
+# the fetch-wiring functions on top of the render set (saveAutoTopup posts the change through the step-up seam)
 _WIRING = ["pageFlag", "dataView", "buySection", "viewBilling", "viewBillingClassic", "classicBillingCards",
-           "viewBillingDashboard", "loadBillingUsage", "ratesSection"]
+           "viewBillingDashboard", "loadBillingUsage", "ratesSection", "saveAutoTopup", "autoTopupInt"]
 
 # sample server payloads (the real shapes: W1 rates, W2c-2 exact + balance-after, W6 per-scan running/held_mc)
 _OV = {"org_id": "o", "credits": {"available": 57, "persistent": 57, "plan_live": 3},
@@ -137,7 +140,8 @@ def _wiring_fns(flag: str) -> str:
     navigation / loading stubbed so the billing views can run in isolation."""
     src = _js()
     stubs = ("function here(){ return '#/billing'; }\nfunction loadingHolder(t){ return h('p.cust-muted', {text:t}); }\n"
-             "function shell(inner){ return inner; }\nfunction err(){}\nfunction nav(){}\nasync function refreshWho(){}\n")
+             "function shell(inner){ return inner; }\nfunction err(m){ out.err = m; }\nfunction nav(){}\nasync function refreshWho(){}\n"
+             "function withStepUp(action){ return action(); }\n")   # security screens off in the harness: step-up is a pass-through
     return "\n".join([f"document.body.dataset.billingDashboard = {json.dumps(flag)};",
                       _render_fns(),
                       "\n".join(_fn(src, n) for n in _WIRING),
@@ -220,7 +224,7 @@ out.calls = calls; out.text = node.textContent;
     assert "6250.000 per million" in t and "2.500 each" in t                # the per-line rate (tokens / per-one)
     assert "Balance after: 57.87 credits" in t                             # the per-charge balance-after (W2c-2)
     assert "Your balance is low." in t                                      # the low-balance notice (W5 field)
-    assert "Auto top-up" in t and "coming soon" in t                        # A1 not merged -> described, no endpoint
+    assert "Auto top-up" in t and "Set up auto top-up" in t                  # A1 opt-in control (its form is on demand)
     assert "Rates" in t                                                      # the on-demand Rates control
     assert "Persistent (wallet)" not in t and "Granted" not in t            # not the flat-billing cards
 
@@ -303,18 +307,123 @@ document.body.appendChild(root); out.text = root.textContent;
     assert "credits" in out["text"] and "57.87" in out["text"]
 
 
-def test_the_auto_topup_settings_render_when_a1_supplies_them():
-    """When A1 (auto top-up) later puts its settings on the overview (ov.auto_topup), the section shows them
-    read-only; today (A1 not merged) it shows the 'coming soon' copy and invents no write endpoint."""
-    ov = dict(_OV); ov["auto_topup"] = {"enabled": True, "trigger_mc": 100_000, "pack_name": "1,000 credits",
-                                        "monthly_limit_credits": 5000}
-    out = _node(_render_fns(), r"""
-out.with_a1 = autoTopupSection(""" + json.dumps(ov) + r""").textContent;
-out.without = autoTopupSection(""" + json.dumps(_OV) + r""").textContent;
-""")
-    assert "On" in out["with_a1"] and "100.00" in out["with_a1"] and "1,000 credits" in out["with_a1"]
-    assert "5000" in out["with_a1"]
-    assert "coming soon" in out["without"]                                   # no A1 data -> described, not interactive
+# A1 — the SESSION org's auto top-up read (/billing/auto-topup): credits only, never a money amount. `settings` is
+# None until the org opts in; `packs` are the offered top-ups; `receipts` are the per-crossing outcomes.
+_AT_OFF = {"settings": None, "card_saved": False, "month_credits": 0,
+           "packs": [{"price_id": "price_topup", "name": "Credit top-up", "credits": 50},
+                     {"price_id": "price_topup_big", "name": "Bulk credits", "credits": 1000}],
+           "receipts": []}
+_AT_ON = {"settings": {"enabled": True, "trigger_credits": 25, "pack_price_id": "price_topup_big",
+                       "monthly_cap_credits": 5000},
+          "card_saved": True, "month_credits": 1000,
+          "packs": _AT_OFF["packs"],
+          "receipts": [{"status": "charged", "credits": 1000, "at": 1_700_000_000},
+                       {"status": "cap_blocked", "credits": 1000, "at": 1_700_600_000}]}
+
+
+def _open_auto_topup(payload: dict) -> dict:
+    """Render the Auto top-up section, click its on-demand control and return the loaded form's text + the reads."""
+    return _node(_wiring_fns("1"), r"""
+const calls = [];
+VUI.getJSON = async (p) => { calls.push(p); return """ + json.dumps(payload) + r"""; };
+const sec = autoTopupSection(); document.body.appendChild(sec);
+out.before = sec.textContent;
+const open = sec.querySelectorAll('button').filter(b => b.textContent === 'Set up auto top-up')[0];
+open.click(); await tick(); await tick();
+out.after = sec.textContent; out.calls = calls;
+out.toggle = sec.querySelectorAll('button')[0].textContent;
+""", is_async=True)
+
+
+def test_the_auto_topup_control_is_on_demand_and_opt_in_default_off():
+    """The section is the one card every mode shows; its form loads on demand (like Rates) and, with no settings yet,
+    the opt-in is OFF — an explicit choice, never defaulted on. The offered packs (credits only) are there to pick."""
+    out = _open_auto_topup(_AT_OFF)
+    assert "Set up auto top-up" in out["before"] and "coming soon" not in out["before"]   # off until opened
+    assert "1250.000" not in out["before"]                                   # nothing fetched before the click
+    assert out["calls"] == ["api/customer/billing/auto-topup"]               # the one read, only on the click
+    t = out["after"]
+    assert "Auto top-up" in t and "Off" in t                                 # default-off: not armed
+    assert "Turn auto top-up on" in t and "Start when my balance falls below (credits)" in t
+    assert "Credit top-up — 50 credits" in t and "Bulk credits — 1,000 credits" in t       # the offered packs
+    assert "Buy credits once to save a card" in t                            # no card yet -> honest note
+    assert out["toggle"] == "Hide auto top-up"                               # the control toggles closed again
+    assert not _LEAK.search(t), _LEAK.search(t) and _LEAK.search(t).group(0)   # no money / model / estimate
+    assert not re.search(r"\bunits?\b", t, re.IGNORECASE)                    # no reserved unit count
+
+
+def test_the_auto_topup_form_shows_the_current_owner_signed_state():
+    """Once armed, the form shows exactly the owner-signed state the server returns: On, the trigger, the pack it
+    buys, the monthly limit, what was bought this month and the per-crossing receipts — credits only."""
+    out = _open_auto_topup(_AT_ON)
+    t = out["after"]
+    assert "Auto top-up" in t and "On" in t                                  # armed
+    assert "Bought this month" in t and "1,000 credits" in t                 # the month tally (cap usage)
+    assert "Recent auto top-ups" in t and "Added credits" in t and "Held at your monthly limit" in t
+    assert "Buy credits once to save a card" not in t                        # a card is saved -> no note
+    assert not _LEAK.search(t), _LEAK.search(t) and _LEAK.search(t).group(0)
+
+
+def _save_auto_topup(check: bool) -> dict:
+    """Open the form (no settings yet -> box default-off), optionally check the box, set the fields and Save once.
+    Returns the single POST (method, path, body). One save per scenario — no re-mount race."""
+    return _node(_wiring_fns("1"), r"""
+const calls = [];
+VUI.getJSON = async (p) => { calls.push(['GET', p]); return """ + json.dumps(_AT_OFF) + r"""; };
+VUI.postJSON = async (p, b) => { calls.push(['POST', p, b]); return { ok: true }; };
+VUI.toast = () => {};
+const sec = autoTopupSection(); document.body.appendChild(sec);
+sec.querySelectorAll('button').filter(b => b.textContent === 'Set up auto top-up')[0].click();
+await tick(); await tick();
+const inputs = sec.querySelectorAll('input');            // [enabled, trigger, cap] in document order
+const select = sec.querySelectorAll('select')[0];
+inputs[0].checked = """ + ("true" if check else "false") + r""";
+inputs[1].value = '25'; inputs[2].value = '2000'; select.value = 'price_topup_big';
+sec.querySelectorAll('button').filter(b => b.textContent === 'Save auto top-up')[0].click();
+await tick(); await tick();
+out.posts = calls.filter(c => c[0] === 'POST');
+""", is_async=True)
+
+
+def test_saving_auto_topup_sends_a_strict_boolean_opt_in_and_the_customers_choices():
+    """The Save sends the customer's choices to the one SET route: the trigger / monthly limit as whole credits and
+    the chosen pack, carrying NO org_id (the server binds it to the session) and NO money amount. The on/off is a
+    STRICT boolean — a checked box is exactly ``True``, never a truthy string."""
+    out = _save_auto_topup(check=True)
+    assert len(out["posts"]) == 1
+    (_m, path, body), = out["posts"]
+    assert path == "api/customer/billing/auto-topup"
+    assert body == {"enabled": True, "trigger_credits": 25, "pack_price_id": "price_topup_big",
+                    "monthly_cap_credits": 2000}
+    assert body["enabled"] is True                                           # a REAL boolean, not a truthy value
+    assert "org_id" not in body and "amount" not in body and "amount_minor" not in body   # tenant + money are server's
+
+
+def test_saving_auto_topup_off_sends_a_strict_boolean_false():
+    """An unchecked box turns it off with a strict boolean ``False`` — never a falsy-but-not-False value, and never
+    silently left on."""
+    out = _save_auto_topup(check=False)
+    (_m, _path, body), = out["posts"]
+    assert body["enabled"] is False
+
+
+def test_auto_topup_is_an_honest_note_when_the_feature_is_off_or_refused():
+    """With the feature off the read is a 404 (and a non-billing role a 403): the control opens to an honest note, not
+    a form and not a crash, and its button is usable again."""
+    out = _node(_wiring_fns("1"), r"""
+const calls = [];
+VUI.getJSON = async (p) => { calls.push(p); const e = new Error('off'); e.status = 404; throw e; };
+const sec = autoTopupSection(); document.body.appendChild(sec);
+const open = sec.querySelectorAll('button').filter(b => b.textContent === 'Set up auto top-up')[0];
+open.click(); await tick(); await tick();
+out.text = sec.textContent; out.calls = calls;
+out.saveButtons = sec.querySelectorAll('button').filter(b => b.textContent === 'Save auto top-up').length;
+out.openDisabled = open.disabled === true;
+""", is_async=True)
+    assert out["calls"] == ["api/customer/billing/auto-topup"]
+    assert "not available on your account right now" in out["text"]
+    assert out["saveButtons"] == 0                                           # no form rendered
+    assert out["openDisabled"] is False                                     # the control is usable again
 
 
 def test_the_low_balance_notice_only_shows_when_flagged():

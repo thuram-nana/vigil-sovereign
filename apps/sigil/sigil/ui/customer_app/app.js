@@ -914,7 +914,7 @@
       // the server sends no exact balance, the flat-billing cards are the accurate picture and are shown as always —
       // with the published Rates, the server's low-balance notice and Auto top-up, which hold in either mode.
       if (!ov || ov.exact_available_mc == null) {
-        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection(ov)]);
+        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection()]);
       }
       var usage = h("div#cust-bill-usage", {}, loadingHolder("Loading your usage…"));
       loadBillingUsage(usage);                                 // held / live / statement, from billing/usage
@@ -923,7 +923,7 @@
         h("div.cust-grid", {}, [billingCreditsCard(ov), billingSubscriptionCard(ov)]),
         usage,
         ratesSection(),                                        // the published rates, loaded on demand
-        autoTopupSection(ov),                                  // A1 settings when present, else "coming"
+        autoTopupSection(),                                    // A1 opt-in / edit (loaded on demand, step-up gated)
         buySection(),                                          // the existing CHK-2 buy surface (unchanged)
       ]);
     });
@@ -1073,22 +1073,147 @@
     if (per === 1000000) return "per million";
     return "per " + groupInt(per);
   }
-  // Auto top-up (A1). A1 is not merged in this build, so the section describes it and invents no endpoint. When A1
-  // adds its settings to the overview (`ov.auto_topup`) this shows them read-only; the EDIT form is A1's own slice
-  // (it owns the write endpoints and the step-up), gated behind A1's flag.
-  function autoTopupSection(ov) {
-    var at = ov && ov.auto_topup;
-    if (at && typeof at === "object") {
-      return VUI.card("Auto top-up", null, [
-        kv("Auto top-up", at.enabled ? "On" : "Off"),
-        kv("Starts when your balance falls below", at.trigger_mc != null ? mc2(at.trigger_mc) : "—"),
-        kv("Buys the pack", at.pack_name != null ? at.pack_name : "—"),
-        kv("Monthly limit", at.monthly_limit_credits != null ? String(at.monthly_limit_credits) : "—"),
-      ]);
+  // Auto top-up (A1). The customer OPTS IN (off by default) to auto-buy a chosen credit pack whenever their balance
+  // falls below a threshold, up to a monthly limit. The control reads the org's current settings from
+  // /billing/auto-topup ON DEMAND (like Rates) and a billing admin changes them through the SAME step-up the server
+  // demands (owner-signed, sovereign side). The money safety is the server's (A1): the arming is strictly opt-in,
+  // each low-balance crossing tops up AT MOST ONCE (idempotent), NEVER above the monthly cap, and CREDIT is minted
+  // solely by the verified webhook — never from this page. The page sends only the customer's choices (credits, never
+  // a money amount) and a STRICT boolean on/off. Absent (the feature off -> 404) or refused (a non-billing role ->
+  // 403): an honest note, no form. Shown only on the W6 dashboard; the classic screen never renders it.
+  function autoTopupSection() {
+    var holder = h("div#cust-bill-autotopup", {});
+    var btn = h("button.btn", { type: "button", text: "Set up auto top-up" });
+    var open = false;
+    btn.addEventListener("click", function () {
+      if (open) { VUI.mount(holder, h("div", {})); open = false; btn.textContent = "Set up auto top-up"; return; }
+      btn.disabled = true;
+      (async function () {
+        var d;
+        try { d = await VUI.getJSON(API + "/billing/auto-topup"); }
+        catch (e) {
+          btn.disabled = false;
+          if (here() !== "#/billing") return;
+          return VUI.mount(holder, h("p.cust-muted", { text: autoTopupUnavailableText(e) }));
+        }
+        btn.disabled = false;
+        if (here() !== "#/billing") return;
+        open = true; btn.textContent = "Hide auto top-up";
+        VUI.mount(holder, autoTopupForm(d || {}, holder, btn));
+      })();
+    });
+    return VUI.card("Auto top-up", null, [
+      h("div.cust-mon-actions", {}, [btn,
+        h("p.cust-muted", { text: "Add credits automatically so an assessment never pauses for credit. Choose the "
+          + "balance that starts it, the pack to buy and a monthly limit. It is off until you turn it on, and it "
+          + "never buys more than your monthly limit." })]),
+      holder,
+    ]);
+  }
+  function autoTopupUnavailableText(e) {
+    if (e && e.status === 403) return "Your role does not manage billing, so auto top-up is not shown.";
+    return "Auto top-up is not available on your account right now.";
+  }
+  // The on-demand settings + edit form. Credits only; no money amount, no model name, no reserved unit count. The
+  // on/off is a STRICT boolean (a checkbox), the trigger / monthly limit whole numbers of credits, the pack one of
+  // the offered top-ups — exactly what the server validates and owner-signs.
+  function autoTopupForm(d, holder, toggleBtn) {
+    var s = (d && d.settings) || {};
+    var packs = (d && d.packs) || [];
+    var armed = s.enabled === true;                     // strict: only an explicit true is "on"
+    if (!packs.length) {
+      return h("p.cust-muted", { text: "No credit packs are offered for auto top-up right now." });
     }
-    return VUI.card("Auto top-up", null, [h("p.cust-muted", {
-      text: "Auto top-up adds credits for you so an assessment never pauses for credit. Choose the balance that "
-        + "starts it, the pack to buy and a monthly limit. This is coming soon." })]);
+    var enBox = h("input#cust-at-enabled", { type: "checkbox" });
+    enBox.checked = armed;                              // reflect the current, owner-signed state
+    var trig = h("input#cust-at-trigger", { type: "text", inputmode: "numeric", autocomplete: "off",
+      spellcheck: "false" });
+    trig.value = (s.trigger_credits != null) ? String(s.trigger_credits) : "";
+    var cap = h("input#cust-at-cap", { type: "text", inputmode: "numeric", autocomplete: "off", spellcheck: "false" });
+    cap.value = (s.monthly_cap_credits != null) ? String(s.monthly_cap_credits) : "";
+    var sel = h("select#cust-at-pack", { "aria-label": "Credit pack to buy" });
+    packs.forEach(function (p) {
+      sel.appendChild(h("option", { value: p.price_id,
+        text: String(p.name || p.price_id) + " — " + groupInt(p.credits) + " credits" }));
+    });
+    if (s.pack_price_id) sel.value = s.pack_price_id;
+    var save = h("button.btn", { type: "button", text: "Save auto top-up" });
+    var refs = { enBox: enBox, trig: trig, cap: cap, sel: sel, holder: holder, toggleBtn: toggleBtn };
+    save.addEventListener("click", function () { saveAutoTopup(refs, save); });
+
+    var rows = [kv("Auto top-up", armed ? "On" : "Off"),
+                kv("Bought this month", groupInt((d && d.month_credits) || 0) + " credits")];
+    if (!(d && d.card_saved)) {
+      rows.push(h("p.cust-muted", { text: "Auto top-up uses the card you pay with when you buy credits. Buy credits "
+        + "once to save a card, then it can charge automatically." }));
+    }
+    rows.push(h("label", { for: "cust-at-enabled", text: "Turn auto top-up on" }), enBox,
+              h("label", { for: "cust-at-trigger", text: "Start when my balance falls below (credits)" }), trig,
+              h("label", { for: "cust-at-pack", text: "Buy this pack" }), sel,
+              h("label", { for: "cust-at-cap", text: "Never buy more than this per month (credits)" }), cap,
+              h("div.cust-mon-actions", {}, [save]));
+    var receipts = (d && d.receipts) || [];
+    if (receipts.length) {
+      rows.push(h("h3", { text: "Recent auto top-ups" }));
+      receipts.forEach(function (r) { rows.push(autoTopupReceiptRow(r)); });
+    }
+    return h("div", {}, rows);
+  }
+  function autoTopupReceiptRow(r) {
+    return h("div.cust-kv", {}, [h("span.k", { text: fmtDate(r.at) + " · " + autoTopupStatusText(r.status) }),
+      h("span", { text: ((r.credits != null) ? groupInt(r.credits) : "—") + " credits" })]);
+  }
+  function autoTopupStatusText(status) {
+    if (status === "charged") return "Added credits";
+    if (status === "declined") return "Card declined";
+    if (status === "cap_blocked") return "Held at your monthly limit";
+    return "Auto top-up";
+  }
+  function saveAutoTopup(refs, btn) {
+    var enabled = refs.enBox.checked === true;         // STRICT boolean: only a real true arms it
+    var trig = autoTopupInt(refs.trig.value);
+    var cap = autoTopupInt(refs.cap.value);
+    var pack = String(refs.sel.value || "");
+    if (trig == null || cap == null) {
+      return err("Enter the balance that starts auto top-up and the monthly limit as whole numbers of credits.");
+    }
+    if (!pack) return err("Choose the credit pack to buy.");
+    btn.disabled = true;
+    (async function () {
+      try {
+        // the SET needs a fresh second factor (server-enforced); withStepUp sends the change ONCE more after it
+        await withStepUp(function () {
+          return VUI.postJSON(API + "/billing/auto-topup", { enabled: enabled === true, trigger_credits: trig,
+            pack_price_id: pack, monthly_cap_credits: cap });
+        }, btn.parentNode);
+      } catch (e) {
+        btn.disabled = false;
+        if (e && e.stepUpCancelled) return;            // the person closed the check: nothing was changed
+        if (e && e.status === 401 && e.data && e.data.step_up_required) {
+          return err("For your security, changing auto top-up needs a fresh second-factor check. Verify with your "
+            + "authenticator, then try again.");
+        }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return err("Auto top-up could not be saved" + ((e && e.data && e.data.error) ? ": " + e.data.error : ".")
+          + " Nothing was charged.");
+      }
+      btn.disabled = false;
+      VUI.toast(enabled ? "Auto top-up is on." : "Auto top-up is off.");
+      if (here() !== "#/billing") return;
+      // re-read the owner-signed state so the form shows exactly what the server stored
+      try {
+        var fresh = await VUI.getJSON(API + "/billing/auto-topup");
+        if (here() === "#/billing") VUI.mount(refs.holder, autoTopupForm(fresh || {}, refs.holder, refs.toggleBtn));
+      } catch (e) { /* the save landed; the next open re-reads */ }
+    })();
+  }
+  // A whole number of credits >= 0, or null when the field is empty / not a clean integer (the server is the
+  // authority; this only keeps an obviously-bad value from being sent).
+  function autoTopupInt(v) {
+    var s = String(v == null ? "" : v).trim();
+    if (!/^\d+$/.test(s)) return null;
+    var n = parseInt(s, 10);
+    return (isFinite(n) && n >= 0) ? n : null;
   }
 
   // ---- CHK-2: buy (hosted checkout) -----------------------------------------------------------------
