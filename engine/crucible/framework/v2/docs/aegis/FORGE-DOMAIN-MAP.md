@@ -69,8 +69,22 @@ and blocks only on a fired oracle's certificate.
   Retry-After, never a block; default-OFF `VIGIL_AEGIS_CAPACITY`)** · **AS-5c probe socket
   (built — `aegis/probe_socket.py` LOCAL owner-only AF_UNIX operational probe socket surfacing the effective mode +
   the AS-5a capacity/admission snapshot off the data-plane HTTP port; read-only, never a block; default-OFF
-  `VIGIL_AEGIS_PROBE_SOCKET`)** · AS-5d/5e/5b
-  outcomes · AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
+  `VIGIL_AEGIS_PROBE_SOCKET`)** · **AS-5d outcomes+receipts (built — `aegis/receipts.py` append-only,
+  hash-linked ENFORCEMENT-OUTCOME receipt ledger recording the disposition of each enforced request
+  [allowed / shed / blocked-by-a-fired-oracle], surfaced read-only on the AS-5c probe snapshot; a receipt
+  RECORDS what enforcement did and is never itself a block/verdict; default-OFF `VIGIL_AEGIS_RECEIPTS`)** ·
+  **AS-5e impact budget (built — `aegis/impact_budget.py` deterministic READ-ONLY rollup over the AS-5d
+  receipt chain: over a bounded recent window it measures the DENIED ratio [shed + blocked] vs a configured
+  budget ceiling + a bounded per-reason breakdown, surfaced read-only on the AS-5c probe snapshot; MEASURES,
+  never acts — never mutates the ledger and never drives an admit/shed/allow/block decision; inert unless the
+  AS-5d receipts dep is also armed; default-OFF `VIGIL_AEGIS_IMPACT_BUDGET`)** · **AS-5b attribution
+  (built — `aegis/attribution.py` deterministic READ-ONLY denial-SOURCE rollup: reads the AS-5a per-caller
+  buckets and reports which sources drive the current shed/denial pressure [concentration + constrained count +
+  a bounded top-N of the heaviest sources as ADDRESS-FREE opaque ids, never a raw caller address], paired with
+  the AS-5e per-reason breakdown, surfaced read-only on the AS-5c probe snapshot; MEASURES, never acts — never
+  mutates a bucket/receipt and never drives an admit/shed/allow/block decision; inert unless its AS-5a capacity +
+  AS-5e impact [and thus AS-5d receipts] deps are also armed; default-OFF `VIGIL_AEGIS_ATTRIBUTION`)** ·
+  AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
   5a → 5c → 5d → 5e → 5b → 13b (plan §9.4 chains).
 
 ## Domain 2 — Authority / entitlement (control plane)
@@ -172,8 +186,20 @@ distribution, with caps and authenticated transport.
 - **Hot set:** SPOOL (receiver shares the spool chain tail).
 - **Slices:** AS-9a broker · AS-9b receiver · AS-20 notify/SIEM emitter (the connector
   CONSUMER — reuses the AS-9a broker to STAMP an outbound credential; adds no OracleKind,
-  opens no serve route) · AS-31 Detection Mirror (DM-signer, cert v2 defense delegation at
-  `finding_receiver.py`) · **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
+  opens no serve route) · **AS-31 Detection Mirror (BUILT — `aegis/detection_mirror.py`)** — the
+  deterministic READ-ONLY DETECTION MIRROR: a reflected, metadata-only view of the detection posture
+  that UNIFIES the AS-30 detection SOURCE catalog (the provider inventory), the AS-7b detection CONTENT
+  admissibility (the Coraza/CRS attestation + its `admit_rule_refs` lead gate) and the AS-3b AS-2e
+  output-hygiene leak gate, all reached by RELATIVE import (never re-implemented); it reflects the
+  cataloged sources × the admissible CRS content leads (address-free, bounded, sorted, de-duplicated,
+  hygiene-clean) + a deterministic posture digest, and `reflect(source, refs)` admits a detection hit as
+  a LEAD only over a cataloged source AND admissible content (fail closed otherwise). Surfaced read-only
+  on the AS-5c probe; MEASURES/REFLECTS, never acts — a mirrored hit is a LEAD never a block, it drives no
+  admit/shed/allow/block decision and mutates no state; inert unless the AS-7b `VIGIL_AEGIS_CORAZA` dep is
+  armed; default-OFF `VIGIL_AEGIS_DETECTION_MIRROR`. (Scope note: the read-only mirror CORE lands here; the
+  wider DM-signer / cert-v2 defense-delegation extension of `finding_receiver.py` — a control-plane write
+  path — is deliberately NOT in this read-only, stdlib-only engine slice and remains to build.) ·
+  **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
   provider reader normalizes CloudTrail, pushes INERT LEADs through the AS-9b receiver (no new
   customer route → no Gate-5 census row), and tamper-evidences each record via AS-9c anchor-1;
   DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`. · **AS-17c IdP sign-in/audit telemetry source (built)** —
@@ -282,7 +308,7 @@ Two supporting areas that every domain leans on:
 
 | Area | Path | Verified | Note |
 |------|------|:---:|------|
-| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-17c IdP (Okta System Log) normalizer + gated `detect_format` (`parse_idp`); AS-7b Coraza |
+| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/`, `aegis/coraza_source.py`, `aegis/detection_kit.py` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-17c IdP (Okta System Log) normalizer + gated `detect_format` (`parse_idp`); **AS-7b Coraza (BUILT — `aegis/coraza_source.py`: deterministic read-only Coraza/CRS front-WAF SUPPLY-CHAIN attestation composing the AS-7a §7 licence gate [`coraza-v3` + `coreruleset-crs-4x` service-use] with an AS-28-style stdlib corpus PIN → `admissible = licensed AND pinned`; a Coraza v3 DetectionOnly hit's `rule_refs` are normalized address-free and admitted as a LEAD only over an admissible corpus [drifted/unlicensed ⇒ fail closed, no belief]; surfaced read-only on the AS-5c probe; MEASURES, never acts — a CRS hit is a LEAD never a block; default-OFF `VIGIL_AEGIS_CORAZA`)**; **AS-10c detection kit (BUILT — `aegis/detection_kit.py`: deterministic read-only detection-content KIT supply-chain packaging attestation that composes the CRS-derived + Sigma-derived rules a tenant would SHIP [the `pushed-rules` DISTRIBUTION bundle] into one bundled, tamper-evident kit — the AS-7a §7 licence gate over the distribution bundle, the AS-7b CRS corpus pin + address-free normalize/admit primitives [reused by relative import], and an AS-28-style stdlib Sigma corpus pin over the AS-17a DEPLOYABLE rules → `admissible = licensed AND crs_pinned AND sigma_pinned`, sealed by one `kit_digest` binding both corpus pins + the licence-ledger digest + the kit identity; a kit hit's `rule_refs` are a LEAD only over an admissible kit [drifted/unlicensed ⇒ fail closed, no belief]; surfaced read-only on the AS-5c probe; MEASURES, never acts — a kit rule_ref is a LEAD never a block; default-OFF `VIGIL_AEGIS_KIT`)** |
 | CODEOWNERS trust domains (`_CRITICAL_PREFIXES`) | `.github/CODEOWNERS`, `integration/tests/test_codeowners_coverage.py` | yes | AS-0: `aegis/`, `verify/`, `veracity/`, `vigil_core/` are critical prefixes |
 | Slice graph (acyclicity, levels, disjoint manifests) | `engine/crucible/framework/v2/aegis/slice_graph.json` + `aegis/tests/test_aegis_slice_graph.py` | yes | AS-0 graph gate (72 slices, 24 waves) |
 

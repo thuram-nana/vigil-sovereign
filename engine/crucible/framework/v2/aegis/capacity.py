@@ -48,6 +48,7 @@ from typing import Callable, Optional
 __all__ = [
     "CAPACITY_ENV",
     "Admission",
+    "CallerLoad",
     "CapacityBudget",
     "CapacityGovernor",
     "capacity_enabled",
@@ -121,6 +122,29 @@ class Admission:
             return max(1, int(math.ceil(self.retry_after_s)))
         except (ValueError, OverflowError):
             return 1
+
+
+@dataclass(frozen=True)
+class CallerLoad:
+    """ONE caller's current READ-ONLY load, computed (not stored) at a snapshot instant. The IN-PROCESS
+    introspection record a read-only consumer (AS-5b attribution) rolls up; it carries the RAW caller key for
+    an in-process consumer that digests it to an opaque id BEFORE any wire/operator surface — this record is
+    never itself emitted off-box. Metadata: concurrency + rate-budget pressure only, no request bytes/secret.
+
+    * ``caller``   — the governor's stable per-actor key (the client IP). RAW — in-process only.
+    * ``inflight`` — concurrent in-flight requests this caller currently holds.
+    * ``tokens``   — the caller's EFFECTIVE token balance at the snapshot instant (refill applied for read,
+      NOT written back — a load read never mutates the bucket).
+    * ``depleted`` — ``tokens < 1.0``: a request from this caller RIGHT NOW would be rate-shed (the caller is
+      driving rate-shed pressure).
+    * ``at_cap``   — ``inflight >= max_inflight_per_caller`` (only when a per-caller concurrency cap is set): a
+      request from this caller right now would be concurrency-shed."""
+
+    caller: str
+    inflight: int
+    tokens: float
+    depleted: bool
+    at_cap: bool
 
 
 class _Bucket:
@@ -289,3 +313,34 @@ class CapacityGovernor:
         Carries no per-caller address (metadata only), so it is safe for an operator status surface."""
         with self._lock:
             return {"tracked_callers": len(self._callers), "global_inflight": self._global_inflight}
+
+    def caller_loads(self, *, now: Optional[float] = None) -> "tuple[CallerLoad, ...]":
+        """A READ-ONLY per-caller load snapshot computed under the lock at ``now`` (the injected monotonic clock
+        by default; an explicit ``now`` for a reproducible test). For each tracked caller it reports concurrency
+        (in-flight) and rate-budget pressure (effective tokens + whether a request now would be rate/concurrency
+        shed) — the per-source signal AS-5b attribution rolls up (AS-5a is the only plane that carries per-caller
+        state; the AS-5d receipts are address-free).
+
+        NEVER MUTATES bucket state: the effective token balance is computed from (stored tokens, last-refill,
+        now, rate) WITHOUT writing it back (no refill side-effect, no ``last`` advance), so any number of load
+        reads leave every admit/shed decision byte-identical. The math mirrors :meth:`_refill` exactly (clamp to
+        burst, add only for a forward-moving clock) so a load read and a real admit agree on the balance.
+
+        Returns the RAW caller keys for an IN-PROCESS consumer only: AS-5b digests them to opaque ids before any
+        operator/wire surface, so no raw address is emitted off-box (the address-free metadata discipline the
+        whole chain serves)."""
+        t = self._now() if now is None else float(now)
+        burst = float(self._budget.burst)
+        rate = self._budget.rate_per_s
+        c_cap = self._budget.max_inflight_per_caller
+        out: "list[CallerLoad]" = []
+        with self._lock:
+            for key, b in self._callers.items():
+                eff = b.tokens
+                elapsed = t - b.last
+                if elapsed > 0:
+                    eff = min(burst, b.tokens + elapsed * rate)
+                out.append(CallerLoad(
+                    caller=key, inflight=b.inflight, tokens=eff,
+                    depleted=eff < 1.0, at_cap=bool(c_cap) and b.inflight >= c_cap))
+        return tuple(out)
