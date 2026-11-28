@@ -222,9 +222,14 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
   **AS-29 enforce release (built — the guarded Release to enforce on
   `#/monitoring/settings`: a confirmed release of a Respond-entitled host from Observe
   into enforce/Respond, reusing the gated `monitoring/authorize` in the `block` mode with
-  no `window_s`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-3d
-  health+ack · AS-4b contract+preview · AS-27b override · AS-6d onboarding. UI chain:
-  4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
+  no `window_s`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** ·
+  **AS-3d health+ack (built — a Host health section + a per-viewer Acknowledge on the
+  `#/monitoring` screen, DERIVED entirely from the two reads the screen already makes
+  [`monitoring` grants/hosts + `monitoring/events`]: an honest health badge [live authority;
+  lapsed proof] and last-report fact, plus a client-side mark-as-seen of a host's latest
+  confirmed attack — no route, no write, no new authority; default-OFF
+  `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-4b contract+preview · AS-27b override ·
+  AS-6d onboarding. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
 

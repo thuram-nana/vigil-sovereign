@@ -2572,7 +2572,7 @@
   // what the server sent, and nothing internal of an event (no record number, report id, certificate hash or org id).
   var MONITORING_ON = pageFlag("monitoring");
   var MON_POLL_MS = 30000;                                // the events refresh this often while the screen is in view
-  var mon = { timer: null, gen: 0, loaded: false };
+  var mon = { timer: null, gen: 0, loaded: false, list: null };
   var MON_MODE = { observe: "Observe", block: "Respond" };
   var MON_ACTION = { block: "Blocked", observe: "Observed", challenge: "Challenged", throttle: "Slowed down",
                      allow: "Allowed" };
@@ -2608,6 +2608,7 @@
   }
 
   function monitoringBody(d) {
+    mon.list = d;                                          // AS-3d — the Host health section reads these grants/hosts on each poll
     var rows = monHostRows(d);
     var top = d.can_manage ? monPlanCard(d)
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can turn monitoring on or "
@@ -2616,8 +2617,11 @@
       : h("div.card.cust-soon", { text: d.can_manage
           ? "No host of this workspace has a current proof of control. Monitoring needs a host that shows Verified in Assets."
           : "No host of this workspace is monitored." });
-    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts, h("h3", { text: "Events" }),
-      h("div#mon-events", {}, loadingHolder("Loading events…"))]);
+    // AS-3d health+ack: the Host health section is rendered now from the armed grants (so it is never stuck loading if
+    // the events read fails) and ENRICHED with the last report + acknowledge on each events poll (pollMonEvents).
+    return h("div", {}, [top, h("h3", { text: "Hosts" }), hosts,
+      h("h3", { text: "Host health" }), h("div#mon-health", {}, monHealthBody(d, [])),
+      h("h3", { text: "Events" }), h("div#mon-events", {}, loadingHolder("Loading events…"))]);
   }
 
   // One row per host: each host with a current proof (sent to a manager only) and each host with monitoring.
@@ -2785,6 +2789,104 @@
     return h("div.card.cust-mon-events", {}, h("table.cust-table", {}, [h("thead", {}, head), h("tbody", {}, rows)]));
   }
 
+  // ---- AS-3d: Host health + acknowledge ------------------------------------------------------------------------------
+  // "health + ack" — the UI-chain increment after AS-29 (chain 4a->2f->2g->2k->21a->29->3d). A customer-facing HEALTH
+  // view of each monitored host and a per-viewer ACKNOWLEDGE of its latest reported attack, built ENTIRELY over the two
+  // reads the Monitoring screen already makes: GET api/customer/monitoring (the armed grants, and — for a manager — the
+  // hosts whose ownership proof is current) and GET api/customer/monitoring/events (the gateway-reported attacks). It
+  // adds NO route, NO write, NO flag and NO new authority; it is default-OFF behind the SAME
+  // VIGIL_CUSTOMER_MONITORING_ENABLED as the rest of the screen (off: the screen and these reads are absent).
+  //
+  // HONESTY. The events stream is ATTACK reports, not a telemetry heartbeat, so "no events" means "no attacks reported"
+  // (good), never "telemetry down". The health badge is therefore grounded ONLY in whether the monitoring AUTHORITY is
+  // live (active) and, for a manager, whether the host's ownership PROOF is still current — an armed host whose proof
+  // lapsed cannot be renewed until it is verified again (a real, honest health signal). The last-report line is a plain
+  // fact (when AEGIS last reported on the host, and whether that report was a confirmed attack).
+  //
+  // ACKNOWLEDGE is a PER-VIEWER mark-as-seen in THIS browser's storage (namespaced by the signed-in user, capped) — the
+  // same honest, convenience-not-a-ledger pattern the notification centre uses for read-state. It makes NO server call,
+  // changes nothing for the workspace or the team, and says so. CSP-safe: addEventListener only, no inline handler.
+  var MON_ACK_CAP = 300;                                   // the per-viewer ack set is a convenience, not a ledger
+  function monAckStore() { try { return window.localStorage; } catch (e) { return null; } }
+  function monAckKey() { var w = (state.get() || {}).who || {}; return "vigil.mon.ack." + (w.username || "anon"); }
+  function monAckSet() {
+    var s = monAckStore(), out = {};
+    if (!s) { return out; }
+    try { var a = JSON.parse(s.getItem(monAckKey()) || "[]"); } catch (e) { return out; }
+    (Array.isArray(a) ? a : []).forEach(function (id) { if (id != null) { out[String(id)] = 1; } });
+    return out;
+  }
+  function monAckSeen(id) { return id != null && Object.prototype.hasOwnProperty.call(monAckSet(), String(id)); }
+  function monAckMark(id) {
+    var s = monAckStore();
+    if (!s || id == null) { return; }                      // storage off: the ack holds for this view only, remembers nothing
+    var cur = Object.keys(monAckSet());
+    if (cur.indexOf(String(id)) < 0) { cur.push(String(id)); }
+    if (cur.length > MON_ACK_CAP) { cur = cur.slice(cur.length - MON_ACK_CAP); }
+    try { s.setItem(monAckKey(), JSON.stringify(cur)); } catch (e) { /* storage off: nothing remembered */ }
+  }
+  // the newest event per host; the events are newest-first already, so the first one seen for a host is its latest.
+  function monLatestByHost(events) {
+    var by = Object.create(null);
+    (Array.isArray(events) ? events : []).forEach(function (ev) {
+      if (ev && typeof ev === "object" && ev.host != null && !(String(ev.host) in by)) { by[String(ev.host)] = ev; }
+    });
+    return by;
+  }
+  // the health section's OWN button, kept distinct from monButton (so the Monitoring screen's guide-button census is
+  // not widened) and from the settings screen's monSettingsButton; CSP-safe — addEventListener, never an inline handler.
+  function monHealthButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  // The Host health section: one card per ARMED (active) host, sorted, each showing its monitoring health and last
+  // report. Rendered from the monitoring list (grants + verified hosts) and the events the poll already fetched.
+  function monHealthBody(d, events) {
+    var grants = ((d && d.grants) || []).filter(function (g) { return g && g.active && g.host; })
+      .sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+    if (!grants.length) { return h("div"); }               // nothing armed: the Hosts section already says so
+    var verified = Object.create(null);
+    ((d && d.hosts) || []).forEach(function (x) { if (x && x.host) { verified[String(x.host)] = 1; } });
+    var canManage = !!(d && d.can_manage), latest = monLatestByHost(events);
+    return h("div.cust-grid", {}, grants.map(function (g) { return monHealthCard(g, latest[String(g.host)], verified, canManage); }));
+  }
+  function monHealthCard(g, ev, verified, canManage) {
+    // a manager is told which hosts' proofs are current, so an armed host missing from that set has a LAPSED proof — a
+    // real health problem (it cannot be renewed until verified again). A non-manager is not told, so no proof claim.
+    var proofLapsed = canManage && !verified[String(g.host)];
+    var badge = proofLapsed ? h("span.cust-badge.cust-badge-off", { text: "Proof of control lapsed" })
+                            : h("span.cust-badge.cust-badge-on", { text: "Watching · " + (own(MON_MODE, g.mode) || "On") });
+    var body = [h("div.cust-asset-head", {}, [h("span.cust-mon-health-host", { text: String(g.host) }), badge])];
+    if (proofLapsed) {
+      body.push(h("p.cust-muted", { text: "Its proof of control is no longer current, so its monitoring cannot be "
+        + "renewed until you verify it again in Assets." }));
+    }
+    // last report — a plain fact about the gateway-reported attacks, NEVER a claim that telemetry is or is not flowing.
+    if (ev && ev.ts != null) {
+      var confirmed = ev.decision === "confirmed";
+      body.push(kv("Last report", fmtWhen(ev.ts) + (confirmed ? " — confirmed attack" : " — unconfirmed signal")));
+      if (confirmed && !monAckSeen(ev.report_id)) {
+        var acts = h("div.cust-mon-health-actions", {});
+        VUI.mount(acts, [h("p.cust-mon-health-attn", { text: "A confirmed attack on this host is not acknowledged." }),
+          monHealthButton("Acknowledge", function () { monAcknowledge(ev.report_id, acts); })]);
+        body.push(acts);
+      } else if (confirmed) {
+        body.push(h("p.cust-muted", { text: "Its last confirmed attack is acknowledged on this device." }));
+      }
+    } else {
+      body.push(kv("Last report", "No attacks reported yet"));
+    }
+    return h("div.card.cust-mon-health-card", { dataset: { host: String(g.host) } }, body);
+  }
+  // Acknowledge is a PER-VIEWER mark-as-seen in this browser only: it makes no server call and changes nothing for the
+  // workspace. It updates this card's cue in place (no full re-render, no re-read), and the next poll shows it seen.
+  function monAcknowledge(id, acts) {
+    monAckMark(id);
+    VUI.toast("Acknowledged on this device.");
+    VUI.mount(acts, h("p.cust-muted", { text: "Acknowledged on this device." }));
+  }
+
   // The events refresh politely: every MON_POLL_MS, and only while the Monitoring screen is shown to someone signed in
   // and the page is visible. render() and the page's visibility changes re-decide, so leaving the screen, hiding the
   // page or signing out stops it; an answer that comes back after any of those is dropped (the generation moved on).
@@ -2811,6 +2913,10 @@
     if (!holder) { return; }
     mon.loaded = true;
     VUI.mount(holder, monEventsList(d && d.events));
+    // AS-3d — enrich the Host health section with the freshly-read last report + acknowledge (same gen guard above, so
+    // a stale or cross-account answer never renders here). No extra read: it reuses this poll's events.
+    var hbox = VUI.$("#mon-health");
+    if (hbox && mon.list) { VUI.mount(hbox, monHealthBody(mon.list, (d && d.events) || [])); }
   }
 
   // ---- Monitoring settings (AS-2k): #/monitoring/settings, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED -------

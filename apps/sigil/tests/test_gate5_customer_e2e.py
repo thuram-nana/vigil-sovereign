@@ -141,6 +141,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # one, Disconnect a connected one, Connect a cloud account
     "#/connect": {"Continue": 2, "Prove again": 1, "Connect a website": 1, "Connect GitHub": 1, "Open Code": 1,
                   "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
+    # AS-3d adds a Host health section (health badge + last report) and an Acknowledge button, but Acknowledge renders
+    # only for a host whose LATEST event is a confirmed attack — and this walk's monitoring/events fixture is empty, so
+    # it renders zero buttons here (its guard/mark-as-seen is pinned by test_customer_monitoring_health_ui.py).
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
     # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls;
