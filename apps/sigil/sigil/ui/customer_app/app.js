@@ -2825,13 +2825,25 @@
     if (cur.length > MON_ACK_CAP) { cur = cur.slice(cur.length - MON_ACK_CAP); }
     try { s.setItem(monAckKey(), JSON.stringify(cur)); return true; } catch (e) { return false; }
   }
-  // the newest event per host; the events are newest-first already, so the first one seen for a host is its latest.
+  // the latest event per host BY ITS ts (attack/report time) — NOT by the server's spine-insertion (seq) order. A
+  // report can be written to the spine out of ts order (a delayed or backfilled report lands later in the spine but
+  // describes an EARLIER attack), so the first record in the insertion-ordered list is not necessarily the latest
+  // ATTACK. Keep, per host, the event with the greatest ts; on a tie, the later-inserted (higher seq) wins — a
+  // deterministic choice independent of the input order. So "Last report" shows the latest by real time and
+  // Acknowledge targets that same record.
   function monLatestByHost(events) {
     var by = Object.create(null);
     (Array.isArray(events) ? events : []).forEach(function (ev) {
-      if (ev && typeof ev === "object" && ev.host != null && !(String(ev.host) in by)) { by[String(ev.host)] = ev; }
+      if (!ev || typeof ev !== "object" || ev.host == null) { return; }
+      var host = String(ev.host);
+      if (!(host in by) || monEventLater(ev, by[host])) { by[host] = ev; }
     });
     return by;
+  }
+  function monEventLater(a, b) {
+    var ta = Number(a.ts) || 0, tb = Number(b.ts) || 0;
+    if (ta !== tb) { return ta > tb; }                    // the greater attack/report TIME is the latest
+    return (Number(a.seq) || 0) > (Number(b.seq) || 0);   // tie on ts: the later-inserted (higher seq) record wins
   }
   // the health section's OWN button, kept distinct from monButton (so the Monitoring screen's guide-button census is
   // not widened) and from the settings screen's monSettingsButton; CSP-safe — addEventListener, never an inline handler.
