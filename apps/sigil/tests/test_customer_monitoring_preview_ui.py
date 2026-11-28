@@ -168,8 +168,12 @@ _NOT_OBS = ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipar
 
 
 def _p(host, headline, *, mode="observe", armed=True, proof=True, respond=True, permitted=False, blockers=()):
+    # AS-4b honesty: "observe_outcomes" is a LIVE claim, so the server only fills it for an ARMED host; an
+    # unarmed host carries the same detection as a preview-only "observe_adds_outcomes" ("would be detected…").
     return {"host": host, "headline": headline, "mode": mode, "armed": armed, "proof_current": proof,
-            "respond_entitled": respond, "observe_outcomes": ["detected_without_enforcement"],
+            "respond_entitled": respond,
+            "observe_outcomes": (["detected_without_enforcement"] if armed else []),
+            "observe_adds_outcomes": ([] if armed else ["detected_without_enforcement"]),
             "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
             "enforce_permitted": permitted, "enforce_blockers": list(blockers), "not_observed": list(_NOT_OBS)}
 
@@ -219,6 +223,11 @@ out.anyButton = document.querySelectorAll("button").length;
     assert out["enf"][0] == "Enforcing · Respond" and "already enforcing" in out["enf"][1]
     assert out["lapsed"][0] == "Proof of control lapsed" and "verify it again in Assets" in out["lapsed"][1]
     assert out["off"][0] == "Not monitored" and "Turn monitoring on for this host" in out["off"][1]
+    # RED-PEN AS-4b: a proven-but-unmonitored host must NOT claim live detection — "Now" inspects nothing and the
+    # detection is shown, honestly, as preview-only ("would be detected once monitoring is armed").
+    assert "AEGIS can detect and report attacks" not in out["off"][1]          # no live-detection over-claim
+    assert "does not inspect this host yet" in out["off"][1]
+    assert "Once monitoring is armed" in out["off"][1] and "would detect and report attacks" in out["off"][1]
     assert "plan does not include Respond" in out["obs"]
     assert out["anyButton"] == 0                                               # the whole screen is read-only
 

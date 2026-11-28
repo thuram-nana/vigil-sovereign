@@ -135,10 +135,27 @@ def test_an_armed_observe_host_with_a_current_proof_and_respond_can_be_released(
     assert p.headline is Headline.OBSERVING
     assert p.enforce_permitted is True and p.enforce_blockers == ()
     # observe reaches detect-only; enforce ADDS prevent + withhold — DERIVED from the baseline provider registry
-    assert p.observe_outcomes == (OutcomeClass.DETECTED_WITHOUT_ENFORCEMENT,)
+    assert p.observe_outcomes == (OutcomeClass.DETECTED_WITHOUT_ENFORCEMENT,)   # armed => detection is LIVE now
+    assert p.observe_adds_outcomes == ()                             # armed => nothing is only "would be detected"
     assert p.enforce_adds_outcomes == (OutcomeClass.PREVENTED_BEFORE_EXECUTION,
                                        OutcomeClass.RESPONSE_WITHHELD_AFTER_EXECUTION)
     assert p.not_observed == NOT_OBSERVED_BASELINE                    # the honest coverage limitation surfaced
+
+
+def test_a_proven_but_unmonitored_host_does_not_claim_live_detection():
+    # RED-PEN AS-4b: a host whose ownership proof is current but which is NOT armed (no live monitoring grant) is
+    # not being monitored — the preview must NOT claim live detection is in effect for it. "What AEGIS does now"
+    # is empty; the detection arming would make live is carried, honestly, as a preview-only "would be" instead.
+    p = preview_host("proven.example", mode=MonitoringMode.OBSERVE, armed=False, proof_current=True,
+                     respond_entitled=True)
+    assert p.headline is Headline.INACTIVE                            # not monitored
+    assert p.observe_outcomes == ()                                  # NO live-detection claim on an unmonitored host
+    assert p.observe_adds_outcomes == (OutcomeClass.DETECTED_WITHOUT_ENFORCEMENT,)   # would be detected once armed
+    assert BLOCKER_NOT_ARMED in p.enforce_blockers
+    # the customer-safe projection the edge ships carries the same honest split — no "detected" value under "now"
+    cs = p.customer_safe()
+    assert cs["observe_outcomes"] == []
+    assert cs["observe_adds_outcomes"] == ["detected_without_enforcement"]
 
 
 def test_the_preview_names_an_honest_blocker_whenever_a_release_would_be_refused():
@@ -182,8 +199,8 @@ def test_the_preview_is_deterministic_and_customer_safe():
     assert HostProtectionPreview.parse(a.model_dump()).canonical_bytes() == a.canonical_bytes()   # round-trips
     cs = a.customer_safe()
     assert set(cs) == {"host", "headline", "mode", "armed", "proof_current", "respond_entitled",
-                       "observe_outcomes", "enforce_adds_outcomes", "enforce_permitted", "enforce_blockers",
-                       "not_observed"}
+                       "observe_outcomes", "observe_adds_outcomes", "enforce_adds_outcomes", "enforce_permitted",
+                       "enforce_blockers", "not_observed"}
     assert all(isinstance(v, (str, bool, list)) for v in cs.values())  # enum values / booleans / token lists only
     # the default registry is the shared baseline (prevent + withhold + detect)
     assert preview_host("x.example", mode=MonitoringMode.OBSERVE, armed=True, proof_current=True,

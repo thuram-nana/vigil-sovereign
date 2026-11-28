@@ -167,7 +167,12 @@ class HostProtectionPreview(CanonicalModel):
     add — a protection-contract preview grounded only in already-verified inputs. It is NEVER authority:
     nothing here arms a host; ``enforce_permitted`` only states whether the AS-29 release gate WOULD admit a
     release right now, and ``enforce_blockers`` names, honestly, why not. Fail-closed: ``enforce_permitted``
-    defaults ``False`` and the headline defaults to the floor."""
+    defaults ``False`` and the headline defaults to the floor.
+
+    ``observe_outcomes`` is a LIVE claim — the detection AEGIS performs RIGHT NOW — so it is only non-empty for
+    a host that is actually armed (a live monitoring grant). A proven-but-unarmed host is not monitored, so it
+    claims NO live detection; what arming it WOULD make live is carried, honestly, in ``observe_adds_outcomes``
+    (availability-first: "would be detected once monitoring is armed", never "is detected now")."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -178,6 +183,7 @@ class HostProtectionPreview(CanonicalModel):
     proof_current: bool = Field(default=False)
     respond_entitled: bool = Field(default=False)
     observe_outcomes: tuple[OutcomeClass, ...] = Field(default_factory=tuple)
+    observe_adds_outcomes: tuple[OutcomeClass, ...] = Field(default_factory=tuple)
     enforce_adds_outcomes: tuple[OutcomeClass, ...] = Field(default_factory=tuple)
     enforce_permitted: bool = Field(default=False)
     enforce_blockers: tuple[str, ...] = Field(default_factory=tuple)
@@ -199,6 +205,7 @@ class HostProtectionPreview(CanonicalModel):
             "proof_current": self.proof_current,
             "respond_entitled": self.respond_entitled,
             "observe_outcomes": [c.value for c in self.observe_outcomes],
+            "observe_adds_outcomes": [c.value for c in self.observe_adds_outcomes],
             "enforce_adds_outcomes": [c.value for c in self.enforce_adds_outcomes],
             "enforce_permitted": self.enforce_permitted,
             "enforce_blockers": list(self.enforce_blockers),
@@ -225,9 +232,18 @@ def preview_host(
 
     ``enforce_permitted`` is the AS-29 release gate as a PREVIEW, never an action: a release would be admitted
     only for an armed, Respond-entitled host whose proof is current and that is still in the always-safe Observe
-    base. ``enforce_blockers`` names, in a closed honest vocabulary, every reason it would not."""
+    base. ``enforce_blockers`` names, in a closed honest vocabulary, every reason it would not.
+
+    HONESTY — live detection is a LIVE claim, not a capability advert: ``observe_outcomes`` (what AEGIS detects
+    NOW) is non-empty ONLY for an armed host. A proven-but-unarmed host is not monitored, so it claims no live
+    detection; the detection arming it WOULD make live is surfaced in ``observe_adds_outcomes`` instead (the
+    renderer reads it as "would be detected once monitoring is armed")."""
     reg = registry if registry is not None else baseline_provider_registry()
-    observe_outcomes, enforce_adds = _outcome_split(reg)
+    detect_outcomes, enforce_adds = _outcome_split(reg)
+    # LIVE claim: detection is only in effect for a host that is actually armed (a live monitoring grant). An
+    # unarmed host is not monitored — it claims NO live detection; arming it is what WOULD make detection live.
+    observe_outcomes = detect_outcomes if armed else ()
+    observe_adds = () if armed else detect_outcomes
 
     if not armed:
         headline = Headline.INACTIVE
@@ -257,6 +273,7 @@ def preview_host(
         proof_current=proof_current,
         respond_entitled=respond_entitled,
         observe_outcomes=observe_outcomes,
+        observe_adds_outcomes=observe_adds,
         enforce_adds_outcomes=enforce_adds,
         enforce_permitted=permitted,
         enforce_blockers=tuple(sorted(blockers)),

@@ -453,12 +453,13 @@ _FAKE_SERVER = {
     # permitted), b.example proven but not yet armed (the preview names the honest blocker). Pure display, no button.
     "api/customer/monitoring/preview": {"org_id": "org_acme", "can_manage": True, "previews": [
         {"host": "a.example", "headline": "observing", "mode": "observe", "armed": True, "proof_current": True,
-         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"],
+         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"], "observe_adds_outcomes": [],
          "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
          "enforce_permitted": True, "enforce_blockers": [],
          "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]},
+        # b.example is proven but NOT armed: honest server emits no live-detection claim; the detection is preview-only.
         {"host": "b.example", "headline": "inactive", "mode": "observe", "armed": False, "proof_current": True,
-         "respond_entitled": True, "observe_outcomes": ["detected_without_enforcement"],
+         "respond_entitled": True, "observe_outcomes": [], "observe_adds_outcomes": ["detected_without_enforcement"],
          "enforce_adds_outcomes": ["prevented_before_execution", "response_withheld_after_execution"],
          "enforce_permitted": False, "enforce_blockers": ["not_armed"],
          "not_observed": ["direct_to_origin", "cache_hits", "chunked", "over_2_mib", "multipart", "websocket", "non_http"]}]},

@@ -63,18 +63,25 @@ def test_a_respond_manager_sees_each_host_graded_and_a_release_flips_its_preview
         armed = _row(d, "armed.acme.example")
         assert armed["headline"] == "observing" and armed["enforce_permitted"] is True and armed["enforce_blockers"] == []
         # the grade is DERIVED from the baseline provider registry, not hard-coded
-        assert armed["observe_outcomes"] == ["detected_without_enforcement"]
+        assert armed["observe_outcomes"] == ["detected_without_enforcement"]   # armed => detection is LIVE now
+        assert armed["observe_adds_outcomes"] == []                 # armed => nothing is only "would be detected"
         assert armed["enforce_adds_outcomes"] == ["prevented_before_execution", "response_withheld_after_execution"]
         assert "websocket" in armed["not_observed"]                 # the honest coverage limitation is surfaced
         proven = _row(d, "proven.acme.example")                     # proven but unarmed => inactive, not-armed blocker
         assert proven["headline"] == "inactive" and proven["enforce_permitted"] is False
         assert proven["enforce_blockers"] == ["not_armed"]
+        # RED-PEN AS-4b: a proven-but-unmonitored host claims NO live detection — "now" is empty; the detection
+        # arming WOULD make live is carried as a preview-only "would be detected once monitoring is armed".
+        assert proven["observe_outcomes"] == []                     # no live-detection over-claim on an unmonitored host
+        assert proven["observe_adds_outcomes"] == ["detected_without_enforcement"]
         # RELEASE the armed host to enforce (AS-29) — the preview flips to enforcing / already-enforcing (read-only view)
         assert _post(op, ep, "/api/customer/monitoring/authorize",
                      {"host": "armed.acme.example", "mode": "block"})[0] == 200
         after = _row(_preview(op, ep), "armed.acme.example")
         assert after["headline"] == "enforcing" and after["enforce_permitted"] is False
         assert after["enforce_blockers"] == ["already_enforcing"]
+        assert after["observe_outcomes"] == ["detected_without_enforcement"]   # enforcing still detects live
+        assert after["observe_adds_outcomes"] == []
     finally:
         sov.shutdown(); edge.shutdown()
 

@@ -3201,6 +3201,12 @@
     var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(p.host) }), badge])];
     var nowText = monPreviewOutcomeText(p.observe_outcomes);
     body.push(kv("Now", nowText ? ("AEGIS can " + nowText + ".") : "AEGIS does not inspect this host yet."));
+    // AS-4b honesty: detection is a LIVE claim. For a host that is not armed, "Now" claims nothing — what arming
+    // it WOULD make live is shown as a preview-only "would…" line, never as detection that is already in effect.
+    var observeAdds = monPreviewOutcomeText(p.observe_adds_outcomes);
+    if (!nowText && observeAdds) {
+      body.push(kv("Once monitoring is armed", "AEGIS would " + observeAdds + "."));
+    }
     var adds = monPreviewOutcomeText(p.enforce_adds_outcomes);
     if (p.enforce_permitted) {
       body.push(kv("Release to enforce would add", adds ? ("AEGIS would also " + adds + ".") : "live blocking."));
