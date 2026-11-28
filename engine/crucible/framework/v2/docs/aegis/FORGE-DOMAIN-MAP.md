@@ -69,8 +69,11 @@ and blocks only on a fired oracle's certificate.
   Retry-After, never a block; default-OFF `VIGIL_AEGIS_CAPACITY`)** · **AS-5c probe socket
   (built — `aegis/probe_socket.py` LOCAL owner-only AF_UNIX operational probe socket surfacing the effective mode +
   the AS-5a capacity/admission snapshot off the data-plane HTTP port; read-only, never a block; default-OFF
-  `VIGIL_AEGIS_PROBE_SOCKET`)** · AS-5d/5e/5b
-  outcomes · AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
+  `VIGIL_AEGIS_PROBE_SOCKET`)** · **AS-5d outcomes+receipts (built — `aegis/receipts.py` append-only,
+  hash-linked ENFORCEMENT-OUTCOME receipt ledger recording the disposition of each enforced request
+  [allowed / shed / blocked-by-a-fired-oracle], surfaced read-only on the AS-5c probe snapshot; a receipt
+  RECORDS what enforcement did and is never itself a block/verdict; default-OFF `VIGIL_AEGIS_RECEIPTS`)** ·
+  AS-5e/5b outcomes · AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
   5a → 5c → 5d → 5e → 5b → 13b (plan §9.4 chains).
 
 ## Domain 2 — Authority / entitlement (control plane)
