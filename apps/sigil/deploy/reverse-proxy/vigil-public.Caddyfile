@@ -23,7 +23,7 @@
 #
 # pubui already sets its own strict 'self' CSP + nosniff + no-referrer + DENY-framing headers and a
 # Cache-Control on every response; this edge only adds HSTS. There are no Server-Sent Events on this plane
-# (static + read-only JSON, GET/HEAD only), so no flush_interval override is needed.
+# (static + read-only JSON + one same-origin access-request POST), so no flush_interval override is needed.
 
 vigilguard.net, www.vigilguard.net {
 	encode zstd gzip
@@ -32,7 +32,13 @@ vigilguard.net, www.vigilguard.net {
 	@www host www.vigilguard.net
 	redir @www https://vigilguard.net{uri} permanent
 
-	reverse_proxy 127.0.0.1:8735
+	reverse_proxy 127.0.0.1:8735 {
+		# The TRUE client IP, SET from the address Caddy accepted the connection from (never the client's own
+		# value): this OVERWRITES any X-Real-IP a client tried to send, so pubui's per-source access-request
+		# rate-limit (which trusts X-Real-IP only from this loopback hop) keys on the real client and cannot be
+		# spoofed to dodge the throttle or collapsed onto one bucket. Mirrors the customer plane's leg.
+		header_up X-Real-IP {remote_host}
+	}
 
 	# Belt-and-braces: only serve the two hosts this site is for.
 	@badhost not host vigilguard.net www.vigilguard.net

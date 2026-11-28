@@ -165,6 +165,14 @@ CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
 COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
 PUBLIC_UI_PORT = _int_env("VIGIL_PUBLIC_PORT", 8735)    # the keyless/cookieless public marketing+tools site
 CVE_CATALOG_PATH = SIGIL_HOME / "cve" / "catalog.db"    # the public CVE catalog (populated by `sigil cve ingest`)
+# Security & Trust Center: the "Request security documentation" queue + its per-source rate-limit markers. The
+# public plane is keyless and cookieless, so a request is NOT owner-signed and mints nothing: it is an off-spine,
+# operational owner-review queue (one 0600 file per request in a 0700 dir, filename carries NO submitted field), the
+# owner-side intake acts on it, and nothing here is money or authority. Protected at rest by filesystem permissions
+# and never logged (pubui never logs). The limiter dir is a disjoint LoginRateLimiter marker dir, so it never
+# interferes with any customer-plane limiter.
+TRUST_ACCESS_REQUESTS_DIR = SIGIL_HOME / "trust_access_requests"
+TRUST_ACCESS_RATELIMIT_DIR = SIGIL_HOME / "trust_access_ratelimit"
 _customer = SIGIL_HOME / "customer"
 
 

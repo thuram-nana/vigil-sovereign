@@ -1,11 +1,18 @@
 """VIGIL PUBLIC site server (`pubui`) — the deliberately-dumbest, keyless, cookieless, offense-free plane.
 
 This serves VIGIL's PUBLIC marketing / tools / trust / blog surface. By construction it:
-  * serves ONLY static files from a fixed, packaged content root (`public_site/`);
-  * holds NO owner key, mints NO cookie / session / token, exposes NO API, GET/HEAD only;
+  * serves static files from a fixed, packaged content root (`public_site/`);
+  * holds NO owner key, mints NO cookie / session / token (keyless and cookieless on every response);
   * makes NO outbound request — so there is nothing to leak and nothing to scrub.
-It binds a `bind_ok` address (loopback/private) behind the external reverse proxy on a SEPARATE marketing
-vhost — never the authenticated operator-console origin, never the cookie-bearing `custui` edge origin.
+It answers GET/HEAD for content, a read-only JSON CVE API (`/api/cve*`, reads a local catalog), and ONE
+same-origin POST, `/api/trust/access-request`, the Security & Trust Center's "request security documentation"
+drop. That POST is origin/Host gated (a cookieless plane has no session to ride, so classic CSRF does not apply;
+the gate keeps it same-origin so a cross-site page cannot script it), per-source rate-limited, validates every
+field, and QUEUES the unsigned request to a 0600 file (`ui/trust_access_requests_store.py`): it mints nothing,
+grants no access, delivers no document, holds no key, makes no outbound call, and sets no cookie. The visitor's
+fields are never logged (this handler never logs). It binds a `bind_ok` address (loopback/private) behind the
+external reverse proxy on a SEPARATE marketing vhost, never the authenticated operator-console origin, never the
+cookie-bearing `custui` edge origin.
 
 FATAL-2: sovereign-side (`assert_no_offense` at import); stdlib + the sovereign `bind_ok` only — imports NO
 framework/strix/vigil_integration. A static file server that co-loads no offense code keeps the two-plane
@@ -42,8 +49,10 @@ _VERIFIER_PATH = Path(__file__).resolve().parents[4] / "docs" / "proof-carrying-
 _VERIFIER_REL = "verify/verify_pcf.py"
 
 # Strict CSP for a static, script-light marketing site: self only, no inline handlers, data: images (inline
-# SVG / data-URI icons), no framing, no off-site form submission. Set as a RESPONSE HEADER, never a <meta>.
-_CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+# SVG / data-URI icons), no framing. `form-action 'self'` lets the Trust Center's access-request form submit to
+# the same-origin endpoint (and nowhere else: a cross-origin target is refused); no inline/remote script runs.
+# Set as a RESPONSE HEADER, never a <meta>.
+_CSP = ("default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
         "object-src 'none'; img-src 'self' data:")
 
 _CTYPES = {
@@ -55,6 +64,21 @@ _CTYPES = {
     ".woff2": "font/woff2", ".map": "application/json",
 }
 _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site is a mistake — refuse
+
+# The Security & Trust Center access-request endpoint (the ONE same-origin POST this plane answers).
+_ACCESS_REQUEST_PATH = "/api/trust/access-request"
+_MAX_POST_BYTES = 16 * 1024    # an access request body over 16 KiB is refused (the five fields are small)
+# The neutral acknowledgement: it promises ONLY that the request was received and queued for review. It never
+# states that access was granted or that any document was sent (the public plane grants nothing and sends nothing).
+_ACCESS_ACK = ("Thank you. Your request has been received and queued for review. If it is approved, a member of the "
+               "team will contact you at the professional email you provided. No access has been granted and no "
+               "document has been sent.")
+# Per-source submission limiter defaults (ui/login_ratelimit.LoginRateLimiter, guard-and-count via `admit`): at most
+# this many submissions per window from one source, then a cooling lockout. Fail-closed on a storage fault.
+_ACCESS_MAX_SUBMISSIONS = 8
+_ACCESS_WINDOW_S = 600.0
+_ACCESS_BASE_LOCK_S = 120.0
+_ACCESS_MAX_LOCK_S = 3600.0
 
 # Cache policy (the site is read once at startup into a content-hashed snapshot — ui/static_site.py):
 #   * pages and any asset requested WITHOUT ?v=: a browser revalidates every time (ETag -> 304) and a CDN may
@@ -72,6 +96,40 @@ _NUMBER = re.compile(r"[0-9]{1,9}")
 
 def _number(raw: str, default: "int | None") -> "int | None":
     return int(raw) if _NUMBER.fullmatch(raw) else default
+
+
+def _is_loopback_ip(addr: str) -> bool:
+    """True iff `addr` is a loopback IP (the trusted same-host reverse-proxy hop). Fail-closed on junk."""
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_access_fields(body: bytes, content_type: str) -> "dict[str, str] | None":
+    """The access-request fields from the POST body: a JSON object (the fetch path) or a urlencoded form (a no-JS
+    submit). Returns a flat ``{field: str}`` map, or None when the body is not one of those shapes. Only string
+    values are kept (a nested/array value is dropped, so validation then reports the field missing)."""
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if ctype == "application/json" or (not ctype and text.lstrip()[:1] == "{"):
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return {k: v for k, v in obj.items() if isinstance(k, str) and isinstance(v, str)}
+    if ctype in ("application/x-www-form-urlencoded", ""):
+        try:
+            parsed = parse_qs(text, keep_blank_values=True, strict_parsing=False)
+        except ValueError:
+            return None
+        return {k: (v[0] if v else "") for k, v in parsed.items()}
+    return None
 
 
 def _proof_on() -> bool:
@@ -114,7 +172,8 @@ def _proof_site() -> "dict[str, Asset]":
 class PublicServer(GracefulMixin, ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, addr, handler, *, root=None, catalog_path=None):
+    def __init__(self, addr, handler, *, root=None, catalog_path=None, access_requests_dir=None,
+                 access_limiter=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -138,6 +197,19 @@ class PublicServer(GracefulMixin, ThreadingHTTPServer):
             # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
             # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
             self.catalog_path = Path(catalog_path) if catalog_path else None
+            # The Security & Trust Center access-request queue dir + its per-source submission limiter. Both default
+            # to the configured SIGIL_HOME paths; a test passes its own tmp dir / a tuned limiter. Nothing is written
+            # until a validated request arrives (the dir is created lazily by the store).
+            from .. import config
+            self.access_requests_dir = Path(access_requests_dir) if access_requests_dir is not None \
+                else Path(config.TRUST_ACCESS_REQUESTS_DIR)
+            if access_limiter is not None:
+                self.access_limiter = access_limiter
+            else:
+                from .login_ratelimit import LoginRateLimiter
+                self.access_limiter = LoginRateLimiter(
+                    config.TRUST_ACCESS_RATELIMIT_DIR, max_fails=_ACCESS_MAX_SUBMISSIONS,
+                    window_s=_ACCESS_WINDOW_S, base_lock_s=_ACCESS_BASE_LOCK_S, max_lock_s=_ACCESS_MAX_LOCK_S)
             self.server_activate()
         except BaseException:
             self.server_close()
@@ -247,6 +319,16 @@ class PublicHandler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — never 500-leak internals
             return self._fault(head=True)
 
+    def do_POST(self):
+        # The ONE write path on this plane: the Trust Center access-request drop. Everything else POSTed is a 404
+        # (the public plane answers no other write). A fault answers one clean JSON 500, never a dropped connection.
+        try:
+            if urlparse(self.path).path == _ACCESS_REQUEST_PATH:
+                return self._access_request()
+            return self._not_found(head=False)
+        except Exception:  # noqa: BLE001 - never 500-leak internals
+            return self._fault(head=False)
+
     def _route_get(self):
         path = urlparse(self.path).path
         if path == "/healthz":
@@ -345,6 +427,158 @@ class PublicHandler(BaseHTTPRequestHandler):
             return self._json(rec) if rec is not None else self._json({"error": "not found"}, 404)
         return self._json({"error": "not found"}, 404)
 
+    # -- Security & Trust Center: the same-origin access-request drop (the one write path) ------------------------
+    def _ip(self) -> str:
+        """The client IP for the per-source submission limiter. This plane binds loopback/private (bind_ok) behind a
+        reverse proxy, so the raw TCP peer is the PROXY. When the immediate peer is loopback (the trusted same-host
+        proxy hop) take the real client IP from `X-Real-IP`, which the shipped proxies overwrite with the address they
+        accepted the connection from (so a client cannot choose it); otherwise key on the peer. The client-chosen
+        `X-Forwarded-For` is NEVER trusted (it would let an attacker key on a victim's address)."""
+        peer = self.client_address[0] if self.client_address else ""
+        if peer and _is_loopback_ip(peer):
+            xr = (self.headers.get("X-Real-IP", "") or "").strip()
+            if xr:
+                return xr
+        return peer or "unknown"
+
+    def _same_origin_ok(self) -> bool:
+        """Same-origin gate for the POST. The plane is cookieless, so there is no ambient session for classic CSRF to
+        ride; this keeps the write SAME-ORIGIN so a cross-site page cannot script it (and defends DNS-rebinding). The
+        Origin (or, absent it, the Referer) host MUST equal the request Host, a present `Sec-Fetch-Site` must be
+        `same-origin`/`none`, and a request carrying neither Origin nor Referer is refused (fail-closed: a real
+        same-origin browser submit always sends at least one)."""
+        host = (self.headers.get("Host", "") or "").strip().lower()
+        if not host:
+            return False
+        sfs = (self.headers.get("Sec-Fetch-Site", "") or "").strip().lower()
+        if sfs and sfs not in ("same-origin", "none"):
+            return False
+        origin = (self.headers.get("Origin", "") or "").strip()
+        if origin:
+            return urlparse(origin).netloc.lower() == host
+        ref = (self.headers.get("Referer", "") or "").strip()
+        if ref:
+            return urlparse(ref).netloc.lower() == host
+        return False
+
+    def _read_post_body(self) -> "bytes | None":
+        """The POST body, bounded to `_MAX_POST_BYTES`. None when there is no declared length, it is malformed, over
+        the bound, or cannot be read in full (the caller answers a clean 400/413, never a hang)."""
+        raw_len = self.headers.get("Content-Length", "")
+        if not raw_len or not raw_len.strip().isdigit():
+            return None
+        length = int(raw_len.strip())
+        if length <= 0 or length > _MAX_POST_BYTES:
+            return None
+        try:
+            data, remaining = b"", length
+            while remaining > 0:
+                chunk = self.rfile.read(remaining)
+                if not chunk:
+                    break
+                data += chunk
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            return None
+        return data if len(data) == length else None
+
+    def _wants_html(self) -> bool:
+        """True for a plain browser navigation (a no-JS form submit): prefers HTML and did not ask for JSON. The
+        JS path sends `Accept: application/json`, so it gets JSON; a no-JS form POST gets a small HTML page."""
+        accept = (self.headers.get("Accept", "") or "").lower()
+        mode = (self.headers.get("Sec-Fetch-Mode", "") or "").lower()
+        if "application/json" in accept:
+            return False
+        return "text/html" in accept or mode == "navigate"
+
+    def _access_reply(self, code: int, payload: dict, *, html_title: str, html_body: str,
+                      retry_after: "str | None" = None):
+        """Answer the access-request POST as JSON (the fetch path) or a minimal CSP-clean HTML page (a no-JS form
+        navigation). Both carry the strict public headers and no-store; neither sets a cookie."""
+        if self._wants_html():
+            doc = (f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+                   f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                   f"<title>{html_title} - VIGIL</title><link rel=\"stylesheet\" href=\"/assets/tokens.css\">"
+                   f"<link rel=\"stylesheet\" href=\"/assets/site.css\"></head><body>"
+                   f"<main class=\"wrap section\"><h1>{html_title}</h1>{html_body}"
+                   f"<p><a class=\"btn btn--ghost\" href=\"/trust\">Back to the Trust Center</a></p>"
+                   f"</main></body></html>")
+            body = doc.encode("utf-8")
+            ctype = "text/html; charset=utf-8"
+        else:
+            body = json.dumps(payload).encode("utf-8")
+            ctype = "application/json; charset=utf-8"
+        if retry_after:
+            # Retry-After is advisory; set it before the standard header block.
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Security-Policy", _CSP)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Vigil-Build", self.server.site.build)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Retry-After", retry_after)
+            self.end_headers()
+        else:
+            self._send_headers(code, ctype, len(body), cache="no-store")
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _access_request(self):
+        # 1) same-origin gate (a cross-site page cannot forge a matching Origin against our Host)
+        if not self._same_origin_ok():
+            return self._access_reply(403, {"ok": False, "error": "origin"},
+                                      html_title="Request not accepted",
+                                      html_body="<p>This form must be submitted from the VIGIL site.</p>")
+        # 2) per-source rate limit (guard-and-count; fail-closed on a storage fault)
+        locked = self.server.access_limiter.admit(f"trust-access:{self._ip()}")
+        if locked is not None:
+            retry = str(max(1, int(locked)))
+            return self._access_reply(429, {"ok": False, "error": "rate_limited",
+                                            "message": "Too many requests. Please try again later."},
+                                      html_title="Too many requests",
+                                      html_body="<p>Too many requests from your network. Please try again later, "
+                                                "or email <a href=\"mailto:info@sigilsovereign.com\">"
+                                                "info@sigilsovereign.com</a>.</p>", retry_after=retry)
+        # 3) read + parse the body (JSON from fetch, or urlencoded from a no-JS form submit)
+        body = self._read_post_body()
+        if body is None:
+            return self._access_reply(413, {"ok": False, "error": "body"},
+                                      html_title="Request not accepted",
+                                      html_body="<p>The submission was empty or too large.</p>")
+        fields = _parse_access_fields(body, self.headers.get("Content-Type", ""))
+        if fields is None:
+            return self._access_reply(400, {"ok": False, "error": "malformed"},
+                                      html_title="Request not accepted",
+                                      html_body="<p>The submission could not be read.</p>")
+        # 4) validate every field (the store is the authority; it echoes no submitted value back)
+        from .trust_access_requests_store import QueueFull, record_request, validate
+        clean, errors = validate(fields)
+        if errors:
+            return self._access_reply(400, {"ok": False, "error": "invalid", "fields": errors},
+                                      html_title="Please check the form",
+                                      html_body="<p>Some fields need attention. Please go back and complete every "
+                                                "required field with valid details.</p>")
+        # 5) record it (fail-closed: NEVER acknowledge a request we did not store)
+        try:
+            record_request(clean, requests_dir=self.server.access_requests_dir)
+        except (QueueFull, OSError, ValueError):
+            return self._access_reply(503, {"ok": False, "error": "unavailable",
+                                            "message": "We could not record your request right now. Please email "
+                                                       "info@sigilsovereign.com."},
+                                      html_title="Please try again",
+                                      html_body="<p>We could not record your request right now. Please try again "
+                                                "later, or email <a href=\"mailto:info@sigilsovereign.com\">"
+                                                "info@sigilsovereign.com</a>.</p>")
+        # 6) neutral acknowledgement: received + queued, never "granted" or "delivered"
+        return self._access_reply(200, {"ok": True, "message": _ACCESS_ACK},
+                                  html_title="Request received",
+                                  html_body=f"<p>{_ACCESS_ACK}</p>")
+
     def _serve(self, head: bool, override: "str | None" = None):
         hit = self._resolve("/" + override) if override else self._resolve(self.path)
         if hit is None:
@@ -380,12 +614,16 @@ class PublicHandler(BaseHTTPRequestHandler):
                 pass
 
 
-def build_public_server(*, host: str = "127.0.0.1", port=None, root=None) -> PublicServer:
+def build_public_server(*, host: str = "127.0.0.1", port=None, root=None, access_requests_dir=None,
+                        access_limiter=None) -> PublicServer:
     """Wire the public static server. Port defaults to `config.PUBLIC_UI_PORT` (:8735); `root` defaults to
-    the packaged `public_site/` tree. No key, no cookie, no API — a static file server behind the edge."""
+    the packaged `public_site/` tree. Keyless + cookieless; GET/HEAD content, a read-only CVE API, and the one
+    same-origin access-request POST. `access_requests_dir` / `access_limiter` default to the configured paths
+    (a test passes its own)."""
     from .. import config
     return PublicServer((host, config.PUBLIC_UI_PORT if port is None else int(port)), PublicHandler,
-                        root=root, catalog_path=config.CVE_CATALOG_PATH)
+                        root=root, catalog_path=config.CVE_CATALOG_PATH,
+                        access_requests_dir=access_requests_dir, access_limiter=access_limiter)
 
 
 def serve_public(*, host: str = "127.0.0.1", port=None, root=None) -> None:

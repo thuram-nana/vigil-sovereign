@@ -229,6 +229,20 @@ _EXCLUSION_REASONS: dict[str, str] = {
                                        "EngagementAuthorities live on the authority seam (the offense leg's to "
                                        "capture), and the settings General profile (customer-typed, nothing "
                                        "regenerates it) is the one captured customer_* top-level — this queue is not it",
+    "trust_access_requests": "the UNSIGNED \"Request security documentation\" queue a visitor drops on the PUBLIC, "
+                             "keyless Security & Trust Center (ui/trust_access_requests_store.py). Like "
+                             "customer_authorization_requests it is an operational owner-review queue, NOT an "
+                             "authority and NOT money — it mints nothing, grants no access, delivers no document and "
+                             "is NEVER owner-signed (the public plane is keyless/cookieless by construction, so it "
+                             "holds no key to seal it into the sovereign backup body). EXCLUDED: a restore drops any "
+                             "pending request and the visitor re-submits; nothing owner-signed references it, so "
+                             "losing it fails SAFE (no authority, credit or trust state lost). Capturing it would "
+                             "pull public-plane visitor PII across the two-plane boundary into the sealed body",
+    "trust_access_ratelimit": "the per-source submission rate-limit lockout dir for that public access-request "
+                              "endpoint (ui/login_ratelimit.LoginRateLimiter, wired in pubui). Transient throttle "
+                              "counters, the same class as the customer edge's login/signup/member lockouts (see "
+                              "`customer`): they reset on their own window and regenerate, so a restore resurrects "
+                              "nothing — never recovery state",
     "cve": "re-ingestable public CVE catalog cache (CISA-KEV/NVD/OSV/EPSS), rebuilt by `sigil cve ingest` — "
            "public data, no trust or memory state",
     "venv": "the re-installable sovereign Python venv the shipped units run from (rebuilt by bootstrap / "
