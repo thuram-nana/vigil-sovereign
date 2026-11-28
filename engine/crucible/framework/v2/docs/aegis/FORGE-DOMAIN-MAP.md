@@ -73,7 +73,12 @@ and blocks only on a fired oracle's certificate.
   hash-linked ENFORCEMENT-OUTCOME receipt ledger recording the disposition of each enforced request
   [allowed / shed / blocked-by-a-fired-oracle], surfaced read-only on the AS-5c probe snapshot; a receipt
   RECORDS what enforcement did and is never itself a block/verdict; default-OFF `VIGIL_AEGIS_RECEIPTS`)** ·
-  AS-5e/5b outcomes · AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
+  **AS-5e impact budget (built — `aegis/impact_budget.py` deterministic READ-ONLY rollup over the AS-5d
+  receipt chain: over a bounded recent window it measures the DENIED ratio [shed + blocked] vs a configured
+  budget ceiling + a bounded per-reason breakdown, surfaced read-only on the AS-5c probe snapshot; MEASURES,
+  never acts — never mutates the ledger and never drives an admit/shed/allow/block decision; inert unless the
+  AS-5d receipts dep is also armed; default-OFF `VIGIL_AEGIS_IMPACT_BUDGET`)** · AS-5b attribution ·
+  AS-13b scope. GW chain order: 27a → 2j → 2c → 2d → 2e → 3b →
   5a → 5c → 5d → 5e → 5b → 13b (plan §9.4 chains).
 
 ## Domain 2 — Authority / entitlement (control plane)
