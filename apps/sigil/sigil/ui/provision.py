@@ -3960,6 +3960,45 @@ class Provisioner:
             self._monitor_admit("monitor_events", requester, requester_org_id, "", "read")
         return {"org_id": requester_org_id, "events": monitoring_events(self.store, requester_org_id, limit=limit)}
 
+    def monitor_preview(self, requester: str, requester_org_id: str, *, ip: str = "",
+                        now: "Optional[float]" = None) -> dict:
+        """AS-4b — the SESSION org's READ-ONLY protection-contract PREVIEW: for each host the manager can act on,
+        what AEGIS does now (observe) and what releasing it to enforce WOULD add, GRADED by the AS-4b core
+        evaluator (``vigil_core.preview_host``) from the SAME already-gated reads ``monitor_list`` uses — the
+        active grants, the hosts whose ownership proof is current, and whether the plan entitles Respond. It
+        is READ-ONLY: it mints nothing, arms nothing and opens no release; a release stays behind AS-29's
+        owner-signed gate. ``enforce_permitted`` only PREVIEWS whether that gate would admit a release right
+        now, and ``enforce_blockers`` names, honestly, why not.
+
+        Manager-only, exactly like ``monitor_list``'s ``hosts``/``plan``: the preview needs the verified hosts
+        and the plan, which the org gives only to someone who may manage monitoring (the founder or an
+        org_admin). Anyone else is told ``can_manage: False`` and gets no rows (the screen shows an honest
+        note) — the hosts and the plan never cross to a read-only role."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import preview_host
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_preview", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False, "previews": []}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = {g.host: g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None}
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+            proven = {str(h["host"]) for h in hosts}
+            respond = bool(plan and plan.get("respond"))
+        previews = []
+        for host in sorted(proven | set(active)):
+            g = active.get(host)
+            mode = MonitoringMode(g.mode) if g is not None else MonitoringMode.OBSERVE
+            p = preview_host(host, mode=mode, armed=g is not None, proof_current=host in proven,
+                             respond_entitled=respond)
+            previews.append(p.customer_safe())
+        return {"org_id": requester_org_id, "can_manage": True, "previews": previews}
+
     def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                              now: "Optional[float]" = None) -> dict:
         """AS-2g — the SESSION org's v2 origin-binding status (org-scoped, read-only). For each ACTIVE v2 grant:

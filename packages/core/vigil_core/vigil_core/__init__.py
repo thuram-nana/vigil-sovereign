@@ -104,6 +104,10 @@ from .protection_contract import (
     RevocationProjection, RevocationState, SignerRole, TrustAssumptions, ViewerTls,
     baseline_provider_registry,
 )
+from .contract_eval import (
+    HEADLINE_LADDER, NOT_OBSERVED_BASELINE, HostProtectionPreview, enforcement_reasons, grade_contract,
+    grade_enforcement, grade_headline, headline_floor, preview_host,
+)
 from .redpen_action import (
     REDPEN_ACTION_SEAM_SUBDIR, REDPEN_FIX_ACTION, REDPEN_RETEST_ACTION, redpen_action_marker,
 )
@@ -232,4 +236,8 @@ __all__ = [
     "Dimensions", "Budgets", "ProtectionContract",
     "ProviderDescriptor", "ProviderRegistry", "DuplicateProviderError",
     "BASELINE_SIGIL_PROVIDER", "baseline_provider_registry",
+    # AS-4b — protection-contract evaluator + enforce/observe preview (contract_eval.py):
+    "HEADLINE_LADDER", "NOT_OBSERVED_BASELINE", "HostProtectionPreview",
+    "headline_floor", "grade_headline", "enforcement_reasons", "grade_enforcement", "grade_contract",
+    "preview_host",
 ]

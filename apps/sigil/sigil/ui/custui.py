@@ -834,6 +834,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
             return self._customer_read_relay("monitor_events")
+        if path == "/api/customer/monitoring/preview" and _monitoring_on():   # AS-4b (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("monitor_preview")
         if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
             return self._live_activity()
         if path == "/api/customer/chat/history" and _chat_memory_on():     # chat continuity transcript (flag OFF -> 404)
