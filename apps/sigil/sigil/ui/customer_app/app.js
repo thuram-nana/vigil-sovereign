@@ -2859,8 +2859,8 @@
   function monSettingsBody(d) {
     var rows = monSettingsRows(d);
     var head = d.can_manage
-      ? h("p.cust-muted", { text: "Shorten a host's armed window or turn its monitoring off here. VIGIL never "
-          + "extends a window beyond its standard length." })
+      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, or turn its "
+          + "monitoring off here. VIGIL never extends a window beyond its standard length." })
       : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
           + "settings. You can see what each monitored host is set to." });
     if (!rows.length) {
@@ -2883,8 +2883,10 @@
     return h("div.card.cust-mon-settings-card", { dataset: { host: String(g.host) } }, body);
   }
   // A manager's controls for one armed host: shorten the armed window (re-arm, same mode, a shorter window the server
-  // caps) and turn the host off (confirmed in place first, like the Monitoring screen). CSP-safe: the input is wrapped
-  // in its label (no id lookup across a dotted host), and every action is an addEventListener, never an inline handler.
+  // caps), RE-ARM it to the full standard window (AS-21a, below), and turn the host off (confirmed in place first, like
+  // the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host), and every
+  // action is an addEventListener, never an inline handler. Re-arm sits in its OWN row (cust-mon-rearm), so the window
+  // controls (cust-mon-actions) are byte-identical to AS-2k.
   function monSettingsActions(g, holder) {
     var input = h("input.cust-mon-window", { type: "number", min: "1", step: "1", inputmode: "numeric",
       "aria-label": "Armed window in days for " + String(g.host) });
@@ -2894,6 +2896,9 @@
         monSettingsButton("Shorten window", function (b) { monShortenWindow(g, input, b); }, "primary"),
         monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder); }, "danger"),
       ]),
+      // AS-21a retest guard: re-arm (renew) this host's authority to the full standard window — the privilege-raising
+      // counterpart to Shorten window, so it is GUARDED (asked in place first, like Turn off) before anything is sent.
+      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder); })),
     ];
   }
   async function monShortenWindow(g, input, btn) {
@@ -2931,6 +2936,35 @@
     try {
       await VUI.postJSON(API + "/monitoring/revoke", { host: host });
       VUI.toast("Monitoring is off for " + host + ".");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // AS-21a — the RETEST GUARD. Re-arm renews a host's monitoring authority to VIGIL's full standard window from now, in
+  // the host's CURRENT mode, reusing the SAME monitoring/authorize write (it mints no new authority and opens no new
+  // route). It is the counterpart to Shorten window: where Shorten asks for a SHORTER window, Re-arm renews back to the
+  // full standard length (never beyond it — the sovereign provisioner is the real cap, config.MONITORING_WINDOW_SECONDS,
+  // clamped to the plan period), and the re-authorize re-checks that the host's proof of control is still current (a
+  // lapsed proof is refused, surfaced honestly). Because it LENGTHENS the armed window, it is guarded: asked in place
+  // first, like Turn off, and nothing is sent until it is confirmed. CSP-safe: addEventListener, never an inline handler.
+  function monSettingsConfirmReArm(g, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Re-arm monitoring" }, [
+      h("p", { text: "Re-arm " + g.host + "? This renews its monitoring to VIGIL's full standard window from now, in "
+        + "the same mode, and confirms its proof of control is still current. VIGIL never extends it beyond that "
+        + "standard length." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, re-arm", function (b) { monReArm(g, b); }, "primary"),
+        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+      ]),
+    ]));
+  }
+  async function monReArm(g, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write — re-armed in the host's CURRENT mode with NO window_s, so the sovereign
+      // renews it to the SERVER window (never longer). The ORG is the session's at the edge (never a body field).
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: g.mode });
+      VUI.toast("Monitoring for " + g.host + " was re-armed.");
       if (here() === "#/monitoring/settings") render();
     } catch (e) { btn.disabled = false; await monFailed(e); }
   }

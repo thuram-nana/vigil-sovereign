@@ -143,8 +143,9 @@ _CONTROLS: dict[str, dict[str, int]] = {
                   "Cancel": 1, "Connect again": 1, "Disconnect": 2, "Connect a cloud account": 1},
     "#/monitoring": {"Turn on Observe": 1, "Turn on Respond": 1,    # b.example: proved, unmonitored, a free slot
                      "Switch to Respond": 1, "Turn off": 1},        # a.example: monitored in Observe
-    # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls
-    "#/monitoring/settings": {"Shorten window": 1, "Turn off": 1},
+    # AS-2k Monitoring settings: the one ARMED authority (a.example) renders its Shorten window + Turn off controls;
+    # AS-21a adds the guarded Re-arm (renew to the full standard window) in its own row.
+    "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Turn off": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},

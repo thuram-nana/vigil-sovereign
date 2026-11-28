@@ -211,8 +211,11 @@ operator routes in `ui-wiring-matrix.json` (plan §9.1 rule 2).
 
 - **Hot set:** UI.
 - **Slices:** AS-4a overclaims copy · AS-2f/2g/2k sovereign v2 / binding+publish /
-  settings · AS-21a retest guard · AS-3d health+ack · AS-4b contract+preview · AS-27b
-  override · AS-6d onboarding. UI chain: 4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
+  settings · **AS-21a retest guard (built — the guarded Re-arm on `#/monitoring/settings`:
+  a confirmed renew of a host's authority to the full standard window, reusing the gated
+  `monitoring/authorize`; default-OFF `VIGIL_CUSTOMER_MONITORING_ENABLED`)** · AS-3d
+  health+ack · AS-4b contract+preview · AS-27b override · AS-6d onboarding. UI chain:
+  4a → 2f → 2g → 2k → 21a → 29 → 3d → 4b → 27b → 6d.
 
 ---
 

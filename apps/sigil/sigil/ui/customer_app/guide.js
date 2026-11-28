@@ -386,8 +386,9 @@
           clicks: ["Open Monitoring settings from the Settings menu. It lists each host you have monitoring turned on for.",
                    "Each host shows the mode it is in and how long its authority stays armed before it must be renewed.",
                    "Select Shorten window to re-arm a host for a shorter time. VIGIL never extends a window beyond its standard length.",
+                   "Select Re-arm, then Yes, re-arm, to renew a host to the full standard window from now, in the same mode — its proof of control is re-checked, and the window is never extended beyond that standard length.",
                    "Select Turn off here, then Yes, turn off, to stop monitoring a host — the same as on the Monitoring screen."],
-          why: "A shorter armed window is least-privilege: the monitoring authority auto-expires sooner and is re-armed when you choose. It changes nothing a manager cannot already do on the Monitoring screen." },
+          why: "A shorter armed window is least-privilege: the monitoring authority auto-expires sooner, and you re-arm it to full length when you choose. It changes nothing a manager cannot already do on the Monitoring screen." },
       ],
     },
     {
