@@ -85,7 +85,7 @@ def validate(fields: "dict[str, object]") -> "tuple[dict[str, str], dict[str, st
     data = fields if isinstance(fields, dict) else {}
     for key in FIELDS:
         raw = data.get(key)
-        if raw is None or not _is_text(raw):
+        if not isinstance(raw, str) or not _is_text(raw):   # isinstance narrows raw to str for mypy (and _is_text runs its text check)
             errors[key] = "this field is required"
             continue
         value = raw.strip()
