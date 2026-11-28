@@ -44,6 +44,7 @@ from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
+from . import input_safety  # noqa: E402  (the ONE central request-boundary sanitizer, applied in _read_body)
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 from .sso_edge import SsoEdgeMixin  # noqa: E402  (PR-H: the SSO / SCIM routes — every one absent while the flag is off)
@@ -67,6 +68,35 @@ _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestor
 _MAX_BODY = 65536
 # PR-I: the largest proof-bundle ZIP this edge will relay (the provisioner's own cap, proof_export.MAX_ZIP_BYTES).
 _MAX_PROOF_BYTES = 2 * 1024 * 1024
+
+# --- central input sanitization (applied ONCE in _read_body, so every body field is tightened the same way) -----
+# A generous PER-FIELD character cap, deliberately BELOW the 64 KiB body cap so no legitimate field is ever truncated
+# by the sanitizer (a real email / host / name / question / note is far shorter); the SEMANTIC per-field caps stay in
+# the downstream validators. The structure guard bounds a JSON-bomb: at most _BODY_MAX_DEPTH nested levels and
+# _BODY_MAX_NODES total nodes, rejected with a clean ValueError before any field is processed.
+_FIELD_MAX = 16384
+_BODY_MAX_DEPTH = 8
+_BODY_MAX_NODES = 2000
+# Keys whose VALUE is left BYTE-EXACT (never NFC-normalised, stripped or truncated) because it is a credential, a
+# token, a cryptographic / WebAuthn blob, an idempotency / digest key, a base64 payload, or a signed nested object —
+# any of which a single altered byte would break (auth failure, replay-guard miss, signature-verify fail). Derived by
+# grepping this edge for every field that is a password / token / signature / base64 / WebAuthn / digest / lease blob
+# (see the module handback). A key NOT listed here is ordinary user text and IS sanitized.
+_PASSTHROUGH: "frozenset[str]" = frozenset({
+    # passwords (login / signup / recovery)
+    "password", "new_password", "old_password",
+    # single-use tokens / codes / invites
+    "token", "invite_token", "code",
+    # OIDC / PKCE redeem material
+    "verifier",
+    # WebAuthn (passkey) assertion + enrolment blobs — base64url / JSON, signature-verified at the provisioner
+    "signature", "challenge", "client_data_json", "authenticator_data", "credential_id", "cose_alg",
+    "public_key_spki_b64",
+    # digests / idempotency / lease / request ids — compared or deduped byte-for-byte downstream
+    "oracle_context_digest", "idem_key", "lease", "request_id",
+    # base64 / signed blobs relayed verbatim
+    "data", "zip_b64",
+})
 
 # How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
 # worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
@@ -650,7 +680,13 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict):
             raise ValueError("body must be an object")
-        return body
+        # Central input sanitization at the trust boundary: NFC-normalise + strip dangerous characters from EVERY
+        # string field, leave the credential / token / WebAuthn / base64 passthrough keys BYTE-EXACT, and reject a
+        # JSON-bomb (too deep / too many nodes) with a clean ValueError — all at this ONE choke point, so no field
+        # can be abused via Unicode obfuscation, control characters or a structure bomb (the size cap + "body must be
+        # an object" behaviour above are unchanged).
+        return input_safety.sanitize_body(body, passthrough=_PASSTHROUGH, max_chars=_FIELD_MAX,
+                                          max_depth=_BODY_MAX_DEPTH, max_nodes=_BODY_MAX_NODES)
 
     def _provision(self, action: str, principal: str, body: dict):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
