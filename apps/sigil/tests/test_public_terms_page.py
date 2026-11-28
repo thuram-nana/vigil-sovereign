@@ -309,8 +309,10 @@ def test_privacy_page_makes_no_overclaim():
 # --- the terms, the privacy notice and security.txt agree ----------------------------------------------------------
 
 # The production processors and providers of the hosted service (owner-supplied; Flutterwave is paused in code and
-# is not a current processor). Both legal pages must name every one, and the same contact.
-PROVIDERS = ("AWS", "Amazon SES", "Cloudflare", "Stripe", "Google", "GitHub", "Anthropic")
+# is not a current processor). Both legal pages must name every one, and the same contact. The AI subprocessor is
+# disclosed GENERICALLY ("a third-party AI processor") rather than by provider name, per the consumer no-model rule
+# (the customer never sees the AI provider); the disclosure itself is kept, only the name is withheld.
+PROVIDERS = ("AWS", "Amazon SES", "Cloudflare", "Stripe", "Google", "GitHub", "third-party AI processor")
 CONTACT = "info@sigilsovereign.com"
 
 
@@ -334,7 +336,7 @@ def test_terms_and_privacy_name_the_same_providers_and_contact():
         assert name in terms, f"/terms does not name the provider {name}"
         assert name in privacy, f"/privacy does not name the provider {name}"
     assert "Flutterwave" not in terms
-    assert "AI model providers we use to run the Service, which are listed in our Privacy notice" in terms
+    assert "third-party AI processors we use to run the Service, which are listed in our Privacy notice" in terms
     assert CONTACT in terms and CONTACT in privacy
 
 
