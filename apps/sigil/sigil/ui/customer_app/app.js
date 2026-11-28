@@ -3925,10 +3925,11 @@
       VUI.mount(holder, codeBody(d || {}));
       codeLoadFindings(d || {});
     })();
+    var spend = codeSpendCard();                          // the workspace-wide monthly auto-fix spending limit (C6 §15.11)
     return shell(h("div", {}, [h("h2", { text: "Code" }),
       h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect and reports "
         + "only the problems it reproduced. Only this workspace sees them." }),
-      notice, holder]), "#/code");
+      notice, spend, holder]), "#/code");
   }
   // Back from GitHub (#/code?connected=…): one fixed sentence for what happened, then the hash loses its query so a
   // reload does not say it again.
@@ -4168,6 +4169,73 @@
     var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
       .replace(/\.$/, "");                                // as the server said it (it may start with a repository name)
     err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
+  }
+
+  // ---- C6 §15.11: the workspace-wide monthly auto-fix SPENDING LIMIT ------------------------------------------------
+  // Separate from each repository's per-review limit: this caps how much the merge-blocking auto-fix (Fix this) may
+  // spend ACROSS this workspace in a calendar month, so the automated fixing never goes over. Its own read and write,
+  // both scoped to the SESSION org and gated on managing code review server-side; the save goes through the same
+  // step-up the per-repo settings do. The card picks a pack (a preset ceiling) and/or sets the limit, and shows this
+  // month's usage against it. No price, estimate or engine name — only credits. On any error the main Code body states
+  // it, so this card just stays quiet (it never shows a half-working control).
+  function codeSpendCard() {
+    var holder = h("div#code-spend", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/code/spend"); }
+      catch (e) { if (here() === "#/code") VUI.mount(holder, h("div", {})); return; }
+      if (here() !== "#/code") return;                   // the person navigated away before the load resolved
+      VUI.mount(holder, codeSpendControl(d || {}));
+    })();
+    return holder;
+  }
+  function codeSpendControl(d) {
+    var n = ++codeUi.seq;
+    var limit = parseInt(d.monthly_limit_credits, 10) || 0;
+    var used = parseInt(d.used_this_month, 10) || 0;
+    var inp = h("input#code-spend-" + n + ".cust-code-limit", { type: "text", inputmode: "numeric",
+      autocomplete: "off", value: String(limit) });
+    var row = h("div.cust-mon-actions", {});
+    VUI.mount(row, codeButton("Save", function (b) { codeSpendSave(inp, b, row); }));
+    var out = [h("h3", { text: "Auto-fix spending" }),
+      h("p.cust-muted", { text: "VIGIL's merge-blocking auto-fix opens a pull request for a reproduced finding. Set "
+        + "the most this workspace may spend on it each month so the automated fixing never goes over. VIGIL never "
+        + "estimates what a fix costs; the limit is a ceiling in credits." })];
+    var packs = codeSpendPacks(d, inp);
+    if (packs) out.push(h("label", { text: "Pick a pack" }), packs);
+    out.push(h("label", { for: "code-spend-" + n, text: "Monthly spending limit in credits (0 for no limit)" }), inp);
+    if (limit > 0) {
+      out.push(kv("Used this month", used + " of " + limit + " credits"));
+      if (used >= limit) {
+        out.push(h("p.cust-muted", { text: "This workspace reached its monthly auto-fix limit: new fixes wait until "
+          + "next month, or until you raise the limit." }));
+      }
+    }
+    out.push(row);
+    return h("div.card", {}, out);
+  }
+  // The preset packs the read offers: picking one fills the limit field (a quick choice; the field is what is saved).
+  function codeSpendPacks(d, inp) {
+    var packs = (Array.isArray(d.packs) ? d.packs : []).filter(function (x) {
+      return typeof x === "number" && isFinite(x) && x > 0 && Math.floor(x) === x;
+    });
+    if (!packs.length) return null;
+    return h("div.cust-mon-actions", {}, packs.map(function (x) {
+      return codeButton(String(x) + " credits", function () { inp.value = String(x); });
+    }));
+  }
+  async function codeSpendSave(inp, btn, row) {
+    clearErr();
+    var raw = String(inp.value == null ? "" : inp.value).trim();
+    if (!/^[0-9]{1,9}$/.test(raw)) {
+      return err("Enter the monthly spending limit as a whole number of credits, or 0 for no limit. Nothing was changed.");
+    }
+    btn.disabled = true;
+    try {
+      await codePost("/code/spend", { monthly_limit_credits: parseInt(raw, 10) }, row);
+      VUI.toast("Auto-fix spending limit saved.");
+      if (here() === "#/code") render();
+    } catch (e) { btn.disabled = false; await codeFailed(e, "The auto-fix spending limit was not saved"); }
   }
 
   // ---- Plans, Reports and the standards mapping (PR-G, Area 6) -----------------------------------------------------

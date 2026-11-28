@@ -417,6 +417,7 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
 _CODE_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
     "code/connect": ("redpen_connect", ()),
     "code/settings": ("redpen_set_settings", ("repo", "block_threshold", "monthly_limit_credits")),
+    "code/spend": ("redpen_set_org_spend", ("monthly_limit_credits",)),   # C6 §15.11 workspace-wide auto-fix cap
     "code/disconnect": ("redpen_disconnect", ("repo",)),
     "code/review": ("redpen_review", ("repo",)),
     "code/schedule": ("redpen_schedule", ("repo", "cadence")),
@@ -807,6 +808,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
+        if path == "/api/customer/code/spend" and _redpen_on():          # C6 §15.11 workspace-wide auto-fix spend limit
+            return self._customer_read_relay("redpen_org_spend")
         if path == "/api/customer/connect" and _connect_on():           # PR-C Connect screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("connect_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here

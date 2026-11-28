@@ -2121,6 +2121,11 @@ class Handler(BaseHTTPRequestHandler):
         org, mfa_at = s("org_id"), body.get("mfa_at")
         if action == "redpen_code_overview":
             return p.redpen_code_overview(requester, org, ip=ip)
+        if action == "redpen_org_spend":                 # C6 §15.11 read: the workspace-wide auto-fix spend limit
+            return p.redpen_org_spend(requester, org, ip=ip)
+        if action == "redpen_set_org_spend":             # C6 §15.11 set: manage_code + step-up, session org only
+            return p.redpen_set_org_spend(requester, org, monthly_limit_credits=body.get("monthly_limit_credits"),
+                                          ip=ip, mfa_at=mfa_at)
         if action == "redpen_connect":
             return p.redpen_connect(requester, org, ip=ip, mfa_at=mfa_at)
         if action == "redpen_connect_record":       # no session: the org comes from the verified, owner-signed state
