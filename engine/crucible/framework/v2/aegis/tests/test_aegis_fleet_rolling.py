@@ -43,6 +43,14 @@ class MemSnapshotSink:
         return True
 
 
+class FailingSnapshotSink:
+    """A sink that REFUSES to store the pre-retirement snapshot — AS-6a then leaves the worker DRAINING
+    (snapshot-first is inviolable: never torn down without its state captured)."""
+
+    def store(self, snapshot: F.Snapshot) -> bool:
+        return False
+
+
 class NeverSettles:
     """A probe-backed health that reports NO worker healthy — the rollout must stall (fail-closed)."""
 
@@ -192,6 +200,32 @@ def test_retire_proceeds_even_at_zero_budget(fleet_and_rolling_on):
     assert res.state.get(_worker(a).key).health == F.WorkerHealth.STARTING
     assert res.state.get(_worker(b).key).health == F.WorkerHealth.RETIRED
     assert len(res.result.snapshots) == 1  # snapshot FIRST, carried from AS-6a
+
+
+# ==================================================================================================
+# RED-PEN AS-6e: a DRAINING worker occupies a surge slot — it MUST count against max_surge, so the
+# reconciler never starts more than max_surge TOTAL in-flight (new STARTING + leftover DRAINING).
+# ==================================================================================================
+def test_draining_workers_count_against_the_surge_budget(fleet_and_rolling_on):
+    a, d = "app-a.tt-a.example", "app-d.tt-a.example"
+    start = _place_healthy([_worker(a, epoch=1), _worker(d, epoch=1)])
+    # A sink that REFUSES the pre-retirement snapshot: turning d off leaves it DRAINING (teardown not landed).
+    rr = _rolling(max_surge=1, sink=FailingSnapshotSink())
+    off_d = F.DesiredWorker(kind=F.WorkerKind.UNITS, tenant="tt-a", host=d, desired_mode="off",
+                            image_digest=_LOCKED, epoch=1)
+    # Tick 1: turn d OFF. Its snapshot is refused, so d is left DRAINING — it still holds a surge slot.
+    t1 = rr.reconcile([_worker(a, epoch=1), off_d], start, now=NOW + 10)
+    assert t1.state.get(_worker(d).key).health == F.WorkerHealth.DRAINING
+    assert t1.state.get(_worker(a).key).health == F.WorkerHealth.HEALTHY
+
+    # Tick 2: d is still DRAINING (the one surge slot is taken); now ask to roll a to epoch 2.
+    # The draining worker MUST count against max_surge=1, so a is DEFERRED, not started this tick.
+    t2 = rr.reconcile([_worker(a, epoch=2), off_d], t1.state, now=NOW + 20)
+    in_flight = sum(1 for w in t2.state.workers
+                    if w.health in (F.WorkerHealth.STARTING, F.WorkerHealth.DRAINING))
+    assert in_flight <= 1                                           # never more than max_surge total in-flight
+    assert t2.state.get(_worker(a).key).health == F.WorkerHealth.HEALTHY   # a held, NOT started over budget
+    assert _worker(a).key in t2.deferred and _worker(a).key not in t2.admitted
 
 
 # ==================================================================================================

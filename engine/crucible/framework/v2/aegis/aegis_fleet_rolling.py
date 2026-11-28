@@ -220,7 +220,9 @@ class RollingFleetReconciler:
     Each tick, in order:
       1. ADVANCE: promote every in-flight (``STARTING``) worker the health gate reports SETTLED to
          ``HEALTHY`` (a ``rolled_in`` action), freeing surge budget — the AS-6a hook this slice completes.
-      2. BUDGET: ``budget = max_surge - (workers still STARTING after the advance)``.
+      2. BUDGET: ``budget = max_surge - (workers still IN-FLIGHT after the advance)``, where in-flight is
+         every worker still holding a surge slot — ``STARTING`` (not yet proven healthy) OR ``DRAINING`` (a
+         teardown whose snapshot-first retirement has not landed). Both count, so the cap holds across ticks.
       3. ADMIT: in deterministic key order, admit up to ``budget`` workers whose placement would change (a
          ``rollout`` of a live worker, or a brand-new placement); DEFER the rest.
       4. DELEGATE: run the inner AS-6a reconcile over the admitted + stable + retiring desired workers, with
@@ -266,8 +268,14 @@ class RollingFleetReconciler:
         promoted_state = FleetState.from_workers(promoted_workers.values())
         current = promoted_state.by_key()
 
-        # 2) BUDGET — how many more workers may enter rollout this tick.
-        in_flight = sum(1 for w in promoted_state.workers if w.health == WorkerHealth.STARTING)
+        # 2) BUDGET — how many more workers may enter rollout this tick. IN-FLIGHT is every worker still
+        #    occupying a surge slot: a STARTING worker (new/rolled, not yet proven HEALTHY) AND a DRAINING
+        #    worker (mid-teardown — its snapshot-first retirement has not landed, so the old unit is still up).
+        #    Both count against max_surge. Counting only STARTING leaked the cap: a worker left DRAINING by a
+        #    prior tick (e.g. a refused-snapshot retirement) was re-rolled OUTSIDE the budget, so new STARTING
+        #    admits + the leftover DRAINING could put MORE than max_surge hosts in-flight at once.
+        in_flight = sum(1 for w in promoted_state.workers
+                        if w.health in (WorkerHealth.STARTING, WorkerHealth.DRAINING))
         budget = max(0, self._policy.max_surge - in_flight)
 
         # 3) ADMIT — classify each desired worker; admit disruptive "apply" transitions up to budget.
@@ -292,7 +300,9 @@ class RollingFleetReconciler:
         projected = [w for k, w in desired_by_key.items() if k not in held]
         res = self._inner.reconcile(projected, promoted_state, now=now, hold_keys=held)
 
-        in_flight_after = any(w.health == WorkerHealth.STARTING for w in res.state.workers)
+        # Converged iff nothing is in-flight (no STARTING AND no DRAINING — a stuck-draining worker is work
+        # still outstanding) and nothing was deferred this tick.
+        in_flight_after = any(w.health in (WorkerHealth.STARTING, WorkerHealth.DRAINING) for w in res.state.workers)
         converged = (not in_flight_after) and not deferred
         return RollingReconcileResult(
             disabled=False, result=res, promotions=tuple(promotions),
