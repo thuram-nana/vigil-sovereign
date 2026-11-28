@@ -1,14 +1,17 @@
-"""AS-26 (OPS-1) — OFFLINE posture analyzer for the AEGIS staging CloudFormation templates.
+"""AS-26 (OPS-1) / AS-34 - OFFLINE posture analyzer for the AEGIS platform CloudFormation templates.
 
-cfn-lint proves the templates are well-formed CloudFormation; this analyzer proves the AS-26 SECURITY
-POSTURE that cfn-lint does not express (spec §9.3 AS-26 row + §4/§5 boundary rules). It parses the
-templates as the deployment DECLARATIONS they are and asserts, resource by resource, every invariant the
-slice rests on:
+cfn-lint proves the templates are well-formed CloudFormation; this analyzer proves the AEGIS platform
+SECURITY POSTURE that cfn-lint does not express (spec §9.3 AS-26 row + §4/§5 boundary rules). It is the
+SAME analyzer over the AS-26 staging templates (infra/aws/aegis-staging) and the AS-34 production
+templates (infra/aws/aegis-production): both ship the same resource shapes, so the one analyzer judges
+both. It parses the templates as the deployment DECLARATIONS they are and asserts, resource by resource,
+every invariant the slice rests on:
 
   * IMDSv2 is ENFORCED on every launch template (MetadataOptions.HttpTokens == required);
   * the EIP sets are DISJOINT (B-5): the ``defense`` set and the ``z4-offense`` set share no allocation;
-  * the TEST OWNER and TEST RELEASE KMS roots each DENY admin without MFA (the offline proxy for the
-    "MFA sign-in" acceptance);
+  * the OWNER root and the RELEASE root each DENY admin without MFA (the offline proxy for the
+    "MFA sign-in" acceptance) - tagged ``test-owner``/``test-release`` in staging and ``owner``/
+    ``release`` in production; a template that declares either class must declare BOTH;
   * the Z3R relay role is KEYLESS (R3): it DENIES kms:Decrypt / secretsmanager:GetSecretValue;
   * no security group opens 0.0.0.0/0 ingress (the viewer path enters only through CloudFront);
   * paging (SNS, D32) and CloudFormation DRIFT detection (the Config managed rule) are present;
@@ -37,6 +40,14 @@ from typing import Any
 _MFA_GATED_ACTIONS = frozenset({
     "kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:CreateGrant",
 })
+
+# The vigil:root tag values that name an MFA-gated signing root. Staging labels its roots test-owner /
+# test-release (they are test roots); production labels the REAL roots owner / release. The SAME analyzer
+# covers both, so a production template's roots are posture-checked exactly as staging's are (the rule is
+# per-CLASS, so a staging owner is not failed for a missing production owner and vice versa).
+_OWNER_ROOT_VALUES = frozenset({"test-owner", "owner"})
+_RELEASE_ROOT_VALUES = frozenset({"test-release", "release"})
+_MFA_ROOT_VALUES = _OWNER_ROOT_VALUES | _RELEASE_ROOT_VALUES
 
 
 @dataclass
@@ -169,22 +180,30 @@ def _denies_without_mfa(props: "dict[str, Any]") -> bool:
 
 
 def check_mfa_roots(name: str, doc: "dict[str, Any]") -> "list[Violation]":
-    """The TEST OWNER and TEST RELEASE KMS roots each carry a Deny-without-MFA statement."""
+    """The OWNER root and the RELEASE root each carry a Deny-without-MFA statement (staging:
+    test-owner/test-release; production: owner/release). A template that declares EITHER class of root
+    must declare BOTH (spec §4.6: owner root + a distinct release root)."""
     out: list[Violation] = []
-    want = {"test-owner", "test-release"}
-    seen: dict[str, bool] = {}
+    saw_owner = False
+    saw_release = False
     for lid, props in _resources(doc, "AWS::KMS::Key"):
         root = ""
         for tag in _as_list(props.get("Tags")):
             if isinstance(tag, dict) and tag.get("Key") == "vigil:root":
                 root = str(tag.get("Value"))
-        if root in want:
-            seen[root] = _denies_without_mfa(props)
-            if not seen[root]:
-                out.append(Violation(name, "mfa-root", f"{lid}: {root} key has no Deny-without-MFA statement"))
-    # Only enforce presence in the template that actually declares the roots (10-keys-roles-ssm).
-    if seen and want - set(seen):
-        out.append(Violation(name, "mfa-root-missing", f"missing MFA-gated roots: {sorted(want - set(seen))}"))
+        if root not in _MFA_ROOT_VALUES:
+            continue
+        if not _denies_without_mfa(props):
+            out.append(Violation(name, "mfa-root", f"{lid}: {root} key has no Deny-without-MFA statement"))
+        if root in _OWNER_ROOT_VALUES:
+            saw_owner = True
+        if root in _RELEASE_ROOT_VALUES:
+            saw_release = True
+    # Only enforce presence in the template that actually declares the roots (10-keys-roles-ssm): a
+    # template with an owner-class root must also carry a release-class root, and vice versa.
+    if (saw_owner or saw_release) and not (saw_owner and saw_release):
+        missing = "release" if saw_owner else "owner"
+        out.append(Violation(name, "mfa-root-missing", f"missing the {missing}-class MFA-gated root"))
     return out
 
 
@@ -319,7 +338,7 @@ def lint_template(path: Path) -> "list[Violation]":
     out += check_no_public_ingress(name, loaded)
     if _resources(loaded, "AWS::EC2::EIP"):
         out += check_disjoint_eips(name, loaded)
-    if any(t.get("Value") == "test-owner" or t.get("Value") == "test-release"
+    if any(t.get("Value") in _MFA_ROOT_VALUES
            for _lid, p in _resources(loaded, "AWS::KMS::Key")
            for t in _as_list(p.get("Tags")) if isinstance(t, dict) and t.get("Key") == "vigil:root"):
         out += check_mfa_roots(name, loaded)
