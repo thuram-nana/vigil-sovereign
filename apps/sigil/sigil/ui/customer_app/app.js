@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON) && (route !== "#/monitoring/control" || MONITORING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -2974,6 +2974,10 @@
     if (d.can_manage) {
       children.push(h("div.cust-mon-settings-preview-link", {}, monSettingsButton("View protection preview",
         function () { nav("#/monitoring/preview"); })));
+      // AS-27b — a manager can open the read-only Defense control view (live-enforcement posture + where a
+      // stand-down applies) from here. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+      children.push(h("div.cust-mon-settings-control-link", {}, monSettingsButton("View defense control",
+        function () { nav("#/monitoring/control"); })));
     }
     if (!rows.length) {
       children.push(h("div.card.cust-soon", { text: d.can_manage
@@ -3158,6 +3162,9 @@
                            cache_hits: "responses served from a cache", chunked: "chunked request bodies",
                            over_2_mib: "request bodies larger than 2 MiB", multipart: "multipart uploads",
                            websocket: "WebSocket traffic", non_http: "non-HTTP traffic" };
+  // AS-27b — why an authorized stand-down would be a no-op for a host (the honest closed vocabulary the server sends).
+  var MON_STANDDOWN = { not_enforcing: "This host is not enforcing, so there is nothing to stand down.",
+                        already_stood_down: "Enforcement is already stood down for this host." };
   function monPreviewOutcomeText(list) {
     var parts = (Array.isArray(list) ? list : []).map(function (c) { return own(MON_OUTCOME, c); })
       .filter(function (s) { return !!s; });
@@ -3220,6 +3227,88 @@
       body.push(h("p.cust-muted.cust-mon-preview-limits", { text: "AEGIS does not inspect: " + limits.join(", ") + "." }));
     }
     return h("div.card.cust-mon-preview-card", { dataset: { host: String(p.host) } }, body);
+  }
+
+  // ---- AS-27b: Defense control (#/monitoring/control) ----------------------------------------------------------------
+  // "override + manage_defense" — the UI-chain increment after AS-4b (chain ...->3d->4b->27b). The SAFE-direction MIRROR
+  // of the Protection preview: where the preview shows whether a host could be RELEASED to enforce (observe -> enforce,
+  // the dangerous direction, AS-29's gate), this shows, per host, whether AEGIS is enforcing live blocking (Respond)
+  // RIGHT NOW and whether an authorized STAND-DOWN (the safe-direction return to observe) would have any effect. The
+  // grade comes entirely from the SERVER (the AS-27b core evaluator, over the SAME gated monitoring reads a manager
+  // already sees): the page RENDERS fixed copy from the server's semantic fields and INVENTS nothing.
+  //
+  // It owns its OWN read, GET api/customer/monitoring/control, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED as the
+  // rest of monitoring (off: the route is the home screen exactly as any unknown route, and the Settings link is absent).
+  // It renders NO button (read-only, pure display): it mints nothing, arms nothing and STANDS NOTHING DOWN — a real
+  // stand-down stays behind the owner-signed gate. TWO server-decided capabilities shape it: `can_manage`
+  // (manage_monitoring) gates the host rows (a non-manager sees only an honest note, never the hosts); `can_manage_defense`
+  // (manage_defense — the founder, never a billing-only admin) only shapes the copy (who may OPERATE the live defense).
+  // CSP-safe: no handler at all on the cards (pure display); the Settings link uses addEventListener via onClick.
+  function viewDefenseControl() {
+    var holder = h("div#mon-control-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/control"); }
+      catch (e) {
+        if (here() !== "#/monitoring/control") return;      // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the view claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load defense control just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/control") return;
+      VUI.mount(holder, monControlBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Defense control" }),
+      h("p.cust-muted", { text: "A read-only view of which hosts AEGIS is actively enforcing and where an authorized "
+        + "stand-down (pausing enforcement back to observe) would apply. It shows only — it stands nothing down." }),
+      holder]), "#/monitoring/control");
+  }
+  function monControlBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can see defense control. "
+        + "It shows which hosts are enforcing and where a stand-down would apply." });
+    }
+    var rows = (d.controls || []).filter(function (c) { return c && c.host; });
+    if (!rows.length) {
+      return h("div", {}, [
+        monControlOperatorNote(d),
+        h("div.card.cust-soon", { text: "No host of this workspace has a current proof of control yet. Prove a host "
+          + "in Assets, then its defense posture appears here." })]);
+    }
+    return h("div", {}, [monControlOperatorNote(d), h("div.cust-grid", {}, rows.map(monControlCard))]);
+  }
+  // The honest operate-vs-view line, decided by the SERVER (can_manage_defense): a defense manager (founder) is told
+  // they may operate the live defense; a view-only manager (a billing admin) is told, honestly, that operating it
+  // needs the defense-manager capability. Either way this screen performs nothing — it is read-only.
+  function monControlOperatorNote(d) {
+    return d.can_manage_defense
+      ? h("p.cust-muted.cust-mon-control-op", { text: "You may operate the live defense for this workspace. A "
+          + "stand-down pauses enforcement back to observe for a host — the safe direction; it never widens scope. "
+          + "This screen shows only: a stand-down is issued under the owner-signed gate, not from here." })
+      : h("p.cust-muted.cust-mon-control-op", { text: "Operating the live defense (standing enforcement down) needs "
+          + "the defense-manager capability, which the founder holds. You can see each host's enforcement here." });
+  }
+  function monControlCard(c) {
+    var enforcing = !!c.enforcing;
+    var badge = h("span.cust-badge.cust-badge-" + (enforcing ? "on" : "off"),
+      { text: enforcing ? "Enforcing · Respond" : "Observing" });
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(c.host) }), badge])];
+    if (enforcing) {
+      body.push(kv("Now", "AEGIS is blocking attacks on this host before they reach your app."));
+      body.push(h("p.cust-muted", { text: c.standdown_available
+        ? "An authorized stand-down would pause enforcement back to observe for this host. Nothing is stood down "
+          + "from this screen."
+        : "This host is enforcing." }));
+    } else {
+      var why = (c.standdown_blockers || []).map(function (b) { return own(MON_STANDDOWN, b); })
+        .filter(function (s) { return !!s; });
+      body.push(kv("Now", c.armed ? "AEGIS is observing this host: inspecting and reporting, never blocking."
+        : "AEGIS is not monitoring this host yet."));
+      body.push(h("p.cust-muted", { text: why.length ? why.join(" ")
+        : "This host is not enforcing, so there is nothing to stand down." }));
+    }
+    return h("div.card.cust-mon-control-card", { dataset: { host: String(c.host) } }, body);
   }
 
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
@@ -5406,6 +5495,8 @@
     "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
     // AS-4b protection preview off (same flag as #/monitoring): #/monitoring/preview is the home screen, as any unknown route
     "#/monitoring/preview": function () { return authed() ? (MONITORING_ON ? viewMonitoringPreview() : viewDashboard()) : viewLogin(); },
+    // AS-27b defense control off (same flag as #/monitoring): #/monitoring/control is the home screen, as any unknown route
+    "#/monitoring/control": function () { return authed() ? (MONITORING_ON ? viewDefenseControl() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)

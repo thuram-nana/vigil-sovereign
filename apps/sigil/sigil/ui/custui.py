@@ -785,6 +785,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_events")
         if path == "/api/customer/monitoring/preview" and _monitoring_on():   # AS-4b (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_preview")
+        if path == "/api/customer/monitoring/control" and _monitoring_on():   # AS-27b (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("monitor_control")
         if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
             return self._live_activity()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding

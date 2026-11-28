@@ -3993,6 +3993,55 @@ class Provisioner:
             previews.append(p.customer_safe())
         return {"org_id": requester_org_id, "can_manage": True, "previews": previews}
 
+    def monitor_control(self, requester: str, requester_org_id: str, *, ip: str = "",
+                        now: "Optional[float]" = None) -> dict:
+        """AS-27b — the SESSION org's READ-ONLY DEFENSE-CONTROL view: for each host the manager can act on,
+        whether AEGIS is enforcing live blocking (Respond) right now and whether an authorized STAND-DOWN (the
+        safe-direction override back to Observe) would have any effect — GRADED by the AS-27b core evaluator
+        (``vigil_core.defense_control_host``) over the SAME already-gated monitoring reads ``monitor_list`` /
+        ``monitor_preview`` use. It is READ-ONLY: it mints nothing, arms nothing and STANDS NOTHING DOWN; a real
+        stand-down stays behind the owner-signed gate (the safe direction — a stand-down only ever REDUCES
+        enforcement, never widens scope).
+
+        TWO capability gates, both decided HERE (never by the client) and both admit-gated so a tenant only ever
+        reads ITS OWN org (cross-tenant => ProvisionDenied => 403):
+          * ``can_manage`` (``manage_monitoring``: the founder or an org_admin) — whether the host rows are
+            returned at all. The verified hosts + plan this needs are the SAME a non-manager never sees on the
+            Monitoring screen, so a read-only role gets ``can_manage: False`` and NO rows.
+          * ``can_manage_defense`` (``manage_defense``: the founder — NOT a billing-only org_admin, and never
+            offense) — whether this viewer may OPERATE the live defense (the stand-down). It only shapes the
+            copy; the view performs no stand-down either way (defense-authz != billing-authz, surfaced
+            honestly). A view-only manager is told, honestly, that operating the live defense needs the
+            defense-manager capability."""
+        t = self._now() if now is None else float(now)
+        from vigil_core import defense_control_host
+        from vigil_core.monitoring_authority import MonitoringMode
+        from ..governor.monitoring_authority import MonitoringAuthorityRegistry
+        with self._lock:
+            self._monitor_admit("monitor_control", requester, requester_org_id, "", "read")
+            can_manage = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                       permission="manage_monitoring"))
+            can_manage_defense = bool(self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                                               permission="manage_defense"))
+            if not can_manage:
+                return {"org_id": requester_org_id, "can_manage": False,
+                        "can_manage_defense": can_manage_defense, "controls": []}
+            reg = MonitoringAuthorityRegistry(self.store, owner_key=None)
+            active = {g.host: g for g in reg.grants(requester_org_id)
+                      if reg.active_at(requester_org_id, g.host, now=t) is not None}
+            hosts, plan = self._monitor_setup(requester_org_id, t)
+            proven = {str(h["host"]) for h in hosts}
+            respond = bool(plan and plan.get("respond"))
+        controls = []
+        for host in sorted(proven | set(active)):
+            g = active.get(host)
+            mode = MonitoringMode(g.mode) if g is not None else MonitoringMode.OBSERVE
+            c = defense_control_host(host, mode=mode, armed=g is not None, proof_current=host in proven,
+                                     respond_entitled=respond)
+            controls.append(c.customer_safe())
+        return {"org_id": requester_org_id, "can_manage": True,
+                "can_manage_defense": can_manage_defense, "controls": controls}
+
     def monitor_binding_list(self, requester: str, requester_org_id: str, *, ip: str = "",
                              now: "Optional[float]" = None) -> dict:
         """AS-2g — the SESSION org's v2 origin-binding status (org-scoped, read-only). For each ACTIVE v2 grant:
