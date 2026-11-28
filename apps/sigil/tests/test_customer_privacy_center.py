@@ -57,7 +57,7 @@ OWNER = generate_keypair()
 OP = OWNER.public_key_b64
 
 # the six subprocessors the privacy page publishes, in order
-_SUBPROCESSORS = ("Amazon Web Services (AWS)", "Cloudflare", "Stripe", "Google", "GitHub", "Anthropic")
+_SUBPROCESSORS = ("Amazon Web Services (AWS)", "Cloudflare", "Stripe", "Google", "GitHub", "A third-party AI processor")
 # the three strictly-necessary cookies the cookies page publishes
 _COOKIES = ("sigil_session", "vigil_customer_session", "OIDC binding cookie")
 

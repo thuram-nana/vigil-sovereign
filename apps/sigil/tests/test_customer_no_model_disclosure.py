@@ -31,16 +31,19 @@ WHY NAMES, NOT THE BARE WORD "model":
   and for the picker classes being USED in consumer code (layer 2) — never the bare word
   "model".
 
+  4. The customer-facing LEGAL pages — the public privacy & trust pages and the in-app Privacy
+     centre that reads them — disclose that an AI subprocessor EXISTS but never NAME the AI
+     provider / model-host. The subprocessor line is genericized to "a third-party AI
+     processor"; a customer can read these pages, so a provider name here is a leak too.
+
 ALLOWLIST (kept as narrow as possible — see _ALLOWLIST_NOTES):
   * Cloud-infrastructure providers (AWS / GCP / Azure / Cloudflare) are legitimate,
     customer-facing cloud vendors (cloud-connect) and are NOT in the token set. "Azure
     OpenAI" is still caught, via the "openai" token.
-  * The Trust-Center / Privacy-centre "Subprocessors" disclosure names Anthropic (Claude API)
-    as a data subprocessor. That is a compliance/GDPR disclosure the user owns; it lives in
-    public_site/privacy (served separately and fetched at runtime by the Privacy centre),
-    NOT in the static customer_app bundle. This test scans the static bundle only, which is
-    free of it — so no allowlist entry is needed, and baking that text into the static bundle
-    would (correctly) trip layer 1 for the user to review.
+  * The Trust-Center / Privacy-centre "Subprocessors" disclosure KEEPS a GDPR/compliance data-
+    subprocessor entry for the AI features, but the AI provider is deliberately NOT named (the
+    product decision: a customer never sees the provider). Layer 4 scans those pages to keep it
+    genericized; re-introducing the provider name there fails this guard.
 """
 from __future__ import annotations
 
@@ -54,7 +57,18 @@ from sigil.governor import notify_channels as nc
 from sigil.ui import assistant
 from sigil.ui import report_export as rx
 
-_CUSTOMER_APP = Path(__file__).resolve().parents[1] / "sigil" / "ui" / "customer_app"
+_UI = Path(__file__).resolve().parents[1] / "sigil" / "ui"
+_CUSTOMER_APP = _UI / "customer_app"
+
+# Customer-reachable LEGAL / disclosure surfaces (served separately from the SPA bundle, but a customer CAN read
+# them): the public privacy & trust pages, and the Privacy-centre store that renders the privacy page's provider
+# list in-app at #/privacy. They disclose that an AI subprocessor exists but must never NAME the AI provider.
+_LEGAL_PAGES = (
+    _UI / "public_site" / "privacy" / "index.html",
+    _UI / "public_site" / "trust" / "index.html",
+    _UI / "public_site" / "terms" / "index.html",
+    _UI / "privacy_center_store.py",
+)
 
 # ---- the forbidden token set ------------------------------------------------------------------------------------
 # AI-model family names, AI-provider / model-host names, versiony model ids, and model-TYPE labels a customer could
@@ -103,6 +117,18 @@ decision."""
 def _hits(text: str) -> list[str]:
     """Every forbidden model/provider pattern that matches ``text`` (the patterns, for a readable failure)."""
     return [p.pattern for p in _NAME_RE if p.search(text)]
+
+
+# The provider / specific-model NAME subset: everything EXCEPT the generic "<type> model" LABEL. These must appear
+# NOWHERE a customer can read. Generic positioning ("a language model decides...", "parts of the Service use AI
+# models") names nothing and is allowed in marketing / legal copy; a provider or model NAME never is.
+_TYPE_LABEL_PATTERN = r"\b(?:ai|language|large\s+language|foundation|engine)\s+model\b"
+_NAME_ONLY_RE = tuple(p for p in _NAME_RE if p.pattern != _TYPE_LABEL_PATTERN)
+
+
+def _name_only_hits(text: str) -> list[str]:
+    """Only the provider / specific-model NAME patterns that match ``text`` (not the generic model-TYPE label)."""
+    return [p.pattern for p in _NAME_ONLY_RE if p.search(text)]
 
 
 def _bundle_files() -> list[Path]:
@@ -210,6 +236,43 @@ def test_customer_report_export_redacts_any_model_identifier():
     report = rx.build_report(store, "acme", now=1000.0, org_name="Acme")
     assert report["findings_total"] == 1          # the finding IS in the report ...
     assert not _hits(report["html"]), f"the exported report leaked a model identifier: {_hits(report['html'])}"
+
+
+# ---- layer 4: the customer-facing legal pages name no AI provider ------------------------------------------------
+def test_customer_facing_legal_pages_name_no_ai_provider():
+    """The privacy & trust pages (and the Privacy-centre store that renders them in-app) disclose that an AI
+    subprocessor EXISTS, but — per the no-provider rule — never NAME the provider/model: the disclosure is
+    genericized to "a third-party AI processor". A customer reads these pages, so a provider / model name here is a
+    leak exactly like one in the SPA bundle. (The GDPR subprocessor disclosure itself is kept; only the NAME is
+    withheld, which is the product decision.)"""
+    leaks: list[str] = []
+    for path in _LEGAL_PAGES:
+        assert path.exists(), f"expected customer-facing legal page missing: {path}"
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for pat in _hits(line):
+                leaks.append(f"{path.name}:{n}: token /{pat}/  ->  {line.strip()[:160]}")
+    assert not leaks, (
+        "an AI provider / model name is shown on a customer-facing legal page — the subprocessor disclosure must "
+        "stay genericized to 'a third-party AI processor':\n" + "\n".join(leaks)
+    )
+
+
+# ---- layer 5: the WHOLE customer-visible public site names no AI provider / model ---------------------------------
+def test_no_ai_provider_or_model_name_anywhere_in_the_public_site():
+    """Future-proof the rule across the ENTIRE customer-visible marketing + legal site (every public_site page), not
+    only the known legal pages: no AI provider / specific-model NAME (Anthropic / Claude / Opus / Bedrock / GPT / ...)
+    may appear anywhere a customer could read it. Generic AI positioning that names nothing ("a language model",
+    "AI models") is allowed — only a provider or model NAME is a leak."""
+    site = _UI / "public_site"
+    leaks: list[str] = []
+    for path in sorted(p for p in site.rglob("*.html") if p.is_file()):
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for pat in _name_only_hits(line):
+                leaks.append(f"{path.relative_to(site)}:{n}: token /{pat}/  ->  {line.strip()[:160]}")
+    assert not leaks, (
+        "an AI provider / model NAME appears on a customer-visible public-site page (a customer must never learn the "
+        "model/provider):\n" + "\n".join(leaks)
+    )
 
 
 # ---- the guard stays consistent with the notify_channels shared checker ------------------------------------------
