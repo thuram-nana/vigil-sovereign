@@ -56,8 +56,12 @@ _DEPTH = {
 }
 
 # A conservative dotted-DNS matcher: at least one label + a dot + a 2..63 alpha TLD. "e.g" / "i.e" never match
-# (1-char TLD), so prose abbreviations are not mistaken for a host.
-_HOST_RE = re.compile(r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})")
+# (1-char TLD), so prose abbreviations are not mistaken for a host. The label-group repetition is POSSESSIVE
+# (``)++``): on untrusted box input like "0.0.0.0...0" (many "label." with no alpha TLD) a backtracking "+" would
+# re-try every label when the trailing TLD fails -> polynomial ReDoS; the possessive form matches a valid host
+# identically (labels are dot-terminated, the TLD is not) but refuses to backtrack into the labels, so a failing
+# match aborts in one linear pass. ``_extract_host`` also caps the token length as defence in depth.
+_HOST_RE = re.compile(r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)++[a-z]{2,63})")
 
 
 def _head_index(words: "list[str]") -> int:
@@ -93,6 +97,8 @@ def _extract_host(text: str) -> str:
         t = t.split("@")[-1]                             # userinfo
         t = t.split(":", 1)[0]                           # port
         t = t.strip(".,;!()[]{}<>\"'`")
+        if len(t) > 253:                                 # a hostname is at most 253 chars; skip pathological input
+            continue
         m = _HOST_RE.fullmatch(t) or _HOST_RE.search(t)
         if m:
             return m.group(1)
