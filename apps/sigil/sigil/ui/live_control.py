@@ -143,8 +143,10 @@ def agent_graph(store: Any, org_id: str, host: str) -> dict:
     do not contain (AS-4a honesty). Resolves the slug SERVER-side (ONLY for a host the org has ownership-proven —
     tenant-safe) and reads the shared live-graph seam. Returns ``{ok, slug, nodes, edges, generation, cursor}``:
     nodes = the real sub-agents / phases that actually posted (per-node status + provenance ref + oracle-verified
-    count), edges = the recorded delegation / phase-sequence / attachment links. Raises ``ValueError`` on an
-    unproven host (fail-closed, tenant-safe). A read-only projection; it mints nothing and promotes no LEAD."""
+    count), edges = the recorded delegation / phase-sequence / attachment links. ``epoch`` is the RUN/GENERATION
+    token the client diffs: on a change the (org, host) slug was relaunched, so the client resyncs the transcript
+    from the start of the new run rather than appending a suffix of it onto the prior run. Raises ``ValueError``
+    on an unproven host (fail-closed, tenant-safe). A read-only projection; it mints nothing and promotes no LEAD."""
     slug = _proven_slug(store, org_id, host)
     if slug is None:
         raise ValueError("no such engagement for this org")
@@ -152,7 +154,8 @@ def agent_graph(store: Any, org_id: str, host: str) -> dict:
     from vigil_core.seam_base import resolve_seam_base
     g = _graph(resolve_seam_base(), slug)
     return {"ok": True, "slug": slug, "nodes": g.get("nodes", []), "edges": g.get("edges", []),
-            "generation": int(g.get("generation", 0)), "cursor": int(g.get("cursor", -1))}
+            "generation": int(g.get("generation", 0)), "epoch": int(g.get("epoch", 0)),
+            "cursor": int(g.get("cursor", -1))}
 
 
 def graph_activity(store: Any, org_id: str, host: str, *, since: int = -1, limit: int = 300,
@@ -161,17 +164,23 @@ def graph_activity(store: Any, org_id: str, host: str, *, since: int = -1, limit
     tool events as the spine recorded them, each grounded in a real blackboard event (its ``ref``). Resolves the
     slug SERVER-side (tenant-safe) and reads the shared live-graph seam incrementally with a ``since`` cursor;
     ``since=-1`` returns the whole recorded stream (the honest REPLAY / scrub). ``node`` optionally filters to
-    ONE node (what the UI does when a graph node is selected). Returns ``{ok, slug, rows, cursor}`` where each row
-    is ``{seq, ts, node, role, label, kind, status, ref, verified}`` (fixed-field, customer-safe — the seam drops
-    anything else). Raises ``ValueError`` on an unproven host. A read-only projection; it mints nothing."""
+    ONE node (what the UI does when a graph node is selected). Returns ``{ok, slug, rows, cursor, epoch}`` where
+    each row is ``{seq, ts, node, role, label, kind, status, ref, verified}`` (fixed-field, customer-safe — the
+    seam drops anything else). ``epoch`` is the RUN/GENERATION token: the per-run ``seq`` cursor is only valid
+    within one epoch, so when ``epoch`` changes the (org, host) slug was relaunched (a reused slug) and the client
+    MUST resync from the start of the new run instead of appending — otherwise a stale cursor would splice a
+    suffix of the new run onto the prior run (an AS-4a violation). Raises ``ValueError`` on an unproven host. A
+    read-only projection; it mints nothing."""
     slug = _proven_slug(store, org_id, host)
     if slug is None:
         raise ValueError("no such engagement for this org")
+    from vigil_core.live_graph import epoch as _epoch
     from vigil_core.live_graph import read as _read
     from vigil_core.seam_base import resolve_seam_base
-    rows = _read(resolve_seam_base(), slug, since=int(since), limit=int(limit), node=str(node or ""))
+    base = resolve_seam_base()
+    rows = _read(base, slug, since=int(since), limit=int(limit), node=str(node or ""))
     cursor = rows[-1]["seq"] if rows else int(since)
-    return {"ok": True, "slug": slug, "rows": rows, "cursor": cursor}
+    return {"ok": True, "slug": slug, "rows": rows, "cursor": cursor, "epoch": int(_epoch(base, slug))}
 
 
 def activity(store: Any, org_id: str, host: str, *, since: int = -1, limit: int = 200) -> dict:

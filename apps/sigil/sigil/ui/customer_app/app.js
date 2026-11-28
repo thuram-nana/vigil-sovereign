@@ -2100,7 +2100,10 @@
                holder: null, feed: null };
   // graph-view state (only used when LIVE_GRAPH_ON). `all` is the FULL recorded transcript (for replay/scrub +
   // client-side per-node filter); `nodes`/`edges` are the latest live graph snapshot; `sel` is the selected node.
-  var lg = { nodes: [], edges: [], gen: 0, cursor: -1, all: [], sel: "", scrub: -1, nodeEls: {},
+  // `epoch` is the RUN/GENERATION token the seam stamps on every relaunch of the reused (org, host) slug. The
+  // `cursor` is only a per-run line index, so when `epoch` changes we resync the transcript from seq 0 of the new
+  // run instead of appending a suffix of it onto the prior run (which would splice two engagements). -1 = unseen.
+  var lg = { nodes: [], edges: [], gen: 0, epoch: -1, cursor: -1, all: [], sel: "", scrub: -1, nodeEls: {},
              graphEl: null, feedEl: null, detailEl: null, errored: false };
 
   function liveActive() {
@@ -2189,8 +2192,8 @@
     if (!live.host || !running.some(function (l) { return l.host === live.host; })) {
       live.host = running[0].host; live.rows = []; live.cursor = -1;
       if (LIVE_GRAPH_ON) {                                     // a host switch starts the graph trail fresh too
-        lg.nodes = []; lg.edges = []; lg.gen = 0; lg.cursor = -1; lg.all = []; lg.sel = ""; lg.scrub = -1;
-        lg.nodeEls = {}; lg.errored = false;
+        lg.nodes = []; lg.edges = []; lg.gen = 0; lg.epoch = -1; lg.cursor = -1; lg.all = []; lg.sel = "";
+        lg.scrub = -1; lg.nodeEls = {}; lg.errored = false;
       }
     }
     var cur = running.filter(function (l) { return l.host === live.host; })[0] || running[0];
@@ -2257,6 +2260,14 @@
     var gen = live.gen, g = null, a = null, status = 0;
     try { g = await VUI.getJSON(API + "/live/graph?host=" + encodeURIComponent(live.host)); }
     catch (e) { g = null; status = (e && e.status) || 0; }
+    // A reused-slug relaunch stamps a fresh epoch on the seam. Our activity `cursor` is a per-run line index and
+    // is meaningless across runs, so when the epoch moves we resync from seq 0 of the NEW run — never append a
+    // suffix of it onto the prior run's rows (that splices two engagements: AS-4a). Reset the cursor BEFORE the
+    // transcript fetch so it re-reads the new run from the start IN THIS SAME tick (the graph read carries no
+    // cursor, so its epoch is the earliest honest signal of the relaunch).
+    if (g && typeof g.epoch === "number" && g.epoch !== lg.epoch) {
+      lg.all = []; lg.cursor = -1; lg.scrub = -1; lg.epoch = g.epoch;
+    }
     if (status !== 401 && status !== 404) {                    // only poll the transcript if the graph read was ok
       try { a = await VUI.getJSON(API + "/live/graph/activity?host=" + encodeURIComponent(live.host)
               + "&since=" + lg.cursor); }
@@ -2273,12 +2284,20 @@
     if (g && g.nodes) { lg.nodes = g.nodes; lg.edges = g.edges || []; lg.gen = g.generation || 0;
       lg.errored = false; changed = true; }
     else if (!g) { lg.errored = true; changed = true; }
-    if (a && a.rows && a.rows.length) {
-      var first = a.rows[0].seq;
-      if (lg.all.length && first <= lg.all[lg.all.length - 1].seq) { lg.all = a.rows.slice(); lg.scrub = -1; }
-      else { lg.all = lg.all.concat(a.rows); }                 // a trail reset (new run) resyncs from seq 0 -> replace
-      if (typeof a.cursor === "number") lg.cursor = a.cursor;
-      changed = true;
+    if (a && a.rows) {
+      if (typeof a.epoch === "number" && a.epoch !== lg.epoch) {
+        // the epoch moved BETWEEN the graph read and this transcript read (or the graph read was absent): the
+        // cursor we used belongs to a prior run, so DISCARD these rows (a partial suffix of the new run) and
+        // resync from seq 0 on the next poll — never append across runs.
+        lg.all = []; lg.cursor = -1; lg.scrub = -1; lg.epoch = a.epoch;
+        changed = true;
+      } else if (a.rows.length) {
+        var first = a.rows[0].seq;
+        if (lg.all.length && first <= lg.all[lg.all.length - 1].seq) { lg.all = a.rows.slice(); lg.scrub = -1; }
+        else { lg.all = lg.all.concat(a.rows); }               // same run: append (a short-file reset resyncs from seq 0)
+        if (typeof a.cursor === "number") lg.cursor = a.cursor;
+        changed = true;
+      }
     }
     if (changed) {
       renderGraphPanel(); renderGraphDetail(); renderGraphFeed();

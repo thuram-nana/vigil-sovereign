@@ -148,16 +148,39 @@ def test_projection_is_read_only_and_best_effort():
     bad.on_phase("scan", "started", ts=1.0)                              # must not raise
 
 
-def test_flag_default_off():
+def test_flag_default_off(monkeypatch):
     from framework.v2.agents import graph_projection as gp
     for off in ("", "0", "no", "off", "false"):
-        os.environ["VIGIL_CUSTOMER_LIVE_GRAPH"] = off
+        monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_GRAPH", off)
         assert gp.flag_enabled() is False
-    for on in ("1", "true", "yes", "on"):
-        os.environ["VIGIL_CUSTOMER_LIVE_GRAPH"] = on
-        assert gp.flag_enabled() is True
-    del os.environ["VIGIL_CUSTOMER_LIVE_GRAPH"]
+    # EVERY canonical affirmative token turns the EMIT plane on — crucially INCLUDING ``enabled`` (and its mixed
+    # case ``Enabled``), the token whose omission used to strand the read plane polling an empty seam.
+    for on in ("1", "true", "yes", "on", "enabled", "Enabled"):
+        monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_GRAPH", on)
+        assert gp.flag_enabled() is True, on
+    monkeypatch.delenv("VIGIL_CUSTOMER_LIVE_GRAPH", raising=False)
     assert gp.flag_enabled() is False
+
+
+def test_emit_and_read_planes_agree_on_every_affirmative_token(monkeypatch):
+    # The two-plane invariant the divergence broke: the OFFENSE emit gate (flag_enabled) and the SOVEREIGN read
+    # gate (config.customer_live_graph_enabled) must agree on EVERY token, or an engagement emits onto a seam the
+    # reader never turns on (or vice-versa). The FATAL-2 boundary forbids a cross-plane import in PRODUCTION code,
+    # so the projector mirrors the literal set; here in a TEST we import both to PROVE they stay in lockstep.
+    from framework.v2.agents import graph_projection as gp
+    sov = pytest.importorskip("sigil.config")                         # the sovereign gate (skip if sigil not on path)
+
+    assert set(gp._AFFIRMATIVE) == set(sov._OIDC_AFFIRMATIVE)          # the literal sets are byte-for-byte identical
+    assert "enabled" in gp._AFFIRMATIVE                                # the token the divergence dropped
+    for tok in gp._AFFIRMATIVE:                                        # every canonical token: ON on BOTH planes
+        monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_GRAPH", tok)
+        assert gp.flag_enabled() is True and sov.customer_live_graph_enabled() is True, tok
+    for tok in ("enabled", "Enabled", "ENABLED"):                     # case-folded identically on both planes
+        monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_GRAPH", tok)
+        assert gp.flag_enabled() is True and sov.customer_live_graph_enabled() is True, tok
+    for tok in ("", "0", "off", "disabled", "enable"):               # a non-affirmative token is OFF on BOTH planes
+        monkeypatch.setenv("VIGIL_CUSTOMER_LIVE_GRAPH", tok)
+        assert gp.flag_enabled() is False and sov.customer_live_graph_enabled() is False, tok
 
 
 # --- the PhaseLedger wiring: the graph mirror is driven ONLY when the flag is on AND a spine is handed in -----

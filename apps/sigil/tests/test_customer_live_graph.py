@@ -104,6 +104,34 @@ def test_graph_activity_streams_rows_with_cursor_and_node_filter():
     assert [r["node"] for r in only["rows"]] == ["agent:exploit"]
 
 
+def test_graph_endpoints_surface_the_generation_epoch_and_it_changes_on_relaunch():
+    # Finding 2 end-to-end through the sovereign reader: both graph endpoints return a RUN/GENERATION epoch, and a
+    # relaunch of the reused (org, host) slug changes it — the signal the client uses to resync from seq 0 rather
+    # than append a suffix of the new run onto the prior run (which would splice two engagements, AS-4a).
+    from vigil_core import live_graph as lg
+    from vigil_core.seam_base import resolve_seam_base
+
+    from sigil.ui import live_control
+    s = _store()
+    _prove(s, "org_a", "api.example.com")
+    slug = _slug("org_a", "api.example.com")
+    _seed_seam(slug)
+    g = live_control.agent_graph(s, "org_a", "api.example.com")
+    a = live_control.graph_activity(s, "org_a", "api.example.com")
+    assert "epoch" in g and "epoch" in a and g["epoch"] == a["epoch"]   # both endpoints agree on the generation
+    e0, old_cursor = a["epoch"], a["cursor"]
+    # a NEW launch on the SAME slug resets the trail and writes a run; the epoch MUST move so a stale cursor resyncs
+    base = resolve_seam_base()
+    lg.reset(base, slug)
+    for i in range(4):
+        lg.emit(base, slug, "phase:preflight" if i == 0 else "agent:recon",
+                "phase" if i == 0 else "observation", ts=float(10 + i), ref=i + 1,
+                status="started" if i == 0 else "")
+    a2 = live_control.graph_activity(s, "org_a", "api.example.com", since=old_cursor)
+    assert a2["epoch"] != e0                                            # a new generation -> client resyncs from 0
+    assert live_control.agent_graph(s, "org_a", "api.example.com")["epoch"] == a2["epoch"]
+
+
 def test_tenant_isolation_an_unproven_or_other_org_host_is_refused():
     from sigil.ui import live_control
     s = _store()
@@ -234,6 +262,16 @@ def test_the_graph_view_fabricates_no_data():
     # honest states: fixed empty / could-not-load copy (never a fake heartbeat)
     assert "No agent activity has been recorded yet" in section
     assert "Could not load the live graph" in section
+
+
+def test_the_graph_view_resyncs_the_transcript_on_a_generation_epoch_change():
+    # Finding 2 (client): the graph view tracks the run/generation epoch and, when it changes, resyncs the
+    # transcript from seq 0 instead of appending a suffix of a new run onto the prior run.
+    section = _graph_js_section()
+    assert "lg.epoch" in section                                       # the client holds the epoch its cursor belongs to
+    assert "epoch !== lg.epoch" in section                             # and resyncs when the seam's epoch moves
+    # on a detected epoch change the cursor is reset to -1 so the next read re-reads the new run from the start
+    assert "lg.cursor = -1" in section
 
 
 def test_the_graph_view_is_csp_clean_no_inline_handlers():

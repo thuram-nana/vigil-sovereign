@@ -25,8 +25,20 @@ reader DROPS any row whose node/kind is off the allowlist and NORMALISES an unkn
 INCREMENTAL + REPLAY. ``seq`` is the row's line index; :func:`read` takes a ``since`` cursor and returns only
 rows after it, so the UI streams new activity without re-downloading history (a tightened poll). ``since=-1``
 returns the whole recorded stream from the start — the honest REPLAY/scrub of what actually happened, grounded
-in the tamper-evident spine (each row's ``ref`` links back to its blackboard event). Bounded (the reader caps
-rows). Best-effort + fail-closed: emit NEVER raises into the engine; read/graph NEVER raise into the edge (a
+in the tamper-evident spine (each row's ``ref`` links back to its blackboard event).
+
+GENERATION / EPOCH. ``seq`` is only meaningful WITHIN one run: the slug is per (org, host) and REUSED by every
+relaunch, and :func:`reset` unlinks the file so a new run restarts at ``seq`` 0. A viewer holding a stale cursor
+from a prior run would therefore mistake a SUFFIX of the new run for a continuation of the old one (splicing two
+engagements — an AS-4a violation). So :func:`reset` stamps a fresh GENERATION/EPOCH token (a persisted monotone
+counter — deterministic, no wall-clock, no RNG) that :func:`epoch` / :func:`graph` return alongside the cursor;
+the sovereign reader compares it to the epoch ITS cursor belongs to and, on a change, resyncs from ``seq`` 0
+instead of appending. So a prior generation's cursor can never return a suffix of a new generation as a
+continuation.
+
+BOUNDED + FAIL-CLOSED. The reader caps a single read's output, AND caps the TOTAL bytes / lines it will ever
+parse from a seam (``_MAX_TOTAL_BYTES`` / ``_MAX_TOTAL_LINES``): an oversized seam reads as EMPTY, so the fold is
+never unbounded. Best-effort: emit NEVER raises into the engine; read/graph NEVER raise into the edge (a
 missing / corrupt / oversized file reads as empty).
 """
 from __future__ import annotations
@@ -118,6 +130,13 @@ _MAX_READ = 2000          # bound a single read (an engagement spine is ~hundred
 _MAX_LINE = 320           # a row is tiny; cap the bytes we ever parse per line
 _MAX_ROLE = 32
 _MAX_REF = 10 ** 12       # a sane upper bound on a provenance ref (a blackboard event id / phase seq)
+# Total-seam fail-closed bounds (defense against an oversized / runaway file: _read_rows / read / graph must honour
+# the docstring's "oversized file reads as empty"). _MAX_TOTAL_LINES is a generous ceiling (10x a single read
+# window — a customer spine is ~hundreds of events); _MAX_TOTAL_BYTES is the matching byte ceiling at _MAX_LINE
+# per row. A seam over EITHER bound reads as [] (fail-closed), so the fold is never unbounded.
+_MAX_TOTAL_LINES = 20000
+_MAX_TOTAL_BYTES = _MAX_TOTAL_LINES * _MAX_LINE       # == 6_400_000
+_MAX_EPOCH = 10 ** 15     # a sane upper bound on the generation/epoch counter (wraps to 1 beyond it)
 
 
 def _safe_component(slug: str) -> Optional[str]:
@@ -132,6 +151,16 @@ def _path(base: Any, slug: str) -> Optional[Path]:
     if comp is None or base is None:
         return None
     return Path(str(base)) / f"{comp}.graph.jsonl"
+
+
+def _epoch_path(base: Any, slug: str) -> Optional[Path]:
+    """The sidecar holding ``slug``'s GENERATION/EPOCH token — a tiny file beside the seam. Kept OUT of the JSONL
+    so the row file stays byte-identical (``seq`` = physical line index) and the epoch survives the file's unlink
+    on :func:`reset`. Same safe-component gate as the seam path."""
+    comp = _safe_component(slug)
+    if comp is None or base is None:
+        return None
+    return Path(str(base)) / f"{comp}.graph.epoch"
 
 
 def _norm_role(role: Any) -> Optional[str]:
@@ -211,14 +240,62 @@ def emit(base: Any, slug: str, node: str, kind: str, *, ts: float, ref: int = 0,
         return
 
 
+def epoch(base: Any, slug: str) -> int:
+    """``slug``'s current GENERATION/EPOCH token — a monotone counter :func:`reset` bumps on every relaunch of the
+    reused (org, host) slug. The sovereign reader compares this to the epoch ITS cursor belongs to and, on a
+    change, resyncs the client from ``seq`` 0 (a new run began; the prior cursor is a different generation's line
+    index, so appending its suffix would splice two engagements). ``0`` when no run has reset the seam yet.
+    Deterministic (a persisted counter — NO wall-clock, NO RNG), bounded, fail-closed (an unreadable/odd token
+    reads as ``0``)."""
+    p = _epoch_path(base, slug)
+    if p is None:
+        return 0
+    try:
+        raw = p.read_text(encoding="utf-8")[:32]
+    except OSError:
+        return 0
+    try:
+        v = int(raw.strip() or "0")
+    except ValueError:
+        return 0
+    return v if 0 <= v <= _MAX_EPOCH else 0
+
+
+def _bump_epoch(base: Any, slug: str) -> None:
+    """Stamp a fresh generation: the persisted counter + 1 (deterministic — no wall-clock, no RNG), published
+    atomically. Best-effort: NEVER raises (a stamp failure just leaves the epoch unchanged — at worst the client
+    misses one resync and self-heals on the next poll)."""
+    p = _epoch_path(base, slug)
+    if p is None:
+        return
+    nxt = epoch(base, slug) + 1
+    if nxt > _MAX_EPOCH:
+        nxt = 1
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(nxt))
+        os.replace(tmp, p)            # atomic publish of the new generation
+    except OSError:
+        return
+
+
 def reset(base: Any, slug: str) -> None:
     """Begin a FRESH graph trail for ``slug`` — the engine calls this when a new run attempt starts (preflight),
     so the customer graph shows the CURRENT run, not the concatenation of every past run on the same host (the
-    slug is per (org, host), reused across launches). Best-effort: NEVER raises. After a reset a reader whose
-    cursor is now beyond the (shorter) file auto-recovers to the start — see :func:`read`."""
+    slug is per (org, host), reused across launches). Best-effort: NEVER raises.
+
+    Also BUMPS the GENERATION/EPOCH token (:func:`epoch`) FIRST — BEFORE clearing the rows, so even a reset of a
+    not-yet-created seam still moves the epoch — so a reader whose cursor belongs to the PRIOR run detects the
+    relaunch and resyncs from ``seq`` 0 instead of appending a suffix of the new run onto the old one. (A reader
+    whose cursor is merely beyond the now-shorter file also auto-recovers to the start — see :func:`read` — but
+    that alone does NOT catch a new run that has already written MORE rows than the stale cursor; the epoch does.)"""
     p = _path(base, slug)
     if p is None:
         return
+    _bump_epoch(base, slug)           # stamp a fresh generation first (deterministic monotone counter)
     try:
         p.unlink()
     except OSError:
@@ -230,50 +307,60 @@ def _read_rows(base: Any, slug: str) -> "list[dict[str, Any]]":
     parse under both :func:`read` and :func:`graph`. A row whose node/kind is off the allowlist is DROPPED; an
     unknown agent role is normalised to the generic ``agent`` node. Each row is returned as
     ``{seq, ts, node, role, nodekind, kind, status, ref, from, edge, verified}`` — ONLY these fixed fields, so an
-    injected extra key never surfaces."""
+    injected extra key never surfaces.
+
+    BOUNDED + FAIL-CLOSED: a seam larger than ``_MAX_TOTAL_BYTES`` reads as EMPTY (the size is checked via stat
+    BEFORE any bytes are read, so an oversized file is never loaded), and parsing stops fail-closed if the line
+    count would exceed ``_MAX_TOTAL_LINES`` — honouring the module's "oversized file reads as empty" contract so
+    neither :func:`read` nor :func:`graph` can ever fold an unbounded number of rows."""
     p = _path(base, slug)
     if p is None:
         return []
     try:
-        with p.open("r", encoding="utf-8") as fh:
-            lines = fh.readlines()
+        if p.stat().st_size > _MAX_TOTAL_BYTES:
+            return []                                  # oversized seam -> empty (fail-closed; never loaded)
     except OSError:
-        return []
+        return []                                      # missing / unstat-able -> empty
     out: "list[dict[str, Any]]" = []
-    for seq, line in enumerate(lines):
-        if len(line) > _MAX_LINE:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(rec, dict):
-            continue
-        parts = _split_node(rec.get("node"))
-        kind = rec.get("kind")
-        if parts is None or kind not in _EVENT_LABELS:
-            continue                                   # off-allowlist -> dropped (customer-safe)
-        nodekind, role = parts
-        nid = f"{nodekind}:{role}"
-        ts = rec.get("ts")
-        ref = rec.get("ref")
-        status = rec.get("status")
-        frm = _split_node(rec.get("from"))
-        edge = rec.get("edge")
-        row: "dict[str, Any]" = {
-            "seq": seq,
-            "ts": float(ts) if isinstance(ts, (int, float)) else 0.0,
-            "node": nid,
-            "role": role,
-            "nodekind": nodekind,
-            "kind": str(kind),
-            "status": str(status) if status in _PHASE_STATUSES else "",
-            "ref": int(ref) if isinstance(ref, int) and 0 < ref <= _MAX_REF else 0,
-            "from": f"{frm[0]}:{frm[1]}" if (frm is not None and edge in _EDGE_KINDS) else "",
-            "edge": str(edge) if (frm is not None and edge in _EDGE_KINDS) else "",
-            "verified": bool(rec.get("verified")) and str(kind) == "finding",
-        }
-        out.append(row)
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            for seq, line in enumerate(fh):            # stream line-by-line (never readlines() the whole file)
+                if seq >= _MAX_TOTAL_LINES:
+                    return []                          # too many lines -> empty (fail-closed; nothing above the bound parsed)
+                if len(line) > _MAX_LINE:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                parts = _split_node(rec.get("node"))
+                kind = rec.get("kind")
+                if parts is None or kind not in _EVENT_LABELS:
+                    continue                           # off-allowlist -> dropped (customer-safe)
+                nodekind, role = parts
+                nid = f"{nodekind}:{role}"
+                ts = rec.get("ts")
+                ref = rec.get("ref")
+                status = rec.get("status")
+                frm = _split_node(rec.get("from"))
+                edge = rec.get("edge")
+                out.append({
+                    "seq": seq,
+                    "ts": float(ts) if isinstance(ts, (int, float)) else 0.0,
+                    "node": nid,
+                    "role": role,
+                    "nodekind": nodekind,
+                    "kind": str(kind),
+                    "status": str(status) if status in _PHASE_STATUSES else "",
+                    "ref": int(ref) if isinstance(ref, int) and 0 < ref <= _MAX_REF else 0,
+                    "from": f"{frm[0]}:{frm[1]}" if (frm is not None and edge in _EDGE_KINDS) else "",
+                    "edge": str(edge) if (frm is not None and edge in _EDGE_KINDS) else "",
+                    "verified": bool(rec.get("verified")) and str(kind) == "finding",
+                })
+    except OSError:
+        return []                                      # a read error mid-stream -> empty (fail-closed)
     return out
 
 
@@ -299,7 +386,10 @@ def read(base: Any, slug: str, *, since: int = -1, limit: int = 400,
     shown).
 
     If ``since`` is at or beyond the file's current length the trail was RESET under the cursor (a new run began
-    via :func:`reset`): the cursor is stale, so read restarts from the first row rather than returning nothing."""
+    via :func:`reset`): the cursor is stale, so read restarts from the first row rather than returning nothing.
+    That in-reader recovery only catches a reset that left the file SHORTER than the cursor; when the NEW run has
+    already written MORE rows than the stale cursor, the suffix it would return is caught by the caller comparing
+    the :func:`epoch` token to the one its cursor belongs to (see the ``graph_activity`` endpoint)."""
     rows = _read_rows(base, slug)
     lim = max(1, min(int(limit or 400), _MAX_READ))
     start = int(since if since is not None else -1)
@@ -324,7 +414,7 @@ def read(base: Any, slug: str, *, since: int = -1, limit: int = 400,
 def graph(base: Any, slug: str) -> "dict[str, Any]":
     """The customer-safe live AGENT/ENGAGEMENT GRAPH for ``slug`` — a DETERMINISTIC FOLD over the SAME recorded
     rows the transcript streams, so a node/edge can never show activity the events do not contain. Returns
-    ``{slug?, nodes, edges, generation, cursor}`` where:
+    ``{nodes, edges, generation, epoch, cursor}`` where:
 
       * ``nodes`` — one per distinct node that ACTUALLY posted: ``{id, kind, role, group, label, status, events,
         verified, last_ts, first_ref}``. A PHASE node's ``status`` is its latest lifecycle status mapped to a
@@ -335,6 +425,9 @@ def graph(base: Any, slug: str) -> "dict[str, Any]":
         in real engagement order), ``delegation`` (one agent drove another's event), or ``attach`` (an agent was
         active during a phase). Only edges whose BOTH endpoints are present nodes are kept.
       * ``generation`` — the number of rows folded (a monotone counter the UI diffs to know the graph grew).
+      * ``epoch`` — the RUN/GENERATION token (:func:`epoch`): it changes when the reused slug is relaunched
+        (:func:`reset`), so the reader knows its ``cursor`` belongs to a prior run and must resync from ``seq`` 0
+        rather than append a suffix of the new run. (Distinct from ``generation``, which only grows within a run.)
       * ``cursor`` — the newest seq (the transcript poll cursor).
 
     Pure-stdlib, bounded, fail-closed: a missing / empty / corrupt file yields an empty graph (NOT a fabricated
@@ -379,4 +472,4 @@ def graph(base: Any, slug: str) -> "dict[str, Any]":
         return (1, n["first_ref"] or 10 ** 12, n["id"])
     node_list = sorted(nodes.values(), key=_nkey)
     return {"nodes": node_list, "edges": edge_list, "generation": len(rows),
-            "cursor": (rows[-1]["seq"] if rows else -1)}
+            "epoch": epoch(base, slug), "cursor": (rows[-1]["seq"] if rows else -1)}

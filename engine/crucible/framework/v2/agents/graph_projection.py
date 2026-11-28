@@ -171,12 +171,23 @@ class GraphProjector:
                     ref=rid, from_node=frm, edge=edge, verified=verified)
 
 
+# The affirmative token set for ``VIGIL_CUSTOMER_LIVE_GRAPH``. This MUST stay byte-for-byte in lockstep with the
+# sovereign gate's canonical set ``apps/sigil/sigil/config.py::_OIDC_AFFIRMATIVE`` ({"1","true","yes","on",
+# "enabled"}). The FATAL-2 boundary forbids importing the sovereign config across the plane boundary, so the
+# literal is mirrored here (stdlib-only). If the two sets diverge, an affirmative token (e.g. ``enabled``) turns
+# ON the sovereign READ plane while leaving this EMIT plane OFF — the customer graph panel then loads and polls
+# an empty seam forever while the engagement is actually producing events. Keep the two sets identical.
+_AFFIRMATIVE = ("1", "true", "yes", "on", "enabled")
+
+
 def flag_enabled() -> bool:
     """True iff the OFFENSE-side customer live-graph mirror is on (``VIGIL_CUSTOMER_LIVE_GRAPH`` affirmative).
     DEFAULT-OFF: unset / any non-affirmative token is off, and the projector is never constructed, so the engine
-    is byte-identical. The SAME env var the sovereign plane gates its read routes on, so emit and read agree."""
+    is byte-identical. The SAME env var AND THE SAME affirmative token set (:data:`_AFFIRMATIVE`, kept in lockstep
+    with the sovereign ``_OIDC_AFFIRMATIVE``) the sovereign plane gates its read routes on, so emit and read agree
+    on EVERY token — including ``enabled`` (a divergence there would strand the read plane polling an empty seam)."""
     import os
-    return (os.environ.get("VIGIL_CUSTOMER_LIVE_GRAPH") or "").strip().lower() in ("1", "true", "yes", "on")
+    return (os.environ.get("VIGIL_CUSTOMER_LIVE_GRAPH") or "").strip().lower() in _AFFIRMATIVE
 
 
 # Re-export the phase-ledger stage constants so a caller/test can assert the projector's stage vocabulary matches
