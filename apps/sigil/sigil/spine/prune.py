@@ -272,6 +272,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand active customer credential(s) {stranded_creds}: their only "
                           f"owner-signed grant sits below K and would not be carried into the snapshot seed "
                           f"(resetting the per-(username, cred_key) anti-replay high-water); lower K or resolve")
+    # (c, DevSecOps integrations) the SAME floor for governor.customer_integration: an active Slack/Jira/Linear
+    # delivery binding whose only owner-signed active config sits below K must be carried into the seed, or the
+    # prune drops it (deliveries to a still-authorized integration silently stop) AND resets the per-(org_id,
+    # binding_id) high-water (re-opening the LWW replay-resurrection of a REVOKED binding — re-enabling egress of
+    # confirmed findings + evidence through a retired sealed credential).
+    stranded_bindings = stranded_active_integration_bindings(store, archived, K)
+    if stranded_bindings:
+        raise PruneUnsafe(f"K={K} would strand active integration binding(s) {stranded_bindings}: their only "
+                          f"owner-signed active config sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org_id, binding_id) anti-replay high-water); lower K or resolve")
     # (c, SaaS plan credits) the SAME floor for governor.plan_grant/plan_debit: a prune must carry every below-K
     # tenant's per-period tranche totals AND the consumed-entry_id set into the seed, or it would ZERO an
     # unexpired plan tranche (lose granted allotment) AND drop the anti-replay seen-set (re-opening plan-grant
@@ -905,6 +915,50 @@ def stranded_active_customer_credentials(store, archived: list[Segment], K: int)
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.customer_credential_state_map()
     carried = {(row[0], row[1]) for row in seed.customer_credential_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
+
+
+def stranded_active_integration_bindings(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, DevSecOps integrations) — the ACTIVE customer-integration bindings
+    (`governor/customer_integrations.py`) whose only owner-signed active config sits in the pruned prefix [0..K)
+    yet would NOT be carried into the snapshot seed: the set a hard prune would silently vanish (deliveries to a
+    still-authorized Slack/Jira/Linear integration stop) AND whose per-(org_id, binding_id) anti-replay high-water
+    it would reset — re-opening the LWW replay-RESURRECTION (a captured owner-signed `active` record for a REVOKED
+    binding re-activating it, re-enabling egress of confirmed findings + evidence through a retired sealed
+    credential). EMPTY in the happy path — `SnapshotState.build()` carries every VERIFIED-active binding. Mirrors
+    `stranded_active_customer_credentials`. Returns keys as ``binding_id@org_id``. VERIFIED-active only (a
+    forged/unsigned `active` record is not counted, so it can never block a prune). Read-only."""
+    from ..governor.customer_integrations import _BINDING_SIGNAL as _CI_SIGNAL, _BINDING_CORE as _CI_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    ci_state: dict[tuple, str] = {}
+    ci_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _CI_SIGNAL:
+            continue
+        oid, bid, rst = p.get("org_id"), p.get("binding_id"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(bid, str) and bid):
+            continue
+        key = (oid, bid)
+        if rst == "revoked":
+            ci_state[key] = "revoked"
+        elif rst == "active" and verify_signed(p, _CI_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > ci_issued.get(key, NO_HIGHWATER):
+                ci_issued[key], ci_state[key] = at, "active"
+    active = {k for k, v in ci_state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.customer_integration_state_map()
+    carried = {(row[0], row[1]) for row in seed.customer_integration_row
                if seed_state.get((row[0], row[1])) == "active"}
     return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 

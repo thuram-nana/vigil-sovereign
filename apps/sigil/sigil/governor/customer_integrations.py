@@ -62,6 +62,7 @@ from . import notify_channels as _nc  # noqa: E402  (render + the no-model-id ba
 from .asset_ownership import _check_org_id  # noqa: E402  (ONE tenant-id validator, shared)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from ..spine.snapshot import SnapshotState, seed_applies  # noqa: E402  (hard-prune seed — mirrors customer_credentials._fold)
 
 # ---- providers -----------------------------------------------------------------------------------------------
 PROVIDER_SLACK = "slack"
@@ -577,16 +578,42 @@ class IntegrationBindingRegistry:
                    "reason": f"integration binding {oid}/{bid} REMOVED"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
-    # -- reads (owner-key-succession-aware genesis fold; tenant-isolated) -----------------------------
+    # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune; tenant-isolated) --
+    def _seed(self, snap) -> "tuple[tuple[dict, dict, dict], int]":
+        """((state, issued, rows), since): the HARD-PRUNE SEED from ``snap`` (mirrors
+        ``customer_credentials._seed`` / ``asset_ownership._proof_seed``), or the empty genesis start when the
+        trusted pubkey differs from the snapshot's. ``rows`` holds rebuilt :class:`IntegrationBinding` instances for
+        the honored-active bindings — reconstructed with the SAME coercions ``_apply`` uses — so a post-prune
+        ``_fold`` re-reads them (both the per-(org, binding) anti-replay high-water AND the active config survive)."""
+        if not seed_applies(snap, self.trusted_pubkey, self.store):
+            return ({}, {}, {}), -1
+        state = dict(snap.customer_integration_state_map())      # (org, binding) -> "active"|"revoked" (keep revoked)
+        issued = dict(snap.customer_integration_issued_map())    # (org, binding) -> per-pair active high-water
+        # flat row [org_id, binding_id, provider, min_severity, mode, slack_channel, jira_cloud_id,
+        # jira_project_key, jira_user_email, linear_team_id, sealed_secret, issued_at] -> IntegrationBinding.
+        rows = {(r[0], r[1]): IntegrationBinding(
+                    org_id=r[0], binding_id=r[1], provider=str(r[2] or ""), min_severity=_norm_severity(r[3]),
+                    sealed_secret=str(r[10] or ""), mode=str(r[4] or ""), slack_channel=str(r[5] or ""),
+                    jira_cloud_id=str(r[6] or ""), jira_project_key=str(r[7] or ""),
+                    jira_user_email=str(r[8] or ""), linear_team_id=str(r[9] or ""), issued_at=as_issued_at(r[11]))
+                for r in snap.customer_integration_row}
+        return (state, issued, rows), snap.base_seq - 1
+
     def _fold(self) -> "dict[tuple, IntegrationBinding]":
         """{(org_id, binding_id): IntegrationBinding} for bindings whose latest state is ACTIVE. A signature-verifying
-        genesis scan of the live window: an owner-signed active record is honored only under the owner pubkey valid at
-        its seq and only when FRESH (LWW high-water); a remove (even unsigned) supersedes."""
+        fold: an owner-signed active record is honored only under the owner pubkey valid at its seq and only when FRESH
+        (LWW high-water); a remove (even unsigned) supersedes. Mirrors ``asset_ownership._fold_proofs`` /
+        ``customer_credentials._fold`` EXACTLY, including the snapshot seed: seed the per-(org, binding) state /
+        anti-replay high-water / row from the committed :class:`SnapshotState`, then fold the LIVE window only — so an
+        active binding whose only owner-signed config was pruned SURVIVES and its high-water is NOT reset. Else the
+        first hard prune below a revoke would re-open the LWW replay-RESURRECTION (a captured owner-signed active
+        record re-activating a revoked integration, re-enabling egress through a retired sealed credential), and a
+        prune below an active-config would STRAND the binding (deliveries silently stop). A rotated/empty anchor
+        bypasses the seed and full-scans from genesis (byte-identical under an empty snapshot)."""
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        state: "dict[tuple, str]" = {}
-        issued: "dict[tuple, float]" = {}
-        rows: "dict[tuple, IntegrationBinding]" = {}
-        for r in self.store.iter_records():
+        (state, issued, rows), since = self._seed(snap)
+        for r in self.store.iter_records(since_seq=since):
             self._apply(r, resolver, state, issued, rows)
         return {k: b for k, b in rows.items() if state.get(k) == "active"}
 

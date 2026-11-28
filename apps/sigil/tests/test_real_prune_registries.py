@@ -41,6 +41,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -58,6 +59,7 @@ from sigil.governor import budget as bd
 from sigil.governor import capability as cap
 from sigil.governor import cost_ledger as cl
 from sigil.governor import customer_credentials as cc
+from sigil.governor import customer_integrations as ci
 from sigil.governor import customers as cu
 from sigil.governor import identity
 from sigil.governor import invoices as inv
@@ -165,6 +167,7 @@ class _Regs:
         self.meter = mt.CreditMeter(self.wallet, self.plan, self.subs)
         self.accts = acc.AccountsRegistry(s, **kw)
         self.creds = cc.CustomerCredentialRegistry(s, **kw)
+        self.integ = ci.IntegrationBindingRegistry(s, **kw)
         self.inv = inv.InvoiceRegistry(s, **kw)
         self.cost = cl.CostEnvelopeLedger(s, **kw)
         self.pp = pp.PostpaidRegistry(s, **kw)
@@ -658,6 +661,56 @@ def _customer_credentials() -> Scenario:
         reads=reads)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _customer_integrations_flag_on():
+    """`IntegrationBindingRegistry.configure` is flag-gated (default-off, fail-closed). Turn the DevSecOps
+    integrations layer ON for the whole module so the `customer_integrations` scenario's owner-signed binding
+    writes land on the spine; no other registry reads this flag, so it is inert for every other scenario.
+    Restored on teardown, so it never leaks to another test module."""
+    prev = os.environ.get("VIGIL_CUSTOMER_INTEGRATIONS")
+    os.environ["VIGIL_CUSTOMER_INTEGRATIONS"] = "1"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("VIGIL_CUSTOMER_INTEGRATIONS", None)
+        else:
+            os.environ["VIGIL_CUSTOMER_INTEGRATIONS"] = prev
+
+
+def _customer_integrations() -> Scenario:
+    """Real-prune survival of the owner-signed `governor.customer_integration` DevSecOps bindings — the OUTBOUND
+    twin covered exactly as `customer_credentials` above: an active binding configured below K SURVIVES the prune
+    (no stranding), and a replayed owner-signed `active` record for a REVOKED binding stays inert (the seed keeps
+    the per-(org, binding) high-water, so no revoke-resurrection). Slack-webhook bindings only (no extra
+    destination fields), so the op list stays uniform."""
+    def cfg(org, binding, at):
+        return lambda R: R.integ.configure(org, binding, provider=ci.PROVIDER_SLACK, mode=ci.SLACK_WEBHOOK,
+                                           sealed_secret="c2VhbGVk", issued_at=at)
+
+    def reads(R):
+        for o in ORGS:
+            yield _r(R.integ.active_for_org, o)
+        for (o, b) in (("acme", "slk1"), ("acme", "slk2"), ("acme", "slk6"), ("globex", "slk3"),
+                       ("globex", "slk4"), ("globex", "slk7"), ("initech", "slk5"), ("initech", "slk8")):
+            yield _r(R.integ.get, o, b)
+    return Scenario(
+        name="customer integrations", defining=_signal(ci._BINDING_SIGNAL),
+        below=[cfg("acme", "slk1", 1.0),
+               cfg("acme", "slk2", 2.0),
+               _stash("rev", cfg("globex", "slk3", 3.0)),
+               lambda R: R.integ.remove("globex", "slk3"),
+               cfg("globex", "slk4", 4.0)],
+        live=[cfg("initech", "slk5", 5.0)],
+        after=[_replay("rev"),                                      # pruned active config of a REVOKED binding
+               cfg("acme", "slk6", 6.0),
+               lambda R: R.integ.remove("acme", "slk2")],
+        later=[cfg("globex", "slk7", 7.0), lambda R: R.integ.remove("globex", "slk4")],
+        latest=[_replay("rev"), cfg("initech", "slk8", 8.0),
+                cfg("acme", "slk2", 9.0)],                          # FRESH re-config supersedes the revoke (9.0 > hw)
+        reads=reads)
+
+
 def _invoice(R, org, iid, kind, amount, at, **kw):
     return R.inv.record(org, invoice_id=iid, kind=kind, price_id="pro", amount_minor=amount, currency="usd",
                         issued_at=at, **kw)
@@ -1027,6 +1080,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
                                                      "monitoring subscription"),
     "accounts": _accounts,
     "customer_credentials": _customer_credentials,
+    "customer_integrations": _customer_integrations,
     "invoices": _invoices,
     "cost_ledger": _cost_ledger,
     "postpaid": _postpaid,
