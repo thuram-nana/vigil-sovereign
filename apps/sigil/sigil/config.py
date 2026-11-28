@@ -1155,6 +1155,35 @@ def customer_overview_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_OVERVIEW") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_workspaces_enabled() -> bool:
+    """True iff the per-engagement WORKSPACES feature is ON (`VIGIL_CUSTOMER_WORKSPACES` affirmative; C-WS). When a
+    customer starts an engagement/chat, VIGIL auto-creates a named, OWNER-SIGNED, tenant-isolated workspace on the
+    spine (`governor.engagement_workspaces`) that AGGREGATES — by reference, never by copy — that run's transcript,
+    oracle-confirmed findings + evidence-certificate ids, launch/engagement record, uploaded knowledge docs and
+    notes, so the customer can return to one place and reach all of a run's work; a workspace is portable (an
+    owner-signed export bundle) and tamper-evident (a forged/replayed record is inert, LWW-high-water guarded like
+    `governor.orgs`). OFF by default (the strict flag): with it off the `/api/customer/workspaces` + `workspace/*`
+    edge routes and the cockpit provisioner actions are ABSENT (404 exactly as an unknown route/action), NO
+    workspace record is ever appended, and the SPA shows no Workspaces screen — byte-identical to a build without
+    the feature. A workspace MINTS, CHARGES and LAUNCHES nothing; it only organises references (the
+    confirm-before-launch gate is untouched). Read when the customer edge starts (it is written into the page and
+    counts in the build id) and by the cockpit on each request, the same way the other `customer_*` predicates are."""
+    return (os.environ.get("VIGIL_CUSTOMER_WORKSPACES") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def customer_workspaces_max_per_org() -> int:
+    """The most ACTIVE engagement workspaces one org may hold (`VIGIL_CUSTOMER_WORKSPACES_MAX_PER_ORG`, default 100).
+    A per-org ceiling enforced on create: at the cap, creating a new workspace auto-archives the OLDEST-created
+    active one (the trim policy), so the newest engagement always gets a workspace and the active set stays bounded.
+    Archived workspaces stay accessible and do not count. Junk/out-of-range falls back to the default."""
+    raw = (os.environ.get("VIGIL_CUSTOMER_WORKSPACES_MAX_PER_ORG") or "").strip()
+    try:
+        n = int(raw) if raw else 100
+    except ValueError:
+        return 100
+    return n if 1 <= n <= 10_000 else 100
+
+
 def customer_billing_dashboard_enabled() -> bool:
     """True iff the customer app shows the fuller Billing dashboard (`VIGIL_CUSTOMER_BILLING_DASHBOARD` affirmative;
     W6 / C5): available credits, credits on hold for running assessments, live consumption per running scan, the

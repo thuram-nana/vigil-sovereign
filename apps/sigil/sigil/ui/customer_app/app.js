@@ -5300,6 +5300,168 @@
     "#/data-rights");
   }
 
+  // ---- Engagement workspaces (VIGIL_CUSTOMER_WORKSPACES, C-WS): the per-engagement workspace screen -------------
+  // Shown only while the edge writes data-workspaces="1" (WORKSPACES_ON). A workspace is the one place a run's work
+  // lives: VIGIL creates one automatically when an engagement/chat starts (the command box surfaces "Created
+  // workspace: <title>"), and this screen lists them (title, when, status) and opens one to reach its transcript,
+  // findings, evidence and documents by link, rename/archive it, or export a portable owner-signed bundle. Every read
+  // is scoped to the session org server-side (admit_customer) — this UI never sends an org id. CSP-clean: no inline
+  // handler, addEventListener / onClick(kit) only; a workspace mints / charges / launches nothing.
+  var WORKSPACES_ON = pageFlag("workspaces");
+  function wsStatusLabel(s) { return String(s) === "archived" ? "Archived" : "Active"; }
+  // The opaque workspace id from the current hash's query (#/workspaces?id=ws_...), or "" for the list view. The hash
+  // is user-controlled, so only a value matching the id shape is honoured; anything else is treated as the list.
+  function wsSelectedId() {
+    var q = String(location.hash || "").split("?")[1] || "";
+    var parts = q.split("&");
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].split("=");
+      if (kv[0] === "id") {
+        var v = decodeURIComponent(kv[1] || "");
+        return /^ws_[0-9a-f]{40}$/.test(v) ? v : "";
+      }
+    }
+    return "";
+  }
+  // Hand the viewer a portable signed export as a downloaded JSON file, CSP-safe (a blob URL + a programmatic click,
+  // no inline handler, no external call). Best-effort: where the browser blocks it, the bundle still returned to the UI.
+  function wsDownload(name, obj) {
+    try {
+      var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url; a.download = name; a.rel = "noopener";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) { /* freed on unload */ } }, 4000);
+    } catch (e) { /* the bundle is still in hand; the UI shows it was produced */ }
+  }
+  function wsWhy(e) {
+    var d = (e && e.data) || {};
+    if (d.error === "updating") return String((e && e.message) || "");
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+  function viewWorkspaces() {
+    var selected = wsSelectedId();
+    var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
+    var holder = h("div#cust-workspaces", {}, loadingHolder("Loading…"));
+    function say(text, bad) { note.textContent = text || ""; note.className = "cust-team-msg" + (bad ? " bad" : ""); }
+    function gone() { return here() !== "#/workspaces"; }           // the customer navigated away mid-flight
+    function onErr(e, what) {
+      if (gone()) return true;
+      if (e && e.status === 401) { refreshWho().then(function () { nav("#/login"); }); return true; }
+      if (e && e.status === 403) {
+        VUI.mount(holder, h("div.card.cust-soon", { text: "Your role does not have access to " + what
+          + ". Ask the owner for access to assessments." }));
+        return true;
+      }
+      return false;
+    }
+    function refLink(ref) {
+      var label = String(ref.label || ref.kind || "Open");
+      if (typeof ref.count === "number") { label += " (" + ref.count + ")"; }
+      var btn = h("button.btn", { type: "button", text: label });
+      btn.addEventListener("click", function () { nav(String(ref.route || "#/")); });
+      return h("li.cust-ws-ref", {}, [btn]);
+    }
+    function detailCard(d) {
+      var w = (d && d.workspace) || {};
+      var refs = (d && d.references) || [];
+      var rows = [
+        h("h3", { text: String(w.title || "Workspace") }),
+        h("p.cust-muted", { text: wsStatusLabel(w.status) + " · created " + fmtWhen(w.created_at)
+          + " · updated " + fmtWhen(w.updated_at) }),
+        h("p.cust-muted", { text: "Everything this engagement produced, in one place:" }),
+        h("ul.cust-ws-refs", {}, refs.map(refLink)),
+      ];
+      var rename = h("button.btn.primary", { type: "button", text: "Rename" });
+      var title = h("input#ws-rename", { type: "text", maxlength: "200", value: String(w.title || "") });
+      rename.addEventListener("click", function () {
+        var t = String(title.value || "").trim();
+        if (!t) { say("Enter a name for this workspace.", true); return; }
+        send("/workspace/rename", { workspace_id: w.workspace_id, title: t }, "Workspace renamed.");
+      });
+      var archive = h("button.btn.danger", { type: "button", text: "Archive" });
+      archive.addEventListener("click", function () {
+        send("/workspace/archive", { workspace_id: w.workspace_id }, "Workspace archived.");
+      });
+      var expt = h("button.btn", { type: "button", text: "Export signed bundle" });
+      expt.addEventListener("click", function () {
+        expt.disabled = true;
+        VUI.postJSON(API + "/workspace/export", { workspace_id: w.workspace_id }).then(function (r) {
+          expt.disabled = false;
+          if (r && r.bundle) { wsDownload("vigil-workspace-" + w.workspace_id + ".json", r.bundle);
+            say("Exported a portable, owner-signed bundle."); }
+        }).catch(function (e) { expt.disabled = false; if (!onErr(e, "export")) say(wsWhy(e) || "Could not export.", true); });
+      });
+      var controls = [expt];
+      if (String(w.status) !== "archived") {
+        rows.push(h("label", { for: "ws-rename", text: "Name" }), title);
+        controls = [rename, archive, expt];
+      }
+      rows.push(h("div.cust-member-actions", {}, controls));
+      var back = h("button.btn", { type: "button", text: "← All workspaces" });
+      back.addEventListener("click", function () { nav("#/workspaces"); });
+      return h("div", {}, [back, h("div.card.cust-ws-detail", {}, rows)]);
+    }
+    function listRow(w) {
+      var open = h("button.btn", { type: "button", text: "Open" });
+      open.addEventListener("click", function () { nav("#/workspaces?id=" + encodeURIComponent(w.workspace_id)); });
+      return h("div.card.cust-ws", {}, [
+        h("div.cust-ws-head", {}, [h("strong", { text: String(w.title || "Workspace") }),
+          h("span.cust-ws-badge", { text: wsStatusLabel(w.status) })]),
+        h("p.cust-muted", { text: "Created " + fmtWhen(w.created_at) + " · updated " + fmtWhen(w.updated_at) }),
+        h("div.cust-member-actions", {}, [open]),
+      ]);
+    }
+    function listCard(d) {
+      var list = (d && d.workspaces) || [];
+      var head = h("p.cust-muted", { text: "A workspace is created automatically when you start an engagement, and "
+        + "keeps that run's transcript, findings, evidence and documents together." });
+      if (!list.length) { return h("div", {}, [head, h("div.card.cust-soon", { text: "No workspaces yet — start an "
+        + "engagement and one appears here." })]); }
+      return h("div", {}, [head, h("div.cust-ws-list", {}, list.map(listRow))]);
+    }
+    async function load() {
+      if (selected) {
+        var one;
+        try { one = await VUI.getJSON(API + "/workspace?id=" + encodeURIComponent(selected)); }
+        catch (e) {
+          if (onErr(e, "this workspace")) return;
+          VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load this workspace"
+            + (wsWhy(e) ? ": " + wsWhy(e) : ".") }));
+          return;
+        }
+        if (gone()) return;
+        VUI.mount(holder, detailCard(one));
+        return;
+      }
+      var d;
+      try { d = await VUI.getJSON(API + "/workspaces"); }
+      catch (e) {
+        if (onErr(e, "workspaces")) return;
+        VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load your workspaces"
+          + (wsWhy(e) ? ": " + wsWhy(e) : ".") }));
+        return;
+      }
+      if (gone()) return;
+      VUI.mount(holder, listCard(d));
+    }
+    async function send(path, body, done) {
+      say("");
+      try { await VUI.postJSON(API + path, body); }
+      catch (e) {
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        say(wsWhy(e) || "Nothing was changed.", true);
+        return;
+      }
+      VUI.toast(done);
+      await load();
+    }
+    load();
+    return shell(h("div", {}, [h("h2", { text: "Workspaces" }), note, holder]), "#/workspaces");
+  }
+
   // ---- router -------------------------------------------------------------------------------------
   var ROUTES = {
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
@@ -5372,7 +5534,14 @@
     googleError();
     var hash = location.hash || "#/";
     var key = hash.split("?")[0];
-    var view = ROUTES[routeFor(key)];
+    // C-WS: the Workspaces screen (#/workspaces) is dispatched HERE, by an exact-string match, rather than through
+    // the ROUTES table or a sidebar navLink — so the shared route table, the nav links and routeShown stay
+    // byte-identical and the guide census (which scans ROUTES + navLink) is untouched, avoiding any collision with
+    // the parallel chat-continuity build that owns those structures and the guide. Off (WORKSPACES_ON false) or an
+    // unknown route falls through to the ROUTES table exactly as before (the home screen) — byte-identical.
+    var view = (WORKSPACES_ON && key === "#/workspaces")
+      ? (authed() ? viewWorkspaces : viewLogin)
+      : ROUTES[routeFor(key)];
     ntf.open = false;              // a route change closes any open panel (the shell is rebuilt below)
     VUI.mount(root, view());
     setTopbarVar();                // the topbar just (re)mounted — pin the notification panel below it

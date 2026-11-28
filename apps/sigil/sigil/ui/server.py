@@ -2067,6 +2067,31 @@ class Handler(BaseHTTPRequestHandler):
             if not _config.customer_overview_enabled():
                 return None
             return p.customer_overview_summary(requester, str(body.get("org_id", "")), ip=ip)
+        # C-WS — the per-engagement WORKSPACES surface (owner-signed, tenant-isolated, tamper-evident): create-on-start
+        # (idempotent) / list / get / rename / archive / export. Absent (unknown action -> 404) unless
+        # VIGIL_CUSTOMER_WORKSPACES is on — the same flag that serves its edge routes and writes data-workspaces into the
+        # page. requester is the hop principal, org from the edge SESSION (never a free body field); the engagement id,
+        # workspace id and title are body data, tenant-scoped + admit-gated server-side. A workspace mints/charges/launches
+        # nothing — it only owner-signs an INDEX of references.
+        if action in ("workspace_ensure", "workspaces_list", "workspace_get", "workspace_rename",
+                      "workspace_archive", "workspace_export"):
+            from .. import config as _config
+            if not _config.customer_workspaces_enabled():
+                return None
+            org = str(body.get("org_id", ""))
+            if action == "workspaces_list":
+                return p.customer_workspaces_list(requester, org, ip=ip)
+            if action == "workspace_ensure":
+                return p.customer_workspace_ensure(requester, org, str(body.get("engagement_id", "")),
+                                                   str(body.get("title", "")), ip=ip)
+            wid = str(body.get("workspace_id", ""))
+            if action == "workspace_get":
+                return p.customer_workspace_get(requester, org, wid, ip=ip)
+            if action == "workspace_rename":
+                return p.customer_workspace_rename(requester, org, wid, str(body.get("title", "")), ip=ip)
+            if action == "workspace_archive":
+                return p.customer_workspace_archive(requester, org, wid, ip=ip)
+            return p.customer_workspace_export(requester, org, wid, ip=ip)
         # Legal/governance S5 — the AI / human-in-the-loop governance disclosure (read-only). Org from the edge
         # SESSION; absent (unknown action -> 404) unless VIGIL_CUSTOMER_AI_GOVERNANCE is on, the same flag that serves
         # its edge route.

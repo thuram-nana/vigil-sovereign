@@ -4901,6 +4901,169 @@ class Provisioner:
                                 choices=self._launch_choices(org) if control else [])
         return self._customer_read(requester, requester_org_id, "view_assessments", project)
 
+    # -- C-WS — per-engagement WORKSPACES (owner-signed, tenant-isolated, tamper-evident) ---------------------------
+    # Every action is behind VIGIL_CUSTOMER_WORKSPACES (default OFF; the cockpit dispatch 404s when off, and each
+    # method refuses here too, defence in depth). ``requester``/``requester_org_id`` are the hop-bound SESSION
+    # principal, NEVER a free body field; writes are gated on ``admit_customer(run_engagement)`` (the per-org write
+    # permission, the same one the knowledge upload uses — the member who runs the engagement), reads on
+    # ``admit_customer(view_assessments)``. A workspace MINTS, CHARGES and LAUNCHES nothing: it only owner-signs an
+    # INDEX of references to artifacts other (already-gated) stores own.
+    def _workspaces(self):
+        """The org's workspace registry, built lazily over the shared store with the deployment owner key (the
+        same key the OrgRegistry carries — this process alone holds it). Cached on the instance."""
+        reg = getattr(self, "_workspace_registry", None)
+        if reg is None:
+            from ..governor.engagement_workspaces import WorkspaceRegistry
+            reg = WorkspaceRegistry(self.store, owner_key=self.orgs.owner_key,
+                                    trusted_pubkey=getattr(self.orgs, "trusted_pubkey", None))
+            self._workspace_registry = reg
+        return reg
+
+    def _workspace_references(self, org_id: str, w) -> "list[dict]":
+        """The inert, navigational reference descriptors a workspace aggregates — links into the EXISTING,
+        already-gated screens that own each artifact (never a copy, never the offense engine). Each is
+        ``{"kind", "label", "route", "ref"}``: the SPA renders it as a link. The uploaded-knowledge-docs count is
+        the one cheap, org-scoped live number (its own store), included only while that feature is on."""
+        refs = [
+            {"kind": "transcript", "label": "Engagement chat", "route": "#/live", "ref": w.engagement_id},
+            {"kind": "findings", "label": "Findings", "route": "#/assessments", "ref": w.engagement_id},
+            {"kind": "evidence", "label": "Evidence certificates", "route": "#/assessments", "ref": w.engagement_id},
+            {"kind": "launch", "label": "Engagement runs", "route": "#/assessments", "ref": w.engagement_id},
+        ]
+        try:
+            from .. import config
+            if config.customer_knowledge_enabled():
+                from .. import tenant_knowledge
+                docs = tenant_knowledge.list_documents(org_id)
+                refs.append({"kind": "knowledge", "label": "Knowledge documents", "route": "#/assessments",
+                             "ref": "", "count": int(docs.get("count", 0))})
+        except Exception:  # noqa: BLE001 — a knowledge-store hiccup never fails the workspace read
+            pass
+        return refs
+
+    def customer_workspace_ensure(self, requester: str, requester_org_id: str, engagement_id: str,
+                                  title: str = "", *, ip: str = "") -> dict:
+        """C-WS create-on-start — IDEMPOTENT. Ensure a workspace exists for ``engagement_id`` in the SESSION org
+        (auto-create on the first call, return the existing one thereafter — safe to fire on every engagement
+        start). Absent unless VIGIL_CUSTOMER_WORKSPACES. Gated on ``admit_customer(run_engagement)``. Returns the
+        workspace, whether it was just ``created``, and the ``announcement`` the command box surfaces."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("workspace_ensure", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not create workspaces for this org (run_engagement)")
+        from ..governor.engagement_workspaces import WorkspaceError
+        try:
+            w, created = self._workspaces().ensure_workspace(requester_org_id, engagement_id, title,
+                                                             issued_at=float(self._now()))
+        except WorkspaceError as e:
+            self._audit("workspace_ensure", requester=requester, org_id=requester_org_id, outcome="refused")
+            raise ProvisionDenied(str(e)) from None
+        self._audit("workspace_ensure", requester=requester, org_id=requester_org_id,
+                    target=w.workspace_id, outcome="created" if created else "exists")
+        return {"org_id": requester_org_id, "workspace": w.as_dict(), "created": created,
+                "announcement": f"Created workspace: {w.title}" if created else f"Workspace: {w.title}"}
+
+    def customer_workspaces_list(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """C-WS — the SESSION org's workspaces (active and archived), newest-first. Absent unless
+        VIGIL_CUSTOMER_WORKSPACES. Gated like the assessments read (``admit_customer(view_assessments)``, no global
+        leg); a pure read of this org's OWN owner-signed records — never another tenant's — that mints nothing."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        return self._customer_read(requester, requester_org_id, "view_assessments",
+                                   lambda _s, org: {"org_id": org,
+                                                    "workspaces": [w.as_dict() for w in
+                                                                   self._workspaces().list_workspaces(org)]})
+
+    def customer_workspace_get(self, requester: str, requester_org_id: str, workspace_id: str,
+                               *, ip: str = "") -> dict:
+        """C-WS — one workspace of the SESSION org with its reference descriptors (links into the existing
+        screens). Absent unless VIGIL_CUSTOMER_WORKSPACES. Gated on ``admit_customer(view_assessments)``. Tenant
+        isolation: the registry get is org-scoped, so a workspace id belonging to ANOTHER org reads as not found."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not read workspaces for this org (view_assessments)")
+        from ..governor.engagement_workspaces import WorkspaceError
+        try:
+            w = self._workspaces().get_workspace(requester_org_id, workspace_id)
+        except WorkspaceError as e:
+            raise ProvisionDenied(str(e)) from None
+        if w is None:
+            raise ProvisionError("no such workspace")
+        return {"org_id": requester_org_id, "workspace": w.as_dict(),
+                "references": self._workspace_references(requester_org_id, w)}
+
+    def customer_workspace_rename(self, requester: str, requester_org_id: str, workspace_id: str, title: str,
+                                  *, ip: str = "") -> dict:
+        """C-WS — rename a workspace of the SESSION org (owner-signed, the dangerous direction). Absent unless
+        VIGIL_CUSTOMER_WORKSPACES. Gated on ``admit_customer(run_engagement)``. A workspace of another org (get
+        returns None) or an archived one is refused."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("workspace_rename", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not rename workspaces for this org (run_engagement)")
+        from ..governor.engagement_workspaces import WorkspaceError
+        try:
+            w = self._workspaces().rename_workspace(requester_org_id, workspace_id, title,
+                                                    issued_at=float(self._now()))
+        except WorkspaceError as e:
+            self._audit("workspace_rename", requester=requester, org_id=requester_org_id, outcome="refused")
+            raise ProvisionDenied(str(e)) from None
+        self._audit("workspace_rename", requester=requester, org_id=requester_org_id,
+                    target=w.workspace_id, outcome="renamed")
+        return {"org_id": requester_org_id, "workspace": w.as_dict()}
+
+    def customer_workspace_archive(self, requester: str, requester_org_id: str, workspace_id: str,
+                                   *, ip: str = "") -> dict:
+        """C-WS — archive a workspace of the SESSION org (the SAFE direction). Absent unless
+        VIGIL_CUSTOMER_WORKSPACES. Gated on ``admit_customer(run_engagement)``. Idempotent; the workspace stays
+        listed and accessible (archive is a status, not a deletion) and no longer counts against the active cap."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="run_engagement"):
+            self._audit("workspace_archive", requester=requester, org_id=requester_org_id, outcome="denied")
+            raise ProvisionDenied("requester may not archive workspaces for this org (run_engagement)")
+        from ..governor.engagement_workspaces import WorkspaceError
+        try:
+            w = self._workspaces().archive_workspace(requester_org_id, workspace_id)
+        except WorkspaceError as e:
+            raise ProvisionDenied(str(e)) from None
+        self._audit("workspace_archive", requester=requester, org_id=requester_org_id,
+                    target=workspace_id, outcome="archived")
+        return {"org_id": requester_org_id, "workspace": w.as_dict() if w is not None else None}
+
+    def customer_workspace_export(self, requester: str, requester_org_id: str, workspace_id: str,
+                                  *, ip: str = "") -> dict:
+        """C-WS — a PORTABLE owner-signed export bundle for one workspace of the SESSION org (the manifest + its
+        reference descriptors, Ed25519-signed under the owner key, re-verifiable offline — tamper-evident like the
+        evidence certificates). Absent unless VIGIL_CUSTOMER_WORKSPACES. Gated on ``admit_customer(view_assessments)``.
+        A workspace of another org reads as not found (tenant isolation)."""
+        from .. import config
+        if not config.customer_workspaces_enabled():
+            raise ProvisionDenied("engagement workspaces are not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not export workspaces for this org (view_assessments)")
+        from ..governor.engagement_workspaces import WorkspaceError
+        reg = self._workspaces()
+        try:
+            w = reg.get_workspace(requester_org_id, workspace_id)
+            if w is None:
+                raise ProvisionError("no such workspace")
+            bundle = reg.export_bundle(requester_org_id, workspace_id,
+                                       references=self._workspace_references(requester_org_id, w))
+        except WorkspaceError as e:
+            raise ProvisionDenied(str(e)) from None
+        self._audit("workspace_export", requester=requester, org_id=requester_org_id,
+                    target=workspace_id, outcome="exported")
+        return {"org_id": requester_org_id, "bundle": bundle}
+
     def _preview_locked(self, org_id: str) -> bool:
         """Pricing S5: is this org's finding detail locked (trial preview, not unlocked)? Server-side only."""
         from .finding_preview import preview_locked

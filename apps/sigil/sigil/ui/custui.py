@@ -280,6 +280,10 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # step; a non-secret on/off value written into the page, counting in the build id. The SPA front-end that reads
     # this flag ships in a later PR (another builder owns app.js); the placeholder + its injection are wired now.
     knowledge = _config.customer_knowledge_enabled()
+    # C-WS: the per-engagement Workspaces screen (VIGIL_CUSTOMER_WORKSPACES, default OFF) — the same flag that serves
+    # the /api/customer/workspaces + workspace/* edge routes, so the screen and its API are never out of step; a
+    # non-secret on/off value written into the page, counting in the build id.
+    workspaces = _config.customer_workspaces_enabled()
     # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
     # routes, a non-secret on/off value written into the page and counting in the build id.
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
@@ -332,7 +336,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
-                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0", **area6})
+                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0",
+                                     "__VIGIL_WORKSPACES__": "1" if workspaces else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -436,6 +441,14 @@ _CLOUD_CONNECT_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
     "connect/cloud/challenge": ("cloud_connect_challenge", ("provider", "account_id")),
     "connect/cloud/verify": ("cloud_connect_verify", ("provider", "account_id", "role_ref")),
     "connect/cloud/disconnect": ("cloud_disconnect", ("provider", "account_id")),
+}
+# C-WS — the per-engagement workspace MUTATIONS, mapping each edge action to its cockpit provision action. The edge
+# relays only the engagement id / workspace id / title (the org + requester come from the SESSION, never the body).
+_WORKSPACE_ACTIONS: "dict[str, str]" = {
+    "workspace/ensure": "workspace_ensure",
+    "workspace/rename": "workspace_rename",
+    "workspace/archive": "workspace_archive",
+    "workspace/export": "workspace_export",
 }
 # The body fields that are customer AFFIRMATIONS / switches: relayed only as a real JSON true (anything else is false),
 # so a string or a number can never stand in for "I am authorized to test this asset".
@@ -782,6 +795,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("launch_list")
         if path == "/api/customer/overview" and _overview_on():         # C7 Overview aggregate (flag OFF -> unknown-route 404)
             return self._customer_read_relay("customer_overview_summary")
+        if path == "/api/customer/workspaces" and _workspaces_on():      # C-WS list (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("workspaces_list")
+        if path == "/api/customer/workspace" and _workspaces_on():       # C-WS get one (?id=, flag OFF -> 404)
+            return self._workspace_get()
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
@@ -865,6 +882,40 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._deny(401, "login required")
         requester = str(rec.get("username") or "")
         c, r = self._provision(action, requester, {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()})
+        return self._json(r, c)
+
+    def _workspace_get(self):
+        """C-WS — GET one of the SESSION org's engagement workspaces by its opaque id. Like every customer read, the
+        REQUESTER and the ORG come from the SERVER-side session, never the query (a query ``org_id`` is ignored); the
+        query carries ONLY the ``id`` (the workspace id, relayed when it appears exactly once and within its bound,
+        else empty, which the provisioner refuses). The provisioner resolves it within the session org's own
+        workspaces and returns the workspace + its reference links; tenant isolation is structural (a workspace id of
+        another org reads as not found)."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        q = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        v = q.get("id") or []
+        wid = v[0] if len(v) == 1 and len(v[0]) <= 64 else ""
+        c, r = self._provision("workspace_get", requester,
+                               {"org_id": str(rec.get("org_id") or ""), "workspace_id": wid, "ip": self._ip()})
+        return self._json(r, c)
+
+    def _workspace(self, action: str, body: dict):
+        """C-WS — the workspace MUTATIONS (ensure / rename / archive / export). Like ``_member``, the acting
+        REQUESTER and the active ORG are taken from the SERVER-side session, NEVER the body (a body ``org_id``/
+        ``requester`` is ignored — tenant isolation at the edge); only the engagement id, the workspace id and the
+        title travel. A caller with no customer session (or no bound org) is refused before the hop fires. A
+        workspace mints / charges / launches nothing, so no step-up is required."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),      # the session's bound org, never body
+                   "engagement_id": body.get("engagement_id", ""), "workspace_id": body.get("workspace_id", ""),
+                   "title": body.get("title", "")}
+        c, r = self._provision(action, requester, payload)
         return self._json(r, c)
 
     def _live_activity(self):
@@ -1313,6 +1364,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._command(body)
         if action == "flow" and _assistant_on():                     # B3 engagement flow machine (OFF -> 404)
             return self._flow(body)
+        if action in _WORKSPACE_ACTIONS and _workspaces_on():         # C-WS workspaces (flag OFF -> unknown-action 404)
+            return self._workspace(_WORKSPACE_ACTIONS[action], body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1888,6 +1941,14 @@ def _overview_on() -> bool:
     # step (flag OFF -> the route is genuinely absent, 404, and the home screen is the Account-only dashboard).
     from .. import config as _config
     return _config.customer_overview_enabled()
+
+
+def _workspaces_on() -> bool:
+    # C-WS — the per-engagement Workspaces screen + its edge routes, the same VIGIL_CUSTOMER_WORKSPACES flag that
+    # writes data-workspaces into the page and that the cockpit dispatch re-checks, so the routes and the screen are
+    # never out of step (flag OFF -> the routes are genuinely absent, 404, and the SPA shows no Workspaces screen).
+    from .. import config as _config
+    return _config.customer_workspaces_enabled()
 
 
 def _onboarding_on() -> bool:
