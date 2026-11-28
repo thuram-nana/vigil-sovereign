@@ -553,6 +553,25 @@ def customer_notify_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_NOTIFY") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+def customer_integrations_enabled() -> bool:
+    """True iff the customer OUTBOUND DevSecOps INTEGRATIONS layer is ON (`VIGIL_CUSTOMER_INTEGRATIONS` affirmative).
+
+    OFF by default (strict, fail-closed; mirrors `customer_notify_enabled`/`redpen_enabled`). The master flag over the
+    whole `governor.customer_integrations` pipeline — the owner-signed per-org integration bindings (credential
+    custody), the per-provider adapters (Slack / Jira / Linear), the SSRF-guarded + redirect-blocking delivery egress,
+    the idempotency check and the owner-signed append-only delivery ledger. With it OFF the layer is INERT: no binding
+    is written, no sealed secret is opened, no outbound socket opens, no issue is created and no ledger record is
+    appended — the server is byte-identical to a build without the integrations consumer. Read at call time.
+
+    INDEPENDENT of `customer_notify_enabled` (that flag gates the PR-D email/Slack-webhook notice channels and the
+    GitHub issue sync; this one gates the richer, owner-signed Slack-bot / Jira-REST / Linear-GraphQL layer that
+    carries the replayable evidence-certificate reference). Even when ON, each delivery still fails CLOSED unless the
+    binding's sealed credential opens AND the target host is on the owner-reviewed outbound allowlist — a delivery is
+    a DELIVERY of an oracle-minted FACT, never a FACT source (the oracle alone mints a finding), and it only ever
+    creates (posts a message / opens an issue): it never charges, launches, remediates or transitions anything."""
+    return (os.environ.get("VIGIL_CUSTOMER_INTEGRATIONS") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 def apex_autonomous_enabled() -> bool:
     """True iff the APEX autonomous DRIVER is ON (`VIGIL_APEX_AUTONOMOUS` affirmative). OFF by default
     (mirrors `redpen_enabled`): with it OFF an engagement runs the exact current fixed pipeline — crawl →
@@ -2031,6 +2050,22 @@ NOTIFY_ISSUE_API_ALLOWLIST = frozenset({
     "api.github.com",            # GitHub issues REST
     "api.atlassian.com",         # Jira Cloud REST (api.atlassian.com/ex/jira/{cloudid})
     "api.linear.app",            # Linear GraphQL
+})
+
+# The owner-reviewed outbound host allowlist for the richer `governor.customer_integrations` layer (the Slack-bot /
+# Jira-REST / Linear-GraphQL adapters). EXACT host match only, checked by `notify_channels.guard_outbound_url` (the
+# ONE sovereign outbound SSRF/allowlist gate: https-only, no userinfo, default port, host here AND resolves ENTIRELY
+# to PUBLIC addresses) BEFORE any socket opens. A tenant SUPPLIES a Slack channel / Jira cloud id / Linear team id,
+# but the destination HOST can only ever be one the owner reviewed here — a tenant can never steer a delivery at an
+# internal / loopback / cloud-metadata (169.254.169.254) host. Gated DEFAULT-OFF on `customer_integrations_enabled()`:
+# unset ⇒ the layer is inert and no integration egress exists. A tenant's Slack INCOMING-WEBHOOK URL is additionally
+# pinned to `hooks.slack.com` by the Slack adapter (tighter than this list), so a `webhook`-mode binding can never be
+# pointed at `slack.com` (the chat.postMessage API host) or any other allowlisted host.
+CUSTOMER_INTEGRATION_API_ALLOWLIST = frozenset({
+    "slack.com",                 # Slack Web API — chat.postMessage (bot token in Authorization: Bearer)
+    "hooks.slack.com",           # Slack incoming webhooks (the webhook URL itself is the sealed secret)
+    "api.atlassian.com",         # Jira Cloud REST v3 — /ex/jira/{cloudid}/rest/api/3/issue (Basic email:token)
+    "api.linear.app",            # Linear GraphQL — /graphql issueCreate (personal API key in Authorization)
 })
 
 
