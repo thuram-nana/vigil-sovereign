@@ -1,6 +1,6 @@
 /* ==========================================================================
-   VIGIL COMMAND — design tokens (the single source of truth for both planes)
-   Aesthetic: theme.png — dark near-black monochrome, large legible type, pill
+   VIGIL COMMAND: design tokens (the single source of truth for both planes)
+   Aesthetic: a deep true-black monochrome, large legible type, pill
    chips, rounded cards, generous spacing. No CDN, no build; hand-authored.
    Two planes: WORK (offense+defense, cool default) and OWNER (sovereign, gold).
    Theme-aware: dark default + light; the viewer's toggle stamps data-theme.
@@ -32,23 +32,23 @@
   --nav-w: 244px; --nav-w-collapsed: 68px; --drawer-w: 460px; --topbar-h: 64px;
   --content-max: 1320px;
 
-  /* -- dark theme (default) — near-black cool monochrome --------------------- */
-  --bg-0: #0a0c10;   /* app background (near-black, slight cool) */
-  --bg-1: #0f1219;   /* panels / cards */
-  --bg-2: #141922;   /* raised */
-  --bg-3: #1b212c;   /* hover / inputs */
-  --border: #212734;        /* chosen cool neutral, not pure gray */
-  --border-strong: #2c3444;
+  /* -- dark theme (default): deep true-black, mature monochrome -------------- */
+  --bg-0: #050507;   /* app background: near-pure, shining black */
+  --bg-1: #0a0b0e;   /* panels / cards */
+  --bg-2: #0f1116;   /* raised */
+  --bg-3: #161922;   /* hover / inputs */
+  --border: #1b1f27;        /* restrained cool neutral line, not pure gray */
+  --border-strong: #2a2f3a;
   --text-0: #eef1f6;        /* high-contrast heading/body */
   --text-1: #9aa4b4;        /* secondary */
   --text-2: #626c7c;        /* faint / captions */
 
-  /* primary emphasis = white pill on dark (straight from theme.png) */
-  --primary-fg: #0a0c10;
+  /* primary emphasis = a bright pill on deep black */
+  --primary-fg: #050507;
   --primary-bg: #f4f6fa;
   --primary-bg-hover: #ffffff;
 
-  /* OWNER plane accent (sovereign — approvals, keys, kill-switch): gold */
+  /* OWNER plane accent (sovereign: approvals, keys, kill-switch): gold */
   --owner: #e8b64c;
   --owner-dim: color-mix(in srgb, var(--owner) 22%, transparent);
   --owner-line: color-mix(in srgb, var(--owner) 42%, var(--border));
