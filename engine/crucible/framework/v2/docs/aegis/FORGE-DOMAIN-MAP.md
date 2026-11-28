@@ -128,12 +128,18 @@ placement, never enforcement, and renders enforcement only after a release.
 | Routing-edge verification | `apps/sigil/sigil/governor/shard_routing.py` | yes |
 | Fleet model (authority side) | `engine/crucible/framework/v2/authority/fleet.py` | yes |
 | AEGIS fleet / reconciler + worker-kind registry | `aegis_fleet.py` **(to build — AS-6a)** | — |
+| AEGIS rolling reconcile (staged, health-gated rollout over AS-6a) | `aegis_fleet_rolling.py` **(AS-6e, built)** | yes |
 | AWS platform (zones, keys, roles, EIPs, edge) | `infra/aws/…` **(platform CFN to build — AS-26/AS-34)** | dir yes; platform empty |
 
 - **Hot set:** FLEET. **Tokens:** INFRA (for the AWS stacks).
-- **Slices:** AS-6a placement+reconciler · AS-6c edge automation · AS-6e rolling ·
-  AS-26 OPS-1 (staging platform) · AS-34 production + rollout. FLEET chain:
-  6a → 29 → 6e → 27b; INFRA chain: 26 → 6c → 34.
+- **Slices:** AS-6a placement+reconciler · AS-6c edge automation · **AS-6e rolling (built — the
+  staged, health-gated ROLLING reconcile over AS-6a: converges the fleet in deterministic
+  `max_surge` batches, admitting the next batch only once the prior rolled workers land HEALTHY,
+  where AS-6a rolls the whole fleet at once in one pass; renders NO enforcement (release-gating
+  stays in AS-6a) and adds NO WorkerKind/OracleKind; engine module `aegis_fleet_rolling.py`, off
+  the `aegis/__init__` / `__main__` gate path; default-OFF `VIGIL_AEGIS_FLEET_ROLLING`, byte-identical
+  no-op when off — AS-6a stays big-bang)** · AS-26 OPS-1 (staging platform) · AS-34 production +
+  rollout. FLEET chain: 6a → 29 → 6e → 27b; INFRA chain: 26 → 6c → 34.
 
 ## Domain 5 — Ingest / receiver (inbound findings/telemetry endpoint)
 
