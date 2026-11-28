@@ -365,7 +365,7 @@ out.navs = navs; out.replays = replays;
     assert any("Install" in c for c in connect)
     assert any("reproduce" in c for c in pr) and any("block the merge" in c for c in pr)
     assert out["aegis"] == ["Choose an AEGIS plan", "Turn on monitoring for a host", "Connect your traffic and see events",
-                            "Change or stop monitoring"]
+                            "Change or stop monitoring", "Fine-tune the armed window"]
     assert any("Observe" in c for c in out["aegisClicks"]) and any("Respond" in c for c in out["aegisClicks"])
     assert out["faqPressed"][-1] == "true" and set(out["faqPressed"][:-1]) == {"false"}
     assert len(out["faq"]) >= 8 and out["faqSteps"] == 0 and all(q and a for q, a in out["faq"])
@@ -414,7 +414,7 @@ def test_the_copy_follows_the_product_rules():
             assert re.search(r"\bnever\b|\bno\b|\bnot\b", sentence, re.IGNORECASE), sentence
     ids = {ch["id"]: [s["id"] for s in ch["steps"]] for ch in out["chapters"]}
     assert ids["redpen"] == ["connect", "pr", "settings", "system", "fix", "disconnect"]
-    assert ids["aegis"] == ["plans", "monitor", "events", "manage"]
+    assert ids["aegis"] == ["plans", "monitor", "events", "manage", "settings"]
     for t in out["tour"]:                                       # every tour step points at a real guide step
         if "chapter" in t:
             assert t["step"] in ids[t["chapter"]], t
@@ -461,6 +461,7 @@ def test_the_guide_covers_every_screen_of_the_app():
         "#/billing/return": (("credits", "buy"), "Payment received"),
         "#/security": (("start", "security"), "Open Account security from your name in the top bar"),
         "#/settings/authorizations": (("start", "authorizations"), "Authorizations"),
+        "#/monitoring/settings": (("aegis", "settings"), "Open Monitoring settings from the Settings menu"),  # AS-2k
         "#/data-rights": (("workspace", "datarights"), "Open Data rights from Settings"),   # legal/governance S3
         "#/ai-governance": (("workspace", "ai_governance"), "How VIGIL uses AI"),      # legal/governance S5
         "#/command": (("assess", "command"), "Command box"),   # B2/B3 — the engagement command box (no top-bar tab yet)

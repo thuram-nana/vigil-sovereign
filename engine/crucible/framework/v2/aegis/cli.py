@@ -403,6 +403,12 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
                                                      str(notify_format), saas_tenant, saas_host)
         if notify_notifier is not None:
             saas_kw["notify_notifier"] = notify_notifier
+        # AS-5c (opt-in, DEFAULT-OFF): a LOCAL operational probe socket. Passed only when a path is configured;
+        # the socket is bound ONLY when VIGIL_AEGIS_PROBE_SOCKET is additionally on (gateway-side gate), so a
+        # deployment that does not opt in calls serve_gateway byte-identically to before.
+        probe_socket_path = os.environ.get("AEGIS_GW_PROBE_SOCKET") or getattr(args, "probe_socket", None) or None
+        if probe_socket_path:
+            saas_kw["probe_socket_path"] = probe_socket_path
         httpd = serve_gateway(upstream, config=config, host=host, port=port,
                               slug=slug, on_verdict=on_verdict, **saas_kw)
     except ValueError as e:
@@ -430,6 +436,13 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     if _es["downgraded"]:
         active += f" (downgraded: {_es['downgrade_reason']})"
     sys.stderr.write(f"AEGIS Gateway  http://{host}:{port}  ->  {upstream}  [{active}]\n")
+    if probe_socket_path:
+        from .probe_socket import probe_socket_enabled
+        _probe_live = getattr(httpd.settings, "probe_socket", None) is not None  # type: ignore[attr-defined]
+        _probe_armed = ("ARMED" if (probe_socket_enabled() and _probe_live)
+                        else "inert (VIGIL_AEGIS_PROBE_SOCKET unset)")
+        sys.stderr.write(f"  local probe socket -> {probe_socket_path} [{_probe_armed}]; owner-only, read-only, "
+                         f"metadata-only (effective mode + AS-5a capacity state); never a block\n")
     if verdict_webhook:
         _authset = "with auth" if os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") else "no auth header"
         sys.stderr.write(f"  verdict sink -> {verdict_sink} at {verdict_webhook} ({_authset}); "
@@ -466,6 +479,9 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
             except OSError:
                 pass
         httpd.settings.stop_oob()   # clean shutdown of the loopback OOB receiver
+        _stop_probe = getattr(httpd.settings, "stop_probe_socket", None)  # type: ignore[attr-defined]
+        if _stop_probe is not None:
+            _stop_probe()   # AS-5c: clean shutdown of the local probe socket
         httpd.server_close()
     return 0
 
@@ -554,6 +570,12 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--status-out", default=None, metavar="PATH",
                    help="periodically snapshot effective mode + per-actor beliefs to PATH (JSON), "
                         "for a live UI status view")
+    g.add_argument("--probe-socket", default=None, metavar="PATH",
+                   help="AS-5c (opt-in, DEFAULT-OFF VIGIL_AEGIS_PROBE_SOCKET): bind a LOCAL owner-only "
+                        "AF_UNIX socket at PATH that answers each connection with a read-only, metadata-only "
+                        "operational snapshot (effective mode + the AS-5a capacity/admission state), OFF the "
+                        "data-plane HTTP port. Read-only: never a block, never a verdict. Bound only when the "
+                        "flag is also on; OFF => nothing is bound (byte-identical).")
     g.add_argument("--verdict-webhook", default=None, metavar="URL",
                    help="ALSO POST each verdict (browser-safe projection) to this outbound sink "
                         "(SIEM/webhook/Slack). Bounded POST, redirects DISABLED, http(s) only, fail-open. "

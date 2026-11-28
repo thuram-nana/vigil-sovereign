@@ -984,9 +984,8 @@ def _overview(script: str, *, posture: str = "1") -> dict:
 
 
 _OV_SERVER = r"""
-server = { "GET api/customer/billing": { data: { credits: { available: 5 } } }, "GET api/customer/assets": { data: { assets: [] } },
-           "GET api/customer/assessments": { data: { assessments: [] } }, "GET api/customer/notifications": { data: { notifications: [] } },
-           "GET api/customer/posture/trend": { data: TREND } };
+server = { "GET api/customer/overview": { data: { credits: { credits: { available: 5 } }, assets: { assets: [] },
+           assessments: { assessments: [] }, notifications: { notifications: [] }, posture: TREND } } };
 location.hash = "#/";
 const view = viewOverview(); document.body.appendChild(view); await flush();
 const card = t => document.querySelectorAll("div.card").filter(c => ((c.querySelectorAll("h3")[0] || {}).textContent) === t)[0];
@@ -1010,11 +1009,12 @@ out.navs = navs;
     last = trend["points"][-1]
     assert on["rows"] == [f"Posture{trend['current']}/100", f"Open findings{last['open']}"]
     assert on["delta"].startswith(f"▲Up {trend['change']} since ") and on["navs"] == ["#/fix-first"]
-    assert "api/customer/posture/trend" in on["reads"] and "api/customer/posture" not in on["reads"]
+    assert on["reads"] == ["api/customer/overview"]               # ONE aggregate read; the posture section rides it
     for flag in ("0", "", "__VIGIL_POSTURE__"):
         off = _overview(script, posture=flag)
         assert "Posture" not in off["titles"] and off["rows"] is None, flag
-        assert not any("posture" in r for r in off["reads"]), flag
+        # the card is gone with the flag, and the single aggregate read carries no posture-specific path
+        assert off["reads"] == ["api/customer/overview"] and not any("posture" in r for r in off["reads"]), flag
     unmeasured = _overview(_OV_SERVER.replace("TREND", json.dumps({"points": [], "current": None})) + r"""
 out.text = text(card("Posture"));
 """)

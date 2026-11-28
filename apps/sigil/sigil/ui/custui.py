@@ -785,6 +785,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("billing_auto_topup")
         if path == "/api/customer/launches" and _launch_ui_on():         # C1a (flag OFF -> unknown-route 404)
             return self._customer_read_relay("launch_list")
+        if path == "/api/customer/overview" and _overview_on():         # C7 Overview aggregate (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("customer_overview_summary")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
@@ -1881,6 +1883,14 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _overview_on() -> bool:
+    # C7 — the Overview home screen's aggregate read, the same VIGIL_CUSTOMER_OVERVIEW flag that writes
+    # data-overview into the page and that the cockpit dispatch re-checks, so the route and the screen are never out of
+    # step (flag OFF -> the route is genuinely absent, 404, and the home screen is the Account-only dashboard).
+    from .. import config as _config
+    return _config.customer_overview_enabled()
 
 
 def _onboarding_on() -> bool:

@@ -43,6 +43,8 @@ if TYPE_CHECKING:
         AuthorityV2Paths,
         MonotoneEpochFloor,
     )
+    from .capacity import CapacityBudget, CapacityGovernor
+    from .probe_socket import ProbeSocketServer
 
 from ..common.logging import get_logger
 from .actor_graph import ActorGraph
@@ -137,6 +139,32 @@ def _gateway_v2_flag() -> bool:
     return (os.environ.get(GATEWAY_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5a (capacity): the default-OFF switch for the availability-first load-shedding admission plane. Kept in
+# LOCKSTEP with ``capacity.CAPACITY_ENV`` (a test asserts they match) and read here directly so the capacity
+# module is NOT eagerly import-reachable from the gateway (it is imported only when a budget is configured).
+CAPACITY_ENV = "VIGIL_AEGIS_CAPACITY"
+
+
+def _capacity_flag() -> bool:
+    """AS-5a capacity-admission switch — strict, fail-closed, DEFAULT OFF (read per request). OFF ⇒ the
+    capacity governor is never consulted and the gateway path is byte-identical."""
+    import os
+    return (os.environ.get(CAPACITY_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-5c (probe socket): the default-OFF switch for the LOCAL operational probe socket. Kept in LOCKSTEP with
+# ``probe_socket.PROBE_SOCKET_ENV`` (a test asserts they match) and read here directly so the probe_socket module
+# is NOT eagerly import-reachable from the gateway (it is imported only when a probe-socket path is configured).
+PROBE_SOCKET_ENV = "VIGIL_AEGIS_PROBE_SOCKET"
+
+
+def _probe_socket_flag() -> bool:
+    """AS-5c probe-socket switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built). OFF ⇒ no
+    local socket is bound, no thread runs, and the gateway (data path AND lifecycle) is byte-identical."""
+    import os
+    return (os.environ.get(PROBE_SOCKET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -198,7 +226,9 @@ class GatewaySettings:
                  instance_id: str = "gw", replica_index: int = 0, saas_v2_dir: "str | None" = None,
                  now_fn: "Callable[[], datetime] | None" = None,
                  monotonic_fn: "Callable[[], float] | None" = None,
-                 on_authority_event: "Callable[[Any], None] | None" = None) -> None:
+                 on_authority_event: "Callable[[Any], None] | None" = None,
+                 capacity_budget: "CapacityBudget | None" = None,
+                 probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"upstream must be an http(s) URL with a host, got {upstream!r}")
@@ -232,6 +262,15 @@ class GatewaySettings:
         self._v2_now = now_fn or (lambda: datetime.now(timezone.utc))
         self._v2_monotonic = monotonic_fn or time.monotonic
         self.on_authority_event = on_authority_event
+        # AS-5a (capacity) — the availability-first load-shedding admission plane. Built ONCE when a budget is
+        # configured (cheap + inert); it is CONSULTED per request only when the default-OFF VIGIL_AEGIS_CAPACITY
+        # flag is on (``capacity_active``), so a flag-OFF (or unconfigured) gateway behaves byte-identically. The
+        # monotonic clock is INJECTED (the same clock the V2 plane uses) for determinism. Importing the capacity
+        # module lazily here keeps it OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        self.capacity_governor: "CapacityGovernor | None" = None
+        if capacity_budget is not None:
+            from .capacity import CapacityGovernor
+            self.capacity_governor = CapacityGovernor(capacity_budget, monotonic=self._v2_monotonic)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -288,6 +327,52 @@ class GatewaySettings:
                 self.oob_correlator = None
                 self.oob_receiver = None
                 _log.warning("aegis.gateway.oob_disabled", slug=self.slug, reason="start failed")
+        # AS-5c (probe socket) — the LOCAL operational probe socket. Bound (owner-only AF_UNIX) and its accept
+        # loop started ONLY when a path was configured AND the default-OFF VIGIL_AEGIS_PROBE_SOCKET flag is on;
+        # OFF ⇒ nothing is bound, no thread runs, and the gateway (data path AND lifecycle) is byte-identical.
+        # Built LAST so the snapshot it serves can read the fully-initialised enforce/capacity state. Importing
+        # the module lazily here keeps it OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        # Any bind error leaves the feature DORMANT (fail-open), exactly like the OOB receiver.
+        self.probe_socket: "ProbeSocketServer | None" = None
+        if probe_socket_path and _probe_socket_flag():
+            try:
+                from .probe_socket import ProbeSocketServer
+                self.probe_socket = ProbeSocketServer(
+                    probe_socket_path, self._probe_snapshot, monotonic=self._v2_monotonic).start()
+                _log.info("aegis.gateway.probe_socket_enabled", slug=self.slug, path=probe_socket_path)
+            except Exception:
+                self.probe_socket = None
+                _log.warning("aegis.gateway.probe_socket_disabled", slug=self.slug, reason="start failed")
+
+    def _probe_snapshot(self) -> "dict[str, object]":
+        """The read-only, metadata-only operational snapshot the AS-5c probe socket serves: the HONEST effective
+        enforce state (so an operator reads 'requested enforce, running observe BECAUSE …', never a silent
+        downgrade) and the AS-5a capacity admission OUTCOME (whether shedding is active + the address-free load
+        snapshot). Carries NO raw caller address and NO secret. Total: any read error degrades that field, never
+        the probe."""
+        snap: "dict[str, object]" = {"slug": self.slug}
+        try:
+            snap["enforcement"] = self.enforcement_status()
+        except Exception:
+            pass
+        try:
+            gov = self.capacity_governor
+            snap["capacity_active"] = bool(self.capacity_active)
+            snap["capacity"] = gov.snapshot() if gov is not None else None
+        except Exception:
+            pass
+        return snap
+
+    def stop_probe_socket(self) -> None:
+        """Clean shutdown of the AS-5c local probe socket (idempotent, total). The gateway's CLI/callers invoke
+        this in teardown; the accept thread is a daemon regardless, so a missed stop never hangs the process."""
+        p = self.probe_socket
+        self.probe_socket = None
+        if p is not None:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
     def _authorize_oob(self) -> bool:
         """Entitlement check for the OOB belief-elevation feature — the SAME AEGIS_RESPOND gate the
@@ -400,6 +485,14 @@ class GatewaySettings:
         return (self.intended_mode() == "enforce"
                 and self._enforce_authorized
                 and not self._killswitch_tripped())
+
+    @property
+    def capacity_active(self) -> bool:
+        """Is the AS-5a capacity admission plane active for THIS request? Only when a budget was configured (the
+        governor exists) AND the default-OFF per-request VIGIL_AEGIS_CAPACITY flag is on. Otherwise no admission
+        runs and the gateway path is byte-identical. Independent of enforce/observe: load shedding protects
+        availability in BOTH modes (it is operational, not an enforcement action)."""
+        return self.capacity_governor is not None and _capacity_flag()
 
     def saas_decision(self):
         """AE-3 per-request re-authorization. None when this is not a SaaS gateway; otherwise the AE-2
@@ -862,7 +955,56 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 
     # -- the request lifecycle --------------------------------------------
 
+    def _is_probe_request(self) -> bool:
+        """The unauthenticated liveness/readiness probes (GET/HEAD on /healthz or /readyz) — NEVER shed for
+        capacity: an orchestrator's probe must always reach the firewall itself, even under load (shedding a
+        readiness probe would make a healthy gateway look down and trigger a needless restart)."""
+        return self.command in ("GET", "HEAD") and self._probe_path() in ("/healthz", "/readyz")
+
+    def _send_shed(self, admission: Any) -> None:
+        """AS-5a soft, retryable 503 for a capacity shed — availability-first load shedding, NOT a block (no
+        certificate, no verdict; the gateway is simply at capacity). Capacity is an OPERATIONAL signal, never a
+        finding, so this is logged (not emitted as an attack verdict) and carries a Retry-After for honest
+        back-off."""
+        retry = admission.retry_after_header
+        try:
+            _log.info("aegis.gateway.capacity_shed", slug=self.settings.slug, reason=admission.reason,
+                      client=self._actor_key(), method=self.command, retry_after=retry)
+        except Exception:
+            pass
+        body = (
+            b'{"aegis":"capacity_shed","by":"aegis-gateway","reason":"the gateway is at capacity; this is an '
+            b'availability-first, retryable load-shed, NOT a proven block (no certificate) - retry after the '
+            b'interval"}'
+        )
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Aegis-Action", "capacity_shed")
+        self.send_header("Retry-After", str(retry))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     def _handle(self) -> None:
+        # AS-5a (capacity): availability-first admission. When a budget is configured AND the default-OFF
+        # VIGIL_AEGIS_CAPACITY flag is on (``capacity_active``), a request over the per-caller / global budget
+        # is SHED with a soft, retryable 503 BEFORE any body read, inspection or forward (excess load is shed
+        # early). Liveness/readiness probes are never shed. A taken concurrency slot is ALWAYS returned in the
+        # finally, even on a handler error. When capacity is inactive (the default), ``admission`` stays None
+        # and this path is byte-identical to the un-gated handler.
+        settings = self.settings
+        admission = None
+        gov = settings.capacity_governor
+        if gov is not None and settings.capacity_active and not self._is_probe_request():
+            admission = gov.admit(self._actor_key())
+            if not admission.admitted:
+                try:
+                    self._send_shed(admission)
+                except Exception:
+                    pass
+                return
         try:
             self._handle_inner()
         except Exception:
@@ -872,6 +1014,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
                 self._send_bad_gateway()
             except Exception:
                 pass
+        finally:
+            if admission is not None and gov is not None:
+                gov.release(admission)
 
     def _probe_path(self) -> str:
         """The request path with any query stripped — used only to match the exact probe routes."""
@@ -1065,7 +1210,9 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   now_fn: "Callable[[], datetime] | None" = None,
                   monotonic_fn: "Callable[[], float] | None" = None,
                   on_authority_event: "Callable[[Any], None] | None" = None,
-                  notify_notifier: "Callable[[Verdict], None] | None" = None) -> ThreadingHTTPServer:
+                  notify_notifier: "Callable[[Verdict], None] | None" = None,
+                  capacity_budget: "CapacityBudget | None" = None,
+                  probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -1084,7 +1231,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      saas_tenant=saas_tenant, saas_host=saas_host,
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
-                                     on_authority_event=on_authority_event)
+                                     on_authority_event=on_authority_event, capacity_budget=capacity_budget,
+                                     probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
     if monitoring_spool is not None:
