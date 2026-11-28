@@ -201,10 +201,22 @@ scenarios. The benchmark runs **lazily, off the gate path**.
 | OWASP benchmark | `engine/crucible/framework/v2/eval/owasp_benchmark.py` | yes |
 | Eval gate / corpus / A·B | `engine/crucible/framework/v2/eval/{gate.py,corpus.py,ab.py}` | yes |
 | Benchmark narrative (root) | `BENCHMARK.md` | yes |
-| AEGIS benchmark (commit-reveal corpora; signed scorecard) | `aegis_bench.py` **(to build — AS-23a)** | — |
+| AEGIS early benchmark (fixed reference efficacy; deterministic digest) | `aegis/benchmark_early.py` **(BUILT, AS-23a)** | yes |
+| AEGIS full benchmark (commit-reveal corpora; signed scorecard) | `aegis_bench.py` **(to build, AS-23b)** | (pending) |
 
 - **Tokens:** GP (gate path; needs `make gate` evidence).
-- **Slices:** AS-23a early benchmark (arms A/B/G1/G2; CRS & claims gates) · AS-23b full
+- **Slices:** **AS-23a early benchmark (BUILT: `aegis/benchmark_early.py`: deterministic
+  read-only EARLY DETECTION-POSTURE BENCHMARK that composes the AS-8 coverage measure, the AS-7b
+  Coraza/CRS admissibility [carried by both composed meters, cross-checked via `consistent`] and the
+  AS-31 detection mirror into a bounded, address-free EFFICACY measurement against a small FIXED
+  in-repo reference technique set [`REFERENCE_TECHNIQUES`, a code constant, never fetched]: of the
+  reference techniques, how many the admissible content covers [`covered`/`missing`], an integer-floor
+  `efficacy_bps`, the AS-31 live-posture cross-check and a deterministic posture digest; over
+  inadmissible content or an empty reference it covers nothing, fail closed. MEASURES, never acts, a
+  covered reference technique is a LEAD never a block, it asserts nothing about live traffic; runs
+  lazily OFF the gate path [not gateway-wired, the live gateway stays byte-identical]; default-OFF
+  `VIGIL_AEGIS_BENCHMARK`, inert unless its own flag AND every dep flag [AS-7b/AS-8/AS-31] are armed.
+  The signed A/B/G1/G2 commit-reveal scorecard is AS-23b)** · AS-23b full
   benchmark · **AS-8 content + coverage (BUILT: `aegis/detection_coverage.py`: deterministic
   read-only detection-content COVERAGE measure over the AS-7b admissible CRS content, classifying
   each rule-id into its CRS detection TECHNIQUE by the rule-id banding + a per-technique breakdown +
