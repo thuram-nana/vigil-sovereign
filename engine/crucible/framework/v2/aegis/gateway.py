@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         MonotoneEpochFloor,
     )
     from .capacity import CapacityBudget, CapacityGovernor
+    from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
     from .receipts import ReceiptLedger
 
@@ -180,6 +181,22 @@ def _receipts_flag() -> bool:
     return (os.environ.get(RECEIPTS_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5e (impact budget): the default-OFF switch for the deterministic read-only IMPACT-BUDGET rollup over the
+# AS-5d receipt chain. Kept in LOCKSTEP with ``impact_budget.IMPACT_BUDGET_ENV`` (a test asserts they match) and
+# read here directly so the impact_budget module (and, through it, receipts) is NOT eagerly import-reachable from
+# the gateway (it is imported only when the flag is on AND the AS-5d ledger — its dependency — exists).
+IMPACT_BUDGET_ENV = "VIGIL_AEGIS_IMPACT_BUDGET"
+
+
+def _impact_budget_flag() -> bool:
+    """AS-5e impact-budget switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the rollup at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The rollup is ALSO
+    inert whenever its dependency flag (``VIGIL_AEGIS_RECEIPTS``) is off — there is no chain to roll up."""
+    import os
+    return (os.environ.get(IMPACT_BUDGET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -243,6 +260,7 @@ class GatewaySettings:
                  monotonic_fn: "Callable[[], float] | None" = None,
                  on_authority_event: "Callable[[Any], None] | None" = None,
                  capacity_budget: "CapacityBudget | None" = None,
+                 impact_budget: "ImpactBudget | None" = None,
                  probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
@@ -298,6 +316,20 @@ class GatewaySettings:
         if _receipts_flag():
             from .receipts import ReceiptLedger
             self.receipt_ledger = ReceiptLedger(monotonic=self._v2_monotonic)
+        # AS-5e (impact budget) — the deterministic, READ-ONLY rollup over the AS-5d receipt chain: over a bounded
+        # recent window it measures the DENIED ratio (shed + blocked, the availability cost of enforcement) and
+        # compares it against a configured budget ceiling, surfaced read-only on the AS-5c probe snapshot. Built
+        # ONCE, only when the default-OFF VIGIL_AEGIS_IMPACT_BUDGET flag is on at construction AND the AS-5d ledger
+        # — its DEPENDENCY — exists (there is no chain to roll up otherwise). It holds NO mutable ledger state and
+        # NEVER mutates the append-only chain: it only READS. It MEASURES and never acts — being over budget mints
+        # no verdict and drives no admit/shed/allow/block decision (only a fired oracle blocks). OFF ⇒ no meter is
+        # built, nothing is computed, and the gateway data path (and the probe snapshot) are byte-identical.
+        # Importing the module lazily here keeps it (and, through it, receipts) OFF the eager __init__/__main__
+        # import path (make-gate byte-identity).
+        self.impact_budget_meter: "ImpactBudgetMeter | None" = None
+        if _impact_budget_flag() and self.receipt_ledger is not None:
+            from .impact_budget import ImpactBudgetMeter
+            self.impact_budget_meter = ImpactBudgetMeter(self.receipt_ledger, impact_budget)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -396,6 +428,17 @@ class GatewaySettings:
             if led is not None and self.receipts_active:
                 snap["receipts_active"] = True
                 snap["receipts"] = led.snapshot()
+        except Exception:
+            pass
+        # AS-5e (impact budget): surface the deterministic read-only rollup over the AS-5d receipt chain (the
+        # denied ratio vs the budget ceiling + the per-reason breakdown) ONLY when the meter is active, so a
+        # gateway without the feature answers a probe byte-identically to AS-5d. Metadata only (no address, no
+        # secret). It MEASURES, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            meter = self.impact_budget_meter
+            if meter is not None and self.impact_budget_active:
+                snap["impact_budget_active"] = True
+                snap["impact"] = meter.snapshot()
         except Exception:
             pass
         return snap
@@ -538,6 +581,16 @@ class GatewaySettings:
         at runtime stops recording live. Independent of enforce/observe: an ``allowed``/``shed`` outcome is
         recorded in both modes; a ``blocked`` outcome arises only under effective enforce (a fired oracle)."""
         return self.receipt_ledger is not None and _receipts_flag()
+
+    @property
+    def impact_budget_active(self) -> bool:
+        """Is the AS-5e impact-budget rollup active for THIS snapshot? Only when the meter was built (the
+        default-OFF VIGIL_AEGIS_IMPACT_BUDGET flag was on at construction AND the AS-5d ledger exists) AND the flag
+        is STILL on AND its DEPENDENCY (the AS-5d receipts flag) is STILL on — so flipping EITHER flag off at
+        runtime stops surfacing the rollup live. Read-only / observational: it never gates enforcement."""
+        return (self.impact_budget_meter is not None
+                and _impact_budget_flag()
+                and self.receipts_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
@@ -1280,6 +1333,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   on_authority_event: "Callable[[Any], None] | None" = None,
                   notify_notifier: "Callable[[Verdict], None] | None" = None,
                   capacity_budget: "CapacityBudget | None" = None,
+                  impact_budget: "ImpactBudget | None" = None,
                   probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
@@ -1300,7 +1354,7 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
                                      on_authority_event=on_authority_event, capacity_budget=capacity_budget,
-                                     probe_socket_path=probe_socket_path)
+                                     impact_budget=impact_budget, probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
     if monitoring_spool is not None:
