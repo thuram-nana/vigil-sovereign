@@ -370,9 +370,21 @@ def test_scan_clean_scanner_allows_valid_text(corpus, monkeypatch, tmp_path):
     assert out["chunks"] >= 1 and _spine_doc_count("acme") >= 1
 
 
-def test_malformed_scan_cmd_is_treated_as_off(monkeypatch):
-    monkeypatch.setenv(_SCAN_ENV, 'clamscan "unbalanced')   # unparseable argv => OFF (a typo must not wedge uploads)
-    assert config.customer_knowledge_scan_cmd() == []
+def test_malformed_scan_cmd_fails_closed_not_off(monkeypatch):
+    # A SET-but-unparseable scanner command must RAISE (so ingest fails closed), never silently return OFF: an
+    # operator that configured a scanner must never have it downgraded to a no-op by a typo, ingesting unscanned bytes.
+    monkeypatch.setenv(_SCAN_ENV, 'clamscan "unbalanced')   # unbalanced quote => cannot parse to an argv
+    with pytest.raises(config.ScanCmdError):
+        config.customer_knowledge_scan_cmd()
+
+
+def test_ingest_refuses_when_scan_cmd_is_misconfigured(corpus, monkeypatch):
+    # End-to-end: a misconfigured (set-but-unparseable) scanner refuses the upload (fail closed) and writes nothing,
+    # even for otherwise-valid text - the configured-but-broken scanner does not let the document through.
+    monkeypatch.setenv(_SCAN_ENV, 'clamscan "unbalanced')
+    with pytest.raises(KnowledgeError, match="could not be malware-scanned"):
+        tk.ingest_document("acme", "doc.txt", b"otherwise perfectly valid organization text", **corpus.be)
+    _assert_nothing_written(corpus, "acme")
 
 
 # ===================================================================== 7. isolation under rejection ==============

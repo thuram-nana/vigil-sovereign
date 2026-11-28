@@ -1900,21 +1900,35 @@ def customer_knowledge_max_chunks() -> int:
     return n if 1 <= n <= 100_000 else 2000
 
 
+class ScanCmdError(ValueError):
+    """`VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD` is SET but cannot be parsed into a runnable argv. Raised rather than
+    returning an empty list so a configured-but-broken scanner can never be silently downgraded to OFF: the ingest
+    path catches this and FAILS CLOSED (refuses the upload) instead of ingesting unscanned content. Unset/blank is
+    not an error - that is the documented OFF no-op and returns an empty argv."""
+
+
 def customer_knowledge_scan_cmd() -> "list[str]":
     """The external malware scanner VIGIL pipes each uploaded knowledge document to, as a parsed argv list
     (`VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD`, default EMPTY = OFF). The raw upload bytes are fed to the command on stdin
     (NO shell, NO network); the upload is refused if the command exits non-zero (infection) or errors / times out
     (fail-closed). This is the plug point for a real AV, e.g. `clamdscan --no-summary -` or `clamscan --no-summary -`.
     DEFAULT-SAFE: unset/blank ⇒ the scan step is a documented no-op (the always-on structural allowlist + strict-text
-    validator still apply). A value that cannot be parsed as a shell argv (e.g. an unbalanced quote) is treated as OFF
-    - a configuration typo must not wedge every upload; the structural defences remain in force regardless."""
+    validator still apply, returning an empty argv). A value that IS set but cannot be parsed as a shell argv (e.g. an
+    unbalanced quote, or a value that is all whitespace) raises :class:`ScanCmdError` - the operator asked for a scanner,
+    so the ingest path fails CLOSED and refuses the upload rather than silently accepting unscanned content. A loud
+    misconfiguration is strictly safer here than a silent downgrade to OFF; the operator fixes the typo, not the gate."""
     raw = (os.environ.get("VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD") or "").strip()
     if not raw:
         return []
     try:
-        return shlex.split(raw)
-    except ValueError:
-        return []
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        raise ScanCmdError(
+            "VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD is set but could not be parsed as a command") from exc
+    if not argv:
+        raise ScanCmdError(
+            "VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD is set but parsed to an empty command")
+    return argv
 
 
 def oidc_settings() -> dict:

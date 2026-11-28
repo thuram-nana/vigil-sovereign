@@ -228,14 +228,20 @@ def scan(data: bytes, filename: str) -> None:
     """FAIL-CLOSED external malware-scan hook. When a scanner is configured (``config.customer_knowledge_scan_cmd`` /
     ``VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD``) the raw ``data`` is piped to it on stdin as an argv list (NO shell, NO
     network) under :data:`_SCAN_TIMEOUT_SECONDS`; the upload is REFUSED (``KnowledgeError``) if the scanner reports an
-    infection (non-zero exit) OR if it errors / times out / is missing (a configured-but-broken scanner must never let
-    an upload through). When UNCONFIGURED this is a documented no-op - the structural allowlist and strict-text
-    validator are the always-on defences. ``filename`` is never passed to the command (no argument injection).
+    infection (non-zero exit) OR if it errors / times out / is missing / is MISCONFIGURED (a configured-but-broken
+    scanner must never let an upload through). When UNCONFIGURED this is a documented no-op - the structural allowlist
+    and strict-text validator are the always-on defences. ``filename`` is never passed to the command (no injection).
 
     Deploy note: point ``VIGIL_CUSTOMER_KNOWLEDGE_SCAN_CMD`` at a real engine that reads stdin and exits non-zero on
     detection, e.g. ``clamdscan --no-summary -`` (daemon) or ``clamscan --no-summary -`` (standalone)."""
     del filename                                              # never interpolate a customer-controlled name into argv
-    argv = config.customer_knowledge_scan_cmd()
+    try:
+        argv = config.customer_knowledge_scan_cmd()
+    except config.ScanCmdError:
+        # the scanner is SET but its command is unparseable: fail CLOSED (never ingest unscanned content when an
+        # operator intended scanning on). A loud refusal is strictly safer than a silent downgrade to OFF.
+        raise KnowledgeError(
+            "this document could not be malware-scanned and was refused; please try again later") from None
     if not argv:
         return                                                # unconfigured: documented no-op (structural checks stay)
     try:
