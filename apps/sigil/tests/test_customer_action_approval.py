@@ -213,6 +213,50 @@ def test_evidence_is_owner_signed_tamper_evident_and_rollback_guarded():
     assert ok is False and "ROLLBACK" in why
 
 
+def test_evidence_resigned_under_attacker_key_is_detected_and_append_refuses():
+    """The RED-PEN forgery the owner-pin closes: a same-host writer REWRITES the approval audit history and
+    RE-SIGNS a self-consistent hash chain under their OWN keypair (own pub embedded), keeping entry_count /
+    last_seq == the genuine floor — so the LWW high-water alone (which only guards monotonic length/seq) would
+    let the equal-length re-sign pass. The DEFAULT ``verify_evidence`` (no ``trusted_pubkey``) must now PIN the
+    owner key and return NOT-ok, and ``_append_evidence`` must REFUSE to extend / bless such a chain."""
+    from sigil.ui import action_approval as aa
+    from sigil.reuse import generate_keypair
+    from vigil_core import sign
+    org, host = _org(), "forge.example.com"
+    # (1) a GENUINE owner-signed trail (requested -> allowed -> consumed) that verifies under the DEFAULT pin.
+    o = aa.gate_step(org, host, "reserve_start", risk=_risk(), params={"host": host}, requested_by="a", now=1.0)
+    aa.answer(org, "a", o.approval["approval_id"], allow=True, now=2.0)
+    aa.gate_step(org, host, "reserve_start", risk=_risk(), params={"host": host}, requested_by="a", now=3.0)
+    assert aa.verify_evidence(org)[0] is True              # DEFAULT (owner-pinned) path accepts the genuine trail
+    genuine = aa._read_evidence(org)
+    assert len(genuine) >= 2
+    # (2) FORGE: re-sign a chain with IDENTICAL content (so the hashes — hence entry_count/last_seq, hence the
+    # floor — are byte-for-byte preserved) under a FRESH ATTACKER keypair, embedding the attacker's OWN pub.
+    atk = generate_keypair()
+    assert atk.public_key_b64 != _owner_pub()
+    forged, prev = [], aa._GENESIS_PREV
+    for r in genuine:
+        content = aa._evidence_content(r)
+        eh = aa._entry_hash(prev, content)                 # hashes are key-independent ⇒ == the genuine entry_hash
+        sig = sign(atk.private_key_b64, aa._evidence_sig_bytes(prev, eh, content))
+        forged.append({**content, "prev": prev, "entry_hash": eh, "sig": sig, "pub": atk.public_key_b64})
+        prev = eh
+    aa._evidence_path(org).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in forged),
+                                      encoding="utf-8")
+    # the forgery is internally self-consistent AND keeps the high-water floor (same hashes, length and seqs) ...
+    assert [r["entry_hash"] for r in forged] == [r["entry_hash"] for r in genuine]
+    # ... yet the DEFAULT verify (owner-pinned) now REJECTS it — it is not signed by the owner key.
+    ok, why = aa.verify_evidence(org)
+    assert ok is False and "owner" in why.lower()
+    # an explicit pin to the genuine owner key rejects the attacker-signed trail too.
+    assert aa.verify_evidence(org, trusted_pubkey=_owner_pub())[0] is False
+    # and _append_evidence REFUSES to extend / bless the forged (non-owner-signed) chain.
+    with pytest.raises(aa.ApprovalStoreError):
+        aa._append_evidence(org, {"decision": aa.DECISION_REQUESTED, "approval_id": "appr_" + "0" * 32,
+                                  "slug": "s", "host": host, "action": "reserve_start",
+                                  "action_digest": "d"}, now=4.0)
+
+
 def test_tenant_isolation_store_level():
     from sigil.ui import action_approval as aa
     oa, ob = _org(), _org()

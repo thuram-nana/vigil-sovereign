@@ -89,6 +89,41 @@ def _owner_keypair():
     return ensure_owner_keypair()
 
 
+def _owner_pub() -> "Optional[str]":
+    """The CURRENT owner public key the evidence spine is signed under — read-only, NEVER minting (a verify
+    path must not generate trust; that is what ``owner_pubkey()`` is for, vs the signing ``ensure_owner_keypair``).
+    None when no owner identity is present, in which case a non-empty trail is refused: an unresolvable anchor
+    verifies nothing."""
+    from ..governor.identity import owner_pubkey
+    return owner_pubkey()
+
+
+def _trusted_owner_pubkeys() -> "frozenset[str]":
+    """The owner public keys an evidence record may legitimately be signed under: the CURRENT owner key PLUS
+    every PRIOR owner key in the cross-signed ``key_history`` succession — so a record appended BEFORE an
+    owner-key rotation still verifies (not orphaned), while any key OUTSIDE the owner succession is rejected.
+
+    WHY A SET AND NOT A PER-SEQ WINDOW: the sibling owner-signed stores (monitoring authority, the prune folds)
+    verify each GOVERNANCE-SPINE record under the owner key valid AT ITS SEQ (``key_resolver.at(seq)``). This
+    evidence spine is a PER-ORG, append-only log with its OWN local seq space — those seqs are NOT governance
+    spine seqs, so that per-seq window does not map onto it. We therefore pin to the owner-key SET (current ∪
+    succession priors), the documented honest fallback: it fully closes the attacker-re-sign forgery (a non-
+    owner key is never in the set) and keeps a rotated owner key's historical records verifiable, at the cost
+    of not distinguishing WHICH owner epoch signed a given evidence line (acceptable — this trail is audit-only,
+    off the authorization path). Fail-soft: if the governance spine / succession cannot be read the set is just
+    the current owner key (correct for an un-rotated install; still rejects any non-owner key). Empty ONLY when
+    there is no owner identity at all (fail-closed — the caller then refuses a non-empty trail)."""
+    cur = _owner_pub()
+    keys: "set[str]" = {cur} if cur else set()
+    try:
+        from ..governor import key_history as _kh
+        from ..spine.store import SpineStore
+        keys |= set(_kh.key_resolver(SpineStore(), current=cur).all_pubkeys)
+    except Exception:  # noqa: BLE001 — no spine / unreadable or forked history ⇒ current owner key only
+        pass
+    return frozenset(k for k in keys if k)
+
+
 def _root() -> Path:
     """The approval store root, resolved from ``SIGIL_HOME`` at CALL time (the ``resolve_live_dir`` /
     ``resolve_seam_base`` pattern), under the canonical ``customer_action_approval`` dir name. In production
@@ -260,17 +295,20 @@ def _append_evidence(org_id: str, content: dict, *, now: float) -> dict:
     to move downward. Returns the written record."""
     from ..spine.atomicio import atomic_write_text
     recs = _read_evidence(org_id)
-    # verify the existing chain tip before extending it, so a tampered trail cannot be quietly appended onto.
+    kp = _owner_keypair()
+    # verify the existing chain tip UNDER THE PINNED OWNER KEY before extending it, so a trail re-signed under a
+    # NON-owner key (its own pub embedded) cannot be quietly appended onto / blessed — even though this path
+    # already holds the owner keypair. The current signing key is always unioned into the pinned set so a
+    # genuine tip never spuriously fails the guard (belt-and-suspenders over the read-only owner-pub resolve).
     prev = _GENESIS_PREV
     seq = 0
     if recs:
-        ok, why = _verify_chain(recs)
+        ok, why = _verify_chain(recs, _trusted_owner_pubkeys() | {kp.public_key_b64})
         if not ok:
-            raise ApprovalStoreError(f"refusing to append onto a broken evidence chain: {why}")
+            raise ApprovalStoreError(f"refusing to append onto a non-owner-signed / broken evidence chain: {why}")
         last = recs[-1]
         prev = str(last.get("entry_hash") or "")
         seq = int(last.get("seq", -1)) + 1
-    kp = _owner_keypair()
     body = {**content, "seq": seq, "at": float(now)}
     eh = _entry_hash(prev, _evidence_content(body))
     sig = sign(kp.private_key_b64, _evidence_sig_bytes(prev, eh, _evidence_content(body)))
@@ -295,10 +333,30 @@ def _append_evidence(org_id: str, content: dict, *, now: float) -> dict:
     return rec
 
 
-def _verify_chain(recs: list) -> "tuple[bool, str]":
-    """Pure check that ``recs`` is a contiguous, owner-signed hash chain: each record links the prior
-    entry_hash, re-hashes to its stored entry_hash, and its signature verifies under its own (owner) pubkey.
-    A forged / reordered / tampered record fails here, so a planted evidence line is INERT."""
+def _verify_one_of(trusted_pubkeys: "frozenset[str]", msg: bytes, sig: str) -> bool:
+    """True iff ``sig`` verifies under at least ONE pinned owner key. The verification key always comes from the
+    PINNED set, never from the record itself — a record can never name the key that would validate it."""
+    for pk in trusted_pubkeys:
+        try:
+            if verify_one(pk, msg, sig):
+                return True
+        except Exception:  # noqa: BLE001 — malformed key/sig material ⇒ this key simply does not verify it
+            continue
+    return False
+
+
+def _verify_chain(recs: list, trusted_pubkeys: "frozenset[str]") -> "tuple[bool, str]":
+    """Pure check that ``recs`` is a contiguous hash chain EACH LINK OF WHICH is signed by a PINNED OWNER KEY
+    (``trusted_pubkeys`` — the sovereign owner key the module signs with, plus its ``key_history`` succession
+    priors), NOT by the key embedded in the record. Each record links the prior entry_hash, re-hashes to its
+    stored entry_hash, carries an embedded ``pub`` that MUST equal one of the pinned owner keys, and has a
+    signature that MUST verify under a pinned owner key.
+
+    This is the fix for the audit-integrity defect: verifying under the record's OWN embedded pub let a chain
+    re-signed under an ATTACKER keypair (its own pub embedded) verify as valid. Pinning the verification key to
+    the owner set makes such a re-signed / planted trail INERT — the attacker key is not pinned and the attacker
+    signature does not verify under the owner key — while a genuine owner-signed (or owner-succession) record
+    still verifies. A forged / reordered / tampered record also fails the chain/hash checks, independently."""
     prev = _GENESIS_PREV
     for i, r in enumerate(recs):
         if not isinstance(r, dict):
@@ -312,31 +370,34 @@ def _verify_chain(recs: list) -> "tuple[bool, str]":
         pub, sig = r.get("pub"), r.get("sig")
         if not isinstance(pub, str) or not isinstance(sig, str):
             return False, f"record {i} is missing its signature"
-        try:
-            if not verify_one(pub, _evidence_sig_bytes(prev, eh, content), sig):
-                return False, f"record {i} signature does not verify (forged)"
-        except Exception:  # noqa: BLE001 — malformed key/sig material ⇒ fail-closed
-            return False, f"record {i} signature is malformed"
+        # OWNER-PIN: the embedded pub is accepted ONLY when it IS a pinned owner key, and the signature is
+        # verified against the pinned owner key(s) — the record's own embedded key is never the trust anchor.
+        if pub not in trusted_pubkeys:
+            return False, f"record {i} is not signed by the owner key (embedded key is not a pinned owner key)"
+        if not _verify_one_of(trusted_pubkeys, _evidence_sig_bytes(prev, eh, content), sig):
+            return False, f"record {i} signature does not verify under the pinned owner key (forged)"
         prev = eh
     return True, "ok"
 
 
 def verify_evidence(org_id: str, *, trusted_pubkey: "Optional[str]" = None) -> "tuple[bool, str]":
-    """Verify the whole evidence trail for ``org_id``: the owner-signed hash chain AND the LWW high-water floor
-    (a rolled-back / truncated trail is refused). When ``trusted_pubkey`` is given, every record MUST be signed
-    by it (so an attacker cannot re-sign a forged trail under their OWN key — the owner key is the anchor).
-    Total; never raises (a store fault is returned as ``(False, reason)``)."""
+    """Verify the whole evidence trail for ``org_id``: the OWNER-SIGNED hash chain AND the LWW high-water floor
+    (a rolled-back / truncated trail is refused). The chain is pinned to the OWNER key BY DEFAULT: when
+    ``trusted_pubkey`` is NOT supplied the owner public key (and its ``key_history`` succession priors) is
+    resolved here, so the DEFAULT call is FAIL-CLOSED — a chain re-signed under an attacker's own keypair does
+    NOT verify even though its hashes and the high-water floor are self-consistent (an equal-length re-sign that
+    the floor alone would let pass). ``trusted_pubkey`` is an optional override that pins to EXACTLY that one key
+    (explicit callers / tests). Total; never raises (a store fault is returned as ``(False, reason)``)."""
     try:
         recs = _read_evidence(org_id)
     except ApprovalStoreError as e:
         return False, str(e)
-    ok, why = _verify_chain(recs)
+    trusted = frozenset({trusted_pubkey}) if trusted_pubkey is not None else _trusted_owner_pubkeys()
+    if recs and not trusted:
+        return False, "no owner key is available to verify the evidence trail against (fail-closed)"
+    ok, why = _verify_chain(recs, trusted)
     if not ok:
         return False, why
-    if trusted_pubkey is not None:
-        for i, r in enumerate(recs):
-            if r.get("pub") != trusted_pubkey:
-                return False, f"record {i} is not signed by the trusted owner key"
     # high-water: a valid chain that nonetheless sits BELOW the durable floor is a rollback/truncation.
     try:
         hw = load_highwater(_floor_path(org_id))
