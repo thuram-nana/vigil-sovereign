@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Optional, cast
@@ -130,15 +131,29 @@ def edge_id(group_id: str, user_id: str) -> str:
 
 
 def _clean_str(value: object, what: str, *, required: bool = False) -> str:
-    """A bounded, control-free attribute string (fail-closed). Never used as a path or a key."""
+    """A bounded, control-free, non-obfuscatable attribute string (fail-closed). Never used as a path or a key.
+
+    A SCIM attribute (``displayName`` / ``name.*`` / ``userName`` / ``externalId``) is stored and echoed back to the
+    IdP and shown in the operator member view, so it is strictly sanitised before it is trusted: the whole Unicode
+    ``Cf`` invisible-format class (zero-width, bidi embeddings / overrides / isolates / marks, Tag characters, word
+    joiner, soft hyphen, ...) is STRIPPED and the result is NFC-normalised, closing the Trojan-Source reordering /
+    homoglyph display-spoof surface. C0 / C1 / DEL control characters remain a hard REFUSAL (fail-closed).
+    """
     s = str(value or "").strip() if not isinstance(value, (dict, list)) else ""
+    if not s:
+        if required:
+            raise DirectoryError(f"{what} is required")
+        return ""
+    # Strip the invisible format class (carries no display meaning; enables reordering / homoglyph spoofing) and
+    # re-normalise, so a base + combining-mark pair left adjacent by a removed zero-width separator is composed.
+    s = unicodedata.normalize("NFC", "".join(c for c in s if unicodedata.category(c) != "Cf")).strip()
     if not s:
         if required:
             raise DirectoryError(f"{what} is required")
         return ""
     if len(s) > MAX_ATTR:
         raise DirectoryError(f"{what} is longer than {MAX_ATTR} characters")
-    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in s):
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in s):   # C0 + DEL + C1 control characters -> refuse
         raise DirectoryError(f"{what} must not contain control characters")
     return s
 

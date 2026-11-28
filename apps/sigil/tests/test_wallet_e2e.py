@@ -460,9 +460,12 @@ def _edge_statement(op, ep):
     return d
 
 
-# Opaque cryptographic fields of a customer payload — a signed lease, its trust root, a signature, a token: random
-# base64 that could spell any word, so the money/model scan reads the lease's DOCUMENT instead.
-_OPAQUE = frozenset({"lease", "trust_root", "signature", "signatures", "token"})
+# Opaque cryptographic fields of a customer payload — a signed lease, its trust root, a signature, a token, a random
+# nonce: random base64/base32 that could spell any word, so the money/model scan reads the lease's DOCUMENT and its
+# MEANINGFUL fields instead. (The nonce lives INSIDE the lease document, so it must be scrubbed there too — a random
+# nonce once contained the substring "nyx" and tripped the model-name leak scan; it is an opaque token, never a leak
+# vector for a model/engine name, so excluding its value — exactly like `signature`/`token` — is correct, not a weaken.)
+_OPAQUE = frozenset({"lease", "trust_root", "signature", "signatures", "token", "nonce"})
 
 
 def _customer_words(blob) -> str:

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         MonotoneEpochFloor,
     )
     from .capacity import CapacityBudget, CapacityGovernor
+    from .probe_socket import ProbeSocketServer
 
 from ..common.logging import get_logger
 from .actor_graph import ActorGraph
@@ -151,6 +152,19 @@ def _capacity_flag() -> bool:
     return (os.environ.get(CAPACITY_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5c (probe socket): the default-OFF switch for the LOCAL operational probe socket. Kept in LOCKSTEP with
+# ``probe_socket.PROBE_SOCKET_ENV`` (a test asserts they match) and read here directly so the probe_socket module
+# is NOT eagerly import-reachable from the gateway (it is imported only when a probe-socket path is configured).
+PROBE_SOCKET_ENV = "VIGIL_AEGIS_PROBE_SOCKET"
+
+
+def _probe_socket_flag() -> bool:
+    """AS-5c probe-socket switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built). OFF ⇒ no
+    local socket is bound, no thread runs, and the gateway (data path AND lifecycle) is byte-identical."""
+    import os
+    return (os.environ.get(PROBE_SOCKET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -213,7 +227,8 @@ class GatewaySettings:
                  now_fn: "Callable[[], datetime] | None" = None,
                  monotonic_fn: "Callable[[], float] | None" = None,
                  on_authority_event: "Callable[[Any], None] | None" = None,
-                 capacity_budget: "CapacityBudget | None" = None) -> None:
+                 capacity_budget: "CapacityBudget | None" = None,
+                 probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"upstream must be an http(s) URL with a host, got {upstream!r}")
@@ -312,6 +327,52 @@ class GatewaySettings:
                 self.oob_correlator = None
                 self.oob_receiver = None
                 _log.warning("aegis.gateway.oob_disabled", slug=self.slug, reason="start failed")
+        # AS-5c (probe socket) — the LOCAL operational probe socket. Bound (owner-only AF_UNIX) and its accept
+        # loop started ONLY when a path was configured AND the default-OFF VIGIL_AEGIS_PROBE_SOCKET flag is on;
+        # OFF ⇒ nothing is bound, no thread runs, and the gateway (data path AND lifecycle) is byte-identical.
+        # Built LAST so the snapshot it serves can read the fully-initialised enforce/capacity state. Importing
+        # the module lazily here keeps it OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        # Any bind error leaves the feature DORMANT (fail-open), exactly like the OOB receiver.
+        self.probe_socket: "ProbeSocketServer | None" = None
+        if probe_socket_path and _probe_socket_flag():
+            try:
+                from .probe_socket import ProbeSocketServer
+                self.probe_socket = ProbeSocketServer(
+                    probe_socket_path, self._probe_snapshot, monotonic=self._v2_monotonic).start()
+                _log.info("aegis.gateway.probe_socket_enabled", slug=self.slug, path=probe_socket_path)
+            except Exception:
+                self.probe_socket = None
+                _log.warning("aegis.gateway.probe_socket_disabled", slug=self.slug, reason="start failed")
+
+    def _probe_snapshot(self) -> "dict[str, object]":
+        """The read-only, metadata-only operational snapshot the AS-5c probe socket serves: the HONEST effective
+        enforce state (so an operator reads 'requested enforce, running observe BECAUSE …', never a silent
+        downgrade) and the AS-5a capacity admission OUTCOME (whether shedding is active + the address-free load
+        snapshot). Carries NO raw caller address and NO secret. Total: any read error degrades that field, never
+        the probe."""
+        snap: "dict[str, object]" = {"slug": self.slug}
+        try:
+            snap["enforcement"] = self.enforcement_status()
+        except Exception:
+            pass
+        try:
+            gov = self.capacity_governor
+            snap["capacity_active"] = bool(self.capacity_active)
+            snap["capacity"] = gov.snapshot() if gov is not None else None
+        except Exception:
+            pass
+        return snap
+
+    def stop_probe_socket(self) -> None:
+        """Clean shutdown of the AS-5c local probe socket (idempotent, total). The gateway's CLI/callers invoke
+        this in teardown; the accept thread is a daemon regardless, so a missed stop never hangs the process."""
+        p = self.probe_socket
+        self.probe_socket = None
+        if p is not None:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
     def _authorize_oob(self) -> bool:
         """Entitlement check for the OOB belief-elevation feature — the SAME AEGIS_RESPOND gate the
@@ -1150,7 +1211,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   monotonic_fn: "Callable[[], float] | None" = None,
                   on_authority_event: "Callable[[Any], None] | None" = None,
                   notify_notifier: "Callable[[Verdict], None] | None" = None,
-                  capacity_budget: "CapacityBudget | None" = None) -> ThreadingHTTPServer:
+                  capacity_budget: "CapacityBudget | None" = None,
+                  probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
     so ``host`` is NOT forced to loopback — the compensating controls are the ``boundary``/inspect
@@ -1169,7 +1231,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      saas_tenant=saas_tenant, saas_host=saas_host,
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
-                                     on_authority_event=on_authority_event, capacity_budget=capacity_budget)
+                                     on_authority_event=on_authority_event, capacity_budget=capacity_budget,
+                                     probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
     if monitoring_spool is not None:

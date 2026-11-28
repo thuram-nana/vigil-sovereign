@@ -18,6 +18,7 @@ recorded in CREDITS only (never a currency amount, never an estimate — a revie
 """
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -34,6 +35,13 @@ from .identity import owner_keypair, owner_pubkey  # noqa: E402
 
 SIGNAL = "governor.redpen_spend"
 _CORE = ("signal", "org_id", "repo", "month", "credits", "nonce", "issued_at")
+# C6 §15.11 — the per-ORG (workspace-wide) monthly auto-fix spending LIMIT config. A standing ceiling (credits; 0 = no
+# limit) that persists across calendar months — only the USAGE resets monthly (``org_charged``). Owner-signed and
+# latest-wins (the record with the greatest ``issued_at`` is the live limit), so a forged or stale record can neither
+# raise a workspace's ceiling nor lower it. Separate signal from the per-review charge records above, so the two folds
+# never cross.
+_ORG_LIMIT_SIGNAL = "governor.redpen_org_limit"
+_ORG_LIMIT_CORE = ("signal", "org_id", "limit", "nonce", "issued_at")
 _LOAD_FROM_VAULT = object()
 
 
@@ -122,4 +130,101 @@ class RedPenSpendLedger:
             return None
         return {"refused": True, "notify": True, "charged": used, "limit": limit, "month": month_key(now),
                 "reason": "this repository has reached its monthly review spending limit; new reviews resume next "
+                          "month or when the limit is raised"}
+
+    # -- the per-ORG (workspace-wide) monthly auto-fix spending cap (C6 §15.11) ------------------------
+    def set_org_monthly_limit(self, org_id: str, limit: int, *, issued_at: float, nonce: Optional[str] = None) -> int:
+        """Owner-sign the SESSION org's workspace-wide monthly auto-fix spending LIMIT (``limit`` credits; 0 = no
+        limit). Latest-wins by ``issued_at`` (a strictly-increasing source), so a re-set simply appends a newer
+        record. Fail-closed ``ValueError`` on a bad org / limit / nonce or a missing signing key. Returns the
+        appended seq."""
+        if self.owner_key is None:
+            raise ValueError("recording a Red-Pen org limit requires the owner signing key")
+        oid = _check_org_id(org_id)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+        if limit < 0:
+            raise ValueError("limit must be >= 0")
+        non = str(nonce) if nonce is not None else secrets.token_urlsafe(16)
+        if not non or ":" in non:
+            raise ValueError("nonce must be a non-empty string without ':'")
+        core = {"signal": _ORG_LIMIT_SIGNAL, "org_id": oid, "limit": int(limit), "nonce": non,
+                "issued_at": float(issued_at)}
+        payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
+                   "tier": "A0", "decision": "auto",
+                   "reason": f"Red-Pen workspace monthly auto-fix limit {int(limit)} credit(s) (org {oid})"}
+        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
+    def org_monthly_limit(self, org_id: str) -> int:
+        """The SESSION org's live workspace-wide monthly auto-fix spending limit in credits (0 = no limit). The
+        latest VERIFIED owner-signed limit record (greatest ``issued_at``, seq as the tie-break) wins; DEFAULT 0
+        (fail-closed) for an unknown org or when none was ever set (a forged record is inert)."""
+        try:
+            oid = _check_org_id(org_id)
+        except ValueError:
+            return 0
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        best_at, best_limit = None, 0
+        for r in self.store.iter_records():
+            p = getattr(r, "payload", None)
+            if not isinstance(p, dict) or p.get("signal") != _ORG_LIMIT_SIGNAL or p.get("org_id") != oid:
+                continue
+            at = p.get("issued_at")
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                continue
+            lim = p.get("limit")
+            if not isinstance(lim, int) or isinstance(lim, bool) or lim < 0:
+                continue                                 # a non-int / negative limit is inert, never raises
+            if not verify_signed(p, _ORG_LIMIT_CORE, resolver.at(r.seq)):
+                continue
+            if best_at is None or float(at) >= best_at:  # iter is seq-ordered, so '>=' lets the later record win ties
+                best_at, best_limit = float(at), int(lim)
+        return best_limit
+
+    def org_charged(self, org_id: str, *, now: float) -> int:
+        """Credits charged to the whole ORG (across EVERY repository) in the CALENDAR MONTH of ``now`` (UTC) — the
+        workspace-wide usage the org cap accounts for. DEFAULT 0 (fail-closed) for an unknown org; only VERIFIED
+        owner-signed charges count, each (org, repo, nonce) once (additive + idempotent), regardless of repo."""
+        try:
+            oid, month = _check_org_id(org_id), month_key(now)
+        except ValueError:
+            return 0
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        total = 0
+        seen: set = set()
+        for r in self.store.iter_records():
+            p = getattr(r, "payload", None)
+            if not isinstance(p, dict) or p.get("signal") != SIGNAL:
+                continue
+            if p.get("org_id") != oid or p.get("month") != month:
+                continue
+            repo, non = p.get("repo"), p.get("nonce")
+            if not isinstance(non, str) or not isinstance(repo, str) or (repo, non) in seen:
+                continue
+            if not verify_signed(p, _CORE, resolver.at(r.seq)):
+                continue
+            c = p.get("credits")
+            if not isinstance(c, int) or isinstance(c, bool) or c < 0:
+                continue                                 # a non-int / negative credits field is inert, never raises
+            seen.add((repo, non))
+            total += c
+        return total
+
+    def org_review_refusal(self, org_id: str, *, monthly_limit_credits: int, now: float) -> Optional[dict]:
+        """The workspace-wide auto-fix cap gate (decision O-2, org scope). Returns a refusal
+        ``{refused, reason, notify, charged, limit, month}`` when the ORG has reached its monthly limit
+        (``org_charged >= limit``, the boundary REACHED refuses further auto-spend), else None (allow).
+        ``monthly_limit_credits`` 0 (or less) ⇒ no limit ⇒ always None. Re-arms each calendar month (the usage
+        fold resets); an auto-fix already reserved is unaffected (this gate only governs NEW auto-fixes)."""
+        try:
+            limit = int(monthly_limit_credits)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            return None
+        used = self.org_charged(org_id, now=now)
+        if used < limit:
+            return None
+        return {"refused": True, "notify": True, "charged": used, "limit": limit, "month": month_key(now),
+                "reason": "this workspace has reached its monthly auto-fix spending limit; new fixes resume next "
                           "month or when the limit is raised"}

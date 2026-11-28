@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -687,20 +687,26 @@
   // shows an estimate, a predicted cost or an engine name; the only amount shown is credits the customer holds.
   function viewOverview() {
     var w = state.get().who || {};
-    // One context per render: the route it was drawn for (each async fill checks the customer is still there) and
-    // whether a card already found the session ended (so sign-in is asked for once, not once per card).
+    // One context per render: the route it was drawn for (each async fill checks the customer is still there), a
+    // sign-in-asked-once latch (so an ended session asks for sign-in once, not once per card), and ONE aggregate read
+    // — credits, hosts, assessments and monitoring brought together — that EVERY card shares. The UI sends NO org id:
+    // the edge scopes the whole aggregate to the SESSION org (admit_customer), and the server composes each section
+    // from the SAME gated read its full screen uses, so a card whose section a role may not read degrades to an
+    // honest line while the sections the role may read still show. One round trip, not one per card.
     var view = { at: here(), ended: false };
+    view.summary = VUI.getJSON(API + "/overview");
     var cards = [
       VUI.card("Account", null, [kv("Signed in as", w.username), kv("Workspace", w.org_id)]),
-      overviewCard(view, "Credits", API + "/billing", "Billing", creditsFill),
-      overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
-      overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
+      overviewCard(view, "Credits", "credits", "Billing", creditsFill),
+      overviewCard(view, "Authorized hosts", "assets", "Assets", hostsFill),
+      overviewCard(view, "Assessments", "assessments", "Assessments", assessFill),
     ];
-    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does).
-    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
-    // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
-    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
-    cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
+    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does); the
+    // server includes its section under the same switch, so card and section are never out of step.
+    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", "posture", "Fix first", postureFill)); }
+    // Monitoring only while its screen is on (the same switch the server gates its section by); off, the card is absent.
+    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", "monitoring", "Monitoring", monFill)); }
+    cards.push(overviewCard(view, "Notifications", "notifications", "Notifications", ntfFill));
     var body = h("div.cust-overview", {}, [
       h("h2", { text: "Overview" }),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
@@ -710,28 +716,31 @@
     return shell(body, "#/");
   }
 
-  // One async summary card: render the card + a loading holder now, then fetch its OWN tenant-scoped read and fill it.
-  // A 401 means the session ended: the first card to see it asks who is signed in and routes to sign-in, the others
-  // stand down. A 403 is the honest role line; anything else (a read this deployment does not serve, a network
-  // failure) is an honest "could not load" line — never a raw error and never the server's own words. A read that
-  // resolves after the customer left the screen changes nothing.
-  function overviewCard(view, title, path, label, fill) {
+  // One summary card of the shared Overview aggregate: render the card + a loading holder now, then await the ONE
+  // session-org-scoped read and fill this card from its OWN section (data[key]). A 401 means the session ended: the
+  // first card to see it asks who is signed in and routes to sign-in, the others stand down. A section the role may
+  // not read is the honest role line (its section is {access:"forbidden"} — no data, no link); any read failure is an
+  // honest "could not load" line, never a raw error and never the server's own words. A read that resolves after the
+  // customer left the screen changes nothing.
+  function overviewCard(view, title, key, label, fill) {
     var holder = h("div.cust-ov-cell", {}, loadingHolder("Loading…"));
     (async function () {
       var data;
-      try { data = await VUI.getJSON(path); }
+      try { data = await view.summary; }
       catch (e) {
         if (here() !== view.at) { return; }
         if (e && e.status === 401) {
           if (!view.ended) { view.ended = true; await refreshWho(); nav("#/login"); }
           return;
         }
-        var msg = (e && e.status === 403) ? ("Your role does not have access to " + label + ".")
-                                          : ("Could not load " + label + " right now.");
-        return VUI.mount(holder, h("p.cust-muted", { text: msg }));
+        return VUI.mount(holder, h("p.cust-muted", { text: "Could not load " + label + " right now." }));
       }
       if (here() !== view.at) { return; }
-      VUI.mount(holder, fill(data));
+      var section = (data && data[key]) || {};
+      if (section.access === "forbidden") {
+        return VUI.mount(holder, h("p.cust-muted", { text: "Your role does not have access to " + label + "." }));
+      }
+      VUI.mount(holder, fill(section));
     })();
     return VUI.card(title, null, holder);
   }
@@ -905,7 +914,7 @@
       // the server sends no exact balance, the flat-billing cards are the accurate picture and are shown as always —
       // with the published Rates, the server's low-balance notice and Auto top-up, which hold in either mode.
       if (!ov || ov.exact_available_mc == null) {
-        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection(ov)]);
+        return h("div", {}, [lowBalanceNotice(ov), classicBillingCards(ov || {}), ratesSection(), autoTopupSection()]);
       }
       var usage = h("div#cust-bill-usage", {}, loadingHolder("Loading your usage…"));
       loadBillingUsage(usage);                                 // held / live / statement, from billing/usage
@@ -914,7 +923,7 @@
         h("div.cust-grid", {}, [billingCreditsCard(ov), billingSubscriptionCard(ov)]),
         usage,
         ratesSection(),                                        // the published rates, loaded on demand
-        autoTopupSection(ov),                                  // A1 settings when present, else "coming"
+        autoTopupSection(),                                    // A1 opt-in / edit (loaded on demand, step-up gated)
         buySection(),                                          // the existing CHK-2 buy surface (unchanged)
       ]);
     });
@@ -1064,22 +1073,147 @@
     if (per === 1000000) return "per million";
     return "per " + groupInt(per);
   }
-  // Auto top-up (A1). A1 is not merged in this build, so the section describes it and invents no endpoint. When A1
-  // adds its settings to the overview (`ov.auto_topup`) this shows them read-only; the EDIT form is A1's own slice
-  // (it owns the write endpoints and the step-up), gated behind A1's flag.
-  function autoTopupSection(ov) {
-    var at = ov && ov.auto_topup;
-    if (at && typeof at === "object") {
-      return VUI.card("Auto top-up", null, [
-        kv("Auto top-up", at.enabled ? "On" : "Off"),
-        kv("Starts when your balance falls below", at.trigger_mc != null ? mc2(at.trigger_mc) : "—"),
-        kv("Buys the pack", at.pack_name != null ? at.pack_name : "—"),
-        kv("Monthly limit", at.monthly_limit_credits != null ? String(at.monthly_limit_credits) : "—"),
-      ]);
+  // Auto top-up (A1). The customer OPTS IN (off by default) to auto-buy a chosen credit pack whenever their balance
+  // falls below a threshold, up to a monthly limit. The control reads the org's current settings from
+  // /billing/auto-topup ON DEMAND (like Rates) and a billing admin changes them through the SAME step-up the server
+  // demands (owner-signed, sovereign side). The money safety is the server's (A1): the arming is strictly opt-in,
+  // each low-balance crossing tops up AT MOST ONCE (idempotent), NEVER above the monthly cap, and CREDIT is minted
+  // solely by the verified webhook — never from this page. The page sends only the customer's choices (credits, never
+  // a money amount) and a STRICT boolean on/off. Absent (the feature off -> 404) or refused (a non-billing role ->
+  // 403): an honest note, no form. Shown only on the W6 dashboard; the classic screen never renders it.
+  function autoTopupSection() {
+    var holder = h("div#cust-bill-autotopup", {});
+    var btn = h("button.btn", { type: "button", text: "Set up auto top-up" });
+    var open = false;
+    btn.addEventListener("click", function () {
+      if (open) { VUI.mount(holder, h("div", {})); open = false; btn.textContent = "Set up auto top-up"; return; }
+      btn.disabled = true;
+      (async function () {
+        var d;
+        try { d = await VUI.getJSON(API + "/billing/auto-topup"); }
+        catch (e) {
+          btn.disabled = false;
+          if (here() !== "#/billing") return;
+          return VUI.mount(holder, h("p.cust-muted", { text: autoTopupUnavailableText(e) }));
+        }
+        btn.disabled = false;
+        if (here() !== "#/billing") return;
+        open = true; btn.textContent = "Hide auto top-up";
+        VUI.mount(holder, autoTopupForm(d || {}, holder, btn));
+      })();
+    });
+    return VUI.card("Auto top-up", null, [
+      h("div.cust-mon-actions", {}, [btn,
+        h("p.cust-muted", { text: "Add credits automatically so an assessment never pauses for credit. Choose the "
+          + "balance that starts it, the pack to buy and a monthly limit. It is off until you turn it on, and it "
+          + "never buys more than your monthly limit." })]),
+      holder,
+    ]);
+  }
+  function autoTopupUnavailableText(e) {
+    if (e && e.status === 403) return "Your role does not manage billing, so auto top-up is not shown.";
+    return "Auto top-up is not available on your account right now.";
+  }
+  // The on-demand settings + edit form. Credits only; no money amount, no model name, no reserved unit count. The
+  // on/off is a STRICT boolean (a checkbox), the trigger / monthly limit whole numbers of credits, the pack one of
+  // the offered top-ups — exactly what the server validates and owner-signs.
+  function autoTopupForm(d, holder, toggleBtn) {
+    var s = (d && d.settings) || {};
+    var packs = (d && d.packs) || [];
+    var armed = s.enabled === true;                     // strict: only an explicit true is "on"
+    if (!packs.length) {
+      return h("p.cust-muted", { text: "No credit packs are offered for auto top-up right now." });
     }
-    return VUI.card("Auto top-up", null, [h("p.cust-muted", {
-      text: "Auto top-up adds credits for you so an assessment never pauses for credit. Choose the balance that "
-        + "starts it, the pack to buy and a monthly limit. This is coming soon." })]);
+    var enBox = h("input#cust-at-enabled", { type: "checkbox" });
+    enBox.checked = armed;                              // reflect the current, owner-signed state
+    var trig = h("input#cust-at-trigger", { type: "text", inputmode: "numeric", autocomplete: "off",
+      spellcheck: "false" });
+    trig.value = (s.trigger_credits != null) ? String(s.trigger_credits) : "";
+    var cap = h("input#cust-at-cap", { type: "text", inputmode: "numeric", autocomplete: "off", spellcheck: "false" });
+    cap.value = (s.monthly_cap_credits != null) ? String(s.monthly_cap_credits) : "";
+    var sel = h("select#cust-at-pack", { "aria-label": "Credit pack to buy" });
+    packs.forEach(function (p) {
+      sel.appendChild(h("option", { value: p.price_id,
+        text: String(p.name || p.price_id) + " — " + groupInt(p.credits) + " credits" }));
+    });
+    if (s.pack_price_id) sel.value = s.pack_price_id;
+    var save = h("button.btn", { type: "button", text: "Save auto top-up" });
+    var refs = { enBox: enBox, trig: trig, cap: cap, sel: sel, holder: holder, toggleBtn: toggleBtn };
+    save.addEventListener("click", function () { saveAutoTopup(refs, save); });
+
+    var rows = [kv("Auto top-up", armed ? "On" : "Off"),
+                kv("Bought this month", groupInt((d && d.month_credits) || 0) + " credits")];
+    if (!(d && d.card_saved)) {
+      rows.push(h("p.cust-muted", { text: "Auto top-up uses the card you pay with when you buy credits. Buy credits "
+        + "once to save a card, then it can charge automatically." }));
+    }
+    rows.push(h("label", { for: "cust-at-enabled", text: "Turn auto top-up on" }), enBox,
+              h("label", { for: "cust-at-trigger", text: "Start when my balance falls below (credits)" }), trig,
+              h("label", { for: "cust-at-pack", text: "Buy this pack" }), sel,
+              h("label", { for: "cust-at-cap", text: "Never buy more than this per month (credits)" }), cap,
+              h("div.cust-mon-actions", {}, [save]));
+    var receipts = (d && d.receipts) || [];
+    if (receipts.length) {
+      rows.push(h("h3", { text: "Recent auto top-ups" }));
+      receipts.forEach(function (r) { rows.push(autoTopupReceiptRow(r)); });
+    }
+    return h("div", {}, rows);
+  }
+  function autoTopupReceiptRow(r) {
+    return h("div.cust-kv", {}, [h("span.k", { text: fmtDate(r.at) + " · " + autoTopupStatusText(r.status) }),
+      h("span", { text: ((r.credits != null) ? groupInt(r.credits) : "—") + " credits" })]);
+  }
+  function autoTopupStatusText(status) {
+    if (status === "charged") return "Added credits";
+    if (status === "declined") return "Card declined";
+    if (status === "cap_blocked") return "Held at your monthly limit";
+    return "Auto top-up";
+  }
+  function saveAutoTopup(refs, btn) {
+    var enabled = refs.enBox.checked === true;         // STRICT boolean: only a real true arms it
+    var trig = autoTopupInt(refs.trig.value);
+    var cap = autoTopupInt(refs.cap.value);
+    var pack = String(refs.sel.value || "");
+    if (trig == null || cap == null) {
+      return err("Enter the balance that starts auto top-up and the monthly limit as whole numbers of credits.");
+    }
+    if (!pack) return err("Choose the credit pack to buy.");
+    btn.disabled = true;
+    (async function () {
+      try {
+        // the SET needs a fresh second factor (server-enforced); withStepUp sends the change ONCE more after it
+        await withStepUp(function () {
+          return VUI.postJSON(API + "/billing/auto-topup", { enabled: enabled === true, trigger_credits: trig,
+            pack_price_id: pack, monthly_cap_credits: cap });
+        }, btn.parentNode);
+      } catch (e) {
+        btn.disabled = false;
+        if (e && e.stepUpCancelled) return;            // the person closed the check: nothing was changed
+        if (e && e.status === 401 && e.data && e.data.step_up_required) {
+          return err("For your security, changing auto top-up needs a fresh second-factor check. Verify with your "
+            + "authenticator, then try again.");
+        }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return err("Auto top-up could not be saved" + ((e && e.data && e.data.error) ? ": " + e.data.error : ".")
+          + " Nothing was charged.");
+      }
+      btn.disabled = false;
+      VUI.toast(enabled ? "Auto top-up is on." : "Auto top-up is off.");
+      if (here() !== "#/billing") return;
+      // re-read the owner-signed state so the form shows exactly what the server stored
+      try {
+        var fresh = await VUI.getJSON(API + "/billing/auto-topup");
+        if (here() === "#/billing") VUI.mount(refs.holder, autoTopupForm(fresh || {}, refs.holder, refs.toggleBtn));
+      } catch (e) { /* the save landed; the next open re-reads */ }
+    })();
+  }
+  // A whole number of credits >= 0, or null when the field is empty / not a clean integer (the server is the
+  // authority; this only keeps an obviously-bad value from being sent).
+  function autoTopupInt(v) {
+    var s = String(v == null ? "" : v).trim();
+    if (!/^\d+$/.test(s)) return null;
+    var n = parseInt(s, 10);
+    return (isFinite(n) && n >= 0) ? n : null;
   }
 
   // ---- CHK-2: buy (hosted checkout) -----------------------------------------------------------------
@@ -2101,6 +2235,280 @@
     else if (here() === "#/live" && live.host) loadLiveActivity();
   }
 
+  // ---- Command box (#/command): ONE box drives a whole engagement (VIGIL_CUSTOMER_ASSISTANT) -------------------------
+  // The deterministic ENGAGEMENT control surface, distinct from the read-only security Assistant. A customer types one
+  // line; the edge classifies it DETERMINISTICALLY (model-free, api/customer/assistant/command) over a closed verb
+  // allowlist, and only an `advice` intent reaches the grounded, read-only assistant. Every other intent drives the
+  // per-(org, session) flow machine ONE transition at a time (api/customer/flow), each calling an already-gated
+  // sovereign action. The money / safety doctrine is enforced HERE in the UI as well as on the server: a launch STOPS
+  // at awaiting_confirm until the customer clicks an EXPLICIT spend-confirm button (never auto-confirmed), and the "I
+  // am authorized to test this asset" affirmation on verify is an EXPLICIT checkbox, read live, NEVER inferred. The box
+  // posts STRICT booleans (`=== true`) for confirm / authorized, and NEVER puts requester / org / mfa_at in the body —
+  // the edge takes those from the server session. Behind the same page flag as this screen (absent => route is home).
+  var COMMAND_ON = pageFlag("command");
+  var cmdbox = { log: null, input: null, send: null, busy: false };
+
+  function cmdIdem() { return String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10); }
+  function cmdAdd(node) {
+    if (cmdbox.log && node) {
+      cmdbox.log.appendChild(node);
+      var last = cmdbox.log.lastChild;
+      if (last && last.scrollIntoView) { try { last.scrollIntoView(); } catch (e) { /* no-op off-DOM / in tests */ } }
+    }
+    return node;
+  }
+  function cmdNote(text, cls) { return h("p." + (cls || "cust-muted"), { text: String(text) }); }
+  function cmdSay(role, body) {
+    return cmdAdd(h("div.cmd-turn.cmd-" + role, {}, [
+      h("span.cmd-who", { text: role === "you" ? "You" : "VIGIL" }),
+      h("div.cmd-body", {}, body)]));
+  }
+  function cmdPlanLabel(r) {
+    var host = r.host || "";
+    var map = { verify: "Verify ownership of " + (host || "a domain"),
+                launch: "Launch an assessment" + (host ? " of " + host : ""),
+                status: "Show progress" + (host ? " for " + host : ""),
+                steer: "Steer the running assessment" + (host ? " of " + host : ""),
+                pause: "Pause the assessment" + (host ? " of " + host : ""),
+                resume: "Resume the assessment" + (host ? " of " + host : ""),
+                cancel: "Cancel the assessment" + (host ? " of " + host : "") };
+    return own(map, r.intent) || ("Command: " + String(r.intent || ""));
+  }
+  function cmdError(e) {
+    if (e && e.status === 401) { refreshWho().then(function () { nav("#/login"); }); return; }
+    // HONESTY: map the edge's STATUS to FIXED copy — NEVER echo the server's raw error string (it can carry internal
+    // exception wording) into the chat log. A 403 is an authorization refusal; a 404 is a feature that is off here.
+    var status = (e && e.status) || 0;
+    var msg = status === 403 ? "You are not authorized to do that here."
+      : status === 404 ? "That action is not available."
+        : "That could not be processed. Please try again, or contact support if it keeps happening.";
+    cmdSay("vigil", cmdNote(msg, "cmd-err"));
+  }
+
+  // the raw token a customer publishes, shown verbatim in a <code> (never display-renamed — it must read exactly).
+  function cmdKV(label, value) {
+    return h("div.cmd-kv", {}, [h("div.cmd-kv-k", { text: label }),
+      h("code.cmd-kv-v", {}, String(value == null ? "" : value))]);
+  }
+  function cmdAdvice(advice) {
+    var a = advice || {};
+    var body = [h("div.cmd-answer", { text: String(a.answer || "No advice was returned.") })];
+    var fc = Number(a.finding_count || 0), dc = Number(a.document_count || 0);
+    var foot = [];
+    if (fc > 0) { foot.push("Grounded in " + fc + " of your confirmed finding" + (fc === 1 ? "" : "s") + "."); }
+    if (dc > 0) { foot.push(dc + " of your document" + (dc === 1 ? "" : "s") + " cited."); }
+    foot.push("Advice only — never a new finding, and nothing was launched.");
+    body.push(cmdNote(foot.join(" "), "cmd-foot"));
+    return cmdSay("vigil", h("div.card.cmd-advice", {}, body));
+  }
+
+  // verify, step 1: the challenge to publish, the method the customer chose, the EXPLICIT authorization checkbox, and
+  // the Verify button that only ever posts authorized=true when the box is actually ticked (the affirmation is read
+  // live from the checkbox, never inferred from the text).
+  function cmdVerifyCard(r) {
+    var ch = r.challenge || {};
+    var host = r.host || "";
+    var methods = [["well-known", "well-known file"], ["dns-txt", "DNS TXT record"], ["meta-tag", "homepage meta tag"]];
+    var pick = { method: "well-known" };
+    var mbtns = Object.create(null);
+    function selectMethod(id) {
+      pick.method = id;
+      methods.forEach(function (m) { if (mbtns[m[0]]) { mbtns[m[0]].classList[m[0] === id ? "add" : "remove"]("cmd-on"); } });
+    }
+    var picker = h("div.cmd-methods", {}, methods.map(function (m) {
+      var b = h("button.btn.cmd-method" + (m[0] === pick.method ? ".cmd-on" : ""),
+                { type: "button", onClick: function () { selectMethod(m[0]); } }, m[1]);
+      mbtns[m[0]] = b;
+      return b;
+    }));
+    var placements = [];
+    if (ch.well_known_url) { placements.push(cmdKV("well-known file at " + ch.well_known_url, ch.well_known_body)); }
+    if (ch.dns_name) { placements.push(cmdKV("DNS TXT record at " + ch.dns_name, ch.dns_value)); }
+    if (ch.meta_tag) { placements.push(cmdKV("homepage <head> meta tag", ch.meta_tag)); }
+    var cb = h("input.cmd-affirm", { type: "checkbox" });
+    var affirm = h("label.cmd-affirm-row", {}, [cb, h("span", { text: "I am authorized to test this asset." })]);
+    var note = h("div.cmd-note", {});
+    var go = h("button.btn.cmd-verify", { type: "button", onClick: function () {
+      if (!(cb && cb.checked === true)) {           // the EXPLICIT affirmation is required; without it, send NOTHING
+        VUI.mount(note, cmdNote("Tick the box above to confirm you are authorized, then Verify.", "cmd-err"));
+        return;
+      }
+      go.disabled = true;
+      cmdFlow({ intent: "verify", host: host, method: pick.method, authorized: true })
+        .catch(function () { go.disabled = false; });
+    } }, "Verify ownership");
+    return cmdSay("vigil", h("div.card.cmd-verify-card", {}, [
+      h("h3", { text: "Prove you control " + host }),
+      cmdNote("Publish ONE of these, choose that method, confirm you are authorized, then Verify. VIGIL fetches the "
+        + "token itself — nothing here proves anything until the server re-checks it.", "cust-muted"),
+      h("div.cmd-placements", {}, placements),
+      cmdNote("Which did you publish?", "cust-muted"), picker,
+      affirm, h("div.cmd-verify-go", {}, [go]), note]));
+  }
+
+  // launch, awaiting_confirm: the SERVER-decided depth / product (a depth, never an amount), and the EXPLICIT
+  // spend-confirm button. Nothing is reserved until the customer clicks Confirm — a typed "launch" alone never spends.
+  function cmdConfirmCard(r, signal) {
+    var host = r.host || (signal && signal.host) || "";
+    var choices = (r.choices && r.choices.length) ? r.choices : [{ product_id: "", depth: null }];
+    var want = String((signal && signal.depth) || "").toLowerCase();
+    var chosen = (want && choices.filter(function (c) { return String(c.depth || "").toLowerCase() === want; })[0]) || choices[0];
+    var pick = { product_id: chosen.product_id || "", depth: chosen.depth || "" };
+    var pairs = [];
+    function selectDepth(c) {
+      pick.product_id = c.product_id || ""; pick.depth = c.depth || "";
+      pairs.forEach(function (p) { p[1].classList[p[0] === c ? "add" : "remove"]("cmd-on"); });
+    }
+    choices.forEach(function (c) {
+      var d = String(c.depth || "");
+      var label = (d ? (d.charAt(0).toUpperCase() + d.slice(1)) : "Standard") + " assessment";
+      var b = h("button.btn.cmd-depth" + (c === chosen ? ".cmd-on" : ""),
+                { type: "button", onClick: function () { selectDepth(c); } }, label);
+      pairs.push([c, b]);
+    });
+    var go = h("button.btn.cmd-confirm", { type: "button", onClick: function () {
+      go.disabled = true;                                     // the explicit click IS the spend confirmation
+      cmdFlow({ intent: "launch", host: host, product_id: pick.product_id, depth: pick.depth, confirm: true })
+        .catch(function () { go.disabled = false; });
+    } }, "Confirm and launch");
+    return cmdSay("vigil", h("div.card.cmd-confirm-card", {}, [
+      h("h3", { text: "Confirm the assessment of " + host }),
+      cmdNote("VIGIL has reserved nothing yet. Choose the depth, then Confirm — only then are your credits reserved. "
+        + "VIGIL decides the exact amount from the product; you never name a figure.", "cust-muted"),
+      pairs.length > 1 ? h("div.cmd-depths", {}, pairs.map(function (p) { return p[1]; })) : null,
+      h("div.cmd-confirm-go", {}, [go])]));
+  }
+
+  function cmdActivityCard(r) {
+    var feed = r.activity;
+    var rows = (feed && feed.rows) || [];
+    if (!rows.length) {
+      // HONESTY: an active launch whose feed is `null` is UNAVAILABLE on this deployment (Live Control off, or no
+      // control permission) — never a transient pending state, so it must NOT say "check back". Only an empty feed
+      // OBJECT (present, zero rows) is genuinely pending. No active launch at all => nothing is running.
+      var msg = r.launch
+        ? (feed == null ? "Live step activity isn't available here."
+            : "No step activity yet — check back in a moment.")
+        : "Nothing is running on " + (r.host || "this host") + " right now.";
+      return cmdSay("vigil", cmdNote(msg, "cust-muted"));
+    }
+    return cmdSay("vigil", h("div.card.cmd-activity", {}, [
+      h("h3", { text: "Live activity" }),
+      h("ul.cmd-feed", {}, rows.map(function (x) {
+        return h("li.cmd-step", {}, [h("span.cmd-step-l", { text: (x && (x.label || x.phase)) || "" })]);
+      }))]));
+  }
+
+  function cmdDomainCard(r) {
+    var assets = (r.assets || []).filter(function (a) { return a && a.host; });
+    var body = [cmdNote("Name a domain to act on — e.g. “verify example.com” or “launch example.com”.",
+                        "cust-muted")];
+    if (assets.length) {
+      body.push(cmdNote("Your domains:", "cust-muted"));
+      body.push(h("ul.cmd-assets", {}, assets.slice(0, 12).map(function (a) {
+        return h("li.cmd-asset", {}, [h("span.cmd-asset-h", { text: String(a.host) }), " ",
+          VUI.statusBadge(a.status || "")]);
+      })));
+    }
+    return cmdSay("vigil", h("div.card.cmd-domain", {}, body));
+  }
+
+  // Render ONE flow-step result. The explicit safety gates come back as `need` and are rendered as the EXPLICIT action
+  // UI (not an error): need=confirm => the spend-confirm card; the verify challenge => the affirm+verify card.
+  function cmdRender(r, signal) {
+    r = r || {};
+    if (r.challenge) { return cmdVerifyCard(r); }
+    if (r.need === "confirm") { return cmdConfirmCard(r, signal); }
+    if (r.need === "authorized") {
+      return cmdSay("vigil", cmdNote("Tick “I am authorized to test this asset”, then Verify.", "cmd-err"));
+    }
+    if (r.need === "verify") {
+      return cmdSay("vigil", cmdNote("Verify ownership of " + (r.host || "this domain")
+        + " first — type “verify " + (r.host || "<domain>") + "”.", "cust-muted"));
+    }
+    if (r.need === "domain") { return cmdDomainCard(r); }
+    if (r.verified) {
+      return cmdSay("vigil", [cmdNote("Ownership verified — " + (r.host || "") + " is ready to assess."),
+        cmdNote("Type “launch " + (r.host || "") + "” to begin.", "cust-muted")]);
+    }
+    if (r.started || r.reserved) {
+      return cmdSay("vigil", cmdNote("Assessment started on " + (r.host || "")
+        + ". Watch it step by step in Live Control.", "cmd-ok"));
+    }
+    if (r.instructed) { return cmdSay("vigil", cmdNote("Sent — VIGIL will weigh this in its next step.", "cmd-ok")); }
+    if (r.control) {
+      return cmdSay("vigil", cmdNote("Done — " + String((signal && signal.intent) || "control")
+        + " on " + (r.host || "") + ".", "cmd-ok"));
+    }
+    if (signal && (signal.intent === "status" || signal.intent === "watch")) { return cmdActivityCard(r); }
+    if (r.blocked) { return cmdSay("vigil", cmdNote(String(r.blocked), "cmd-blocked")); }
+    return cmdSay("vigil", cmdNote("State: " + (r.state || "—")
+      + (r.status ? " (" + r.status + ")" : "") + ".", "cust-muted"));
+  }
+
+  // advance the flow by one transition. STRICT booleans for confirm / authorized; NO org / requester / mfa_at in the
+  // body (the edge supplies those from the session); a fresh idem key only for a steer (idempotent re-send).
+  async function cmdFlow(signal) {
+    var body = { intent: signal.intent || "", host: signal.host || "", depth: signal.depth || "",
+                 product_id: signal.product_id || "", method: signal.method || "",
+                 authorized: signal.authorized === true, confirm: signal.confirm === true,
+                 text: signal.text || "", since: signal.since || "",
+                 idem_key: signal.idem_key || (signal.intent === "steer" ? cmdIdem() : "") };
+    var r;
+    try { r = await VUI.postJSON(API + "/flow", body); }
+    catch (e) { cmdError(e); return null; }
+    cmdRender(r, signal);
+    return r;
+  }
+
+  // classify ONE typed line, then route it. An advice intent is answered read-only; every other intent advances the
+  // flow (which still gates the explicit affirm on verify and the explicit spend confirm on launch).
+  async function cmdCommand(line) {
+    cmdSay("you", cmdNote(String(line), "cmd-you-text"));
+    var r;
+    try { r = await VUI.postJSON(API + "/assistant/command", { line: line }); }
+    catch (e) { cmdError(e); return; }
+    var intent = r && r.intent;
+    if (intent === "advice") { cmdAdvice(r.advice); return; }
+    cmdSay("vigil", cmdNote(cmdPlanLabel(r)));                 // show the deterministic classification as the plan
+    await cmdFlow({ intent: intent, host: r.host || "", depth: r.depth || "", text: r.text || "" });
+  }
+
+  async function cmdSubmit() {
+    var line = (cmdbox.input && cmdbox.input.value ? cmdbox.input.value : "").trim();
+    if (cmdbox.busy || !line) { return; }
+    cmdbox.busy = true;
+    if (cmdbox.send) { cmdbox.send.disabled = true; }
+    cmdbox.input.value = "";
+    try { await cmdCommand(line); }
+    finally {
+      cmdbox.busy = false;
+      if (cmdbox.send) { cmdbox.send.disabled = false; }
+    }
+  }
+
+  function viewCommandBox() {
+    cmdbox.busy = false;
+    cmdbox.log = h("div#cmd-log.cmd-log", {});
+    cmdbox.input = h("input.cmd-input", { type: "text", maxlength: "2000", autocomplete: "off",
+      "aria-label": "Command", placeholder: "verify example.com   launch example.com   status   what should I fix first?",
+      onKeydown: function (e) {
+        if (e && (e.key === "Enter" || e.keyCode === 13)) { if (e.preventDefault) { e.preventDefault(); } cmdSubmit(); }
+      } });
+    cmdbox.send = h("button.btn.cmd-send", { type: "button", onClick: function () { cmdSubmit(); } }, "Send");
+    cmdSay("vigil", cmdNote("Type one line to drive a whole engagement — for example “verify example.com”, "
+      + "“launch example.com”, “status” or “pause”. Ask a question (“what should I "
+      + "fix first?”) for grounded, read-only advice. Nothing launches or spends until you confirm it explicitly.",
+      "cust-muted"));
+    return shell(h("div.cmd-screen", {}, [
+      h("div.cmd-head", {}, [
+        h("h2", { text: "Command" }),
+        cmdNote("One box, one engagement. Each line is read deterministically: a question is answered as advice, a "
+          + "command drives the flow, and every spend or authorization step asks you explicitly.", "cust-muted")]),
+      h("div.card.cmd-card", {}, [cmdbox.log]),
+      h("div.cmd-inputrow", {}, [cmdbox.input, cmdbox.send])]), "#/command");
+  }
+
   // After a run: what it used, only as the server's statement already records it (billing/usage: one figure per
   // launch, in credits) — never computed here. Shown for a COMPLETED launch whose statement has usage; asked once
   // per newly finished launch.
@@ -2811,6 +3219,162 @@
     if (!holder) { return; }
     mon.loaded = true;
     VUI.mount(holder, monEventsList(d && d.events));
+  }
+
+  // ---- Monitoring settings (AS-2k): #/monitoring/settings, gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED -------
+  // A THIN settings surface over the SAME reads/writes the Monitoring screen uses: it reads GET api/customer/monitoring
+  // for the SESSION workspace's per-(org, host) monitoring authorities and uses the EXISTING monitoring/authorize and
+  // monitoring/revoke writes. It mints no new authority and opens no new route. Where #/monitoring turns monitoring on
+  // and picks Observe/Respond, THIS screen configures an already-armed authority: it shows each monitored host's armed
+  // telemetry window (how long the authority stays armed before it must be renewed) and lets a manager SHORTEN that
+  // window or turn the host off. The armed window may only be SHORTENED — the customer asks for a shorter window, never
+  // a longer one, and the sovereign provisioner is the real cap (window_s only ever shortens the server window). The
+  // SERVER decides who may manage (can_manage); anyone else sees it read-only. Off, the route is the home screen exactly
+  // as any unknown route and the Settings hub shows no link to it (routeShown → MONITORING_ON).
+  var MON_DAY_S = 86400;                                   // the armed window is entered in whole days
+  // the settings screen's own button (a sibling of monButton, kept distinct so the Monitoring screen's guide-button
+  // census is not widened by this screen's labels); CSP-safe — addEventListener, never an inline handler.
+  function monSettingsButton(label, act, kind) {
+    var b = h("button.btn" + (kind ? "." + kind : ""), { type: "button", text: label });
+    b.addEventListener("click", function () { act(b); });
+    return b;
+  }
+  function viewMonitoringSettings() {
+    var holder = h("div#mon-settings-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring"); }
+      catch (e) {
+        if (here() !== "#/monitoring/settings") return;   // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load Monitoring settings"
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== "#/monitoring/settings") return;
+      VUI.mount(holder, monSettingsBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "Monitoring settings" }),
+      h("p.cust-muted", { text: "Configure how AEGIS monitors each host your workspace has turned on. Turning "
+        + "monitoring on and choosing Observe or Respond stays on the Monitoring screen." }),
+      holder]), "#/monitoring/settings");
+  }
+  // The per-(org, host) authorities that are currently armed (active), sorted by host: an authority that has ended has
+  // nothing left to configure, so it is not listed. The server decides can_manage; a non-manager sees the same list.
+  function monSettingsRows(d) {
+    return (d.grants || []).filter(function (g) { return g && g.active && g.host; })
+      .sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
+  }
+  function monSettingsBody(d) {
+    var rows = monSettingsRows(d);
+    var head = d.can_manage
+      ? h("p.cust-muted", { text: "Shorten a host's armed window, re-arm it to the full standard window, or turn its "
+          + "monitoring off here. VIGIL never extends a window beyond its standard length." })
+      : h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can change monitoring "
+          + "settings. You can see what each monitored host is set to." });
+    if (!rows.length) {
+      return h("div", {}, [head, h("div.card.cust-soon", { text: d.can_manage
+        ? "No host is monitored yet. Turn monitoring on for a host on the Monitoring screen first."
+        : "No host of this workspace is monitored." })]);
+    }
+    return h("div", {}, [head, h("div.cust-grid", {}, rows.map(function (g) { return monSettingsCard(g, d); }))]);
+  }
+  function monSettingsCard(g, d) {
+    var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(g.host) }),
+      h("span.cust-badge.cust-badge-on", { text: "Monitoring · " + (own(MON_MODE, g.mode) || "On") })])];
+    body.push(kv("Armed until", fmtDate(g.not_after)));
+    body.push(kv("Armed since", fmtDate(g.not_before)));
+    if (d.can_manage) {
+      var actions = h("div.cust-mon-settings-actions", {});
+      VUI.mount(actions, monSettingsActions(g, actions));
+      body.push(actions);
+    }
+    return h("div.card.cust-mon-settings-card", { dataset: { host: String(g.host) } }, body);
+  }
+  // A manager's controls for one armed host: shorten the armed window (re-arm, same mode, a shorter window the server
+  // caps), RE-ARM it to the full standard window (AS-21a, below), and turn the host off (confirmed in place first, like
+  // the Monitoring screen). CSP-safe: the input is wrapped in its label (no id lookup across a dotted host), and every
+  // action is an addEventListener, never an inline handler. Re-arm sits in its OWN row (cust-mon-rearm), so the window
+  // controls (cust-mon-actions) are byte-identical to AS-2k.
+  function monSettingsActions(g, holder) {
+    var input = h("input.cust-mon-window", { type: "number", min: "1", step: "1", inputmode: "numeric",
+      "aria-label": "Armed window in days for " + String(g.host) });
+    return [
+      h("label.cust-field", {}, [h("span", { text: "Armed window (days)" }), input]),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Shorten window", function (b) { monShortenWindow(g, input, b); }, "primary"),
+        monSettingsButton("Turn off", function () { monSettingsConfirmOff(g, holder); }, "danger"),
+      ]),
+      // AS-21a retest guard: re-arm (renew) this host's authority to the full standard window — the privilege-raising
+      // counterpart to Shorten window, so it is GUARDED (asked in place first, like Turn off) before anything is sent.
+      h("div.cust-mon-rearm", {}, monSettingsButton("Re-arm", function () { monSettingsConfirmReArm(g, holder); })),
+    ];
+  }
+  async function monShortenWindow(g, input, btn) {
+    clearErr();
+    var raw = input ? String(input.value || "").trim() : "";
+    var days = Number(raw);
+    if (!raw || !isFinite(days) || days <= 0) {
+      err("Enter the armed window as a positive number of days. Nothing was changed.");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write the Monitoring screen uses — re-armed in the host's CURRENT mode with a
+      // shorter window. The ORG is taken from the server session at the edge (never a body field), and the sovereign
+      // provisioner caps window_s (it only ever shortens the server window).
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: g.mode, window_s: days * MON_DAY_S });
+      VUI.toast("The armed window for " + g.host + " was shortened.");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // Turning a host off is asked here first, in place of its controls; nothing is sent until it is confirmed.
+  function monSettingsConfirmOff(g, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Turn off monitoring" }, [
+      h("p", { text: "Stop monitoring " + g.host + "? Its traffic then passes through AEGIS uninspected, and attacks "
+        + "on it are no longer reported." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, turn off", function (b) { monSettingsTurnOff(g.host, b); }, "danger"),
+        monSettingsButton("Keep monitoring", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+      ]),
+    ]));
+  }
+  async function monSettingsTurnOff(host, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      await VUI.postJSON(API + "/monitoring/revoke", { host: host });
+      VUI.toast("Monitoring is off for " + host + ".");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
+  }
+  // AS-21a — the RETEST GUARD. Re-arm renews a host's monitoring authority to VIGIL's full standard window from now, in
+  // the host's CURRENT mode, reusing the SAME monitoring/authorize write (it mints no new authority and opens no new
+  // route). It is the counterpart to Shorten window: where Shorten asks for a SHORTER window, Re-arm renews back to the
+  // full standard length (never beyond it — the sovereign provisioner is the real cap, config.MONITORING_WINDOW_SECONDS,
+  // clamped to the plan period), and the re-authorize re-checks that the host's proof of control is still current (a
+  // lapsed proof is refused, surfaced honestly). Because it LENGTHENS the armed window, it is guarded: asked in place
+  // first, like Turn off, and nothing is sent until it is confirmed. CSP-safe: addEventListener, never an inline handler.
+  function monSettingsConfirmReArm(g, holder) {
+    VUI.mount(holder, h("div.cust-mon-confirm", { role: "group", "aria-label": "Re-arm monitoring" }, [
+      h("p", { text: "Re-arm " + g.host + "? This renews its monitoring to VIGIL's full standard window from now, in "
+        + "the same mode, and confirms its proof of control is still current. VIGIL never extends it beyond that "
+        + "standard length." }),
+      h("div.cust-mon-actions", {}, [
+        monSettingsButton("Yes, re-arm", function (b) { monReArm(g, b); }, "primary"),
+        monSettingsButton("Keep as is", function () { VUI.mount(holder, monSettingsActions(g, holder)); }),
+      ]),
+    ]));
+  }
+  async function monReArm(g, btn) {
+    clearErr();
+    btn.disabled = true;
+    try {
+      // the SAME monitoring/authorize write — re-armed in the host's CURRENT mode with NO window_s, so the sovereign
+      // renews it to the SERVER window (never longer). The ORG is the session's at the edge (never a body field).
+      await VUI.postJSON(API + "/monitoring/authorize", { host: g.host, mode: g.mode });
+      VUI.toast("Monitoring for " + g.host + " was re-armed.");
+      if (here() === "#/monitoring/settings") render();
+    } catch (e) { btn.disabled = false; await monFailed(e); }
   }
 
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
@@ -3669,10 +4233,11 @@
       VUI.mount(holder, codeBody(d || {}));
       codeLoadFindings(d || {});
     })();
+    var spend = codeSpendCard();                          // the workspace-wide monthly auto-fix spending limit (C6 §15.11)
     return shell(h("div", {}, [h("h2", { text: "Code" }),
       h("p.cust-muted", { text: "Red-Pen reviews the pull requests of the GitHub repositories you connect and reports "
         + "only the problems it reproduced. Only this workspace sees them." }),
-      notice, holder]), "#/code");
+      notice, spend, holder]), "#/code");
   }
   // Back from GitHub (#/code?connected=…): one fixed sentence for what happened, then the hash loses its query so a
   // reload does not say it again.
@@ -3912,6 +4477,73 @@
     var why = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "")
       .replace(/\.$/, "");                                // as the server said it (it may start with a repository name)
     err(lead + (why ? ": " + why : "") + ". Nothing was changed.");
+  }
+
+  // ---- C6 §15.11: the workspace-wide monthly auto-fix SPENDING LIMIT ------------------------------------------------
+  // Separate from each repository's per-review limit: this caps how much the merge-blocking auto-fix (Fix this) may
+  // spend ACROSS this workspace in a calendar month, so the automated fixing never goes over. Its own read and write,
+  // both scoped to the SESSION org and gated on managing code review server-side; the save goes through the same
+  // step-up the per-repo settings do. The card picks a pack (a preset ceiling) and/or sets the limit, and shows this
+  // month's usage against it. No price, estimate or engine name — only credits. On any error the main Code body states
+  // it, so this card just stays quiet (it never shows a half-working control).
+  function codeSpendCard() {
+    var holder = h("div#code-spend", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/code/spend"); }
+      catch (e) { if (here() === "#/code") VUI.mount(holder, h("div", {})); return; }
+      if (here() !== "#/code") return;                   // the person navigated away before the load resolved
+      VUI.mount(holder, codeSpendControl(d || {}));
+    })();
+    return holder;
+  }
+  function codeSpendControl(d) {
+    var n = ++codeUi.seq;
+    var limit = parseInt(d.monthly_limit_credits, 10) || 0;
+    var used = parseInt(d.used_this_month, 10) || 0;
+    var inp = h("input#code-spend-" + n + ".cust-code-limit", { type: "text", inputmode: "numeric",
+      autocomplete: "off", value: String(limit) });
+    var row = h("div.cust-mon-actions", {});
+    VUI.mount(row, codeButton("Save", function (b) { codeSpendSave(inp, b, row); }));
+    var out = [h("h3", { text: "Auto-fix spending" }),
+      h("p.cust-muted", { text: "VIGIL's merge-blocking auto-fix opens a pull request for a reproduced finding. Set "
+        + "the most this workspace may spend on it each month so the automated fixing never goes over. VIGIL never "
+        + "estimates what a fix costs; the limit is a ceiling in credits." })];
+    var packs = codeSpendPacks(d, inp);
+    if (packs) out.push(h("label", { text: "Pick a pack" }), packs);
+    out.push(h("label", { for: "code-spend-" + n, text: "Monthly spending limit in credits (0 for no limit)" }), inp);
+    if (limit > 0) {
+      out.push(kv("Used this month", used + " of " + limit + " credits"));
+      if (used >= limit) {
+        out.push(h("p.cust-muted", { text: "This workspace reached its monthly auto-fix limit: new fixes wait until "
+          + "next month, or until you raise the limit." }));
+      }
+    }
+    out.push(row);
+    return h("div.card", {}, out);
+  }
+  // The preset packs the read offers: picking one fills the limit field (a quick choice; the field is what is saved).
+  function codeSpendPacks(d, inp) {
+    var packs = (Array.isArray(d.packs) ? d.packs : []).filter(function (x) {
+      return typeof x === "number" && isFinite(x) && x > 0 && Math.floor(x) === x;
+    });
+    if (!packs.length) return null;
+    return h("div.cust-mon-actions", {}, packs.map(function (x) {
+      return codeButton(String(x) + " credits", function () { inp.value = String(x); });
+    }));
+  }
+  async function codeSpendSave(inp, btn, row) {
+    clearErr();
+    var raw = String(inp.value == null ? "" : inp.value).trim();
+    if (!/^[0-9]{1,9}$/.test(raw)) {
+      return err("Enter the monthly spending limit as a whole number of credits, or 0 for no limit. Nothing was changed.");
+    }
+    btn.disabled = true;
+    try {
+      await codePost("/code/spend", { monthly_limit_credits: parseInt(raw, 10) }, row);
+      VUI.toast("Auto-fix spending limit saved.");
+      if (here() === "#/code") render();
+    } catch (e) { btn.disabled = false; await codeFailed(e, "The auto-fix spending limit was not saved"); }
   }
 
   // ---- Plans, Reports and the standards mapping (PR-G, Area 6) -----------------------------------------------------
@@ -4533,6 +5165,7 @@
       settingsLink("Account security & sign-in", "#/security"),
       settingsLink("Authorized administrators", "#/team"),
       settingsLink("Authorizations", "#/settings/authorizations"),
+      settingsLink("Monitoring", "#/monitoring/settings"),   // AS-2k: only while customer monitoring is on (routeShown)
       settingsLink("Billing", "#/billing"),
       settingsLink("Data rights", "#/data-rights"),
       AI_GOVERNANCE_ON ? settingsLink("How VIGIL uses AI", "#/ai-governance") : null,   // S5: only while its flag is on
@@ -4992,8 +5625,12 @@
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
+    // AS-2k monitoring settings off (same flag as #/monitoring): #/monitoring/settings is the home screen, as any unknown route
+    "#/monitoring/settings": function () { return authed() ? (MONITORING_ON ? viewMonitoringSettings() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
+    // Command box off (VIGIL_CUSTOMER_ASSISTANT): #/command is the home screen, exactly as any unknown route is
+    "#/command": function () { return authed() ? (COMMAND_ON ? viewCommandBox() : viewDashboard()) : viewLogin(); },
     // attack-path off: #/attack-path is the home screen, exactly as any unknown route is (byte-identical)
     "#/attack-path": function () { return authed() ? (ATTACK_PATH_ON ? viewAttackPath() : viewDashboard()) : viewLogin(); },
     // Red-Pen off: #/code is the home screen, exactly as any unknown route is

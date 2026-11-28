@@ -4239,6 +4239,76 @@ class Provisioner:
                         outcome="disconnected" if was else "noop", critical=True)
         return {"org_id": requester_org_id, "repo": ref, "disconnected": was}
 
+    # -- C6 §15.11 — the workspace-wide monthly auto-fix SPENDING LIMIT (choose a pack + set the limit) --------------
+    # Separate from each repository's per-review limit above: this is the ceiling the merge-blocking AUTO-FIX
+    # (``redpen_fix_this``) may spend ACROSS the whole SESSION org in a calendar month, so the automated fixing never
+    # exceeds it. get/set are ``manage_code``-gated and session-org-scoped (the org is the edge SESSION's, never a body
+    # field); the set steps up (it relaxes a spend policy, like the per-repo settings). The cap is enforced where the
+    # auto-fix would spend (``_redpen_org_cap_guard``, consulted before the fix reserves + meters). The limit is a
+    # standing credit ceiling that persists across months; only the month's USAGE resets. Never a cost or an estimate.
+    _REDPEN_SPEND_PACKS = (100, 250, 500, 1000, 2500)
+
+    def redpen_org_spend(self, requester: str, requester_org_id: str, *, ip: str = "",
+                         now: "Optional[float]" = None) -> dict:
+        """The Code screen's read of the SESSION org's workspace-wide monthly auto-fix spending limit: the limit in
+        credits (0 = no limit), the credits the auto-fix was actually CHARGED this calendar month (never an estimate),
+        the calendar-month key, and the preset ``packs`` the screen offers for a quick choice. ``manage_code`` only
+        (anyone else is refused). A read: the signing key is never unsealed."""
+        t = self._now() if now is None else float(now)
+        from ..governor.redpen_spend import RedPenSpendLedger, month_key
+        with self._lock:
+            self._redpen_admit("redpen_org_spend", requester, requester_org_id)
+            spend = RedPenSpendLedger(self.store, owner_key=None)
+            limit = spend.org_monthly_limit(requester_org_id)
+            used = spend.org_charged(requester_org_id, now=t)
+        return {"org_id": requester_org_id, "monthly_limit_credits": int(limit), "used_this_month": int(used),
+                "month": month_key(t), "packs": list(self._REDPEN_SPEND_PACKS)}
+
+    def redpen_set_org_spend(self, requester: str, requester_org_id: str, *, monthly_limit_credits=None, ip: str = "",
+                             mfa_at=0.0, now: "Optional[float]" = None) -> dict:
+        """Set the SESSION org's workspace-wide monthly auto-fix spending limit (credits; 0 = no limit).
+        ``manage_code`` + step-up (it relaxes a spend policy — sensitive). The org is the SESSION's, never a body
+        field (tenant isolation at the edge). The limit is owner-signed sovereign-side. Never a cost or an estimate."""
+        t = self._now() if now is None else float(now)
+        from ..governor.redpen_spend import RedPenSpendLedger, month_key
+        if monthly_limit_credits is None:
+            raise ProvisionError("monthly_limit_credits is required (a whole number of credits; 0 = no limit)")
+        if isinstance(monthly_limit_credits, bool) or not isinstance(monthly_limit_credits, (int, str)):
+            raise ProvisionError("monthly_limit_credits must be a whole number of credits (0 = no limit)")
+        try:
+            limit = int(monthly_limit_credits)
+        except ValueError:
+            raise ProvisionError("monthly_limit_credits must be a whole number of credits (0 = no limit)") from None
+        if limit < 0:
+            raise ProvisionError("monthly_limit_credits must be 0 (no limit) or more")
+        with self._lock:
+            self._redpen_admit("redpen_set_org_spend", requester, requester_org_id)
+            self._require_stepup(mfa_at, now=t)
+            spend = RedPenSpendLedger(self.store)
+            spend.set_org_monthly_limit(requester_org_id, limit, issued_at=self._next_issued())
+            used = spend.org_charged(requester_org_id, now=t)
+            self._audit("redpen_set_org_spend", requester=requester, org_id=requester_org_id, target=str(limit),
+                        outcome="updated", critical=True)
+        return {"org_id": requester_org_id, "monthly_limit_credits": int(limit), "used_this_month": int(used),
+                "month": month_key(t)}
+
+    def _redpen_org_cap_guard(self, requester: str, org_id: str, *, now: float) -> None:
+        """The workspace-wide monthly auto-fix spending cap, consulted at the point the AUTO-FIX would reserve + meter
+        a spend: once the session org's Red-Pen charges this calendar month REACH its limit, refuse a NEW auto-fix
+        (nothing reserved, charged or dispatched) until next month or a raised limit. ``manage_code`` first (authority
+        before the limit), then the owner-signed org limit + the month's charged fold. The per-repo limit
+        (``reserve_redpen_review``) still applies independently; this is the ceiling ACROSS the workspace. 0 = no
+        limit. Caller does not hold the lock."""
+        from ..governor.redpen_spend import RedPenSpendLedger
+        with self._lock:
+            self._redpen_admit("redpen_fix_this", requester, org_id)
+            spend = RedPenSpendLedger(self.store, owner_key=None)
+            limit = spend.org_monthly_limit(org_id)
+            refusal = spend.org_review_refusal(org_id, monthly_limit_credits=limit, now=now)
+            if refusal is not None:
+                self._audit("redpen_fix_this", requester=requester, org_id=org_id, outcome="org_limit_reached")
+                raise ProvisionDenied(refusal["reason"])
+
     # The Red-Pen EXECUTION actions (review now, the review schedule, Fix this, Retest) are driven by the Red-Pen worker
     # slices (R3 PR-review worker, R4 Red-Pen System demand + schedule, R5 Fix + Retest), which are not merged with this
     # screen. FATAL-2: the sovereign plane never imports the offense worker — on merge, each replaces ONLY the inert
@@ -4307,6 +4377,9 @@ class Provisioner:
             # the console is byte-identical to a build without PR-K (no reservation, nothing published).
             ref = self._redpen_execution("redpen_fix_this", requester, requester_org_id, repo, mfa_at=mfa_at, now=t)
             return {"org_id": requester_org_id, "repo": ref, "finding_ref": fref, "coming": True}
+        # C6 §15.11 — the workspace-wide monthly auto-fix spending cap: refuse (nothing reserved, charged or dispatched)
+        # once the session org's Red-Pen charges this calendar month reach its limit. Authority (manage_code) first.
+        self._redpen_org_cap_guard(requester, requester_org_id, now=t)
         return self._redpen_dispatch_fix(requester, requester_org_id, repo, fref, mfa_at=mfa_at, now=t)
 
     def _redpen_dispatch_fix(self, requester: str, org_id: str, repo: str, finding_ref: str, *, mfa_at,
@@ -4898,6 +4971,43 @@ class Provisioner:
         from ..governor import asset_ownership as _own
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
+
+    def customer_overview_summary(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """C7 — ONE session-org-scoped aggregate for the Overview home screen (#/): credits, authorized hosts,
+        assessments and monitoring brought TOGETHER, each COMPOSED from the SAME already-gated per-area read its own
+        full screen uses — never a second gate of its own and never a bypass. ``requester``/``requester_org_id`` are
+        the hop-bound session principal, NEVER a body field, so the aggregate reads ONLY the caller's own tenant (each
+        sub-read re-runs ``admit_customer`` for THIS org). A section the caller's role may not read comes back as
+        ``{"access": "forbidden"}`` — the card then says so plainly, with no data and no link — and an OPTIONAL section
+        whose screen this deployment does not serve is simply absent; the notifications and posture cards ride the same
+        one read so the home screen makes a single round trip. No section is ever an estimate, a predicted cost or an
+        engine name: the only money-shaped figure anywhere is the credits the customer holds."""
+        from .. import config
+
+        def _section(read):
+            # The honest per-card refusal (a role that may not read this area) degrades to a marked section, NOT a
+            # whole-aggregate failure, so a billing role still sees its Credits beside the others' honest lines. Any
+            # OTHER failure propagates (the edge renders one honest "could not load", never the server's own words).
+            try:
+                return read()
+            except ProvisionDenied:
+                return {"access": "forbidden"}
+
+        out: "dict[str, Any]" = {
+            "org_id": requester_org_id,
+            "credits": _section(lambda: self.customer_billing(requester, requester_org_id, ip=ip)),
+            "assets": _section(lambda: self.customer_assets(requester, requester_org_id, ip=ip)),
+            "assessments": _section(lambda: self.customer_assessments(requester, requester_org_id, ip=ip)),
+        }
+        # Monitoring and posture are OPTIONAL cards, each gated by the SAME switch that serves its own screen (and that
+        # the Overview UI reads to decide whether to show the card): included only while on, so the aggregate and the
+        # page are never out of step, and absent (no card, no claim) when the deployment does not serve them.
+        if config.customer_monitoring_enabled():
+            out["monitoring"] = _section(lambda: self.monitor_list(requester, requester_org_id, ip=ip))
+        if config.customer_posture_enabled():
+            out["posture"] = _section(lambda: self.customer_posture_trend(requester, requester_org_id, ip=ip))
+        out["notifications"] = _section(lambda: self.customer_notifications(requester, requester_org_id, ip=ip))
+        return out
 
     # -- Legal/governance S12: the read-only Authorizations surface (behind VIGIL_CUSTOMER_AUTHORIZATIONS) -------------
     # DISCLOSURE, never a mint. ``customer_authorizations_list`` READS the owner-signed EngagementAuthorities on record

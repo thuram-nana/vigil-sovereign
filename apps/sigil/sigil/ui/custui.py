@@ -44,6 +44,7 @@ from vigil_core.hopauth import body_binding, stamp_hop_assertion  # noqa: E402
 from vigil_core.posture import is_production_posture  # noqa: E402
 
 from ..bridge.daemon import bind_ok  # noqa: E402
+from . import input_safety  # noqa: E402  (the ONE central request-boundary sanitizer, applied in _read_body)
 from .graceful import GracefulMixin, serve_until_signal  # noqa: E402
 from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS, SessionLedger  # noqa: E402
 from .sso_edge import SsoEdgeMixin  # noqa: E402  (PR-H: the SSO / SCIM routes — every one absent while the flag is off)
@@ -67,6 +68,35 @@ _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestor
 _MAX_BODY = 65536
 # PR-I: the largest proof-bundle ZIP this edge will relay (the provisioner's own cap, proof_export.MAX_ZIP_BYTES).
 _MAX_PROOF_BYTES = 2 * 1024 * 1024
+
+# --- central input sanitization (applied ONCE in _read_body, so every body field is tightened the same way) -----
+# A generous PER-FIELD character cap, deliberately BELOW the 64 KiB body cap so no legitimate field is ever truncated
+# by the sanitizer (a real email / host / name / question / note is far shorter); the SEMANTIC per-field caps stay in
+# the downstream validators. The structure guard bounds a JSON-bomb: at most _BODY_MAX_DEPTH nested levels and
+# _BODY_MAX_NODES total nodes, rejected with a clean ValueError before any field is processed.
+_FIELD_MAX = 16384
+_BODY_MAX_DEPTH = 8
+_BODY_MAX_NODES = 2000
+# Keys whose VALUE is left BYTE-EXACT (never NFC-normalised, stripped or truncated) because it is a credential, a
+# token, a cryptographic / WebAuthn blob, an idempotency / digest key, a base64 payload, or a signed nested object —
+# any of which a single altered byte would break (auth failure, replay-guard miss, signature-verify fail). Derived by
+# grepping this edge for every field that is a password / token / signature / base64 / WebAuthn / digest / lease blob
+# (see the module handback). A key NOT listed here is ordinary user text and IS sanitized.
+_PASSTHROUGH: "frozenset[str]" = frozenset({
+    # passwords (login / signup / recovery)
+    "password", "new_password", "old_password",
+    # single-use tokens / codes / invites
+    "token", "invite_token", "code",
+    # OIDC / PKCE redeem material
+    "verifier",
+    # WebAuthn (passkey) assertion + enrolment blobs — base64url / JSON, signature-verified at the provisioner
+    "signature", "challenge", "client_data_json", "authenticator_data", "credential_id", "cose_alg",
+    "public_key_spki_b64",
+    # digests / idempotency / lease / request ids — compared or deduped byte-for-byte downstream
+    "oracle_context_digest", "idem_key", "lease", "request_id",
+    # base64 / signed blobs relayed verbatim
+    "data", "zip_b64",
+})
 
 # How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
 # worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
@@ -280,6 +310,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # step; a non-secret on/off value written into the page, counting in the build id. The SPA front-end that reads
     # this flag ships in a later PR (another builder owns app.js); the placeholder + its injection are wired now.
     knowledge = _config.customer_knowledge_enabled()
+    # B2/B3: the chat-driven engagement COMMAND box (the #/command screen). The SAME VIGIL_CUSTOMER_ASSISTANT that
+    # serves the assistant/command + flow edge routes (and the read-only assistant), so the screen and its routes are
+    # never out of step; a non-secret on/off value written into the page, counting in the build id. Off, the route is
+    # the home screen exactly as any unknown route, and every command/flow route 404s (byte-identical). DEFAULT ON.
+    command = _config.customer_assistant_enabled()
     # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
     # routes, a non-secret on/off value written into the page and counting in the build id.
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
@@ -332,7 +367,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
-                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0", **area6})
+                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0",
+                                     "__VIGIL_COMMAND__": "1" if command else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -417,6 +453,7 @@ _READS = {"/api/customer/billing": "billing_overview", "/api/customer/invoices":
 _CODE_ACTIONS: "dict[str, tuple[str, tuple[str, ...]]]" = {
     "code/connect": ("redpen_connect", ()),
     "code/settings": ("redpen_set_settings", ("repo", "block_threshold", "monthly_limit_credits")),
+    "code/spend": ("redpen_set_org_spend", ("monthly_limit_credits",)),   # C6 §15.11 workspace-wide auto-fix cap
     "code/disconnect": ("redpen_disconnect", ("repo",)),
     "code/review": ("redpen_review", ("repo",)),
     "code/schedule": ("redpen_schedule", ("repo", "cadence")),
@@ -643,7 +680,13 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict):
             raise ValueError("body must be an object")
-        return body
+        # Central input sanitization at the trust boundary: NFC-normalise + strip dangerous characters from EVERY
+        # string field, leave the credential / token / WebAuthn / base64 passthrough keys BYTE-EXACT, and reject a
+        # JSON-bomb (too deep / too many nodes) with a clean ValueError — all at this ONE choke point, so no field
+        # can be abused via Unicode obfuscation, control characters or a structure bomb (the size cap + "body must be
+        # an object" behaviour above are unchanged).
+        return input_safety.sanitize_body(body, passthrough=_PASSTHROUGH, max_chars=_FIELD_MAX,
+                                          max_depth=_BODY_MAX_DEPTH, max_nodes=_BODY_MAX_NODES)
 
     def _provision(self, action: str, principal: str, body: dict):
         """Call the sovereign provisioner route over loopback, stamping the hop assertion the same way the
@@ -779,6 +822,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("billing_auto_topup")
         if path == "/api/customer/launches" and _launch_ui_on():         # C1a (flag OFF -> unknown-route 404)
             return self._customer_read_relay("launch_list")
+        if path == "/api/customer/overview" and _overview_on():         # C7 Overview aggregate (flag OFF -> unknown-route 404)
+            return self._customer_read_relay("customer_overview_summary")
         if path == "/api/customer/monitoring" and _monitoring_on():     # AE-1 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("monitor_list")
         if path == "/api/customer/monitoring/events" and _monitoring_on():
@@ -805,6 +850,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._proof_download()
         if path == "/api/customer/code" and _redpen_on():               # C6 Code screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("redpen_code_overview")
+        if path == "/api/customer/code/spend" and _redpen_on():          # C6 §15.11 workspace-wide auto-fix spend limit
+            return self._customer_read_relay("redpen_org_spend")
         if path == "/api/customer/connect" and _connect_on():           # PR-C Connect screen (flag OFF -> unknown-route 404)
             return self._customer_read_relay("connect_overview")
         if path == "/api/customer/code/connected" and _redpen_on():     # the post-install GitHub redirect lands here
@@ -1875,6 +1922,14 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
 def _monitoring_on() -> bool:
     from .. import config as _config
     return _config.customer_monitoring_enabled()
+
+
+def _overview_on() -> bool:
+    # C7 — the Overview home screen's aggregate read, the same VIGIL_CUSTOMER_OVERVIEW flag that writes
+    # data-overview into the page and that the cockpit dispatch re-checks, so the route and the screen are never out of
+    # step (flag OFF -> the route is genuinely absent, 404, and the home screen is the Account-only dashboard).
+    from .. import config as _config
+    return _config.customer_overview_enabled()
 
 
 def _onboarding_on() -> bool:
