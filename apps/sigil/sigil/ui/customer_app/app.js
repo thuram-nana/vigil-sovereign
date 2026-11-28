@@ -127,6 +127,27 @@
     var ds = (document.body && document.body.dataset) || {};
     return ds[name] === "1";
   }
+  // A query param from the hash (e.g. an invite token in #/signup?invite=<token>). The hash is user-controlled, so the
+  // value is only ever carried to the edge as data — it mints nothing, and a bad token never fails the sign-in it rides.
+  function hashQuery(name) {
+    var h2 = String(location.hash || ""); var i = h2.indexOf("?");
+    if (i < 0) { return ""; }
+    var parts = h2.slice(i + 1).split("&");
+    for (var j = 0; j < parts.length; j++) {
+      var kv2 = parts[j].split("=");
+      if (decodeURIComponent(kv2[0]) === name) { try { return decodeURIComponent(kv2[1] || ""); } catch (e) { return ""; } }
+    }
+    return "";
+  }
+  // Surface a clean "invitation accepted" confirmation after a sign-in / sign-up that redeemed an invite token. The
+  // edge returns the provisioner's verdict as r.invite; we only ever celebrate an accepted one (a bad token is silent).
+  function inviteToast(r) {
+    var inv = r && r.invite;
+    if (inv && inv.accepted) {
+      VUI.toast(inv.already_member ? "You're already a member of that workspace."
+        : "Invitation accepted — you've joined the workspace that invited you.");
+    }
+  }
 
   // ---- onboarding (guide.js): the first-sign-in tour, the Guide screen, the branded loader ----------------------
   var GUIDE = window.VIGIL_GUIDE;
@@ -220,7 +241,7 @@
     clearErr();
     try {
       var r = await SECURITY.passkeySignIn({ VUI: VUI, api: API });
-      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); }
+      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); inviteToast(r); }
       else { err("Sign-in failed."); }
     } catch (e) { err(SECURITY.signInMessage(e)); }
   }
@@ -482,8 +503,10 @@
     var email = val("login-email"), password = val("login-password");
     if (!email || !password) { return err("Enter your email and password."); }
     try {
-      var r = await VUI.postJSON(API + "/login", { email: email, password: password });
-      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); }
+      var invite = hashQuery("invite");
+      var r = await VUI.postJSON(API + "/login", invite
+        ? { email: email, password: password, invite_token: invite } : { email: email, password: password });
+      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Signed in"); inviteToast(r); }
       else { err("Sign-in failed."); }
     } catch (e) { err(authMsg(e, "Sign-in failed.")); }
   }
@@ -586,9 +609,11 @@
     if (!password || !org) { return err("Choose a password and name your workspace."); }
     proof.password = password;
     proof.org_name = org;
+    var invite = hashQuery("invite");
+    if (invite) { proof.invite_token = invite; }        // redeem a presented invite at sign-up (best-effort; capped role)
     try {
       var r = await VUI.postJSON(API + "/signup/confirm", proof);
-      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Welcome to VIGIL"); }
+      if (r && r.username) { await refreshWho(); nav("#/"); VUI.toast("Welcome to VIGIL"); inviteToast(r); }
       else { err("Could not complete signup."); }
     } catch (e) { err(authMsg(e, "Could not complete signup.")); }
   }
@@ -700,8 +725,17 @@
     if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
     // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
     if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
+    // First-class entry cards to screens otherwise reached only through a menu (read through pageFlag, as Posture is):
+    // Knowledge shows the document count (a live feed); Assistant and Team link in. Each absent while its flag is off.
+    if (pageFlag("knowledge")) { cards.push(overviewCard(view, "Knowledge", API + "/knowledge", "Knowledge", kwOvFill)); }
+    if (pageFlag("team")) { cards.push(overviewCard(view, "Team", API + "/members", "Team", teamOvFill)); }
+    if (pageFlag("assistant")) { cards.push(assistantOvCard()); }
     cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
+    // The hero (deep-black globe + a live CVE feed) is a function declaration in this file; in the extracted-function
+    // unit harness it is absent, so the typeof guard keeps the Overview's cards byte-for-byte what that harness proves.
+    var hero = (typeof overviewHero === "function") ? overviewHero() : null;
     var body = h("div.cust-overview", {}, [
+      hero,
       h("h2", { text: "Overview" }),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
         + "this workspace by the server. Open any card for its full screen." }),
@@ -821,6 +855,159 @@
     rows.push(h("div.row", {}, [h("button.btn", { type: "button", text: "Open notifications",
       onClick: function () { if (!ntf.open) { toggleNtf(); } } })]));
     return h("div", {}, rows);
+  }
+  // The Knowledge overview card: the workspace's uploaded document count (a live read of /knowledge). A 403 role line
+  // and an empty state are handled by overviewCard's envelope; here we only shape the count + the Open link.
+  function kwOvFill(d) {
+    var docs = (d && d.documents) || [];
+    var n = parseInt(d && d.count, 10);
+    if (isNaN(n)) { n = docs.length; }
+    var rows = n ? [kv("Documents", n)] : [h("p.cust-muted", { text: "No documents yet." })];
+    rows.push(h("p.cust-muted.cust-ov-hint", { text: "The assistant can cite these." }));
+    rows.push(overviewLink("Knowledge", "#/knowledge"));
+    return h("div", {}, rows);
+  }
+  // The Team overview card: the workspace's member count (a live read of /members; a billing role is a 403 line).
+  function teamOvFill(d) {
+    var members = (d && d.members) || [];
+    var rows = members.length ? [kv("Members", members.length)]
+                              : [h("p.cust-muted", { text: "No members yet." })];
+    rows.push(overviewLink("Team", "#/team"));
+    return h("div", {}, rows);
+  }
+  // The Assistant overview card: no list feed (the assistant is a Q&A), so a static entry card — never an async read.
+  function assistantOvCard() {
+    return VUI.card("Assistant", null, h("div", {}, [
+      h("p.cust-muted", { text: "Advisory answers grounded in your confirmed findings." }),
+      overviewLink("Assistant", "#/assistant"),
+    ]));
+  }
+
+  // ---- the Overview hero: a deep-black dotted globe (canvas) + a live CVE feed ------------------------------------
+  // CSP-clean: the canvas is drawn by this file's own code (no inline script), the CVE rows are set with textContent
+  // (never innerHTML), and /api/cve is a SAME-ORIGIN read of the public catalog the edge serves. The globe degrades to
+  // nothing where there is no 2d canvas (the unit harness), and the feed degrades to a quiet line if the read fails.
+  function overviewHero() {
+    var canvas = h("canvas.cust-globe", { width: "480", height: "480", "aria-hidden": "true" });
+    try { custGlobe(canvas); } catch (e) { /* no canvas context (unit harness): the hero still shows its copy + feed */ }
+    var cve = h("div.cust-cve-feed", {}, loadingHolder("Loading CVE feed…"));
+    loadCveFeed(cve);
+    return h("div.cust-ov-hero", {}, [
+      h("div.cust-ov-hero-globe", {}, canvas),
+      h("div.cust-ov-hero-body", {}, [
+        h("p.cust-ov-kicker", { text: "VIGIL" }),
+        h("h2.cust-ov-hero-title", { text: "Prove, don't guess." }),
+        h("p.cust-ov-hero-sub", { text: "Every finding here is proven by an independent oracle and ships with evidence "
+          + "you can verify yourself. No speculation, no noise." }),
+        h("div.cust-cve", {}, [
+          h("div.cust-cve-head", {}, [VUI.icon("bell"), h("span", { text: "Recent CVEs" })]),
+          cve,
+        ]),
+      ]),
+    ]);
+  }
+  // A paginated read of the public CVE catalog, newest first; rows are set with textContent only.
+  async function loadCveFeed(holder) {
+    var d;
+    try { d = await VUI.getJSON("/api/cve?per_page=6&order=published_desc"); }
+    catch (e) { VUI.mount(holder, h("p.cust-muted", { text: "CVE feed is unavailable right now." })); return; }
+    var items = (d && d.items) || [];
+    if (!items.length) {
+      VUI.mount(holder, h("p.cust-muted", { text: (d && d.populated === false)
+        ? "CVE catalog is not yet populated." : "No recent CVEs." }));
+      return;
+    }
+    VUI.mount(holder, h("div.cust-cve-list", {}, items.map(function (it) {
+      var sev = String((it && it.severity) || "info").toLowerCase();
+      var cvss = (it && typeof it.cvss_base === "number") ? it.cvss_base.toFixed(1) : "";
+      var row = h("a.cust-cve-row", { href: "/cve/" + encodeURIComponent(String((it && it.id) || "")) }, [
+        h("span.cust-cve-id", { text: String((it && it.id) || "") }),
+        h("span.cust-cve-sev.sev-" + sev, { text: sev }),
+        cvss ? h("span.cust-cve-score", { text: cvss }) : null,
+      ]);
+      var title = String((it && it.title) || (it && it.description) || "");
+      if (title) { row.appendChild(h("span.cust-cve-title", { text: title })); }
+      return row;
+    })));
+  }
+  // A lightweight rotating dotted globe with a few great-circle arc paths. Pure canvas 2d, requestAnimationFrame.
+  // Guarded so it is inert where there is no DOM/canvas (the extracted-function unit tests): it throws, the caller
+  // swallows it, and the hero still renders its copy and the CVE feed.
+  function custGlobe(canvas) {
+    var ctx = canvas && canvas.getContext && canvas.getContext("2d");
+    if (!ctx) { throw new Error("no 2d context"); }
+    var W = canvas.width, H = canvas.height, R = Math.min(W, H) * 0.42, cx = W / 2, cy = H / 2;
+    // a grid of lat/long points on the unit sphere
+    var pts = [];
+    for (var la = -80; la <= 80; la += 12) {
+      var rl = la * Math.PI / 180, step = Math.max(8, Math.round(24 * Math.cos(rl)));
+      for (var lo = 0; lo < 360; lo += 360 / step) {
+        var ro = lo * Math.PI / 180;
+        pts.push([Math.cos(rl) * Math.cos(ro), Math.sin(rl), Math.cos(rl) * Math.sin(ro)]);
+      }
+    }
+    // a few arc paths (great-circle-ish) that pulse along the surface, like connecting routes
+    var arcs = [];
+    for (var a = 0; a < 5; a++) {
+      var p0 = pts[(a * 53) % pts.length], p1 = pts[(a * 97 + 11) % pts.length];
+      arcs.push([p0, p1, a * 1.7]);
+    }
+    var t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+    var raf = window.requestAnimationFrame || function (f) { return setTimeout(function () { f(Date.now()); }, 32); };
+    function slerp(p, q, u) {
+      var d = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+      d = Math.max(-1, Math.min(1, d));
+      var om = Math.acos(d) || 1e-4, s = Math.sin(om);
+      var k0 = Math.sin((1 - u) * om) / s, k1 = Math.sin(u * om) / s;
+      var x = k0 * p[0] + k1 * q[0], y = k0 * p[1] + k1 * q[1], z = k0 * p[2] + k1 * q[2];
+      var n = Math.sqrt(x * x + y * y + z * z) || 1;
+      return [x / n, y / n, z / n];
+    }
+    function css(name, fallback) {
+      try {
+        var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        return (v && v.trim()) || fallback;
+      } catch (e) { return fallback; }
+    }
+    var stopped = false;
+    function frame(now) {
+      if (stopped || !canvas.isConnected) { stopped = true; return; }       // the screen was left: stop the loop
+      var ang = ((now - t0) / 1000) * 0.28;                                 // a slow, calm spin
+      var ca = Math.cos(ang), sa = Math.sin(ang);
+      ctx.clearRect(0, 0, W, H);
+      // a faint rim glow so the near-black sphere reads as "shining", not flat
+      var glow = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, R * 1.15);
+      glow.addColorStop(0, "rgba(91,155,213,0.10)");
+      glow.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, R * 1.15, 0, Math.PI * 2); ctx.fill();
+      var dot = css("--st-running", "#5b9bd5"), faint = css("--text-2", "#626c7c");
+      function project(p) {
+        var x = p[0] * ca + p[2] * sa, z = -p[0] * sa + p[2] * ca, y = p[1];
+        return [cx + x * R, cy - y * R, z];                                 // z>0 faces the viewer
+      }
+      for (var i = 0; i < pts.length; i++) {
+        var pr = project(pts[i]);
+        var front = pr[2] > 0;
+        ctx.globalAlpha = front ? (0.35 + pr[2] * 0.5) : 0.08;
+        ctx.fillStyle = front ? faint : faint;
+        ctx.beginPath(); ctx.arc(pr[0], pr[1], front ? 1.5 : 1.0, 0, Math.PI * 2); ctx.fill();
+      }
+      for (var k = 0; k < arcs.length; k++) {
+        var seg = 26, head = ((now - t0) / 1000 * 0.35 + arcs[k][2]) % 1;
+        for (var j = 0; j < seg; j++) {
+          var u = j / (seg - 1);
+          var pp = project(slerp(arcs[k][0], arcs[k][1], u));
+          if (pp[2] <= 0) { continue; }
+          var near = 1 - Math.min(1, Math.abs(u - head) * 3);
+          ctx.globalAlpha = 0.12 + near * 0.7;
+          ctx.fillStyle = dot;
+          ctx.beginPath(); ctx.arc(pp[0], pp[1], 1.1 + near * 1.6, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+      raf(frame);
+    }
+    raf(frame);
   }
 
   function viewSoon(title) {
@@ -3553,6 +3740,7 @@
   function viewTeam() {
     var note = h("p.cust-team-msg", { role: "status", "aria-live": "polite" });
     var holder = h("div#cust-team", {}, loadingHolder("Loading…"));
+    var invHolder = h("div#cust-team-invites", {});     // the pending-invites section (filled only when invites are on)
     function say(text, bad) {
       note.textContent = text || "";
       note.className = "cust-team-msg" + (bad ? " bad" : "");
@@ -3572,7 +3760,24 @@
       if (here() !== "#/team") return;                 // the customer navigated away before the load resolved
       var parts = (d && d.seats) ? [teamSeats(d.seats)] : [];     // "used of M seats" only when seats are on
       parts.push(teamMembers((d && d.members) || [], act), teamAddCard(act));
+      // team e-mail invitations (VIGIL_CUSTOMER_TEAM_INVITE): the invite form + a pending-invites list, both absent
+      // while the flag is off (byte-identical to the team screen before invitations). The admin check is the server's.
+      if (TEAM_INVITE_ON) { parts.push(inviteCard(act), invHolder); loadInvites(); }
       VUI.mount(holder, parts);
+    }
+    async function loadInvites() {
+      var d;
+      try { d = await VUI.getJSON(API + "/member/invites"); }
+      catch (e) {
+        if (here() !== "#/team") return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // a 403 here is the same "admins only" the member list already showed; stay quiet rather than double up
+        VUI.mount(invHolder, (e && e.status === 403) ? h("div", {})
+          : h("p.cust-muted", { text: "Could not load pending invitations." }));
+        return;
+      }
+      if (here() !== "#/team") return;
+      VUI.mount(invHolder, [h("h3", { text: "Pending invitations" }), invitesList((d && d.invites) || [], act)]);
     }
     async function send(path, body, done, name, btn) {
       say("");
@@ -3602,9 +3807,295 @@
         return send("/member/revoke", { member_username: m.username },
           teamName(m) + " was removed from this workspace.", teamName(m), btn);
       },
+      invite: function (email, role, btn) {
+        return send("/member/invite", { email: email, role: role },
+          "Invitation sent to " + email + " (" + roleLabel(role) + ").", email, btn);
+      },
+      revokeInvite: function (iv, btn) {
+        return send("/member/invite/revoke", { invite_id: (iv && iv.invite_id) || "" },
+          "The invitation to " + String((iv && iv.email) || "") + " was revoked.", String((iv && iv.email) || ""), btn);
+      },
     };
     load();
     return shell(h("div", {}, [h("h2", { text: "Team" }), note, holder]), "#/team");
+  }
+
+  // ============ PR-K / PR-J / invite — Knowledge, the Security assistant, team e-mail invitations ===================
+  // Each is served only while the edge wrote its flag into the page (the SAME flag that serves its API), so a screen
+  // and its routes are never out of step; off, the tab is absent and the route is the home screen (byte-identical).
+  var KNOWLEDGE_ON = pageFlag("knowledge");       // VIGIL_CUSTOMER_KNOWLEDGE (DEFAULT ON)
+  var ASSISTANT_ON = pageFlag("assistant");       // VIGIL_CUSTOMER_ASSISTANT
+  var TEAM_INVITE_ON = pageFlag("teamInvite");    // VIGIL_CUSTOMER_TEAM_INVITE (DEFAULT ON)
+
+  // ---- Knowledge corpus (VIGIL_CUSTOMER_KNOWLEDGE) -----------------------------------------------------------------
+  // Upload this workspace's OWN documents into a PER-TENANT corpus (its own spine + vector index, scoped by a one-way
+  // hash of the workspace — never another tenant's, never VIGIL's global memory). The Security assistant may then cite
+  // them. The server scopes every read/write to the session workspace (admit_customer); this UI sends no org id. A
+  // document is text, capped in size and count; it is NEVER turned into a finding (only VIGIL's oracle confirms those).
+  function kwRefusal(e) {
+    var d = (e && e.data) || {};
+    if (d.error === "updating") { return String((e && e.message) || ""); }
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    if (/too large/i.test(s)) { return "That document is too large. Shorten it or split it, then try again."; }
+    if (/document limit reached/i.test(s)) { return s.charAt(0).toUpperCase() + s.slice(1); }
+    if (/run_engagement/i.test(s)) { return "Your role cannot add documents to this workspace. Ask an administrator."; }
+    if (/view_assessments/i.test(s)) { return "Your role does not have access to this workspace's knowledge."; }
+    return s ? (s.charAt(0).toUpperCase() + s.slice(1) + (/[.?!]$/.test(s) ? "" : ".")) : "The document could not be added.";
+  }
+  // the per-org spine stamps its records with an ISO-string ts (not epoch seconds), so render the date from either an
+  // ISO string (take its date part) or a numeric epoch (fmtDate) — never an empty "Updated —".
+  function kwDate(ts) {
+    if (ts == null || ts === "") { return ""; }
+    var s = String(ts);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) { return s.slice(0, 10); }
+    var d = fmtDate(ts);
+    return d === "—" ? "" : d;
+  }
+  function kwDoc(d) {
+    var name = String((d && d.filename) || "document");
+    var chunks = parseInt(d && d.chunks, 10) || 0;
+    var rows = [h("div.cust-kw-doc-head", {}, [
+      VUI.icon("book"), h("strong.cust-kw-doc-name", { text: name }),
+      h("span.cust-badge", { text: chunks + (chunks === 1 ? " section" : " sections") })])];
+    var when = kwDate(d && d.last_ts);
+    if (when) { rows.push(h("p.cust-muted", { text: "Updated " + when })); }
+    return h("div.card.cust-kw-doc", {}, rows);
+  }
+  function kwDocs(list) {
+    if (!list.length) {
+      return h("div.card.cust-soon", { text: "No documents yet. Upload a policy, runbook or architecture note and the "
+        + "assistant can cite it when it advises you." });
+    }
+    return h("div.cust-kw-list", {}, list.map(kwDoc));
+  }
+  function kwHits(hits) {
+    if (!hits.length) { return h("p.cust-muted", { text: "No matching documents for that question." }); }
+    return h("div.cust-kw-hits", {}, hits.map(function (ht) {
+      var pct = (ht && typeof ht.score === "number") ? Math.round(ht.score * 100) : null;
+      return h("div.card.cust-kw-hit", {}, [
+        h("div.cust-kw-hit-head", {}, [h("strong", { text: String((ht && ht.filename) || "document") }),
+          pct != null ? h("span.cust-badge", { text: "match " + pct + "%" }) : null]),
+        h("p.cust-kw-snip", { text: String((ht && ht.snippet) || "") })]);
+    }));
+  }
+  function viewKnowledge() {
+    var note = h("p.cust-kw-msg", { role: "status", "aria-live": "polite" });
+    var docsHolder = h("div#cust-kw-docs", {}, loadingHolder("Loading…"));
+    var hitsHolder = h("div#cust-kw-hits", {});
+    function say(text, bad) {
+      note.textContent = text || "";
+      note.className = "cust-kw-msg" + (bad ? " bad" : "");
+      if (bad) { try { note.scrollIntoView({ block: "nearest" }); } catch (e) { /* a convenience */ } }
+    }
+    async function load() {
+      var d;
+      try { d = await VUI.getJSON(API + "/knowledge"); }
+      catch (e) {
+        if (here() !== "#/knowledge") { return; }
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) {
+          VUI.mount(docsHolder, h("div.card.cust-soon", { text: "Your role does not have access to this workspace's "
+            + "knowledge. Ask an administrator." }));
+          return;
+        }
+        VUI.mount(docsHolder, h("div.card.cust-soon", { text: "Could not load your documents right now." }));
+        return;
+      }
+      if (here() !== "#/knowledge") { return; }
+      VUI.mount(docsHolder, kwDocs((d && d.documents) || []));
+    }
+    var fname = h("input#cust-kw-name", { type: "text", placeholder: "runbook.txt", autocomplete: "off",
+      spellcheck: "false", "aria-label": "Document name" });
+    var ftext = h("textarea#cust-kw-text", { rows: "6",
+      placeholder: "Paste the document text, or choose a text file below…", "aria-label": "Document text" });
+    var picker = h("input#cust-kw-file", { type: "file", accept: ".txt,.md,.csv,.json,.log,text/plain" });
+    picker.addEventListener("change", function () {
+      var f = picker.files && picker.files[0];
+      if (!f) { return; }
+      if (!String(fname.value || "").trim()) { fname.value = String(f.name || "document"); }
+      var fr = new FileReader();
+      fr.onload = function () { ftext.value = String(fr.result || ""); };
+      fr.onerror = function () { say("That file could not be read. Paste its text instead.", true); };
+      fr.readAsText(f);
+    });
+    var up = h("button.btn.primary.cust-kw-upload-btn", { type: "button", text: "Upload document" });
+    up.addEventListener("click", async function () {
+      var name = String(fname.value || "").trim(), data = String(ftext.value || "");
+      if (!name) { say("Give the document a name.", true); return; }
+      if (!data.trim()) { say("Add some document text to upload.", true); return; }
+      say(""); up.disabled = true;
+      try {
+        var r = await VUI.postJSON(API + "/knowledge/upload", { filename: name, data: data });
+        up.disabled = false; fname.value = ""; ftext.value = ""; picker.value = "";
+        VUI.toast((r && r.filename ? r.filename : "Document") + " added (" + ((r && r.chunks) || 0) + " sections).");
+        await load();
+      } catch (e) {
+        up.disabled = false;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        say(kwRefusal(e), true);
+      }
+    });
+    var qbox = h("input#cust-kw-q", { type: "text", placeholder: "Ask a question to see which documents match…",
+      autocomplete: "off", "aria-label": "Test query" });
+    var ask = h("button.btn.cust-kw-test-btn", { type: "button", text: "Test query" });
+    ask.addEventListener("click", async function () {
+      var q = String(qbox.value || "").trim();
+      if (!q) { say("Type a question to test.", true); return; }
+      VUI.mount(hitsHolder, loadingHolder("Searching…"));
+      try {
+        var r = await VUI.postJSON(API + "/knowledge/query", { question: q });
+        if (here() !== "#/knowledge") { return; }
+        VUI.mount(hitsHolder, kwHits((r && r.hits) || []));
+      } catch (e) {
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        VUI.mount(hitsHolder, h("p.cust-muted", { text: "Could not run that query right now." }));
+      }
+    });
+    load();
+    var body = h("div.cust-kw", {}, [
+      h("h2", { text: "Knowledge" }),
+      h("p.cust-muted", { text: "Upload your organization's own documents into a private corpus for this workspace. "
+        + "The Security assistant can cite them when it advises you. A document is never turned into a finding — only "
+        + "VIGIL's oracle confirms findings." }),
+      note,
+      h("div.card.cust-kw-upload", {}, [
+        h("h3", { text: "Add a document" }),
+        h("label", { for: "cust-kw-name", text: "Name" }), fname,
+        h("label", { for: "cust-kw-text", text: "Text" }), ftext,
+        h("div.cust-kw-file-row", {}, [picker]),
+        h("div.row", {}, [up]),
+      ]),
+      h("div.card.cust-kw-test", {}, [
+        h("h3", { text: "Test query" }),
+        h("p.cust-muted", { text: "See which documents a question matches, and the grounded snippet the assistant "
+          + "would cite." }),
+        h("div.cust-kw-qrow", {}, [qbox, ask]),
+        hitsHolder,
+      ]),
+      h("h3", { text: "Your documents" }),
+      docsHolder,
+    ]);
+    return shell(body, "#/knowledge");
+  }
+
+  // ---- Security assistant (VIGIL_CUSTOMER_ASSISTANT) ---------------------------------------------------------------
+  // An ADVISORY Q&A grounded ONLY in this workspace's own oracle-confirmed findings (and, with knowledge on, its own
+  // uploaded documents). It summarises / explains / prioritises EXISTING findings as advice (kind=assistant_advice) —
+  // it never asserts a new vulnerability and never files a finding (the oracle alone mints). This is NOT the engagement
+  // command-box (a separate in-flight feature); this screen only advises.
+  function asRefusal(e) {
+    var d = (e && e.data) || {}, status = e && e.status;
+    if (status === 429) { return "You've asked a lot in a short time. Wait a minute, then ask again."; }
+    if (d.error === "updating") { return String((e && e.message) || ""); }
+    var s = String(d.error || "").replace(/^(denied|provision failed|bad request|request failed): /, "");
+    if (/view_assessments/i.test(s)) { return "Your role does not have access to this workspace's findings."; }
+    if (/empty or too long/i.test(s)) { return "Ask a shorter question."; }
+    return s ? (s.charAt(0).toUpperCase() + s.slice(1) + (/[.?!]$/.test(s) ? "" : ".")) : "The assistant could not answer right now.";
+  }
+  function asSources(reply) {
+    var refs = (reply && reply.grounded_in) || [];
+    var dc = parseInt(reply && reply.document_count, 10) || 0;
+    var kids = [];
+    if (refs.length) {
+      kids.push(h("div.cust-as-src", {}, [
+        h("span.cust-as-src-label", { text: refs.length === 1 ? "Grounded in 1 confirmed finding"
+          : "Grounded in " + refs.length + " confirmed findings" }),
+        h("div.cust-as-chips", {}, refs.map(function (rf) { return h("span.cust-badge", { text: String(rf) }); })),
+      ]));
+    }
+    if (dc) {
+      kids.push(h("p.cust-muted.cust-as-docs", { text: dc === 1 ? "Also cited 1 of your documents."
+        : "Also cited " + dc + " of your documents." }));
+    }
+    if (!refs.length && !dc) {
+      kids.push(h("p.cust-muted", { text: "No confirmed findings grounded this answer yet." }));
+    }
+    return h("div.cust-as-sources", {}, kids);
+  }
+  function viewAssistant() {
+    var intro = KNOWLEDGE_ON ? "your confirmed findings and your uploaded documents" : "your confirmed findings";
+    var log = h("div#cust-as-log", {}, h("p.cust-muted.cust-as-hello", { text: "Ask a security question about this "
+      + "workspace. The assistant answers with advice grounded in " + intro + "." }));
+    var qbox = h("textarea#cust-as-q", { rows: "2",
+      placeholder: "e.g. Which of our findings should we fix first, and why?", "aria-label": "Your question" });
+    var ask = h("button.btn.primary.cust-as-ask", { type: "button", text: "Ask" });
+    var busy = false;
+    async function send() {
+      if (busy) { return; }
+      var q = String(qbox.value || "").trim();
+      if (!q) { return; }
+      busy = true; ask.disabled = true;
+      log.appendChild(h("div.cust-as-msg.cust-as-you", {}, [h("span.cust-as-who", { text: "You" }),
+        h("div.cust-as-text", { text: q })]));
+      qbox.value = "";
+      var pending = h("div.cust-as-msg.cust-as-ai.cust-as-pending", {}, [h("span.cust-as-who", { text: "Assistant" }),
+        h("div.cust-as-text", { text: "Thinking…" })]);
+      log.appendChild(pending);
+      try { pending.scrollIntoView({ block: "nearest" }); } catch (e) { /* a convenience */ }
+      try {
+        var r = await VUI.postJSON(API + "/assistant/ask", { question: q });
+        if (here() !== "#/assistant") { return; }
+        VUI.mount(pending, [h("span.cust-as-who", { text: "Assistant" }),
+          h("div.cust-as-text", { text: String((r && r.answer) || "No answer was returned.") }), asSources(r)]);
+        pending.className = "cust-as-msg cust-as-ai";
+      } catch (e) {
+        busy = false; ask.disabled = false;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        VUI.mount(pending, [h("span.cust-as-who", { text: "Assistant" }),
+          h("div.cust-as-text.bad", { text: asRefusal(e) })]);
+        pending.className = "cust-as-msg cust-as-ai";
+        return;
+      }
+      busy = false; ask.disabled = false;
+    }
+    ask.addEventListener("click", send);
+    var body = h("div.cust-as", {}, [
+      h("h2", { text: "Security assistant" }),
+      h("p.cust-muted", { text: "Advisory guidance grounded in this workspace's own confirmed findings. It explains and "
+        + "prioritises what VIGIL has already proven — it never asserts a new vulnerability and never files a finding." }),
+      h("div.card.cust-as-panel", {}, [log, h("div.cust-as-input", {}, [qbox, ask])]),
+    ]);
+    return shell(body, "#/assistant");
+  }
+
+  // ---- team e-mail invitations (VIGIL_CUSTOMER_TEAM_INVITE) --------------------------------------------------------
+  // Invite a person who has NO VIGIL account yet, by e-mail, with a customer-grantable role. The invite GRANTS NOTHING
+  // until it is accepted at sign-up / sign-in; it is single-use, expiring, tenant-scoped and rate-limited. The acting
+  // requester and the workspace come from the SERVER-side session, never the body. Shown only while TEAM_INVITE_ON.
+  function inviteRow(iv, act) {
+    var email = String((iv && iv.email) || "");
+    var rows = [h("div.cust-invite-head", {}, [
+      h("strong.cust-invite-email", { text: email }),
+      h("span.cust-badge", { text: roleLabel(iv && iv.role) }),
+      h("span.chip", { text: "Pending" })])];
+    if (iv && iv.expires_at) { rows.push(h("p.cust-muted", { text: "Expires " + fmtDate(iv.expires_at) })); }
+    var revoke = h("button.btn.danger.cust-invite-revoke", { type: "button", text: "Revoke" });
+    revoke.addEventListener("click", function () { act.revokeInvite(iv, revoke); });
+    rows.push(h("div.cust-member-actions", {}, [revoke]));
+    return h("div.card.cust-invite", {}, rows);
+  }
+  function invitesList(list, act) {
+    if (!list.length) { return h("p.cust-muted", { text: "No pending invitations." }); }
+    return h("div.cust-invite-list", {}, list.map(function (iv) { return inviteRow(iv, act); }));
+  }
+  function inviteCard(act) {
+    var email = h("input#team-invite-email", { type: "email", autocomplete: "off", spellcheck: "false" });
+    var role = teamRoleSelect("team-invite-role", "viewer");
+    var send = h("button.btn.primary.cust-invite-send", { type: "button", text: "Send invitation" });
+    send.addEventListener("click", function () {
+      var e = String(email.value || "").trim().toLowerCase(), r = String(role.value || "");
+      if (!e) { act.say("Enter the e-mail to invite.", true); return; }
+      if (!teamGrantable(r)) { act.say("Choose a role: Admin, Analyst or Viewer.", true); return; }
+      act.invite(e, r, send);
+    });
+    return h("div.card.cust-team-invite", {}, [
+      h("h3", { text: "Invite by e-mail" }),
+      h("p.cust-muted", { text: "Invite someone who does not have a VIGIL account yet. They get an e-mail to join this "
+        + "workspace with the role you pick. The invitation grants nothing until they accept it at sign-up or sign-in." }),
+      h("label", { for: "team-invite-email", text: "E-mail" }), email,
+      h("label", { for: "team-invite-role", text: "Role" }), role,
+      h("div.cust-member-actions", {}, [send]),
+    ]);
   }
 
   // ---- Code (Red-Pen, VIGIL_REDPEN_ENABLED): connected GitHub repositories, their policy, Red-Pen System ------------
@@ -4630,6 +5121,7 @@
       "#/team": "key", "#/connect": "link", "#/monitoring": "shield", "#/live": "live", "#/fix-first": "bolt",
       "#/attack-path": "search", "#/code": "brain", "#/plans": "book", "#/reports": "clip", "#/settings": "gear",
       "#/privacy": "key", "#/seller-identity": "info", "#/guide": "book",
+      "#/knowledge": "book", "#/assistant": "brain", "#/trust": "shield",
     };
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
     var props = { type: "button", onClick: function () { nav(hash); } };
@@ -4652,6 +5144,8 @@
     var links = authed()
       ? [navLink("Overview", "#/"), navLink("Billing", "#/billing"), navLink("Invoices", "#/invoices"),
          navLink("Assets", "#/assets"), navLink("Assessments", "#/assessments"), navLink("Team", "#/team")]
+        .concat(pageFlag("assistant") ? [navLink("Assistant", "#/assistant")] : [])   // PR-J the advisory assistant
+        .concat(pageFlag("knowledge") ? [navLink("Knowledge", "#/knowledge")] : [])   // PR-K the knowledge corpus
         .concat(CONNECT_ON ? [navLink("Connect", "#/connect")] : [])
         .concat(MONITORING_ON ? [navLink("Monitoring", "#/monitoring")] : [])
         .concat(LIVE_ON ? [navLink("Live Control", "#/live")] : [])
@@ -4665,6 +5159,10 @@
         .concat(PRIVACY_CENTER_ON ? [navLink("Privacy", "#/privacy")] : [])      // legal/governance S2
         .concat(SELLER_IDENTITY_ON ? [navLink("Seller identity", "#/seller-identity")] : [])   // legal/governance S7
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
+        // Trust Center — a first-class link to the stable PUBLIC /trust route (a full-page same-origin navigation, not
+        // a hash route): the published security posture, subprocessors and proofs. Always offered to a signed-in member.
+        .concat([h("a.cust-nav-link.cust-nav-trust", { href: "/trust" },
+          [VUI.icon("shield"), h("span.cust-nav-label", { text: "Trust Center" })])])
       : [];
     // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
     var brandDark = { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" };
@@ -4990,6 +5488,10 @@
     // the Fix-first screen off: #/fix-first is the home screen, exactly as any unknown route is
     "#/fix-first": function () { return authed() ? (POSTURE_ON ? viewFixFirst() : viewDashboard()) : viewLogin(); },
     "#/team": function () { return authed() ? (TEAM_ON ? viewTeam() : viewSoon("Team")) : viewLogin(); },
+    // Knowledge off: #/knowledge is the home screen, exactly as any unknown route is (byte-identical)
+    "#/knowledge": function () { return authed() ? (KNOWLEDGE_ON ? viewKnowledge() : viewDashboard()) : viewLogin(); },
+    // the assistant off: #/assistant is the home screen, exactly as any unknown route is (byte-identical)
+    "#/assistant": function () { return authed() ? (ASSISTANT_ON ? viewAssistant() : viewDashboard()) : viewLogin(); },
     // monitoring off: #/monitoring is the home screen, exactly as any unknown route is
     "#/monitoring": function () { return authed() ? (MONITORING_ON ? viewMonitoring() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)

@@ -103,6 +103,8 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/assets": ("Authorized assets", ("api/customer/assets",)),
     "#/assessments": ("Assessments", ("api/customer/assessments", "api/customer/launches")),
     "#/team": ("Team", ("api/customer/members",)),
+    "#/assistant": ("Security assistant", ()),                          # PR-J: advisory Q&A, no read on arrival
+    "#/knowledge": ("Knowledge", ("api/customer/knowledge",)),          # PR-K: the org's uploaded documents
     "#/connect": ("Connect", ("api/customer/connect",)),
     "#/monitoring": ("Monitoring", ("api/customer/monitoring", "api/customer/monitoring/events")),
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
@@ -135,6 +137,8 @@ _CONTROLS: dict[str, dict[str, int]] = {
                       "Pause": 1,                                   # cust_b: running, and pause is offered
                       "View findings": 2},                          # every assessment
     "#/team": {"Add member": 1, "Change role": 1, "Remove": 1},     # cust_ben (the founder's row is read-only)
+    "#/assistant": {"Ask": 1},                                      # the one advisory Q&A control
+    "#/knowledge": {"Upload document": 1, "Test query": 1},         # upload a document + the grounded test query
     # Website: Continue a half-finished proof, Prove again a lapsed one, Connect a website; Code repository: Connect
     # GitHub, Open Code; Cloud account: Cancel / Continue a connection not finished, Connect again / Disconnect a lapsed
     # one, Disconnect a connected one, Connect a cloud account
@@ -186,6 +190,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
 _WALK_FLAGS = {"onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "team": "1", "security": "1", "passkey": "1",
+               "assistant": "1", "knowledge": "1",   # PR-J / PR-K: the advisory assistant + the knowledge corpus screens
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
@@ -406,6 +411,12 @@ _FAKE_SERVER = {
     "api/customer/members": {"org_id": "org_acme", "members": [
         {"username": "cust_ana", "email": "ana@acme.com", "role": "founder"},
         {"username": "cust_ben", "email": "ben@acme.com", "role": "analyst", "since": 1700000000}]},
+    # PR-K: the org's own uploaded documents (filename + chunk count + last-updated), as list_documents returns them.
+    # The Knowledge screen renders these as inert document cards (no buttons); its two controls are the upload + the
+    # test query, which render regardless of the document list.
+    "api/customer/knowledge": {"org_id": "org_acme", "count": 2, "documents": [
+        {"filename": "incident-response.md", "chunks": 3, "first_seq": 1, "last_ts": 1700000000},
+        {"filename": "security-policy.md", "chunks": 2, "first_seq": 4, "last_ts": 1700000100}]},
     # Connect: the real Provisioner.customer_connect_overview shape — connect.connect_overview's three legs (sites =
     # assets_overview rows, each still carrying its challenge; repos = the allowlisted row with the one-way slug; cloud
     # = cloud_overview rows, a not-finished one carrying only provider + account) plus `available`, every flow on, so

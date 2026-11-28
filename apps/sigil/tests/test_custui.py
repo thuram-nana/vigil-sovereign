@@ -23,6 +23,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -158,6 +159,42 @@ def _owner_lease(org_id, host, *, units=5, nonce="edge-nonce-1", now=None):
         engagement_slug=_customer_slug(org_id, host), org_id=org_id, scope_host=host, units_reserved=units,
         not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=1), nonce=nonce, issued_at=t.timestamp())
     return sign_credit_launch_lease(doc, {"owner": kp.private_key_b64}).model_dump(mode="json")
+
+
+def test_cve_feed_is_served_unauthenticated_read_only(tmp_path, monkeypatch):
+    """PR-5 — the customer edge serves the PUBLIC CVE catalog (offense-free) at /api/cve so the SPA Overview can show
+    a live feed from a same-origin fetch (CSP). It needs no session, takes no org, mints nothing. An absent catalog is
+    an honest empty feed; a populated one returns the paginated rows (published_desc), clamped to the feed cap."""
+    from sigil import config
+    from sigil.cve.catalog import CveCatalogStore
+    db = str(tmp_path / "cve.db")
+    s = CveCatalogStore(db)
+    s.upsert({"id": "CVE-2024-0001", "published": "2024-05-01", "cvss_base": 9.9, "kev": True, "title": "Alpha"})
+    s.upsert({"id": "CVE-2024-0002", "published": "2024-06-01", "cvss_base": 5.0, "title": "Beta"})
+    monkeypatch.setattr(config, "CVE_CATALOG_PATH", Path(db))
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()                                            # NO sign-in: the feed is public read-only data
+        c, r = _get(op, ep, "/api/cve?per_page=6&order=published_desc")
+        assert c == 200 and r["populated"] is True and r["total"] == 2, (c, r)
+        assert r["items"][0]["id"] == "CVE-2024-0002"             # newest first (published_desc)
+        assert r["per_page"] == 6
+        # per_page is clamped to the small feed cap even if a caller asks for a huge page
+        c, r2 = _get(op, ep, "/api/cve?per_page=10000")
+        assert c == 200 and r2["per_page"] <= 24, (c, r2)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_cve_feed_is_an_honest_empty_when_the_catalog_is_absent(tmp_path, monkeypatch):
+    from sigil import config
+    monkeypatch.setattr(config, "CVE_CATALOG_PATH", Path(tmp_path / "missing.db"))
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        c, r = _get(_opener(), ep, "/api/cve?per_page=6")
+        assert c == 200 and r["populated"] is False and r["items"] == [] and r["total"] == 0, (c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
 
 
 def test_signup_confirm_login_whoami_logout_over_edge(tmp_path, monkeypatch):

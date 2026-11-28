@@ -2115,11 +2115,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _provision_body_cap(self, action: str) -> int:
         """The body cap for a provision action: the larger SSO/SCIM caps apply ONLY while the flag is on (off ⇒ the
-        64 KiB cap for every action, exactly as before)."""
+        64 KiB cap for every action, exactly as before). PR-K: a ``knowledge_ingest`` carries the document's own text,
+        so its cap is the sovereign document cap (``customer_knowledge_max_doc_bytes``, default 1 MiB) plus the 64 KiB
+        envelope headroom — but ONLY while knowledge is on, so with the flag off every action keeps the 64 KiB cap."""
         if action in self._SSO_BODY_CAPS:
             from .. import config as _config
             if _config.customer_sso_enabled():
                 return self._SSO_BODY_CAPS[action]
+        if action == "knowledge_ingest":
+            from .. import config as _config
+            if _config.customer_knowledge_enabled():
+                return _config.customer_knowledge_max_doc_bytes() + self._MAX_BODY
         return self._MAX_BODY
 
     @staticmethod

@@ -516,3 +516,92 @@ def test_dispatch_serves_knowledge_actions_by_default(monkeypatch):
     # the org comes from the body (server-bound to the session upstream), never a free requester field; the upload
     # body is UTF-8 encoded to bytes for the provisioner.
     assert ("ingest", "olive", "acme", "f.txt", b"hello") in sp.calls
+
+
+# ========================================================= Part 6 - the custui CUSTOMER edge routes (end-to-end) ====
+# The missing wiring before this wave: the sovereign knowledge_* actions existed, but the keyless customer edge had no
+# /api/customer/knowledge/* routes and the SPA had no screen. These prove the edge relays over the hop with the ORG
+# taken from the SERVER-side session (never a body org_id), gated by the DEFAULT-ON flag, and 404 when it is off.
+
+def _edge_stack(tmp_path, monkeypatch):
+    """A sovereign + custui edge over the hop (test_custui._stack), with the per-org corpus pointed at tmp and the
+    embed/index backends faked, and the founder-tester flag on so a fresh signup (the org founder) holds
+    run_engagement + view_assessments (otherwise the kill switch admits a founder as org_admin and ingest refuses)."""
+    from test_custui import _stack
+    _install_default_backends(monkeypatch, tmp_path)
+    # the founder role (org_admin + run_engagement + view_assessments) is granted at sign-up only with BOTH the
+    # founder-tester flag and the trial preview on, and the admit-time kill switch also needs the founder flag.
+    monkeypatch.setenv("VIGIL_SIGNUP_FOUNDER_TESTER_ENABLED", "1")
+    monkeypatch.setenv("VIGIL_TRIAL_PREVIEW_ENABLED", "1")
+    return _stack(tmp_path, monkeypatch)
+
+
+def _signup(op, ep):
+    from test_custui import _post
+    t = _post(op, ep, "/api/customer/signup/request", {"email": "k@acme.io"})[1]["dev_token"]
+    return _post(op, ep, "/api/customer/signup/confirm",
+                 {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+
+
+def test_edge_knowledge_upload_list_query_roundtrip_over_the_hop(tmp_path, monkeypatch):
+    from test_custui import _get, _opener, _post
+    monkeypatch.delenv(FLAG, raising=False)                  # DEFAULT ON
+    sov, edge, ep, _ = _edge_stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        _signup(op, ep)
+        # upload a document — the org is the SESSION org, never a body field (none is sent)
+        c, r = _post(op, ep, "/api/customer/knowledge/upload",
+                     {"filename": "runbook.txt", "data": "incident response runbook escalate to the security engineer"})
+        assert c == 200 and r["filename"] == "runbook.txt" and r["chunks"] >= 1, (c, r)
+        # list — the org's own documents
+        c, lst = _get(op, ep, "/api/customer/knowledge")
+        assert c == 200 and lst["count"] == 1 and lst["documents"][0]["filename"] == "runbook.txt", (c, lst)
+        # grounded test query — inert citation hits
+        c, q = _post(op, ep, "/api/customer/knowledge/query",
+                     {"question": "incident response runbook escalate security engineer"})
+        assert c == 200 and q["count"] >= 1 and q["hits"][0]["filename"] == "runbook.txt", (c, q)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_edge_knowledge_requires_a_session(tmp_path, monkeypatch):
+    from test_custui import _get, _opener, _post
+    monkeypatch.delenv(FLAG, raising=False)
+    sov, edge, ep, _ = _edge_stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()                                      # no sign-in: the edge refuses before the hop fires
+        assert _get(op, ep, "/api/customer/knowledge")[0] == 401
+        assert _post(op, ep, "/api/customer/knowledge/upload", {"filename": "f.txt", "data": "x"})[0] == 401
+        assert _post(op, ep, "/api/customer/knowledge/query", {"question": "q"})[0] == 401
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_edge_knowledge_routes_are_absent_when_the_flag_is_off(tmp_path, monkeypatch):
+    from test_custui import _get, _opener, _post
+    monkeypatch.setenv(FLAG, "0")                           # EXPLICIT off — the routes are an unknown route/action (404)
+    sov, edge, ep, _ = _edge_stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        _signup(op, ep)                                     # a real session, so 404 is the flag, not the session
+        assert _get(op, ep, "/api/customer/knowledge")[0] == 404
+        assert _post(op, ep, "/api/customer/knowledge/upload", {"filename": "f.txt", "data": "x"})[0] == 404
+        assert _post(op, ep, "/api/customer/knowledge/query", {"question": "q"})[0] == 404
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_edge_knowledge_upload_ignores_a_body_org_id(tmp_path, monkeypatch):
+    """Finding D + tenant isolation at the edge: a body org_id is IGNORED — the document lands in the SESSION org."""
+    from test_custui import _get, _opener, _post  # noqa: F401
+    monkeypatch.delenv(FLAG, raising=False)
+    sov, edge, ep, _ = _edge_stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        me = _signup(op, ep)
+        c, r = _post(op, ep, "/api/customer/knowledge/upload",
+                     {"org_id": "org_someone_else", "filename": "mine.txt", "data": "my own organization policy text"})
+        assert c == 200 and r["org_id"] == me["org_id"], (c, r)   # the hop-bound session org, never the body
+    finally:
+        sov.shutdown(); edge.shutdown()

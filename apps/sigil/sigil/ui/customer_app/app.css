@@ -706,3 +706,115 @@ body.cust-touring .cust-topbar { position: relative; z-index: 1001; }
 .live-step-t { font-family: var(--font-mono, monospace); font-size: var(--fs-sm, 0.85em); color: var(--muted, #888); min-width: 6.5em; }
 .live-step-i { width: 1.2em; text-align: center; }
 .live-step-l { flex: 1; }
+
+/* =====================================================================================================================
+   CONSUMER FRONT-END WAVE — deep TRUE-BLACK theme + the Overview hero (globe + CVE feed), the Knowledge screen, the
+   Security assistant and the team-invite UI. The deep-black palette is applied HERE (scoped to the customer plane and
+   the DARK theme only) rather than in the byte-shared tokens.css, so the operator console, the shared kit and the
+   light theme are untouched. In light mode the tokens inherit the kit's light palette (no duplicated hex values).
+   ===================================================================================================================== */
+body[data-plane="customer"] {
+  --bg-0: #050507;   /* app background — near-pure black */
+  --bg-1: #0a0b0e;   /* panels / cards */
+  --bg-2: #0f1116;   /* raised */
+  --bg-3: #161922;   /* hover / inputs */
+  background: var(--bg-0);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) body[data-plane="customer"] {
+    --bg-0: inherit; --bg-1: inherit; --bg-2: inherit; --bg-3: inherit;     /* light stays the kit's */
+  }
+}
+:root[data-theme="light"] body[data-plane="customer"] {
+  --bg-0: inherit; --bg-1: inherit; --bg-2: inherit; --bg-3: inherit;
+}
+
+/* ---- Overview hero: the dotted globe + the live CVE feed ---------------------------------------------------------- */
+.cust-ov-hero {
+  display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 24px; align-items: center;
+  margin-bottom: 24px; padding: 20px; border: 1px solid var(--border); border-radius: var(--r-3, 16px);
+  background:
+    radial-gradient(120% 140% at 18% 20%, color-mix(in srgb, var(--st-running) 10%, transparent), transparent 60%),
+    var(--bg-1);
+  overflow: hidden;
+}
+.cust-ov-hero-globe { display: flex; justify-content: center; align-items: center; }
+.cust-globe { width: 100%; max-width: 340px; height: auto; aspect-ratio: 1 / 1; display: block; }
+.cust-ov-kicker { font-size: var(--fs-micro, 11px); letter-spacing: var(--tracking-label, .08em); text-transform: uppercase;
+  color: var(--text-2); margin: 0 0 6px; }
+.cust-ov-hero-title { margin: 0 0 8px; font-size: var(--fs-3xl, 40px); line-height: var(--lh-tight, 1.2); color: var(--text-0); }
+.cust-ov-hero-sub { margin: 0 0 16px; color: var(--text-1); max-width: 54ch; }
+.cust-cve { border-top: 1px solid var(--border); padding-top: 12px; }
+.cust-cve-head { display: flex; align-items: center; gap: 8px; color: var(--text-1); font-size: var(--fs-sm, 14px);
+  font-weight: 600; margin-bottom: 8px; }
+.cust-cve-head .glyph { color: var(--st-running); }
+.cust-cve-list { display: grid; gap: 4px; }
+.cust-cve-row { display: grid; grid-template-columns: auto auto auto 1fr; gap: 10px; align-items: baseline;
+  padding: 6px 8px; border-radius: var(--r-1, 8px); text-decoration: none; color: var(--text-1);
+  border: 1px solid transparent; }
+.cust-cve-row:hover { background: var(--bg-2); border-color: var(--border); }
+.cust-cve-id { font-family: var(--font-mono, monospace); font-size: var(--fs-xs, 12.5px); color: var(--text-0); white-space: nowrap; }
+.cust-cve-sev { font-size: var(--fs-micro, 11px); text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+.cust-cve-sev.sev-critical { color: var(--sev-critical); }
+.cust-cve-sev.sev-high { color: var(--sev-high); }
+.cust-cve-sev.sev-medium { color: var(--sev-medium); }
+.cust-cve-sev.sev-low { color: var(--sev-low); }
+.cust-cve-sev.sev-info, .cust-cve-sev.sev-none { color: var(--sev-info); }
+.cust-cve-score { font-family: var(--font-mono, monospace); font-size: var(--fs-xs, 12.5px); color: var(--text-2); }
+.cust-cve-title { color: var(--text-1); font-size: var(--fs-sm, 14px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cust-ov-hint { margin: 2px 0 6px; font-size: var(--fs-xs, 12.5px); }
+
+/* ---- Knowledge screen -------------------------------------------------------------------------------------------- */
+.cust-kw > p.cust-muted { max-width: 72ch; }
+.cust-kw-msg { min-height: 1.2em; margin: 8px 0; }
+.cust-kw-msg.bad { color: var(--st-blocked); }
+.cust-kw-upload label, .cust-kw-test label { display: block; font-size: var(--fs-sm, 14px); color: var(--text-1); margin: 10px 0 4px; }
+.cust-kw-upload input[type="text"], .cust-kw-upload textarea, .cust-kw-qrow input {
+  width: 100%; box-sizing: border-box; font: inherit; background: var(--bg-3); color: var(--text-0);
+  border: 1px solid var(--border); border-radius: var(--r-1, 8px); padding: 8px 10px; }
+.cust-kw-upload textarea { resize: vertical; min-height: 6em; }
+.cust-kw-file-row { margin: 10px 0; }
+.cust-kw-qrow { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.cust-kw-qrow input { flex: 1; }
+.cust-kw-list { display: grid; gap: 8px; }
+.cust-kw-doc-head { display: flex; align-items: center; gap: 8px; }
+.cust-kw-doc-head .glyph { color: var(--st-running); }
+.cust-kw-doc-name { color: var(--text-0); }
+.cust-kw-hits { display: grid; gap: 8px; margin-top: 8px; }
+.cust-kw-hit-head { display: flex; align-items: center; gap: 8px; }
+.cust-kw-snip { margin: 6px 0 0; color: var(--text-1); font-size: var(--fs-sm, 14px); white-space: pre-wrap; word-break: break-word; }
+
+/* ---- Security assistant ------------------------------------------------------------------------------------------ */
+.cust-as > p.cust-muted { max-width: 72ch; }
+.cust-as-panel { display: grid; gap: 12px; }
+.cust-as-log { display: grid; gap: 12px; max-height: 52vh; overflow: auto; padding-right: 4px; }
+.cust-as-hello { margin: 0; }
+.cust-as-msg { display: grid; gap: 4px; }
+.cust-as-who { font-size: var(--fs-micro, 11px); text-transform: uppercase; letter-spacing: .06em; color: var(--text-2); }
+.cust-as-text { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-2, 12px);
+  padding: 10px 12px; color: var(--text-0); white-space: pre-wrap; word-break: break-word; line-height: var(--lh, 1.55); }
+.cust-as-you .cust-as-text { background: color-mix(in srgb, var(--st-running) 14%, var(--bg-2)); }
+.cust-as-text.bad { color: var(--st-blocked); }
+.cust-as-pending .cust-as-text { color: var(--text-2); }
+.cust-as-sources { margin-top: 6px; }
+.cust-as-src { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cust-as-src-label { font-size: var(--fs-xs, 12.5px); color: var(--text-2); }
+.cust-as-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.cust-as-docs { margin: 4px 0 0; font-size: var(--fs-xs, 12.5px); }
+.cust-as-input { display: flex; gap: 8px; align-items: flex-end; }
+.cust-as-input textarea { flex: 1; box-sizing: border-box; font: inherit; resize: vertical; min-height: 2.4em;
+  background: var(--bg-3); color: var(--text-0); border: 1px solid var(--border); border-radius: var(--r-1, 8px); padding: 8px 10px; }
+
+/* ---- team e-mail invitations ------------------------------------------------------------------------------------- */
+.cust-team-invite label { display: block; font-size: var(--fs-sm, 14px); color: var(--text-1); margin: 10px 0 4px; }
+.cust-team-invite input, .cust-team-invite select {
+  width: 100%; box-sizing: border-box; font: inherit; background: var(--bg-3); color: var(--text-0);
+  border: 1px solid var(--border); border-radius: var(--r-1, 8px); padding: 8px 10px; }
+.cust-invite-list { display: grid; gap: 8px; }
+.cust-invite-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cust-invite-email { color: var(--text-0); word-break: break-all; }
+
+@media (max-width: 760px) {
+  .cust-ov-hero { grid-template-columns: 1fr; }
+  .cust-ov-hero-globe { order: 2; }
+}

@@ -67,6 +67,8 @@ _CSP = ("default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestor
 _MAX_BODY = 65536
 # PR-I: the largest proof-bundle ZIP this edge will relay (the provisioner's own cap, proof_export.MAX_ZIP_BYTES).
 _MAX_PROOF_BYTES = 2 * 1024 * 1024
+# PR-5: the most CVE rows the customer Overview feed ever serves in one page (a bounded read of public data).
+_CVE_FEED_MAX = 24
 
 # How long the edge waits on its loopback hop to the cockpit. A hop that gives up BEFORE the cockpit finishes is
 # worse than a slow page: the cockpit completes the action anyway (a hosted checkout is created, an email sent,
@@ -233,6 +235,14 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     posture = _config.customer_posture_enabled()
     monitoring = _config.customer_monitoring_enabled()
     team = _config.customer_team_ui_enabled()
+    # The team EMAIL-INVITE flow (VIGIL_CUSTOMER_TEAM_INVITE; DEFAULT ON) — the Team screen's "Invite by email" form,
+    # the pending-invites list and Revoke. The SAME flag that serves the member/invite* edge routes, so the form and
+    # its API are never out of step; a non-secret on/off value written into the page, counting in the build id.
+    team_invite = _config.customer_team_invite_enabled()
+    # PR-J — the security ASSISTANT (the advisory chat grounded in the org's own findings + knowledge). The SAME
+    # VIGIL_CUSTOMER_ASSISTANT that serves the assistant/ask edge route, so the screen and its API are never out of
+    # step; a non-secret on/off value written into the page, counting in the build id.
+    assistant = _config.customer_assistant_enabled()
     # Live Control (VIGIL_CUSTOMER_LIVE_CONTROL) — the #/live screen: watch the live engagement (phase activity)
     # and steer it with an advisory instruction. The SAME flag that serves /api/customer/launch/instruct +
     # /api/customer/live/activity, so the screen and its routes are never out of step; off, the tab is absent and
@@ -332,7 +342,9 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_PROOF_BADGE__": "1" if proof_badge else "0",
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
-                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0", **area6})
+                                     "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0",
+                                     "__VIGIL_ASSISTANT__": "1" if assistant else "0",
+                                     "__VIGIL_TEAM_INVITE__": "1" if team_invite else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -636,9 +648,19 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         from .oidc_handoff import client_net
         return client_net(self._ip(), allow_private=not is_production_posture())
 
-    def _read_body(self) -> dict:
+    def _body_cap(self, action: str) -> int:
+        """The incoming-body cap for a customer action. Every action body is tiny (64 KiB) EXCEPT a knowledge
+        upload, which carries the document's own text (the sovereign corpus caps the decoded bytes at
+        ``customer_knowledge_max_doc_bytes()`` — default 1 MiB). The larger cap applies ONLY while knowledge is on,
+        so with the flag off the surface is byte-identical. Headroom covers the JSON envelope (filename + escapes)."""
+        if action == "knowledge/upload" and _knowledge_on():
+            from .. import config as _config
+            return _config.customer_knowledge_max_doc_bytes() + _MAX_BODY
+        return _MAX_BODY
+
+    def _read_body(self, cap: "int | None" = None) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > _MAX_BODY:
+        if length > (_MAX_BODY if cap is None else cap):
             raise ValueError("body too large")
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict):
@@ -740,6 +762,12 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         if path == "/version.json":
             # the build this edge serves (a content hash of the app): no auth, no cookie read, no-store (JSON)
             return self._json({"build": self.server.app.build})
+        # PR-5 — the READ-ONLY public CVE catalog (offense-free), the SAME data the marketing site serves. Placed
+        # with the probe surface, ahead of the session plane: it is UNAUTHENTICATED public data (no cookie, no org,
+        # no secret), so the customer Overview can render a live CVE feed from a SAME-ORIGIN fetch (CSP). Pure read;
+        # nothing minted, mutated or hop-relayed. Absent catalog ⇒ an honest empty feed, never an error.
+        if path == "/api/cve" or path.startswith("/api/cve/"):
+            return self._cve_api(path)
         if path == "/api/customer/whoami":
             rec = self._session()
             if rec is None:
@@ -773,6 +801,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("members_list")
         if path == "/api/customer/member/invites" and _team_invite_on():   # pending invites (flag OFF -> unknown-route 404)
             return self._customer_read_relay("member_invites_list")
+        if path == "/api/customer/knowledge" and _knowledge_on():   # PR-K the org's uploaded documents (flag OFF -> 404)
+            return self._customer_read_relay("knowledge_list")
         if path == "/api/customer/billing/offers" and _checkout_on():   # CHK-2 (flag OFF -> unknown-route 404)
             return self._customer_read_relay("billing_offers")
         if path == "/api/customer/billing/auto-topup" and _auto_topup_on():   # A1 (flag OFF -> unknown-route 404)
@@ -1209,7 +1239,7 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._deny(403, "denied (origin / host)")
         action = path[len("/api/customer/"):]
         try:
-            body = self._read_body()
+            body = self._read_body(self._body_cap(action))
         except (ValueError, OSError) as e:
             if action == "preferences" and _settings_on():
                 # the settings shell's General tab answers a body it cannot read in its own plain words — never with
@@ -1304,6 +1334,10 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._connect(_CLOUD_CONNECT_ACTIONS[action], body)
         if action == "assistant/ask" and _assistant_on():            # PR-J assistant (flag OFF -> unknown-action 404)
             return self._assistant(body)
+        if action == "knowledge/upload" and _knowledge_on():         # PR-K upload a document (flag OFF -> unknown-action 404)
+            return self._knowledge_upload(body)
+        if action == "knowledge/query" and _knowledge_on():          # PR-K grounded test query (flag OFF -> 404)
+            return self._knowledge_query(body)
         if action == "billing/checkout" and _checkout_on():          # CHK-1 (flag OFF -> unknown-action 404)
             return self._checkout(body)
         if action == "billing/auto-topup" and _auto_topup_on():      # A1 (flag OFF -> unknown-action 404)
@@ -1605,6 +1639,77 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
                                       "question": body.get("question", "")}   # the question only, from the body
         c, r = self._provision("assistant_ask", str(rec.get("username") or ""), payload)
         return self._json(r, c)
+
+    def _knowledge_upload(self, body: dict):
+        """PR-K — relay ONE document upload into the SESSION org's own knowledge corpus. REQUESTER + ORG come from the
+        SERVER-side session, never the body (a body org_id is ignored): a customer uploads into THEIR bound org only.
+        Only the ``filename`` and the document's ``data`` (its UTF-8 text) travel; the sovereign provisioner gates on
+        ``run_engagement``, enforces the size / per-org caps, and writes to that org's OWN per-org spine + index. The
+        assistant may later cite these documents, but a document NEVER becomes a finding (the oracle alone mints)."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "filename": body.get("filename", ""), "data": body.get("data", "")}
+        c, r = self._provision("knowledge_ingest", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _knowledge_query(self, body: dict):
+        """PR-K — relay a grounded "test query" against the SESSION org's own knowledge corpus. REQUESTER + ORG from
+        the SERVER-side session, never the body; only the ``question`` travels. The provisioner gates on
+        ``view_assessments`` and returns inert citation hits (filename + snippet), scoped to this org ONLY — it mints
+        nothing and crosses no tenant."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                                      "question": body.get("question", "")}
+        c, r = self._provision("knowledge_query", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _cve_api(self, path: str):
+        """PR-5 — a READ-only slice of the PUBLIC CVE catalog (offense-free ``sigil.cve.catalog``), the SAME data the
+        marketing site's ``/api/cve`` serves, so the customer Overview can show a live CVE feed from a same-origin
+        fetch (CSP: no CDN). UNAUTHENTICATED public data: no cookie is read, no org is taken, nothing is minted,
+        mutated or hop-relayed, and this edge holds no owner key. With the catalog file absent (not yet ingested) the
+        feed answers honestly empty rather than erroring. Only the paginated LIST is served here (the Overview's one
+        need); per-CVE detail stays the marketing site's job."""
+        from .. import config as _config
+        empty = {"items": [], "total": 0, "page": 1, "per_page": _CVE_FEED_MAX, "pages": 1, "populated": False}
+        cp = _config.CVE_CATALOG_PATH
+        if not cp.exists():
+            if path in ("/api/cve", "/api/cve/"):
+                return self._json(empty)
+            return self._deny(404, "not found")
+        try:
+            from ..cve.catalog import CveCatalogStore
+            store = CveCatalogStore(str(cp))
+        except Exception:  # noqa: BLE001 — a broken catalog must never 500 the customer edge
+            return self._json(empty)
+        if path not in ("/api/cve", "/api/cve/"):
+            return self._deny(404, "not found")       # the customer Overview needs only the list, never per-CVE detail
+        q = parse_qs(urlparse(self.path).query)
+
+        def one(k: str) -> str:
+            v = q.get(k, [""])
+            return (v[0] or "").strip() if v else ""
+
+        def num(k, default):
+            try:
+                return int(one(k))
+            except (TypeError, ValueError):
+                return default
+
+        kev = one("kev").lower()
+        res = store.query(
+            page=max(1, num("page", 1)),
+            per_page=max(1, min(num("per_page", _CVE_FEED_MAX), _CVE_FEED_MAX)),
+            severity=one("severity") or None, q=one("q") or None,
+            year=(num("year", None) if one("year") else None),
+            kev=(True if kev in ("1", "true", "yes") else (False if kev in ("0", "false", "no") else None)),
+            order=one("order") or "published_desc")
+        res["populated"] = True
+        return self._json(res)
 
     def _code_connected(self):
         """GET /api/customer/code/connected — GitHub sends the browser here once the VIGIL app is installed (its Setup

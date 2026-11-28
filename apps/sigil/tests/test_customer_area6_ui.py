@@ -490,7 +490,9 @@ def test_the_guide_walks_through_plans_and_reports():
     assert gated == ["assess/fixfirst", "assess/pause", "assess/report", "assess/standards", "assess/steer",
                      "assess/watch", "credits/compare", "credits/plans:alt",
                      "faq/Can I give our results to an auditor or a customer?", "workspace/ai_governance",
-                     "workspace/datarights", "workspace/organization", "workspace/organization:alt",
+                     "workspace/assistant",             # PR-J the security assistant (data-assistant)
+                     "workspace/datarights", "workspace/knowledge",      # PR-K the knowledge corpus (data-knowledge)
+                     "workspace/organization", "workspace/organization:alt",
                      "workspace/privacy", "workspace/seller"]
     assert steps[("workspace", "privacy")]["when"] == "privacyCenter"             # lgS2's step, never a PR-G switch
     assert steps[("workspace", "datarights")]["when"] == "dataRights"            # lgS3's step, never a PR-G switch

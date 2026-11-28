@@ -96,6 +96,20 @@
                    "To give a member another role, choose it on their row and select Change role.",
                    "To take a member off the workspace, select Remove on their row, then Yes, remove."],
           why: "Only the founder and admins can see and change the team, and a workspace always keeps one person who can manage it: VIGIL refuses to remove the last one or to make them an Analyst or Viewer. Testing and billing are separate: paying for VIGIL, or running the workspace, never gives anyone permission to test. Team changes may ask for a fresh authenticator code." },
+        // The Security assistant (VIGIL_CUSTOMER_ASSISTANT): an advisory Q&A grounded in this workspace's own confirmed
+        // findings. `when` names the page switch app.js reads with pageFlag; `route` lights up its tab.
+        { id: "assistant", title: "Ask the security assistant", where: "Security assistant", route: "#/assistant", when: "assistant",
+          clicks: ["Select Assistant in the top bar. Type a security question about this workspace, such as which findings to fix first.",
+                   "Select Ask. The answer is advice grounded in your confirmed findings, with the findings it drew on listed below it.",
+                   "It explains and prioritises what VIGIL has already proven; it never asserts a new vulnerability and never files a finding."],
+          why: "The assistant advises only. It reads your workspace's own confirmed findings, and the documents you have added, and never acts, charges or confirms a finding by itself." },
+        // The per-tenant Knowledge corpus (VIGIL_CUSTOMER_KNOWLEDGE, default on): your own documents the assistant may
+        // cite. `when` names the page switch; `route` lights up its tab.
+        { id: "knowledge", title: "Add your organization's documents", where: "Knowledge", route: "#/knowledge", when: "knowledge",
+          clicks: ["Select Knowledge in the top bar. Under Add a document, give it a name and paste its text, or choose a text file.",
+                   "Select Upload document. It is split into sections and added to a private corpus for this workspace only.",
+                   "Under Test query, type a question to see which of your documents match, and the snippet the assistant would cite."],
+          why: "Your documents stay private to this workspace and are never shared with another tenant or with VIGIL's own memory. The assistant may cite them, but a document is never turned into a finding — only VIGIL's oracle confirms findings." },
         { id: "notifications", title: "Notifications", where: "The bell", route: null,
           clicks: ["Select the bell in the top bar. It lists new findings, assessment outcomes, billing notices and monitoring events.",
                    "The number on the bell counts what you have not read yet. Select Mark all read to clear it.",

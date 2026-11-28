@@ -32,11 +32,11 @@
   --nav-w: 244px; --nav-w-collapsed: 68px; --drawer-w: 460px; --topbar-h: 64px;
   --content-max: 1320px;
 
-  /* -- dark theme (default) — near-black cool monochrome --------------------- */
-  --bg-0: #0a0c10;   /* app background (near-black, slight cool) */
-  --bg-1: #0f1219;   /* panels / cards */
-  --bg-2: #141922;   /* raised */
-  --bg-3: #1b212c;   /* hover / inputs */
+  /* -- dark theme (default) — deep TRUE-BLACK "shining" monochrome ----------- */
+  --bg-0: #050507;   /* app background — near-pure black */
+  --bg-1: #0a0b0e;   /* panels / cards */
+  --bg-2: #0f1116;   /* raised */
+  --bg-3: #161922;   /* hover / inputs */
   --border: #212734;        /* chosen cool neutral, not pure gray */
   --border-strong: #2c3444;
   --text-0: #eef1f6;        /* high-contrast heading/body */

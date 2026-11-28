@@ -1193,9 +1193,11 @@ def test_the_team_screen_builds_every_element_with_h_and_asks_no_browser_dialog(
     for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "html:", "eval(", "new Function"):
         assert bad not in block, bad
     assert not re.search(r"(?<![\w.])(confirm|alert|prompt)\s*\(|window\.(confirm|alert|prompt)", src)
-    # every call is relative to the mount (API = "api/customer"), and these four are the only ones
+    # every call is relative to the mount (API = "api/customer"); these are the only member/invite ones (the invite
+    # routes join once VIGIL_CUSTOMER_TEAM_INVITE wires the Team screen's e-mail invitations). /member/invite/revoke is
+    # a three-segment path the two-segment regex does not capture, which is fine — it is the same invite plane.
     assert set(re.findall(r'"(/members?(?:/[a-z]+)?)"', block)) == {"/members", "/member/add", "/member/grant",
-                                                                   "/member/revoke"}
+                                                                   "/member/revoke", "/member/invite", "/member/invites"}
     assert 'VUI.getJSON(API + "/members")' in block and "VUI.postJSON(API + path, body)" in block
     assert "org_id" not in block                                         # the page never names an org
     copy = " ".join(re.findall(r'"([^"]*)"', block))

@@ -1081,6 +1081,7 @@ function ser(e) {
     return ("Object.assign(document.body.dataset, CFG.flags || {});\n" + stubs + _fn(src, "pageFlag") + "\n"
             + _security_lines(src) + "\n" + _fn(src, "field") + "\n"
             + _fn(src, "navLink") + "\n" + shell + "\n" + _fn(src, "accountLinks") + "\n" + _fn(src, "passkeyBlock")
+            + "\n" + _fn(src, "inviteToast")   # passkey sign-in surfaces an accepted invite exactly as doLogin does
             + "\n" + _fn(src, "doPasskeyLogin") + "\n" + _fn(src, "withStepUp") + "\n" + _fn(src, "viewLogin") + "\n"
             + routes + "\n" + base)
 
@@ -1143,8 +1144,9 @@ out.trace = trace;
 def test_passkey_sign_in_follows_the_password_sign_in_flow():
     """A passkey sign-in ends exactly like a password sign-in (doLogin): refresh the session, go home, say so."""
     src = _src()
-    login_tail = re.search(r'if \(r && r\.username\) \{ await refreshWho\(\); nav\("#/"\); VUI\.toast\("Signed in"\); \}',
-                           _fn(src, "doLogin"))
+    login_tail = re.search(
+        r'if \(r && r\.username\) \{ await refreshWho\(\); nav\("#/"\); VUI\.toast\("Signed in"\); inviteToast\(r\); \}',
+        _fn(src, "doLogin"))
     assert login_tail and login_tail.group(0) in _fn(src, "doPasskeyLogin")
     out = _run(_app_harness() + _STUB + r"""
 installWebAuthn();
