@@ -574,7 +574,16 @@ def _eval_condition(tokens: list[str], selresults: dict[str, bool], names: list[
         else:
             picked = [resolve_name(target)]
         if not picked:
-            return False
+            # The ONLY way ``picked`` is empty is a prefix-glob (``1 of typo*``) that matches NONE
+            # of the rule's own selections — ``them`` is never empty (≥1 selection is required at
+            # parse) and the bare-name branch resolves to a single bool. Such an aggregation
+            # references nothing, so it is MALFORMED. Fail CLOSED by raising (the whole rule then
+            # does not match). The old ``return False`` fired on everything under a ``not`` — it
+            # inverted to ``not False = True`` for every event, fabricating a detection, which is
+            # exactly the fail-OPEN outcome this module forbids. Raising keeps BOTH the positive
+            # (``1 of typo*`` -> no match, as before) and the negated (``not 1 of typo*`` -> no
+            # match, was: match-everything) forms non-matching.
+            raise _Unsupported("aggregation prefix matched no selection")
         return any(picked) if quant == "1" else all(picked)
 
     def atom() -> bool:
