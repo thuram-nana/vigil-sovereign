@@ -60,6 +60,7 @@ from .logsource import (
     parse_cef,
     parse_cloudtrail,
     parse_evtx_json,
+    parse_idp,
     parse_log,
     parse_syslog,
 )
@@ -109,6 +110,7 @@ __all__ = [
     "parse_cef",
     "parse_evtx_json",
     "parse_cloudtrail",
+    "parse_idp",
     # Sigma runtime + ATT&CK mapping (v2: wildcards, provenance, field maps, logsource)
     "SigmaRule",
     "SigmaMatch",
