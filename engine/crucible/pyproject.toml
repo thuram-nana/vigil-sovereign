@@ -42,7 +42,7 @@ classifiers = [
 
 # Kept byte-for-byte in sync with framework/v2/pyproject.toml.
 dependencies = [
-  "pydantic>=2.14.3,<3",
+  "pydantic>=2.14.4,<3",
   "structlog>=26.1.0,<27",
   "httpx>=0.28,<1",
   "requests>=2.32,<3",
@@ -61,7 +61,7 @@ dependencies = [
 # Vertex request preparation verified on 2.8 only; widen after re-verifying it on the new minor.
 anthropic   = ["anthropic>=2.8.0,<2.9"]
 embeddings  = ["sentence-transformers>=2,<6"]
-analysis    = ["semgrep>=1.185.0"]
+analysis    = ["semgrep>=1.186.0"]
 smt         = ["z3-solver>=5.4.1.0,<6"]
 numerics    = ["numpy>=2.4.6,<3"]
 saml        = ["signxml>=5.2.0,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
