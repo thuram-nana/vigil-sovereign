@@ -96,8 +96,13 @@ def sanitize_input(s: object, *, max_chars: int) -> str:
          (U+202A-202E, U+2066-2069, U+200E/200F) - the characters that let a paste render one way and classify /
          store another;
       4. removes NUL and C0/C1 control characters EXCEPT ordinary whitespace (tab, newline, carriage-return, space);
-      5. hard-truncates to ``max_chars`` (the resource / model-cost bound) - applied LAST, so the obfuscation strip
-         never leaves dangling bytes past the cap.
+      5. removes EVERY remaining Unicode ``Cf`` invisible-format character - the whole class, not just the explicit
+         set above: the Tag block (U+E0000-E007F, which can smuggle a fully invisible instruction into text an LLM
+         later reads), WORD JOINER (U+2060), SOFT HYPHEN (U+00AD), the invisible math operators and more;
+      6. NFC-normalizes AGAIN (stripping a zero-width separator can leave a base + combining-mark pair adjacent, which
+         the second pass composes so the NFC guarantee holds on the RESULT, not only the input);
+      7. hard-truncates to ``max_chars`` (the resource / model-cost bound) - applied LAST, so neither the obfuscation
+         strip nor the re-normalization ever leaves dangling bytes past the cap.
 
     The result contains no zero-width, bidi, NUL or other control character beyond ordinary whitespace, and is never
     longer than ``max_chars``. ``max_chars`` must be a non-negative ``int``. Surrounding-whitespace trimming is left
@@ -113,8 +118,13 @@ def sanitize_input(s: object, *, max_chars: int) -> str:
             continue
         if _is_removable_control(ch):
             continue
+        if unicodedata.category(ch) == "Cf":          # the whole invisible-format class (Tag chars, word joiner, ...)
+            continue
         out.append(ch)
-    cleaned = "".join(out)
+    # Re-normalize after stripping: a removed zero-width separator can leave a base character adjacent to a combining
+    # mark, and the second NFC pass composes them so the result is the canonical (precomposed) form, not a decomposed
+    # look-alike. Truncation is still applied LAST so neither NFC pass can exceed the cap.
+    cleaned = unicodedata.normalize("NFC", "".join(out))
     if len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars]
     return cleaned
