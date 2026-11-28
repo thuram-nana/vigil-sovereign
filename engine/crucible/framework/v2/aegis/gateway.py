@@ -43,8 +43,14 @@ if TYPE_CHECKING:
         AuthorityV2Paths,
         MonotoneEpochFloor,
     )
+    from .attribution import AttributionMeter
     from .capacity import CapacityBudget, CapacityGovernor
+    from .coraza_source import CorazaAttestationMeter, CorazaCorpus
+    from .detection_kit import DetectionKit, DetectionKitMeter
+    from .detection_mirror import DetectionMirrorMeter
+    from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
+    from .receipts import ReceiptLedger
 
 from ..common.logging import get_logger
 from .actor_graph import ActorGraph
@@ -165,6 +171,114 @@ def _probe_socket_flag() -> bool:
     return (os.environ.get(PROBE_SOCKET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5d (receipts): the default-OFF switch for the append-only ENFORCEMENT-OUTCOME receipt ledger. Kept in
+# LOCKSTEP with ``receipts.RECEIPTS_ENV`` (a test asserts they match) and read here directly so the receipts
+# module is NOT eagerly import-reachable from the gateway (it is imported only when the flag is on).
+RECEIPTS_ENV = "VIGIL_AEGIS_RECEIPTS"
+
+
+def _receipts_flag() -> bool:
+    """AS-5d receipt-ledger switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and
+    re-read per request so a live flip-OFF stops recording at once). OFF ⇒ no ledger is built, no receipt is
+    recorded, and the gateway data path (and the AS-5c probe snapshot) are byte-identical."""
+    import os
+    return (os.environ.get(RECEIPTS_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-5e (impact budget): the default-OFF switch for the deterministic read-only IMPACT-BUDGET rollup over the
+# AS-5d receipt chain. Kept in LOCKSTEP with ``impact_budget.IMPACT_BUDGET_ENV`` (a test asserts they match) and
+# read here directly so the impact_budget module (and, through it, receipts) is NOT eagerly import-reachable from
+# the gateway (it is imported only when the flag is on AND the AS-5d ledger — its dependency — exists).
+IMPACT_BUDGET_ENV = "VIGIL_AEGIS_IMPACT_BUDGET"
+
+
+def _impact_budget_flag() -> bool:
+    """AS-5e impact-budget switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the rollup at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The rollup is ALSO
+    inert whenever its dependency flag (``VIGIL_AEGIS_RECEIPTS``) is off — there is no chain to roll up."""
+    import os
+    return (os.environ.get(IMPACT_BUDGET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-5b (attribution): the default-OFF switch for the deterministic read-only DENIAL-SOURCE ATTRIBUTION rollup —
+# which sources hold the current shed/denial pressure (from the AS-5a per-caller buckets), paired with the AS-5e
+# per-reason breakdown. Kept in LOCKSTEP with ``attribution.ATTRIBUTION_ENV`` (a test asserts they match) and read
+# here directly so the attribution module (and, through it, capacity/impact_budget/receipts) is NOT eagerly
+# import-reachable from the gateway (it is imported only when the flag is on AND both deps — the AS-5a governor and
+# the AS-5e meter — exist).
+ATTRIBUTION_ENV = "VIGIL_AEGIS_ATTRIBUTION"
+
+
+def _attribution_flag() -> bool:
+    """AS-5b attribution switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the rollup at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The rollup is ALSO
+    inert whenever any dependency is off — the AS-5a capacity plane (the per-caller SOURCE signal) or the AS-5e
+    impact rollup (and, through it, AS-5d receipts) — there is no source load, or no reason breakdown, to attribute
+    otherwise."""
+    import os
+    return (os.environ.get(ATTRIBUTION_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-7b (coraza): the default-OFF switch for the deterministic read-only CORAZA/CRS FRONT-WAF SUPPLY-CHAIN
+# ATTESTATION — whether the front-WAF detection content (the ``coraza-v3`` engine + the ``coreruleset-crs-4x`` corpus)
+# a tenant runs is licence-admitted (AS-7a §7 gate) AND pinned (AS-28-style corpus digest), so a Coraza DetectionOnly
+# hit's typed ``rule_refs`` may be admitted as a LEAD (never a block). Kept in LOCKSTEP with
+# ``coraza_source.CORAZA_ENV`` (a test asserts they match) and read here directly so the coraza_source module (and,
+# through it, the AS-7a license_gate / pydantic / vigil_core) is NOT eagerly import-reachable from the gateway (it is
+# imported only when the flag is on AND its dependency — a configured CRS corpus manifest — exists).
+CORAZA_ENV = "VIGIL_AEGIS_CORAZA"
+
+
+def _coraza_flag() -> bool:
+    """AS-7b coraza switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read per
+    snapshot so a live flip-OFF stops surfacing the attestation at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The attestation is ALSO
+    inert whenever its dependency — a configured CRS corpus manifest — is absent (there is nothing to attest)."""
+    import os
+    return (os.environ.get(CORAZA_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-10c (detection kit): the default-OFF switch for the deterministic read-only DETECTION-CONTENT KIT SUPPLY-CHAIN
+# ATTESTATION — whether the detection content a tenant would SHIP (the CRS-derived + Sigma-derived rules of the
+# ``pushed-rules`` bundle) is licence-admitted for DISTRIBUTION (AS-7a §7 gate) AND both corpora are pinned (AS-28-style
+# digests), so a kit hit's rule_refs may be admitted as a LEAD. Kept in LOCKSTEP with ``detection_kit.KIT_ENV`` (a test
+# asserts they match) and read here directly so the detection_kit module (and, through it, coraza_source / license_gate
+# / defender.sigma) is NOT eagerly import-reachable from __init__/__main__.
+KIT_ENV = "VIGIL_AEGIS_KIT"
+
+
+def _kit_flag() -> bool:
+    """AS-10c detection-kit switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read per
+    snapshot so a live flip-OFF stops surfacing the attestation at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The attestation is ALSO
+    inert whenever its dependency — a configured kit (a CRS corpus + a Sigma corpus) — is absent (nothing to attest)."""
+    import os
+    return (os.environ.get(KIT_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# AS-31 (detection mirror): the default-OFF switch for the deterministic read-only DETECTION MIRROR — a reflected,
+# metadata-only view of the detection posture that unifies the AS-30 detection SOURCE catalog (the provider
+# inventory), the AS-7b detection CONTENT admissibility (the Coraza/CRS attestation + its admit gate), and the AS-3b
+# AS-2e output-hygiene leak gate. Kept in LOCKSTEP with ``detection_mirror.DETECTION_MIRROR_ENV`` (a test asserts
+# they match) and read here directly so the detection_mirror module (and, through it, provider_runtime /
+# coraza_source / monitoring_event_v2 / vigil_core) is NOT eagerly import-reachable from the gateway (it is imported
+# only when the flag is on AND its dependency — the AS-7b Coraza attestation meter — exists).
+DETECTION_MIRROR_ENV = "VIGIL_AEGIS_DETECTION_MIRROR"
+
+
+def _detection_mirror_flag() -> bool:
+    """AS-31 detection-mirror switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the mirror at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The mirror is ALSO inert
+    whenever its dependency — the AS-7b Coraza attestation (``VIGIL_AEGIS_CORAZA`` + a configured CRS corpus) — is
+    off; the AS-30 inventory and the AS-3b hygiene gate are flagless pure functions, so there is no further dep
+    flag to arm."""
+    import os
+    return (os.environ.get(DETECTION_MIRROR_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -228,6 +342,9 @@ class GatewaySettings:
                  monotonic_fn: "Callable[[], float] | None" = None,
                  on_authority_event: "Callable[[Any], None] | None" = None,
                  capacity_budget: "CapacityBudget | None" = None,
+                 impact_budget: "ImpactBudget | None" = None,
+                 coraza_corpus: "CorazaCorpus | None" = None,
+                 detection_kit: "DetectionKit | None" = None,
                  probe_socket_path: "str | None" = None) -> None:
         u = urlsplit(upstream)
         if u.scheme not in ("http", "https") or not u.netloc:
@@ -271,6 +388,95 @@ class GatewaySettings:
         if capacity_budget is not None:
             from .capacity import CapacityGovernor
             self.capacity_governor = CapacityGovernor(capacity_budget, monotonic=self._v2_monotonic)
+        # AS-5d (receipts) — the append-only, hash-linked ENFORCEMENT-OUTCOME receipt ledger. Built ONCE when the
+        # default-OFF VIGIL_AEGIS_RECEIPTS flag is on at construction (cheap + inert: in-memory, no thread, no
+        # socket); a receipt is APPENDED per terminal enforcement disposition only when ``receipts_active``. OFF ⇒
+        # the ledger is never built, no receipt is recorded, and the gateway data path (and the AS-5c probe
+        # snapshot) are byte-identical. A receipt RECORDS an outcome the gate already decided — it is never itself
+        # a block or a verdict (only a fired oracle blocks). The monotonic clock is INJECTED (the same clock the
+        # V2/capacity/probe planes use) for determinism. Importing the module lazily here keeps it OFF the eager
+        # __init__/__main__ import path (make-gate byte-identity).
+        self.receipt_ledger: "ReceiptLedger | None" = None
+        if _receipts_flag():
+            from .receipts import ReceiptLedger
+            self.receipt_ledger = ReceiptLedger(monotonic=self._v2_monotonic)
+        # AS-5e (impact budget) — the deterministic, READ-ONLY rollup over the AS-5d receipt chain: over a bounded
+        # recent window it measures the DENIED ratio (shed + blocked, the availability cost of enforcement) and
+        # compares it against a configured budget ceiling, surfaced read-only on the AS-5c probe snapshot. Built
+        # ONCE, only when the default-OFF VIGIL_AEGIS_IMPACT_BUDGET flag is on at construction AND the AS-5d ledger
+        # — its DEPENDENCY — exists (there is no chain to roll up otherwise). It holds NO mutable ledger state and
+        # NEVER mutates the append-only chain: it only READS. It MEASURES and never acts — being over budget mints
+        # no verdict and drives no admit/shed/allow/block decision (only a fired oracle blocks). OFF ⇒ no meter is
+        # built, nothing is computed, and the gateway data path (and the probe snapshot) are byte-identical.
+        # Importing the module lazily here keeps it (and, through it, receipts) OFF the eager __init__/__main__
+        # import path (make-gate byte-identity).
+        self.impact_budget_meter: "ImpactBudgetMeter | None" = None
+        if _impact_budget_flag() and self.receipt_ledger is not None:
+            from .impact_budget import ImpactBudgetMeter
+            self.impact_budget_meter = ImpactBudgetMeter(self.receipt_ledger, impact_budget)
+        # AS-5b (attribution) — the deterministic, READ-ONLY denial-SOURCE rollup: which sources currently hold the
+        # shed/denial pressure (read from the AS-5a per-caller buckets, the only plane with per-caller state),
+        # paired with the AS-5e per-reason breakdown (the "what"). Built ONCE, only when the default-OFF
+        # VIGIL_AEGIS_ATTRIBUTION flag is on at construction AND BOTH dependencies exist: the AS-5a capacity
+        # governor (its SOURCE input) AND the AS-5e impact meter (its formal dependency + the reason "what"). It
+        # holds NO mutable state (beyond an opaque-id salt) and NEVER mutates a bucket, a receipt, or any chain
+        # state: it only READS. It MEASURES and never acts — naming a heavy source drives no admit/shed/allow/block
+        # decision (only a fired oracle blocks; shedding rides solely on the AS-5a budget). Every surfaced source
+        # is an OPAQUE id, never a raw address. OFF (or any dep off) ⇒ no meter is built, nothing is computed, and
+        # the gateway data path (and the probe snapshot) are byte-identical. Importing the module lazily here keeps
+        # it (and, through it, capacity/impact_budget/receipts) OFF the eager __init__/__main__ import path.
+        self.attribution_meter: "AttributionMeter | None" = None
+        if (_attribution_flag() and self.capacity_governor is not None
+                and self.impact_budget_meter is not None):
+            from .attribution import AttributionMeter
+            self.attribution_meter = AttributionMeter(self.capacity_governor, self.impact_budget_meter)
+        # AS-7b (coraza) — the deterministic, READ-ONLY Coraza/CRS front-WAF SUPPLY-CHAIN ATTESTATION: whether the
+        # front-WAF detection content (the coraza-v3 engine + the coreruleset-crs-4x corpus) a tenant runs is
+        # licence-admitted (AS-7a §7 gate) AND pinned (AS-28-style corpus digest), so a Coraza DetectionOnly hit's
+        # typed rule_refs may be admitted as a LEAD. Built ONCE, only when the default-OFF VIGIL_AEGIS_CORAZA flag is
+        # on at construction AND its dependency — a configured CRS corpus manifest — exists (mirroring AS-5a's
+        # configured budget). It holds NO mutable state and NEVER mutates the licence ledger or the corpus: it only
+        # READS. It MEASURES and never acts — the attestation drives no admit/shed/allow/block decision (only a fired
+        # oracle blocks; a CRS rule_ref is a LEAD, never a block). OFF (or no corpus configured) ⇒ no meter is built,
+        # nothing is computed, and the gateway data path (and the probe snapshot) are byte-identical. Importing the
+        # module lazily here keeps it (and, through it, the AS-7a license_gate) OFF the eager __init__/__main__ path.
+        self.coraza_meter: "CorazaAttestationMeter | None" = None
+        if _coraza_flag() and coraza_corpus is not None:
+            from .coraza_source import CorazaAttestationMeter
+            from .license_gate import load_ledger
+            self.coraza_meter = CorazaAttestationMeter(coraza_corpus, ledger=load_ledger())
+        # AS-10c (detection kit) — the deterministic, READ-ONLY DETECTION-CONTENT KIT SUPPLY-CHAIN ATTESTATION:
+        # whether the detection content a tenant would SHIP (the CRS-derived + Sigma-derived rules of the pushed-rules
+        # bundle) is licence-admitted for DISTRIBUTION (AS-7a §7 gate) AND both corpora are pinned (AS-28-style
+        # digests), sealed by a single kit digest, so a kit hit's typed rule_refs may be admitted as a LEAD. Built
+        # ONCE, only when the default-OFF VIGIL_AEGIS_KIT flag is on at construction AND its dependency — a configured
+        # kit (a CRS corpus + a Sigma corpus) — exists (mirroring AS-7b's configured CRS corpus). It holds NO mutable
+        # state and NEVER mutates the licence ledger or the corpora: it only READS. It MEASURES and never acts — the
+        # attestation drives no admit/shed/allow/block decision (only a fired oracle blocks; a kit rule_ref is a LEAD,
+        # never a block). OFF (or no kit configured) ⇒ no meter is built, nothing is computed, and the gateway data
+        # path (and the probe snapshot) are byte-identical. Importing the module lazily here keeps it (and, through
+        # it, the AS-7b coraza_source / AS-7a license_gate / AS-17a defender.sigma) OFF the eager __init__/__main__
+        # import path (make-gate byte-identity).
+        self.kit_meter: "DetectionKitMeter | None" = None
+        if _kit_flag() and detection_kit is not None:
+            from .detection_kit import DetectionKitMeter
+            from .license_gate import load_ledger
+            self.kit_meter = DetectionKitMeter(detection_kit, ledger=load_ledger())
+        # AS-31 (detection mirror) — the deterministic, READ-ONLY reflection of the detection posture: the AS-30
+        # detection SOURCE catalog (the provider inventory) × the AS-7b detection CONTENT admissibility (the Coraza
+        # attestation + its admit gate), surfaced address-free / hygiene-clean (AS-3b) and read-only on the AS-5c
+        # probe snapshot. Built ONCE, only when the default-OFF VIGIL_AEGIS_DETECTION_MIRROR flag is on at
+        # construction AND the AS-7b Coraza meter — its DEPENDENCY — exists (there is no detection content to mirror
+        # otherwise). It holds NO mutable state and NEVER mutates the inventory, the licence ledger, or the corpus:
+        # it only READS. It MEASURES / REFLECTS and never acts — a mirrored detection hit is a LEAD, never a block
+        # (only a fired oracle blocks), and it drives no admit/shed/allow/block decision. OFF (or the AS-7b dep off)
+        # ⇒ no meter is built, nothing is computed, and the gateway data path (and the probe snapshot) are
+        # byte-identical. Importing the module lazily here keeps it (and, through it, provider_runtime / coraza_source
+        # / monitoring_event_v2) OFF the eager __init__/__main__ import path (make-gate byte-identity).
+        self.detection_mirror_meter: "DetectionMirrorMeter | None" = None
+        if _detection_mirror_flag() and self.coraza_meter is not None and coraza_corpus is not None:
+            from .detection_mirror import DetectionMirrorMeter
+            self.detection_mirror_meter = DetectionMirrorMeter(self.coraza_meter, coraza_corpus.rule_ids)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -359,6 +565,76 @@ class GatewaySettings:
             gov = self.capacity_governor
             snap["capacity_active"] = bool(self.capacity_active)
             snap["capacity"] = gov.snapshot() if gov is not None else None
+        except Exception:
+            pass
+        # AS-5d (receipts): surface the enforcement-outcome ledger snapshot (count + chain head + tally) ONLY when
+        # the ledger is recording, so a receipts-OFF gateway's probe answer is byte-identical to the AS-5c one.
+        # Metadata only (no address, no secret), mirroring the AS-5a capacity snapshot.
+        try:
+            led = self.receipt_ledger
+            if led is not None and self.receipts_active:
+                snap["receipts_active"] = True
+                snap["receipts"] = led.snapshot()
+        except Exception:
+            pass
+        # AS-5e (impact budget): surface the deterministic read-only rollup over the AS-5d receipt chain (the
+        # denied ratio vs the budget ceiling + the per-reason breakdown) ONLY when the meter is active, so a
+        # gateway without the feature answers a probe byte-identically to AS-5d. Metadata only (no address, no
+        # secret). It MEASURES, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            meter = self.impact_budget_meter
+            if meter is not None and self.impact_budget_active:
+                snap["impact_budget_active"] = True
+                snap["impact"] = meter.snapshot()
+        except Exception:
+            pass
+        # AS-5b (attribution): surface the deterministic read-only denial-SOURCE rollup — which sources hold the
+        # current shed/denial pressure (address-free, opaque ids, from the AS-5a buckets) paired with the AS-5e
+        # per-reason breakdown — ONLY when the meter is active, so a gateway without the feature answers a probe
+        # byte-identically to AS-5e. Metadata only (no raw address, no secret). It MEASURES, it never acts. Total:
+        # any read error degrades this field, never the probe.
+        try:
+            attrib = self.attribution_meter
+            if attrib is not None and self.attribution_active:
+                snap["attribution_active"] = True
+                snap["attribution"] = attrib.snapshot()
+        except Exception:
+            pass
+        # AS-7b (coraza): surface the deterministic read-only Coraza/CRS front-WAF supply-chain attestation — whether
+        # the front-WAF detection content is licence-admitted (AS-7a) AND pinned (AS-28-style corpus digest), so a
+        # Coraza DetectionOnly hit's rule_refs may be admitted as a LEAD — ONLY when the meter is active, so a gateway
+        # without the feature answers a probe byte-identically. Metadata only (counts + a digest, no address, no
+        # secret). It MEASURES, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            cm = self.coraza_meter
+            if cm is not None and self.coraza_active:
+                snap["coraza_active"] = True
+                snap["coraza"] = cm.snapshot()
+        except Exception:
+            pass
+        # AS-10c (detection kit): surface the deterministic read-only detection-content kit supply-chain attestation —
+        # whether the CRS-derived + Sigma-derived content a tenant would ship is licence-admitted for distribution
+        # (AS-7a) AND both corpora are pinned (AS-28-style digests), sealed by the kit digest, so a kit hit's rule_refs
+        # may be admitted as a LEAD — ONLY when the meter is active, so a gateway without the feature answers a probe
+        # byte-identically. Metadata only (counts + digests, no address, no secret). It MEASURES, it never acts. Total:
+        # any read error degrades this field, never the probe.
+        try:
+            km = self.kit_meter
+            if km is not None and self.kit_active:
+                snap["kit_active"] = True
+                snap["kit"] = km.snapshot()
+        except Exception:
+            pass
+        # AS-31 (detection mirror): surface the deterministic read-only reflection of the detection posture — the
+        # cataloged detection sources (AS-30) × the detection content admissibility + admissible leads (AS-7b),
+        # address-free and hygiene-clean (AS-3b) — ONLY when the meter is active, so a gateway without the feature
+        # answers a probe byte-identically. Metadata only (counts + tokens + a digest, no address, no secret). It
+        # REFLECTS, it never acts. Total: any read error degrades this field, never the probe.
+        try:
+            dm = self.detection_mirror_meter
+            if dm is not None and self.detection_mirror_active:
+                snap["detection_mirror_active"] = True
+                snap["detection_mirror"] = dm.snapshot()
         except Exception:
             pass
         return snap
@@ -493,6 +769,77 @@ class GatewaySettings:
         runs and the gateway path is byte-identical. Independent of enforce/observe: load shedding protects
         availability in BOTH modes (it is operational, not an enforcement action)."""
         return self.capacity_governor is not None and _capacity_flag()
+
+    @property
+    def receipts_active(self) -> bool:
+        """Is the AS-5d receipt ledger recording for THIS request? Only when the ledger was built (the default-OFF
+        VIGIL_AEGIS_RECEIPTS flag was on at construction) AND the flag is STILL on — so an operator flipping it OFF
+        at runtime stops recording live. Independent of enforce/observe: an ``allowed``/``shed`` outcome is
+        recorded in both modes; a ``blocked`` outcome arises only under effective enforce (a fired oracle)."""
+        return self.receipt_ledger is not None and _receipts_flag()
+
+    @property
+    def impact_budget_active(self) -> bool:
+        """Is the AS-5e impact-budget rollup active for THIS snapshot? Only when the meter was built (the
+        default-OFF VIGIL_AEGIS_IMPACT_BUDGET flag was on at construction AND the AS-5d ledger exists) AND the flag
+        is STILL on AND its DEPENDENCY (the AS-5d receipts flag) is STILL on — so flipping EITHER flag off at
+        runtime stops surfacing the rollup live. Read-only / observational: it never gates enforcement."""
+        return (self.impact_budget_meter is not None
+                and _impact_budget_flag()
+                and self.receipts_active)
+
+    @property
+    def attribution_active(self) -> bool:
+        """Is the AS-5b denial-source attribution rollup active for THIS snapshot? Only when the meter was built
+        (the default-OFF VIGIL_AEGIS_ATTRIBUTION flag was on at construction AND both deps — the AS-5a governor and
+        the AS-5e meter — exist) AND the flag is STILL on AND BOTH deps are STILL active (``capacity_active`` for
+        the per-caller source signal, ``impact_budget_active`` for the reason breakdown, which transitively
+        requires the AS-5d receipts flag). So flipping ANY of the attribution / capacity / impact-budget / receipts
+        flags off at runtime stops surfacing the rollup live. Read-only / observational: it never gates
+        enforcement."""
+        return (self.attribution_meter is not None
+                and _attribution_flag()
+                and self.capacity_active
+                and self.impact_budget_active)
+
+    @property
+    def coraza_active(self) -> bool:
+        """Is the AS-7b Coraza/CRS front-WAF supply-chain attestation active for THIS snapshot? Only when the meter
+        was built (the default-OFF VIGIL_AEGIS_CORAZA flag was on at construction AND a CRS corpus was configured)
+        AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing the attestation live.
+        Read-only / observational: it never gates enforcement (a CRS rule_ref is a LEAD, never a block)."""
+        return self.coraza_meter is not None and _coraza_flag()
+
+    @property
+    def kit_active(self) -> bool:
+        """Is the AS-10c detection-content kit supply-chain attestation active for THIS snapshot? Only when the meter
+        was built (the default-OFF VIGIL_AEGIS_KIT flag was on at construction AND a kit — a CRS corpus + a Sigma
+        corpus — was configured) AND the flag is STILL on — so an operator flipping it OFF at runtime stops surfacing
+        the attestation live. Read-only / observational: it never gates enforcement (a kit rule_ref is a LEAD)."""
+        return self.kit_meter is not None and _kit_flag()
+
+    @property
+    def detection_mirror_active(self) -> bool:
+        """Is the AS-31 detection mirror active for THIS snapshot? Only when the meter was built (the default-OFF
+        VIGIL_AEGIS_DETECTION_MIRROR flag was on at construction AND the AS-7b Coraza meter exists) AND the flag is
+        STILL on AND its DEPENDENCY (the AS-7b Coraza attestation, ``coraza_active``) is STILL active — so flipping
+        EITHER the detection-mirror or the coraza flag off at runtime stops surfacing the mirror live. Read-only /
+        observational: it never gates enforcement (a mirrored detection hit is a LEAD, never a block)."""
+        return (self.detection_mirror_meter is not None
+                and _detection_mirror_flag()
+                and self.coraza_active)
+
+    def record_outcome(self, outcome: str, reason: str = "") -> None:
+        """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
+        and any error is swallowed so a receipt fault can NEVER touch the data path. A receipt RECORDS the
+        disposition the gate already produced — it is not itself a block or a verdict."""
+        led = self.receipt_ledger
+        if led is None or not self.receipts_active:
+            return
+        try:
+            led.record(outcome, reason)
+        except Exception:
+            pass
 
     def saas_decision(self):
         """AE-3 per-request re-authorization. None when this is not a SaaS gateway; otherwise the AE-2
@@ -796,6 +1143,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         """403 with the certificate id — the honest, auditable block. The cert is re-runnable offline
         (``CertRef.reverify``), so the block is provable, not a guess."""
         cid = verdict.certificate.cert_id if verdict.certificate else ""
+        # AS-5d (receipts): record the BLOCKED enforcement outcome (a record THAT a fired oracle blocked — not the
+        # cause of the block; the block rides on the certificate above). No-op unless the ledger is active; total.
+        self.settings.record_outcome("blocked", verdict.attack_class)
         # AUDIT — every aegis.respond block is recorded with its re-runnable certificate id, the
         # attack class, and the client, so the operator has a complete, provable enforcement trail.
         try:
@@ -967,6 +1317,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         finding, so this is logged (not emitted as an attack verdict) and carries a Retry-After for honest
         back-off."""
         retry = admission.retry_after_header
+        # AS-5d (receipts): record the SHED enforcement outcome (availability-first, before inspection — never a
+        # block). No-op unless the ledger is active; total. The reason is the address-free capacity shed category.
+        self.settings.record_outcome("shed", getattr(admission, "reason", ""))
         try:
             _log.info("aegis.gateway.capacity_shed", slug=self.settings.slug, reason=admission.reason,
                       client=self._actor_key(), method=self.command, retry_after=retry)
@@ -1192,6 +1545,11 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if self._is_block(rverdict):
             self._send_block(rverdict)  # type: ignore[arg-type]
             return
+        # AS-5d (receipts): record the ALLOWED enforcement outcome — a request AEGIS INSPECTED (request- and
+        # response-side) and chose not to block, now relayed to the upstream. This fires only on the
+        # inspected-and-let-through path; an un-inspected pass-through (no valid authority) mints no receipt (no
+        # enforcement occurred). No-op unless the ledger is active; total.
+        self.settings.record_outcome("allowed", "relayed")
         self._relay(status, resp_headers, content)
 
     @staticmethod
@@ -1212,6 +1570,9 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                   on_authority_event: "Callable[[Any], None] | None" = None,
                   notify_notifier: "Callable[[Verdict], None] | None" = None,
                   capacity_budget: "CapacityBudget | None" = None,
+                  impact_budget: "ImpactBudget | None" = None,
+                  coraza_corpus: "CorazaCorpus | None" = None,
+                  detection_kit: "DetectionKit | None" = None,
                   probe_socket_path: "str | None" = None) -> ThreadingHTTPServer:
     """Build (but do not start) the gateway server. The caller runs ``.serve_forever()``. Unlike the
     loopback-only ``api``/``console`` servers, a data-plane proxy must be reachable by real clients,
@@ -1232,6 +1593,8 @@ def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1"
                                      instance_id=instance_id, replica_index=replica_index, saas_v2_dir=saas_v2_dir,
                                      now_fn=now_fn, monotonic_fn=monotonic_fn,
                                      on_authority_event=on_authority_event, capacity_budget=capacity_budget,
+                                     impact_budget=impact_budget, coraza_corpus=coraza_corpus,
+                                     detection_kit=detection_kit,
                                      probe_socket_path=probe_socket_path)
     if emit_v2 and monitoring_spool is None:
         raise ValueError("emit_v2 requires a tenant-bound gateway with monitoring_spool + monitoring_secret")
