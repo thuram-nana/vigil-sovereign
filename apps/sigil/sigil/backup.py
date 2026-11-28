@@ -221,6 +221,15 @@ _EXCLUSION_REASONS: dict[str, str] = {
                 "same host supersedes it and `ops-sweep reservations` releases it). The settings shell's General "
                 "profile is NOT here: the customer typed it and nothing regenerates it, so it is its own top-level "
                 "`customer_preferences`, captured",
+    "customer_chat": "chat continuity: the per-(org, session) command-box CONVERSATION transcript (the customer's typed "
+                     "lines + the grounded advice answers, ui/customer_chat_store.py). COSMETIC continuity only — it "
+                     "holds NO authority, NO money and NO finding, and nothing read from it can mint one (the "
+                     "AUTHORITATIVE findings / authorities / wallet are owner-signed on the captured spine). EXCLUDED: a "
+                     "restore drops the scrollback and a reopened box simply starts a fresh conversation (the live "
+                     "engagement state is re-derived from the captured assets/launches), so losing it fails SAFE; and "
+                     "capturing per-tenant chat text would pull it into the sealed backup body for no recovery value. "
+                     "Written only while VIGIL_CUSTOMER_CHAT_MEMORY is on (strict default-OFF; the dir is absent "
+                     "entirely on a default deployment)",
     "customer_authorization_requests": "legal/governance S12: the UNSIGNED owner-review requests a customer drops from "
                                        "the read-only Authorizations surface (\"please authorize host X\"). An "
                                        "operational owner-review queue, not an authority and not money — it mints "

@@ -269,6 +269,16 @@ CUSTOMER_DATA_RIGHTS_CONTACT = "info@sigilsovereign.com"
 # nothing regenerates it): its own top-level directory the backup captures and a restore brings back. Written only
 # while VIGIL_CUSTOMER_KNOWLEDGE is on.
 CUSTOMER_KNOWLEDGE_DIR = SIGIL_HOME / "customer_knowledge"
+# Chat continuity (customer_chat_memory_enabled). The per-(org, session) append-only CONVERSATION transcript behind the
+# command box — the customer's own typed lines and the grounded advice answers — so a reopened box reads like one
+# running conversation and (optionally) the grounded assistant sees recent prior turns for continuity. Each org's
+# transcripts live in its OWN sub-directory under here, named by a one-way hash of org_id (customer_chat_store), and
+# within it ONE append-only file per session key (a hash of the session id, computed at the edge — never a body field).
+# It stores ONLY turn text + role + timestamp, bounded per (org, session) (turns + bytes, oldest trimmed), and is
+# DISJOINT by construction from every other org's and from the owner's global stores. It is cosmetic CONTINUITY only:
+# it holds no authority, no money, no finding, and nothing read from it can mint one. STRICT default-OFF — written and
+# read only while VIGIL_CUSTOMER_CHAT_MEMORY is affirmatively on.
+CUSTOMER_CHAT_DIR = SIGIL_HOME / "customer_chat"
 # C1a — the launches a customer reserved from the app and has not started or cancelled yet (ui/customer_launches.py):
 # a cache of the owner-signed leases the customer was already handed, so the app can start or cancel one after a
 # reload. Never money or authority; written only while VIGIL_CUSTOMER_LAUNCH_UI is on.
@@ -473,6 +483,19 @@ def customer_assistant_enabled() -> bool:
     ON, a turn still fails closed unless the model gateway is reachable and an owner key is present to mint the turn's
     grant."""
     return _default_on_flag("VIGIL_CUSTOMER_ASSISTANT")
+
+
+def customer_chat_memory_enabled() -> bool:
+    """True iff the per-(org, session) command-box CONVERSATION transcript is ON (`VIGIL_CUSTOMER_CHAT_MEMORY`
+    affirmative). STRICT default-OFF (mirrors the opt-in readers, NOT the default-on consumer flags): UNSET / blank /
+    any non-affirmative token reads OFF, so with it off NO transcript is written on a command, the `chat/history` edge
+    route and its provisioner action are ABSENT (404 exactly as an unknown route/action), and the command box is
+    byte-identical to today (nothing is read on arrival). On, the box persists the customer's typed lines and the
+    grounded advice answers to the session org's OWN append-only store so a reopened box reads like one running
+    conversation; it is NESTED under `VIGIL_CUSTOMER_ASSISTANT` (the command box itself), stores ONLY turn text + role +
+    timestamp, is bounded per (org, session), and holds no authority / money / finding (nothing read from it can mint
+    one). Read at call time."""
+    return (os.environ.get("VIGIL_CUSTOMER_CHAT_MEMORY") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
 def customer_assistant_wallet_enabled() -> bool:

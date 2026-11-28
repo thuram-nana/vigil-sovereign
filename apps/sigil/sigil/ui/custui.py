@@ -285,6 +285,11 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
     # never out of step; a non-secret on/off value written into the page, counting in the build id. Off, the route is
     # the home screen exactly as any unknown route, and every command/flow route 404s (byte-identical). DEFAULT ON.
     command = _config.customer_assistant_enabled()
+    # Chat continuity: the per-(org, session) conversation transcript behind the command box. The SAME
+    # VIGIL_CUSTOMER_CHAT_MEMORY that serves the chat/history read and drives the customer_command append, so the box's
+    # on-mount replay and its routes are never out of step; a non-secret on/off value written into the page, counting
+    # in the build id. STRICT default-OFF: off, the box reads nothing on arrival and the route 404s (byte-identical).
+    chat_memory = _config.customer_chat_memory_enabled()
     # PR-G (Area 6): the Plans screen, the report export and the compliance view — each the same flag that serves its
     # routes, a non-secret on/off value written into the page and counting in the build id.
     area6 = {"__VIGIL_PLANS__": "1" if _config.customer_plans_enabled() else "0",
@@ -338,7 +343,8 @@ def build_app_snapshot(root=None) -> SiteSnapshot:
                                      "__VIGIL_ATTACK_PATH__": "1" if attack_path else "0",
                                      "__VIGIL_BLIND_VULN__": "1" if blind_vuln else "0",
                                      "__VIGIL_KNOWLEDGE__": "1" if knowledge else "0",
-                                     "__VIGIL_COMMAND__": "1" if command else "0", **area6})
+                                     "__VIGIL_COMMAND__": "1" if command else "0",
+                                     "__VIGIL_CHAT_MEMORY__": "1" if chat_memory else "0", **area6})
 # The customer session's non-authoritative plane label. It is NEVER a `vigil_core.rbac` role, so
 # `role_can(_CUSTOMER_SESSION_ROLE, …)` is False for every permission — the edge stores NO authoritative role
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
@@ -793,6 +799,8 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
             return self._customer_read_relay("monitor_events")
         if path == "/api/customer/live/activity" and _live_control_on():  # Live Control feed (flag OFF -> 404)
             return self._live_activity()
+        if path == "/api/customer/chat/history" and _chat_memory_on():     # chat continuity transcript (flag OFF -> 404)
+            return self._chat_history()
         # PR-B — the Fix-first screen's reads (flag OFF -> unknown-route 404). Not in `_READS`: each carries finding
         # detail and holds the trial preview itself (customer_posture's lock; the trend is severity-only aggregate).
         if path == "/api/customer/posture" and _posture_on():
@@ -1630,8 +1638,36 @@ class CustomerHandler(SsoEdgeMixin, BaseHTTPRequestHandler):
         if rec is None or not rec.get("org_id"):
             return self._deny(401, "login required")
         payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
-                                      "line": body.get("line", "")}   # the typed line only, from the body
+                                      "line": body.get("line", ""),
+                                      # the per-(org, session) conversation key — a one-way hash of the SESSION id the
+                                      # edge holds, NEVER a body field, so a customer can never name another session's
+                                      # transcript. The provisioner only uses it when the chat-memory flag is on.
+                                      "session_key": self._chat_session_key()}
         c, r = self._provision("customer_command", str(rec.get("username") or ""), payload)
+        return self._json(r, c)
+
+    def _chat_session_key(self) -> str:
+        """The per-session conversation key: a one-way SHA-256 of this request's SESSION id (the same digest the
+        session ledger names its marker file by). It is derived from the HttpOnly session cookie the edge holds, never
+        from the request body, so it is an OPAQUE, non-reversible, per-session handle a customer cannot forge or point
+        at another session. Empty when there is no session cookie."""
+        sid = self._cookie()
+        return hashlib.sha256(sid.encode("utf-8")).hexdigest() if sid else ""
+
+    def _chat_history(self):
+        """Chat continuity — GET the SESSION org's OWN command-box conversation transcript for THIS session, so a
+        reopened box survives reload / navigation. Served ONLY while VIGIL_CUSTOMER_CHAT_MEMORY is on (else the route
+        is the unknown-route 404, byte-identical). Like every customer read, the REQUESTER + ORG come from the
+        SERVER-side session (never the query), and the per-session key is the edge's hash of the session id (never a
+        body/query field): the provisioner returns this (org, session)'s own inert conversation turns and nothing
+        else."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip(),
+                   "session_key": self._chat_session_key()}
+        c, r = self._provision("customer_chat_history", requester, payload)
         return self._json(r, c)
 
     def _flow(self, body: dict):
@@ -2042,6 +2078,13 @@ def _knowledge_on() -> bool:
     # PR-K - the per-tenant customer knowledge corpus (the same flag the cockpit knowledge_* actions read). DEFAULT ON.
     from .. import config as _config
     return _config.customer_knowledge_enabled()
+
+
+def _chat_memory_on() -> bool:
+    # Chat continuity - the per-(org, session) conversation transcript store. STRICT default-OFF (the same flag the
+    # cockpit customer_chat_history action and the customer_command append read); off => the route is a 404.
+    from .. import config as _config
+    return _config.customer_chat_memory_enabled()
 
 
 def _connect_on() -> bool:

@@ -1973,7 +1973,16 @@ class Handler(BaseHTTPRequestHandler):
             from .. import config as _config
             if not _config.customer_assistant_enabled():
                 return None
-            return p.customer_command(requester, str(body.get("org_id", "")), str(body.get("line", "")), ip=ip)
+            # the per-(org, session) conversation key is the edge's hash of the SESSION id (never a body field the
+            # customer controls); the provisioner uses it only when VIGIL_CUSTOMER_CHAT_MEMORY is on.
+            return p.customer_command(requester, str(body.get("org_id", "")), str(body.get("line", "")),
+                                      ip=ip, session_key=str(body.get("session_key", "")))
+        if action == "customer_chat_history":
+            from .. import config as _config
+            if not _config.customer_chat_memory_enabled():
+                return None                             # strict default-OFF: absent (404) exactly as an unknown action
+            return p.customer_chat_history(requester, str(body.get("org_id", "")),
+                                           session_key=str(body.get("session_key", "")), ip=ip)
         if action == "customer_flow_step":
             from .. import config as _config
             if not _config.customer_assistant_enabled():

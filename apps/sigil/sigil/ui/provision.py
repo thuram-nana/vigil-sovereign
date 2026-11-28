@@ -4473,7 +4473,8 @@ class Provisioner:
         except _proof.ProofUnavailable as e:
             raise ProvisionDenied(str(e)) from None
 
-    def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "") -> dict:
+    def customer_assistant_ask(self, requester: str, requester_org_id: str, question: str, *, ip: str = "",
+                               history: "Optional[list]" = None) -> dict:
         """PR-J — answer ONE customer security question for the SESSION org, grounded ONLY in that org's oracle-confirmed
         findings and metered through the sovereign model gateway. Absent unless VIGIL_CUSTOMER_ASSISTANT is on (gated at
         the dispatch). Gated like the assessments read — ``admit_customer(view_assessments)`` on the session org, NO
@@ -4506,13 +4507,19 @@ class Provisioner:
         # documents (server-derived for requester_org_id - never a body value; tenant-scoped by the per-org corpus).
         # It degrades to findings-only on any corpus fault, but a cross-tenant anomaly fails CLOSED (never served).
         docs = self._assistant_knowledge_documents(requester_org_id, q)
+        # Chat continuity (4b): ``history`` is the org's OWN earlier turns, supplied by ``customer_command`` ONLY when
+        # the chat-memory flag is on (tenant-scoped server-side, never a body field). It is CONTEXT exactly like the
+        # documents: it rides into the SAME grounded ``answer`` call in a separate <conversation_history> DATA block
+        # and NEVER enters ``grounded_in`` (the finding-minting firewall), so the model still mints / launches nothing.
+        hist = [t for t in (history or []) if isinstance(t, dict)] or None
         if accounted:
-            return self._assistant_ask_accounted(requester, requester_org_id, q, owner_key, documents=docs)
+            return self._assistant_ask_accounted(requester, requester_org_id, q, owner_key, documents=docs,
+                                                  history=hist)
         token = self._mint_assistant_grant(requester_org_id, owner_key, now=_t.time())
         call = _assistant.gateway_model_call(gateway_url=config.model_gateway_url(), grant_token=token)
         reply = _assistant.answer(self.store, requester_org_id, q, model_call=call, now=_t.time(),
                                   model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
-                                  limit=config.assistant_finding_limit(), documents=docs)
+                                  limit=config.assistant_finding_limit(), documents=docs, history=hist)
         return reply.as_dict()
 
     def _assistant_knowledge_documents(self, org_id: str, question: str) -> "Optional[list]":
@@ -4536,7 +4543,7 @@ class Provisioner:
         return hits or None
 
     def _assistant_ask_accounted(self, requester: str, org_id: str, q: str, owner_key: Any,
-                                 *, documents: "Optional[list]" = None) -> dict:
+                                 *, documents: "Optional[list]" = None, history: "Optional[list]" = None) -> dict:
         """PR-J2 — ONE assistant turn ACCOUNTED to the session org (``VIGIL_CUSTOMER_ASSISTANT_WALLET`` on).
         ``requester`` / ``org_id`` are the hop-bound session principal :meth:`customer_assistant_ask` has ALREADY
         admitted (view_assessments) — never a body field — so every record written and every credit moved is that
@@ -4579,7 +4586,7 @@ class Provisioner:
         try:
             reply = _assistant.answer(self.store, org_id, q, model_call=call, now=_t.time(),
                                       model=config.assistant_model(), max_tokens=config.assistant_max_tokens(),
-                                      limit=config.assistant_finding_limit(), documents=documents)
+                                      limit=config.assistant_finding_limit(), documents=documents, history=history)
         except TurnRateLimited as e:
             self._audit("assistant_ask", requester=requester, org_id=org_id, outcome="refused", reason="rate_limited")
             raise ProvisionRateLimited(e.retry_after) from None
@@ -4621,14 +4628,23 @@ class Provisioner:
     # EXPLICITLY (never inferred), and a launch stops at awaiting_confirm until an EXPLICIT spend confirm. Both are
     # behind VIGIL_CUSTOMER_ASSISTANT (the dispatch 404s when off; each refuses here too, defence in depth) and take
     # requester + org + mfa_at from the SERVER session only.
-    def customer_command(self, requester: str, requester_org_id: str, line: str, *, ip: str = "") -> dict:
+    def customer_command(self, requester: str, requester_org_id: str, line: str, *, ip: str = "",
+                         session_key: str = "") -> dict:
         """B2 - interpret ONE typed box line and route it. The line is classified DETERMINISTICALLY (model-free,
         ``assistant_command.classify``) over the closed verb allowlist. An ``advice`` intent hands off to the
         grounded, read-only ``customer_assistant_ask`` (the ONLY path to the model); every other intent is RETURNED
         as a plan only - nothing is launched, reserved or minted here (the box advances it through
         ``customer_flow_step``, which still gates the explicit affirmation on verify and the explicit spend confirm
         on launch). requester / org are the hop-bound session principal, never a body field. Behind
-        VIGIL_CUSTOMER_ASSISTANT (refused here too, defence in depth under the dispatch 404)."""
+        VIGIL_CUSTOMER_ASSISTANT (refused here too, defence in depth under the dispatch 404).
+
+        Chat continuity (VIGIL_CUSTOMER_CHAT_MEMORY, strict default-OFF): when on and the edge supplies the hop-bound
+        ``session_key`` (a hash of the session id - NEVER a body field), the customer's typed line and the grounded
+        advice answer are appended to the session org's OWN append-only transcript so a reopened box reads like one
+        running conversation, and the PRIOR turns are fed to the grounded assistant as CONTEXT (a separate data block,
+        same grounding discipline - never ``grounded_in``, never a finding, never an action). The transcript write is
+        fail-SOFT: a store fault never breaks a command. With the flag off this is byte-identical to before (no read,
+        no write)."""
         from .. import config
         if not config.customer_assistant_enabled():
             raise ProvisionDenied("the chat engagement surface is not enabled")
@@ -4638,15 +4654,69 @@ class Provisioner:
         from . import assistant_command as _cmd
         parsed = _cmd.classify(str(line or ""))
         intent = str(parsed.get("intent") or "advice")
+        # the conversation store is gated on the flag AND a server-supplied session key; prior turns are read BEFORE
+        # the current line is appended, so the assistant's history excludes the turn being asked (mirrors the
+        # documents block discipline). Everything here is fail-soft: a store fault never takes down the command.
+        mem_on = bool(session_key) and config.customer_chat_memory_enabled()
+        prior = self._chat_prior_turns(requester_org_id, session_key) if mem_on else None
+        if mem_on:
+            self._chat_remember(requester_org_id, session_key, "user", str(line or ""))
         if intent == "advice":
             # the ONLY branch that reaches a model - grounded, read-only, minting nothing (customer_assistant_ask
-            # has no action/mint path); the deterministic layer never lets an advice line become an action.
-            advice = self.customer_assistant_ask(requester, requester_org_id, str(parsed.get("text") or ""), ip=ip)
+            # has no action/mint path); the deterministic layer never lets an advice line become an action. The history
+            # kwarg is passed ONLY when the store is on, so the flag-off call is byte-identical to before.
+            ask_kw: "dict[str, Any]" = {"ip": ip}
+            if mem_on:
+                ask_kw["history"] = prior
+            advice = self.customer_assistant_ask(requester, requester_org_id, str(parsed.get("text") or ""), **ask_kw)
+            if mem_on and isinstance(advice, dict):
+                self._chat_remember(requester_org_id, session_key, "assistant", str(advice.get("answer") or ""))
             return {"intent": "advice", "advice": advice}
         self._audit("customer_command", requester=requester, org_id=requester_org_id,
                     target=str(parsed.get("host") or ""), outcome=intent)
         return {"intent": intent, "host": str(parsed.get("host") or ""),
                 "depth": str(parsed.get("depth") or ""), "text": str(parsed.get("text") or "")}
+
+    def customer_chat_history(self, requester: str, requester_org_id: str, *, session_key: str = "",
+                              ip: str = "") -> dict:
+        """Chat continuity - the SESSION org's OWN command-box conversation transcript for THIS session (the typed
+        lines and the grounded advice answers), oldest-first, so a reopened box survives reload / navigation. Absent
+        unless VIGIL_CUSTOMER_CHAT_MEMORY is on (gated at the dispatch; refused here too, defence in depth). Gated like
+        the assessments read - ``admit_customer(view_assessments)`` on the hop-bound session org, no global leg.
+        ``requester`` / ``requester_org_id`` / ``session_key`` are the SERVER session identity (never a body field); the
+        store is tenant- AND session-scoped by a one-way-hashed per-org path, so a cross-tenant / cross-session read is
+        structurally impossible. A missing / corrupt transcript reads as empty. Returns ``{"turns": [...], "count": n}``
+        - inert conversation text only; it mints nothing and carries no authority, money or finding."""
+        from .. import config
+        if not config.customer_chat_memory_enabled():
+            raise ProvisionDenied("the chat conversation store is not enabled")
+        if not self.orgs.admit_customer(username=requester, org_id=requester_org_id, permission="view_assessments"):
+            raise ProvisionDenied("requester may not read the conversation for this org (view_assessments)")
+        from . import customer_chat_store as _chat
+        try:
+            return _chat.history(requester_org_id, str(session_key or ""))
+        except _chat.ChatStoreError:
+            return {"turns": [], "count": 0}            # a bad session key / corrupt store reads as an empty transcript
+
+    def _chat_remember(self, org_id: str, session_key: str, role: str, text: str) -> None:
+        """Append ONE conversation turn to the session org's OWN transcript, fail-SOFT: a store fault is swallowed (the
+        continuity transcript is cosmetic - it must NEVER break a command). ``org_id`` / ``session_key`` are the
+        hop-bound session identity the caller already resolved (never a body field)."""
+        from . import customer_chat_store as _chat
+        try:
+            _chat.append(org_id, str(session_key or ""), role, text)
+        except Exception:  # noqa: BLE001 - cosmetic continuity: any store fault is swallowed, never breaks a command
+            return
+
+    def _chat_prior_turns(self, org_id: str, session_key: str) -> "Optional[list]":
+        """The session org's OWN prior conversation turns for the assistant's continuity context, or None on any fault
+        (fail-soft: a missing / corrupt transcript just yields no history). Tenant- AND session-scoped by the store's
+        per-org hashed path (``org_id`` / ``session_key`` are the hop-bound session identity, never a body field)."""
+        from . import customer_chat_store as _chat
+        try:
+            return _chat.history(org_id, str(session_key or "")).get("turns") or None
+        except Exception:  # noqa: BLE001 - fail-soft: no history rather than a broken turn
+            return None
 
     def customer_flow_step(self, requester: str, requester_org_id: str, *, intent: str = "", host: str = "",
                            depth: str = "", product_id: str = "", method: str = "", authorized: bool = False,
