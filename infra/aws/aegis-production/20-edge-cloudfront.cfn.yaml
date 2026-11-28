@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AEGIS AS-34 production edge (spec section 5): a Route 53 hosted zone, a KEYLESS origin-hop cert issuer
+  (ACM Private CA), and per tenant (D3 distribution-tenant-per-host) a CloudFront distribution with Shield,
+  caching disabled, an origin-request policy forwarding Host + CloudFront-Viewer-Address, and a per-(org,
+  host) edge secret injected as an origin header, in front of a VPC origin to an INTERNAL ALB. The
+  production counterpart of AS-26 (infra/aws/aegis-staging/20-edge-cloudfront); unlike staging it takes a
+  real hosted zone and, when the operator supplies an ACM certificate ARN, terminates viewer TLS on it
+  (TLSv1.2_2021, SNI). The ALB admits only in-VPC origin traffic; a CloudFront-bypass carries no edge
+  secret and is refused (offline-tested by the Z3R/edge guard). PRODUCTION platform, merged-not-applied;
+  the two tenant distributions are the canonical pattern the AS-6c edge reconciler provisions per tenant
+  at steady state (ROLLOUT.md). Long-form intrinsics only.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The production VPC id (output VpcId of 00-network-zones).
+  AlbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two Z2E subnets for the internal ALB (output Z2ESubnets of 00-network-zones).
+  ProductionZoneName:
+    Type: String
+    Default: aegis.vigil.example
+    Description: >-
+      The Route 53 production hosted-zone name. The default is a reserved example domain; the operator sets
+      the real production zone at apply time.
+  Tenant1Host:
+    Type: String
+    Default: tenant-a.aegis.vigil.example
+    Description: Tenant A host (distribution tenant per host).
+  Tenant2Host:
+    Type: String
+    Default: tenant-b.aegis.vigil.example
+    Description: Tenant B host (distribution tenant per host).
+  ViewerCertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ACM certificate ARN (us-east-1) for viewer TLS. Empty falls back to the CloudFront default
+      certificate; set it in production so each tenant host terminates on a real certificate.
+
+Conditions:
+  UseAcmViewerCert:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ViewerCertificateArn
+          - ""
+
+Resources:
+  # --------------------------------------------------------------------------------------------------
+  # Route 53 production hosted zone (spec row: "Route 53 zone"). The two tenant records point at the two
+  # CloudFront distributions.
+  # --------------------------------------------------------------------------------------------------
+  ProductionHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name:
+        Ref: ProductionZoneName
+      HostedZoneConfig:
+        Comment: AEGIS production zone (AS-34).
+      HostedZoneTags:
+        - Key: vigil:environment
+          Value: production
+
+  # --------------------------------------------------------------------------------------------------
+  # Keyless origin-hop cert issuer - ACM Private CA. The front gets its origin-hop certificate from this
+  # central issuer (spec section 5). Viewer TLS is terminated by CloudFront (ACM cert when supplied).
+  # --------------------------------------------------------------------------------------------------
+  OriginHopCA:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Properties:
+      Type: ROOT
+      KeyAlgorithm: EC_prime256v1
+      SigningAlgorithm: SHA256WITHECDSA
+      Subject:
+        Organization: VIGIL AEGIS production
+        CommonName: aegis-production-origin-hop-issuer
+      UsageMode: SHORT_LIVED_CERTIFICATE
+      Tags:
+        - Key: vigil:issuer
+          Value: origin-hop-keyless
+
+  # --------------------------------------------------------------------------------------------------
+  # Per-(org,host) edge secrets. CloudFront injects each as an origin header; the front verifies it, so a
+  # direct-to-origin request (no edge secret) is refused (T-PXY / CloudFront-bypass).
+  # --------------------------------------------------------------------------------------------------
+  Tenant1EdgeSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: aegis-production/edge/tenant-a
+      Description: Per-(org,host) edge secret for tenant A (CloudFront to front verification).
+      GenerateSecretString:
+        SecretStringTemplate: '{"header":"X-Vigil-Edge-Secret"}'
+        GenerateStringKey: edge_secret
+        PasswordLength: 48
+        ExcludePunctuation: true
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-a
+
+  Tenant2EdgeSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: aegis-production/edge/tenant-b
+      Description: Per-(org,host) edge secret for tenant B (CloudFront to front verification).
+      GenerateSecretString:
+        SecretStringTemplate: '{"header":"X-Vigil-Edge-Secret"}'
+        GenerateStringKey: edge_secret
+        PasswordLength: 48
+        ExcludePunctuation: true
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-b
+
+  # --------------------------------------------------------------------------------------------------
+  # Internal ALB. SG admits only in-VPC origin traffic (the CloudFront VPC origin lives in the VPC); no
+  # 0.0.0.0/0 ingress. Host rule to target group per instance_id (compiled from grants x placement).
+  # --------------------------------------------------------------------------------------------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal ALB for the AEGIS production VPC origin; admits only in-VPC origin traffic.
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "10.90.0.0/16"
+          Description: in-VPC CloudFront VPC-origin traffic only
+      Tags:
+        - Key: Name
+          Value: aegis-production-alb-sg
+
+  InternalAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: aegis-production-origin
+      Scheme: internal
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        Ref: AlbSubnetIds
+      SecurityGroups:
+        - Ref: AlbSecurityGroup
+      Tags:
+        - Key: vigil:environment
+          Value: production
+
+  Tenant1TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: aegis-production-tenant-a
+      VpcId:
+        Ref: VpcId
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /healthz
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-a
+
+  Tenant2TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: aegis-production-tenant-b
+      VpcId:
+        Ref: VpcId
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /healthz
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-b
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn:
+        Ref: InternalAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "421"
+            ContentType: text/plain
+            MessageBody: misdirected request (foreign Host)
+
+  Tenant1ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: AlbListener
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - Ref: Tenant1Host
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: Tenant1TargetGroup
+
+  Tenant2ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: AlbListener
+      Priority: 20
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - Ref: Tenant2Host
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: Tenant2TargetGroup
+
+  # --------------------------------------------------------------------------------------------------
+  # CloudFront VPC origin to the internal ALB, an origin-request policy forwarding Host +
+  # CloudFront-Viewer-Address, and caching disabled via the AWS managed CachingDisabled policy.
+  # --------------------------------------------------------------------------------------------------
+  AlbVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: aegis-production-alb-origin
+        Arn:
+          Ref: InternalAlb
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+        OriginSSLProtocols:
+          - TLSv1.2
+      Tags:
+        - Key: vigil:environment
+          Value: production
+
+  EdgeOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: aegis-production-host-and-viewer-address
+        Comment: Forward Host + CloudFront-Viewer-Address to the VPC origin (spec section 5).
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Host
+            - CloudFront-Viewer-Address
+        CookiesConfig:
+          CookieBehavior: none
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  Tenant1Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: AEGIS production tenant A (distribution tenant per host).
+        Aliases:
+          - Ref: Tenant1Host
+        Origins:
+          - Id: alb-vpc-origin
+            DomainName:
+              Fn::GetAtt:
+                - InternalAlb
+                - DNSName
+            VpcOriginConfig:
+              VpcOriginId:
+                Ref: AlbVpcOrigin
+            OriginCustomHeaders:
+              - HeaderName: X-Vigil-Edge-Secret
+                HeaderValue:
+                  Fn::Sub: "{{resolve:secretsmanager:${Tenant1EdgeSecret}:SecretString:edge_secret}}"
+        DefaultCacheBehavior:
+          TargetOriginId: alb-vpc-origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId:
+            Ref: EdgeOriginRequestPolicy
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+        ViewerCertificate:
+          Fn::If:
+            - UseAcmViewerCert
+            - AcmCertificateArn:
+                Ref: ViewerCertificateArn
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.2_2021
+            - CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-a
+
+  Tenant2Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: AEGIS production tenant B (distribution tenant per host).
+        Aliases:
+          - Ref: Tenant2Host
+        Origins:
+          - Id: alb-vpc-origin
+            DomainName:
+              Fn::GetAtt:
+                - InternalAlb
+                - DNSName
+            VpcOriginConfig:
+              VpcOriginId:
+                Ref: AlbVpcOrigin
+            OriginCustomHeaders:
+              - HeaderName: X-Vigil-Edge-Secret
+                HeaderValue:
+                  Fn::Sub: "{{resolve:secretsmanager:${Tenant2EdgeSecret}:SecretString:edge_secret}}"
+        DefaultCacheBehavior:
+          TargetOriginId: alb-vpc-origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId:
+            Ref: EdgeOriginRequestPolicy
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+        ViewerCertificate:
+          Fn::If:
+            - UseAcmViewerCert
+            - AcmCertificateArn:
+                Ref: ViewerCertificateArn
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.2_2021
+            - CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: vigil:tenant
+          Value: tenant-b
+
+  # --------------------------------------------------------------------------------------------------
+  # Shield protections on each distribution (spec row: "production CloudFront + Shield").
+  # --------------------------------------------------------------------------------------------------
+  Tenant1Shield:
+    Type: AWS::Shield::Protection
+    Properties:
+      Name: aegis-production-tenant-a
+      ResourceArn:
+        Fn::Sub: "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Tenant1Distribution}"
+
+  Tenant2Shield:
+    Type: AWS::Shield::Protection
+    Properties:
+      Name: aegis-production-tenant-b
+      ResourceArn:
+        Fn::Sub: "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Tenant2Distribution}"
+
+  # --------------------------------------------------------------------------------------------------
+  # Route 53 records for each tenant host to its distribution.
+  # --------------------------------------------------------------------------------------------------
+  Tenant1Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Ref: ProductionHostedZone
+      Name:
+        Ref: Tenant1Host
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::GetAtt:
+            - Tenant1Distribution
+            - DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+  Tenant2Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Ref: ProductionHostedZone
+      Name:
+        Ref: Tenant2Host
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::GetAtt:
+            - Tenant2Distribution
+            - DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  Tenant1DistributionId:
+    Description: Tenant A CloudFront distribution id.
+    Value:
+      Ref: Tenant1Distribution
+  Tenant2DistributionId:
+    Description: Tenant B CloudFront distribution id.
+    Value:
+      Ref: Tenant2Distribution
+  OriginHopCAArn:
+    Description: Keyless origin-hop cert issuer (ACM Private CA) ARN.
+    Value:
+      Ref: OriginHopCA
+  ProductionHostedZoneId:
+    Description: The Route 53 production hosted-zone id.
+    Value:
+      Ref: ProductionHostedZone

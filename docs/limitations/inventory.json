@@ -813,6 +813,36 @@
    "w16_issue": null
   },
   {
+   "id": "LIMIT-aegis-production-stack-not-applied",
+   "title": "AEGIS AS-34 production CloudFormation stack is merged but not applied in CI",
+   "summary": "The AEGIS production platform (infra/aws/aegis-production/*.cfn.yaml - zone network + disjoint EIPs on its own 10.90.0.0/16, per-zone KMS keys, the real owner and release roots, permission-bounded roles, the IMDSv2 launch template, the SSM bringup document, the Route 53 production zone, the 2-tenant CloudFront + Shield, the VPC origin + internal ALB, the per-(org,host) edge secrets, the keyless origin-hop cert issuer, SNS paging, CloudFormation drift detection) is the production counterpart of AS-26 and a deployment DECLARATION. It is analyzer-clean (cfn-lint) and posture-checked offline by the SAME analyzer AS-26 uses (integration/vigil_integration/aegis_infra_lint.py: IMDSv2 enforced, disjoint EIP sets, MFA-gated owner/release roots, keyless relay, no public ingress, paging + drift present; pinned by integration/tests/test_aegis_production_posture.py). The residual is that there is no live production AWS account in the merge pipeline, so the stack is NOT applied in CI: the live-reality acceptance - MFA console sign-in against the owner/release roots, the delivered edge page over CloudFront to VPC origin to ALB, Shield, the ACM viewer certificate, and live CloudFormation drift detection - is a production operator action (see infra/aws/aegis-production/README.md and ROLLOUT.md), proven by the AS-1b staging runs and the owner's live apply, not by this slice.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "infra/aws/aegis-production/00-network-zones.cfn.yaml"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "infra/aws/aegis-production/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
+   "id": "LIMIT-aegis-production-cd-inert",
+   "title": "AEGIS AS-34 production CD role ships inert until the operator wires OIDC",
+   "summary": "The production continuous-delivery role (ProductionDeployRole in infra/aws/aegis-production/30-ops-relay-paging-drift.cfn.yaml) is GitHub-OIDC-scoped to ssm:SendCommand against the production bringup document only (no SSH, no long-lived keys), mirroring the staging StagingDeployRole and the deploy-ec2 role. It is gated on the CdEnabled condition and ships inert: with the ExistingOIDCProviderArn parameter empty the role is not created and no production deploy can run. There is no live production deploy executed in this slice - the live apply and the staged, health-gated rollout (AS-6a placement, AS-6e rolling reconcile, AS-6c edge bind) fire only once the operator sets the OIDC provider ARN and the production deploy variables in a live production account, per infra/aws/aegis-production/ROLLOUT.md.",
+   "classification": "doc-only",
+   "severity": "info",
+   "anchor": {
+    "file": "infra/aws/aegis-production/30-ops-relay-paging-drift.cfn.yaml"
+   },
+   "marker": false,
+   "check": "file-exists",
+   "source_doc": "infra/aws/aegis-production/README.md",
+   "disposition": "file-into-w16",
+   "w16_issue": null
+  },
+  {
    "id": "AS1B-live-fire-tt-stg",
    "title": "AEGIS AS-1b TT-STG run-record orchestration is covered offline in full; the live staging run and the record signed under the provisioned staging key are a deploy-gated residual",
    "summary": "AS-1b (engine/crucible/framework/v2/evidence/aegis_tt_run.py) is the staging-run counterpart to AS-1a's TT-CI rig: it takes a test-tenant acceptance run (TT-A under attack, TT-B the cross-tenant control), fail-closed GATES it, DERIVES the AS-25 record's world from the run (the IaC topology digest over the real AS-26 CloudFormation templates, the subject digest, and the six required case-class counts re-derived from the bound JUnit, never asserted), and assembles + self-verifies the AS-25 signed binding (reusing evidence.aegis_tt build/sign/verify verbatim). Every deterministic layer is covered offline in full by evidence/tests/test_aegis_tt_run.py: the gate's fail-closed negative controls (failed acceptance, in-process rather than distinct-uid mode, a false check, a skipped no-skip term, a dirty/failing manifest, a missing case class, non-VALID artifacts, a production root, an off-census UI route, a wrong signer each yield NO record), the deterministic/order-independent/change-sensitive digests, and the sign+offline-self-verify round-trip under an ephemeral provisioning trust root. What is DEPLOYED-GATED is the LIVE half: standing up TT-STG in a real AWS staging account (the AS-26 stack applied, the GitHub-OIDC staging deploy role wired, MFA console sign-in), executing the e2e deploy + acceptance against it, and SIGNING the binding with the provisioned staging TT-evidence key. The committed trust root docs/evidence/aegis-tt/trust-root.json is honestly 'unprovisioned' (empty authorisers; load_trust_root_doc returns trust_root=None and the verifier fails closed), and the real key is KMS-wrapped in the staging control plane and is NEVER a CI runner key (plan 13.3), so no live record can be produced or verified under the real root in CI. Fail-closed meanwhile: with no provisioned root, no record reads 'implemented_and_demonstrated' (the AS-25 status projection stays 'implemented_not_validated').",

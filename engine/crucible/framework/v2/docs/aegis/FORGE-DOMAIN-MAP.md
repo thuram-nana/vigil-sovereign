@@ -140,11 +140,11 @@ placement, never enforcement, and renders enforcement only after a release.
 | Routing-edge verification | `apps/sigil/sigil/governor/shard_routing.py` | yes |
 | Fleet model (authority side) | `engine/crucible/framework/v2/authority/fleet.py` | yes |
 | AEGIS fleet / reconciler + worker-kind registry | `aegis_fleet.py` **(to build — AS-6a)** | — |
-| AWS platform (zones, keys, roles, EIPs, edge) | `infra/aws/…` **(platform CFN to build — AS-26/AS-34)** | dir yes; platform empty |
+| AWS platform (zones, keys, roles, EIPs, edge) | `infra/aws/aegis-staging/` + `infra/aws/aegis-production/` **(platform CFN BUILT — AS-26 staging, AS-34 production)** | yes |
 
 - **Hot set:** FLEET. **Tokens:** INFRA (for the AWS stacks).
 - **Slices:** AS-6a placement+reconciler · AS-6c edge automation · AS-6e rolling ·
-  AS-26 OPS-1 (staging platform) · AS-34 production + rollout. FLEET chain:
+  AS-26 OPS-1 (staging platform) · **AS-34 production +  rollout (built - the PRODUCTION AWS platform CFN `infra/aws/aegis-production/*.cfn.yaml`, the production  counterpart of AS-26: the same four templates scoped for production [own 10.90.0.0/16, real owner/release  roots, real Route 53 zone + optional ACM viewer cert, production CD OIDC role] plus the staged  health-gated rollout procedure `infra/aws/aegis-production/ROLLOUT.md`; cfn-lint + posture clean under the  SAME analyzer AS-26 uses, the live apply deploy-gated as LIMIT-aegis-production-stack-not-applied /  -cd-inert)**. FLEET chain:
   6a → 29 → 6e → 27b; INFRA chain: 26 → 6c → 34.
 
 ## Domain 5 — Ingest / receiver (inbound findings/telemetry endpoint)
@@ -201,11 +201,28 @@ scenarios. The benchmark runs **lazily, off the gate path**.
 | OWASP benchmark | `engine/crucible/framework/v2/eval/owasp_benchmark.py` | yes |
 | Eval gate / corpus / A·B | `engine/crucible/framework/v2/eval/{gate.py,corpus.py,ab.py}` | yes |
 | Benchmark narrative (root) | `BENCHMARK.md` | yes |
-| AEGIS benchmark (commit-reveal corpora; signed scorecard) | `aegis_bench.py` **(to build — AS-23a)** | — |
+| AEGIS early benchmark (fixed reference efficacy; deterministic digest) | `aegis/benchmark_early.py` **(BUILT, AS-23a)** | yes |
+| AEGIS full benchmark (commit-reveal corpora; signed scorecard) | `aegis_bench.py` **(to build, AS-23b)** | (pending) |
 
 - **Tokens:** GP (gate path; needs `make gate` evidence).
-- **Slices:** AS-23a early benchmark (arms A/B/G1/G2; CRS & claims gates) · AS-23b full
-  benchmark · AS-8 content + coverage.
+- **Slices:** **AS-23a early benchmark (BUILT: `aegis/benchmark_early.py`: deterministic
+  read-only EARLY DETECTION-POSTURE BENCHMARK that composes the AS-8 coverage measure, the AS-7b
+  Coraza/CRS admissibility [carried by both composed meters, cross-checked via `consistent`] and the
+  AS-31 detection mirror into a bounded, address-free EFFICACY measurement against a small FIXED
+  in-repo reference technique set [`REFERENCE_TECHNIQUES`, a code constant, never fetched]: of the
+  reference techniques, how many the admissible content covers [`covered`/`missing`], an integer-floor
+  `efficacy_bps`, the AS-31 live-posture cross-check and a deterministic posture digest; over
+  inadmissible content or an empty reference it covers nothing, fail closed. MEASURES, never acts, a
+  covered reference technique is a LEAD never a block, it asserts nothing about live traffic; runs
+  lazily OFF the gate path [not gateway-wired, the live gateway stays byte-identical]; default-OFF
+  `VIGIL_AEGIS_BENCHMARK`, inert unless its own flag AND every dep flag [AS-7b/AS-8/AS-31] are armed.
+  The signed A/B/G1/G2 commit-reveal scorecard is AS-23b)** · AS-23b full
+  benchmark · **AS-8 content + coverage (BUILT: `aegis/detection_coverage.py`: deterministic
+  read-only detection-content COVERAGE measure over the AS-7b admissible CRS content, classifying
+  each rule-id into its CRS detection TECHNIQUE by the rule-id banding + a per-technique breakdown +
+  a `covered`/`known` ratio + a deterministic posture digest; surfaced read-only on the AS-5c probe,
+  address-free and hygiene-clean; MEASURES, never acts, a classified technique is a LEAD never a
+  block; default-OFF `VIGIL_AEGIS_COVERAGE`)**.
 
 ## Domain 7 — Evidence / records (the DONE record + audit export)
 

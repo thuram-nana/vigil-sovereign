@@ -1,14 +1,15 @@
-# AS-26 (OPS-1) — ADVISORY aegis-infra job.
+# AS-26 (OPS-1) + AS-34 — ADVISORY aegis-infra job.
 #
-# It runs the IaC analyzers over the AEGIS staging CloudFormation templates (cfn-lint) PLUS the two offline
-# posture/guard layers this slice ships: the deterministic Z3R relay guards and the AS-26 CFN posture
-# analyzer. It is GREEN on the current tree by construction — every template is cfn-lint clean, the posture
-# analyzer passes, and the relay-guard tests pass.
+# It runs the IaC analyzers over the AEGIS staging AND production CloudFormation templates (cfn-lint) PLUS
+# the two offline posture/guard layers these slices ship: the deterministic Z3R relay guards and the CFN
+# posture analyzer (the SAME analyzer judges both the AS-26 staging and the AS-34 production templates). It
+# is GREEN on the current tree by construction — every template is cfn-lint clean, the posture analyzer
+# passes over both platforms, and the relay-guard tests pass.
 #
-# ADVISORY, NOT REQUIRED. The live AWS staging stack cannot be applied in CI (there is no live staging
+# ADVISORY, NOT REQUIRED. The live AWS staging/production stacks cannot be applied in CI (there is no live
 # account in the merge pipeline), so this job proves what is provable OFFLINE and stays non-blocking while
-# the staging account and its live checks (MFA sign-in, the delivered edge page, live drift detection) are
-# an operator step. It is deliberately NOT in .github/required-status-checks.txt and is enumerated with its
+# the live accounts and their checks (MFA sign-in, the delivered edge page, live drift detection) are an
+# operator step. It is deliberately NOT in .github/required-status-checks.txt and is enumerated with its
 # reason in KNOWN_ADVISORY of docs/tests/test_required_checks_canonical.py, so it never blocks a PR.
 name: aegis-infra advisory (AS-26)
 
@@ -51,20 +52,26 @@ jobs:
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
           pip install -e packages/core/vigil_core --no-deps
 
-      - name: cfn-lint — every AEGIS staging template (BLOCKING within this advisory job)
+      - name: cfn-lint — every AEGIS staging + production template (BLOCKING within this advisory job)
         run: |
-          cfn-lint infra/aws/aegis-staging/*.cfn.yaml infra/aws/github-oidc-deploy-role.cfn.yaml
+          cfn-lint infra/aws/aegis-staging/*.cfn.yaml infra/aws/aegis-production/*.cfn.yaml \
+            infra/aws/github-oidc-deploy-role.cfn.yaml
 
-      - name: AS-26 CFN posture analyzer (IMDSv2, disjoint EIPs, MFA roots, keyless relay, paging, drift)
+      - name: CFN posture analyzer (IMDSv2, disjoint EIPs, MFA roots, keyless relay, paging, drift)
         run: |
+          # The same analyzer over both platforms: AS-26 staging (test-owner/test-release roots) and AS-34
+          # production (owner/release roots). Both must be posture-clean.
           PYTHONPATH=integration python -m vigil_integration.aegis_infra_lint \
             infra/aws/aegis-staging/*.cfn.yaml
+          PYTHONPATH=integration python -m vigil_integration.aegis_infra_lint \
+            infra/aws/aegis-production/*.cfn.yaml
 
-      - name: Z3R relay guards + CFN posture — offline tests
+      - name: Z3R relay guards + CFN posture — offline tests (staging + production)
         run: |
           PYTHONPATH=integration:gateway python -m pytest -q \
             integration/tests/test_aegis_relay_guard.py \
-            integration/tests/test_aegis_infra_posture.py
+            integration/tests/test_aegis_infra_posture.py \
+            integration/tests/test_aegis_production_posture.py
 
       - name: Z3R relay wrapper — dry-run smoke (validates the pinned argv; refuses a vault source)
         run: |
@@ -76,10 +83,11 @@ jobs:
           fi
           echo "relay dry-run smoke: pinned argv validated and vault source refused."
 
-      - name: ruff — the AS-26 Python (guard + analyzer + tests)
+      - name: ruff — the AS-26 + AS-34 Python (guard + analyzer + tests)
         run: |
           ruff check --no-cache --config integration/pyproject.toml \
             integration/vigil_integration/aegis_relay_guard.py \
             integration/vigil_integration/aegis_infra_lint.py \
             integration/tests/test_aegis_relay_guard.py \
-            integration/tests/test_aegis_infra_posture.py
+            integration/tests/test_aegis_infra_posture.py \
+            integration/tests/test_aegis_production_posture.py
