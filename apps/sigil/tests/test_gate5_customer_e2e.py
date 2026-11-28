@@ -108,6 +108,7 @@ _SCREENS: dict[str, tuple[str, tuple[str, ...]]] = {
     "#/monitoring/settings": ("Monitoring settings", ("api/customer/monitoring",)),   # AS-2k (same reads/writes)
     "#/monitoring/preview": ("Protection preview", ("api/customer/monitoring/preview",)),   # AS-4b (read-only preview)
     "#/monitoring/control": ("Defense control", ("api/customer/monitoring/control",)),   # AS-27b (read-only control)
+    "#/monitoring/onboarding": ("AEGIS onboarding", ("api/customer/monitoring/onboarding",)),   # AS-6d (guided flow)
     "#/live": ("Live Control", ("api/customer/launches", "api/customer/live/activity")),   # Live Control (steer+watch)
     "#/command": ("Command", ()),   # B2/B3 — the engagement command box (fires no read on arrival; it POSTs on submit)
     "#/fix-first": ("Fix first", ("api/customer/posture",)),
@@ -155,7 +156,11 @@ _CONTROLS: dict[str, dict[str, int]] = {
     # AS-4b adds one read-only link out to the Protection preview (the preview screen itself renders no button).
     # AS-27b adds one more read-only link out to Defense control (the control screen itself renders no button).
     "#/monitoring/settings": {"Shorten window": 1, "Re-arm": 1, "Release to enforce": 1, "Turn off": 1,
-                              "View protection preview": 1, "View defense control": 1},
+                              "View protection preview": 1, "View defense control": 1,
+                              "Set up AEGIS monitoring": 1},   # AS-6d: one read-only link out to the onboarding flow
+    # AS-6d AEGIS onboarding: the journey is complete here, so every step card is done (no step button); the two
+    # read-only explore-next links out to the AS-4b preview + AS-27b control are the screen's only controls.
+    "#/monitoring/onboarding": {"See what enforcing would add": 1, "Review defense control": 1},
     # Live Control: cust_b is running on b.example (pause offered) -> one Pause; the steer box's one Send to VIGIL.
     # The activity feed rows are <li> steps, not buttons.
     "#/live": {"Pause": 1, "Send to VIGIL": 1},
@@ -202,7 +207,7 @@ _PENDING_ROUTES = {stage[0] for stage in _ROUTE_STAGES.values()}
 # switch Account security and passkey sign-in on once #1147 is in the branch. A screen that lands with a NEW flag must
 # add it here (its stage then reds loudly — the screen fell back home — until it does). connect / cloudConnect
 # (data-connect / data-cloud-connect) switch the Connect screen and its Cloud account tile on.
-_WALK_FLAGS = {"overview": "1", "onboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "command": "1", "team": "1", "security": "1", "passkey": "1",
+_WALK_FLAGS = {"overview": "1", "onboarding": "1", "aegisOnboarding": "1", "launchUi": "1", "monitoring": "1", "liveControl": "1", "command": "1", "team": "1", "security": "1", "passkey": "1",
                "code": "1", "connect": "1", "cloudConnect": "1", "posture": "1", "attackPath": "1", "blindVuln": "1",
                "settings": "1", "authorizations": "1", "privacyCenter": "1", "dataRights": "1", "aiGovernance": "1", "sellerIdentity": "1", "googleSignin": "0", "oidcHandoff": "0", "iosInstall": "0",
                "plans": "1", "reportExport": "1", "compliance": "1"}   # PR-G (Area 6): the last three; S5: aiGovernance; S7: sellerIdentity
@@ -218,7 +223,8 @@ _GATE5_ENV = ("VIGIL_CUSTOMER_OVERVIEW",   # C7 — the home-screen aggregate (i
               "VIGIL_CUSTOMER_PLANS", "VIGIL_CUSTOMER_PDF_REPORT", "VIGIL_CUSTOMER_COMPLIANCE_MAP",   # + PR-G
               "VIGIL_CUSTOMER_SETTINGS", "VIGIL_CUSTOMER_AUTHORIZATIONS",   # + S12 (legal/governance)
               "VIGIL_CUSTOMER_PRIVACY_CENTER", "VIGIL_CUSTOMER_DATA_RIGHTS",   # + S2, S3 (legal/governance)
-              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY")   # + S5, S7 (legal/governance)
+              "VIGIL_CUSTOMER_AI_GOVERNANCE", "VIGIL_CUSTOMER_SELLER_IDENTITY",   # + S5, S7 (legal/governance)
+              "VIGIL_CUSTOMER_AEGIS_ONBOARDING")   # + AS-6d (the strict onboarding gate, on top of monitoring)
 
 
 def _page_scripts(app_dir: Path = APP) -> list[str]:
@@ -492,6 +498,15 @@ _FAKE_SERVER = {
          "enforcing": True, "override_active": False, "standdown_available": True, "standdown_blockers": []},
         {"host": "b.example", "mode": "observe", "armed": False, "proof_current": True, "respond_entitled": True,
          "enforcing": False, "override_active": False, "standdown_available": False, "standdown_blockers": ["not_enforcing"]}]},
+    # AS-6d — the onboarding journey over the SAME state: both hosts proven, a.example monitored (observe), on an
+    # AEGIS plan -> the journey is complete, every step done (no step button), and the two explore-next links show.
+    "api/customer/monitoring/onboarding": {"org_id": "org_acme", "can_manage": True, "journey": {
+        "proven_host_count": 2, "active_host_count": 1, "enforcing_host_count": 0,
+        "has_plan": True, "respond_entitled": True,
+        "steps": [{"key": "prove_host", "status": "done", "done": True},
+                  {"key": "plan", "status": "done", "done": True},
+                  {"key": "turn_on_observe", "status": "done", "done": True}],
+        "complete": True, "next_step": None, "explore_available": True}},
     "api/customer/security": {"ok": True, "totp": False, "passkeys": [], "account_name": "ana@acme.com"},
     # the Settings hub's General tab (legal/governance S1): the account's stored legal-entity / contact profile
     "api/customer/preferences": {"ok": True, "preferences": {
@@ -1006,7 +1021,7 @@ def test_a_flag_off_screen_route_is_absent(tmp_path, monkeypatch):
     sov, edge, ep, _sp = _stack_gate5(tmp_path, monkeypatch, on=False)
     try:
         for p in ("overview",   # C7 — the home-screen aggregate route is gone with VIGIL_CUSTOMER_OVERVIEW off
-                  "members", "monitoring", "monitoring/events", "monitoring/preview", "monitoring/control", "live/activity", "launches", "onboarding", "billing/offers", "connect",
+                  "members", "monitoring", "monitoring/events", "monitoring/preview", "monitoring/control", "monitoring/onboarding", "live/activity", "launches", "onboarding", "billing/offers", "connect",
                   "posture", "posture/trend", "billing/plans", "report", "report/pdf", "compliance",   # + PR-G (Area 6)
                   "preferences", "authorizations", "privacy",   # + S12, S2
                   "data-rights", "data-rights/export",   # + S3

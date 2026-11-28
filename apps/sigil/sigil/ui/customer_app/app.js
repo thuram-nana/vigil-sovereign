@@ -180,7 +180,7 @@
   // A screen the guide may send someone to that this deployment does not show: no "Go to" button leads there, and a
   // guide step that names the screen's page switch (`when`: Settings) is not listed at all.
   // (PR-G: Plans and Reports read their page switches here directly — the same ones PLANS_ON / REPORTS_ON hold.)
-  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON) && (route !== "#/monitoring/control" || MONITORING_ON); }
+  function routeShown(route) { return (route !== "#/monitoring" || MONITORING_ON) && (route !== "#/code" || CODE_ON) && (route !== "#/connect" || CONNECT_ON) && (route !== "#/fix-first" || POSTURE_ON) && (route !== "#/plans" || pageFlag("plans")) && (route !== "#/reports" || pageFlag("reportExport") || pageFlag("compliance")) && (route !== "#/settings" || SETTINGS_ON) && (route !== "#/privacy" || pageFlag("privacyCenter")) && (route !== "#/data-rights" || pageFlag("dataRights")) && (route !== "#/ai-governance" || AI_GOVERNANCE_ON) && (route !== "#/seller-identity" || SELLER_IDENTITY_ON) && (route !== "#/live" || LIVE_ON) && (route !== "#/command" || COMMAND_ON) && (route !== "#/monitoring/settings" || MONITORING_ON) && (route !== "#/monitoring/preview" || MONITORING_ON) && (route !== "#/monitoring/control" || MONITORING_ON) && (route !== "#/monitoring/onboarding" || AEGIS_ONBOARDING_ON); }
 
   // ---- account security (security.js): Account security, passkey sign-in, the step-up prompt -----------------------
   var SECURITY = window.VIGIL_SECURITY;
@@ -3132,6 +3132,10 @@
   // server answers 401 step_up_required); turning it off never does, and is confirmed here first. The page shows only
   // what the server sent, and nothing internal of an event (no record number, report id, certificate hash or org id).
   var MONITORING_ON = pageFlag("monitoring");
+  // AS-6d — the AEGIS onboarding flow (#/monitoring/onboarding). A SECOND, independent gate on top of monitoring:
+  // the screen, its Monitoring-settings link and its route are shown only when BOTH the monitoring flag and the
+  // onboarding flag are on; off, #/monitoring/onboarding is the home screen exactly as any unknown route.
+  var AEGIS_ONBOARDING_ON = MONITORING_ON && pageFlag("aegisOnboarding");
   var MON_POLL_MS = 30000;                                // the events refresh this often while the screen is in view
   var mon = { timer: null, gen: 0, loaded: false, list: null };
   var MON_MODE = { observe: "Observe", block: "Respond" };
@@ -3539,6 +3543,12 @@
       // stand-down applies) from here. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
       children.push(h("div.cust-mon-settings-control-link", {}, monSettingsButton("View defense control",
         function () { nav("#/monitoring/control"); })));
+      // AS-6d — a manager can open the AEGIS onboarding flow (connected host -> monitored) from here, shown only
+      // while the strict onboarding flag is on. A plain nav link (CSP-safe addEventListener via onClick); it reads nothing.
+      if (AEGIS_ONBOARDING_ON) {
+        children.push(h("div.cust-mon-settings-onboarding-link", {}, monSettingsButton("Set up AEGIS monitoring",
+          function () { nav("#/monitoring/onboarding"); })));
+      }
     }
     if (!rows.length) {
       children.push(h("div.card.cust-soon", { text: d.can_manage
@@ -3878,6 +3888,100 @@
         : "This host is not enforcing, so there is nothing to stand down." }));
     }
     return h("div.card.cust-mon-control-card", { dataset: { host: String(c.host) } }, body);
+  }
+
+  // ---- AS-6d: AEGIS onboarding (#/monitoring/onboarding) --------------------------------------------------------------
+  // "tenant onboarding" — the final UI-chain increment (chain ...->4b->27b->6d). A guided flow that COMPOSES the
+  // already-built monitoring surfaces (it re-implements none of them): it walks a tenant from a connected (proven) host
+  // to a monitored (observe) one as an ordered checklist, then surfaces the AS-4b Protection preview and the AS-27b
+  // Defense control read-only views as the explore-next steps. It owns its OWN read, GET api/customer/monitoring/onboarding,
+  // gated by the SAME VIGIL_CUSTOMER_MONITORING_ENABLED AND the strict VIGIL_CUSTOMER_AEGIS_ONBOARDING (a second gate):
+  // off, the route is the home screen exactly as any unknown route and the Monitoring-settings link is absent.
+  //
+  // HONEST BY CONSTRUCTION. The grade comes entirely from the SERVER (the AS-6d core evaluator, over the same gated
+  // monitoring reads a manager already sees): the page RENDERS fixed copy from the server's semantic step keys + status
+  // and INVENTS nothing. It mints nothing, arms nothing and releases nothing — turning monitoring on stays behind the
+  // existing gated monitoring/authorize write on #/monitoring. Its only controls are plain NAV links to the screens that
+  // perform each step (CSP-safe addEventListener via onClick); it writes nothing and reads ONLY its own endpoint.
+  var MON_ONBOARD_STEP = {
+    prove_host: { title: "Connect a host", route: "#/assets", go: "Go to Assets",
+                  todo: "Prove you control a host in Assets, so AEGIS can watch its live traffic.",
+                  done: "A host of this workspace has a current proof of control." },
+    plan: { title: "Choose an AEGIS plan", route: "#/billing", go: "Go to Billing",
+            todo: "An AEGIS plan is needed before monitoring can be turned on for a host.",
+            done: "This workspace has an active AEGIS plan." },
+    turn_on_observe: { title: "Turn monitoring on", route: "#/monitoring", go: "Go to Monitoring",
+                       todo: "Turn monitoring on for a proven host on the Monitoring screen. It starts in Observe — "
+                         + "AEGIS watches its traffic and reports attacks, never blocking.",
+                       done: "At least one host of this workspace is monitored." } };
+  var MON_ONBOARD_STATUS = { done: "Done", current: "Next", todo: "To do" };
+  function monOnboardButton(label, route) {
+    var b = h("button.btn", { type: "button", text: label });
+    b.addEventListener("click", function () { nav(route); });
+    return b;
+  }
+  function viewMonitoringOnboarding() {
+    var holder = h("div#mon-onboarding-body", {}, loadingHolder("Loading…"));
+    (async function () {
+      var d;
+      try { d = await VUI.getJSON(API + "/monitoring/onboarding"); }
+      catch (e) {
+        if (here() !== "#/monitoring/onboarding") return;   // navigated away before the load resolved
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        // AS-4a honesty: FIXED copy, never the server's raw error — the flow claims nothing it cannot show.
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load onboarding just now. "
+          + "VIGIL tries again shortly." }));
+      }
+      if (here() !== "#/monitoring/onboarding") return;
+      VUI.mount(holder, monOnboardingBody(d || {}));
+    })();
+    return shell(h("div", {}, [h("h2", { text: "AEGIS onboarding" }),
+      h("p.cust-muted", { text: "A short, guided walk from a connected host to a monitored one. Each step links to the "
+        + "screen that does it — this page arms nothing itself." }),
+      holder]), "#/monitoring/onboarding");
+  }
+  function monOnboardingBody(d) {
+    if (!d.can_manage) {
+      return h("div.card.cust-soon", { text: "Only the founder or an admin of this workspace can set up AEGIS "
+        + "monitoring. They can walk a host from connected to monitored here." });
+    }
+    var j = d.journey || {};
+    var steps = (j.steps || []).filter(function (s) { return s && own(MON_ONBOARD_STEP, s.key); });
+    var children = [];
+    if (j.complete) {
+      children.push(h("div.card.cust-mon-onboard-complete", {}, [
+        h("div.cust-asset-head", {}, [h("span", { text: "Your workspace is monitored" }),
+          h("span.cust-badge.cust-badge-on", { text: "Monitoring on" })]),
+        h("p.cust-muted", { text: "AEGIS is watching the hosts you turned on and reporting attacks as they happen. "
+          + "The steps below are done." })]));
+    }
+    children.push(h("div.cust-grid.cust-mon-onboard-steps", {}, steps.map(monOnboardingStepCard)));
+    // The explore-next read-only views (AS-4b preview + AS-27b defense control) are meaningful once a host is
+    // monitored. They are plain nav links to the already-built screens — this page performs nothing.
+    if (j.explore_available) {
+      children.push(h("div.card.cust-mon-onboard-explore", {}, [
+        h("h3", { text: "Explore next" }),
+        h("p.cust-muted", { text: "Read-only views of what AEGIS does for each host — neither arms or stands anything "
+          + "down." }),
+        h("div.cust-mon-onboard-explore-links", {}, [
+          monOnboardButton("See what enforcing would add", "#/monitoring/preview"),
+          monOnboardButton("Review defense control", "#/monitoring/control")])]));
+    }
+    return h("div", {}, children);
+  }
+  function monOnboardingStepCard(s) {
+    var meta = own(MON_ONBOARD_STEP, s.key);
+    var status = String(s.status || "todo");
+    var kind = status === "done" ? "on" : (status === "current" ? "signal" : "off");
+    var body = [h("div.cust-asset-head", {}, [h("span", { text: meta.title }),
+      h("span.cust-badge.cust-badge-" + kind, { text: own(MON_ONBOARD_STATUS, status) || "To do" })])];
+    body.push(h("p.cust-muted", { text: s.done ? meta.done : meta.todo }));
+    // The current step gets a plain nav link to the screen that performs it; a done or later step shows no button, so
+    // the flow surfaces exactly one next action at a time. Pure nav — nothing is armed or written from here.
+    if (status === "current") {
+      body.push(h("div.cust-mon-onboard-actions", {}, monOnboardButton(meta.go, meta.route)));
+    }
+    return h("div.card.cust-mon-onboard-card", { dataset: { step: s.key } }, body);
   }
 
   // ---- Connect (VIGIL_CUSTOMER_CONNECT): one place to connect a website, a code repository and a cloud account -------
@@ -6134,6 +6238,8 @@
     "#/monitoring/preview": function () { return authed() ? (MONITORING_ON ? viewMonitoringPreview() : viewDashboard()) : viewLogin(); },
     // AS-27b defense control off (same flag as #/monitoring): #/monitoring/control is the home screen, as any unknown route
     "#/monitoring/control": function () { return authed() ? (MONITORING_ON ? viewDefenseControl() : viewDashboard()) : viewLogin(); },
+    // AS-6d onboarding off (monitoring AND the strict onboarding flag): #/monitoring/onboarding is the home screen, as any unknown route
+    "#/monitoring/onboarding": function () { return authed() ? (AEGIS_ONBOARDING_ON ? viewMonitoringOnboarding() : viewDashboard()) : viewLogin(); },
     // Live Control off: #/live is the home screen, exactly as any unknown route is (byte-identical)
     "#/live": function () { return authed() ? (LIVE_ON ? viewLiveControl() : viewDashboard()) : viewLogin(); },
     // Command box off (VIGIL_CUSTOMER_ASSISTANT): #/command is the home screen, exactly as any unknown route is

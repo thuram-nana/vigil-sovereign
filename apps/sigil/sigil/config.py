@@ -364,6 +364,20 @@ def customer_monitoring_enabled() -> bool:
     return (os.environ.get("VIGIL_CUSTOMER_MONITORING_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
 
 
+# AEGIS AS-6d — the customer-app AEGIS ONBOARDING flow (#/monitoring/onboarding + its read). STRICT, default-OFF.
+# A SECOND, independent gate on top of `customer_monitoring_enabled` (like AS-2f's v2 surface): the onboarding
+# read `monitor_onboarding` and its screen are ABSENT (404 exactly as an unknown route) unless BOTH the
+# monitoring master flag AND this flag are affirmative. The flow mints/arms/releases NOTHING — it only guides
+# and READS the already-signed grants the Monitoring screens already surface — so with it off the build is
+# byte-identical and no existing read gains a key. It deep-links to the already-built surfaces (Monitoring,
+# the AS-4b preview, the AS-27b defense control), which require the monitoring flag, hence the double gate.
+def customer_aegis_onboarding_enabled() -> bool:
+    """True iff the customer AEGIS onboarding flow is ON (`VIGIL_CUSTOMER_AEGIS_ONBOARDING` affirmative). Read
+    at call time; fail-safe default OFF. The route serves only when this AND `customer_monitoring_enabled` are
+    on; off, the onboarding route is an unknown route (404) and the Monitoring settings link to it is absent."""
+    return (os.environ.get("VIGIL_CUSTOMER_AEGIS_ONBOARDING") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
 # AEGIS AS-2f — the SOVEREIGN v2 authority surface (grant/revoke/renew over the AS-2a authority-v2 contracts).
 # STRICT, default-OFF. A SECOND, independent gate on top of `customer_monitoring_enabled`: the v2 provisioner
 # actions (`monitor_authorize_v2` / `monitor_revoke_v2` / `monitor_renew`) are ABSENT (404 exactly as an unknown
