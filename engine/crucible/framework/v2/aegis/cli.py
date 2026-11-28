@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import time
+from typing import Any, Callable, Optional
 
 from .boundary import BoundaryError
 from .guard import LLMGuard
@@ -121,6 +122,30 @@ def _compose_verdict_sinks(*sinks):
                 pass
 
     return fan
+
+
+# AS-20: the managed-control-plane injection seam for the OUTBOUND SIEM/notify connector. A bare
+# `aegis gateway` cannot construct a sealed connector broker from flags (the engine CLI holds no KEK / sealed
+# connector store / tenant grant), so the live ConnectorNotifier is supplied by the managed control plane,
+# which sets this to a callable ``(connector_id, tenant, host) -> (ConnectorSecretBroker, grant) | None``.
+# DEFAULT None => the --notify-* intent is recorded and the notifier is wired out-of-band (never fabricated,
+# never a secret on argv/env). Kept here (not in notify.py) so notify.py stays off the default CLI import path.
+_NOTIFY_BROKER_PROVIDER: "Optional[Callable[[str, str, str], Any]]" = None
+
+
+def _build_notify_notifier(connector_id: str, url: str, fmt: str, tenant: "str | None", host: "str | None"):
+    """Build a broker-backed ConnectorNotifier from the injected control-plane provider, or None when no
+    provider / no (broker, grant) is available. Lazy-imports ``notify`` so the module is reached only when a
+    control plane actually wires a connector (never on the default gate / CLI import path)."""
+    provider = _NOTIFY_BROKER_PROVIDER
+    if provider is None or not (tenant and host):
+        return None
+    pair = provider(connector_id, tenant, host)
+    if not pair:
+        return None
+    broker, grant = pair
+    from .notify import ConnectorNotifier
+    return ConnectorNotifier(broker, grant, org=tenant, connector_id=connector_id, host=host, url=url, fmt=fmt)
 
 
 def _gateway_snapshot(httpd: object) -> dict:
@@ -347,8 +372,21 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as e:
             sys.stderr.write(f"aegis gateway: cannot load --monitoring-secret-file: {e}\n")
             return 2
+    # AS-20 (opt-in, DEFAULT-OFF): an OUTBOUND SIEM/notify connector. The connector id + sink URL + format are
+    # operator config; the sealed credential is NEVER on argv/env — it is brokered (AS-9a). The engine CLI holds
+    # no sealed connector store / KEK / grant, so a bare `aegis gateway` cannot FABRICATE a broker: the live
+    # ConnectorNotifier is built by the managed control plane and injected via serve_gateway(notify_notifier=...).
+    # Here we only VALIDATE the operator intent (a connector needs a URL — fail-closed) and report it.
+    notify_connector = (os.environ.get("AEGIS_GW_NOTIFY_CONNECTOR") or getattr(args, "notify_connector", None)
+                        or None)
+    notify_url = os.environ.get("AEGIS_GW_NOTIFY_URL") or getattr(args, "notify_url", None) or None
+    notify_format = os.environ.get("AEGIS_GW_NOTIFY_FORMAT") or getattr(args, "notify_format", "webhook")
+    if notify_connector and not notify_url:
+        sys.stderr.write("aegis gateway: --notify-connector requires --notify-url (the sole egress); refusing "
+                         "fail-closed\n")
+        return 2
     try:
-        saas_kw = {k: v for k, v in (("saas_tenant", saas_tenant), ("saas_host", saas_host),
+        saas_kw: "dict[str, Any]" = {k: v for k, v in (("saas_tenant", saas_tenant), ("saas_host", saas_host),
                                      ("monitoring_spool", monitoring_spool),
                                      ("monitoring_secret", monitoring_secret)) if v is not None}
         # AS-3b (opt-in, DEFAULT-OFF): additionally emit AS-2b aegis_event v2 records. Env or flag. Only passed
@@ -356,6 +394,15 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         if (os.environ.get("AEGIS_GW_EMIT_V2", "").strip() not in ("", "0", "false", "False")
                 or bool(getattr(args, "emit_v2", False))):
             saas_kw["emit_v2"] = True
+        # AS-20: if the managed control plane injected a broker provider (a callable returning a
+        # (broker, grant) for this tenant+connector), build the ConnectorNotifier and compose it; otherwise the
+        # intent is recorded and the notifier is wired by the control plane out-of-band (never from bare flags).
+        notify_notifier = None
+        if notify_connector and notify_url and _NOTIFY_BROKER_PROVIDER is not None:
+            notify_notifier = _build_notify_notifier(str(notify_connector), str(notify_url),
+                                                     str(notify_format), saas_tenant, saas_host)
+        if notify_notifier is not None:
+            saas_kw["notify_notifier"] = notify_notifier
         httpd = serve_gateway(upstream, config=config, host=host, port=port,
                               slug=slug, on_verdict=on_verdict, **saas_kw)
     except ValueError as e:
@@ -387,6 +434,13 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         _authset = "with auth" if os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") else "no auth header"
         sys.stderr.write(f"  verdict sink -> {verdict_sink} at {verdict_webhook} ({_authset}); "
                          f"bounded POST, redirects disabled, fail-open\n")
+    if notify_connector:
+        from .notify import NOTIFY_ENV, notify_enabled
+        _armed = "ARMED" if notify_enabled() else f"inert ({NOTIFY_ENV} unset)"
+        _wired = "wired" if (saas_kw.get("notify_notifier") is not None) else "control-plane wired out-of-band"
+        sys.stderr.write(f"  notify connector '{notify_connector}' -> {notify_format} at {notify_url} "
+                         f"[{_armed}; {_wired}]; broker-sealed credential (AS-9a), bounded POST, redirects "
+                         f"disabled, fail-open\n")
     if args.oob_canary and httpd.settings.oob_receiver is not None:
         sys.stderr.write(f"  passive OOB belief elevation ON (canary host "
                          f"{httpd.settings.oob_correlator.canary_host}) — receiver is LOOPBACK-only; "
@@ -544,6 +598,20 @@ def main(argv: list[str] | None = None) -> int:
                         "0600 FILE / systemd credential instead of AEGIS_GW_SECRET in the environment, so it "
                         "never lands in /proc/<pid>/environ. Default-OFF: absent => the AEGIS_GW_SECRET env "
                         "path is used unchanged. Also settable via AEGIS_GW_SECRET_FILE.")
+    g.add_argument("--notify-connector", default=None, metavar="CONNECTOR_ID",
+                   help="AEGIS-SaaS (AS-20): the registered connector id for an OUTBOUND SIEM/notification "
+                        "sink. Each confirmed/lead verdict is pushed to --notify-url authenticated by a "
+                        "BROKER-SEALED credential (the secret never lands on argv/env — it is sealed and "
+                        "brokered, AS-9a). Metadata-only + hygiene-clean body; bounded POST, redirects "
+                        "DISABLED, http(s) only, FAIL-OPEN. Requires --notify-url. Inert unless "
+                        "VIGIL_AEGIS_NOTIFY arms it (and VIGIL_AEGIS_CONNECTOR_BROKER arms the broker). The "
+                        "broker + grant are supplied by the managed control plane.")
+    g.add_argument("--notify-url", default=None, metavar="URL",
+                   help="AEGIS-SaaS (AS-20): the operator-configured SIEM/notification sink URL (the SOLE "
+                        "egress for the notify connector). Required with --notify-connector.")
+    g.add_argument("--notify-format", choices=("webhook", "slack"), default="webhook",
+                   help="format for the --notify-connector push: 'webhook' (metadata-only event JSON) or "
+                        "'slack' (compact text). Default webhook.")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")

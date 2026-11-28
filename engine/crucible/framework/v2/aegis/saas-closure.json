@@ -4,7 +4,8 @@
   "entrypoints": [
     "framework.v2.aegis.cli",
     "framework.v2.aegis.gateway",
-    "framework.v2.aegis.receiver"
+    "framework.v2.aegis.receiver",
+    "framework.v2.aegis.edr_provider"
   ],
   "denied_third_party": [
     "agents",

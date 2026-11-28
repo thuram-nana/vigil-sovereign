@@ -701,7 +701,7 @@
     // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
     if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
     cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
-    var body = h("div", {}, [
+    var body = h("div.cust-overview", {}, [
       h("h2", { text: "Overview" }),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
         + "this workspace by the server. Open any card for its full screen." }),
@@ -769,6 +769,17 @@
     items.forEach(function (a) { findings += (parseInt(a && a.findings, 10) || 0); });
     var rows = items.length ? [kv("Authorized", items.length), kv("Findings", findings)]
                             : [h("p.cust-muted", { text: "No authorized assessments yet." })];
+    // A compact, honest feed of the most recent authorized assessments — each host and its confirmed-finding count,
+    // the only fields this read carries (it carries no run state, so none is shown — never an invented status pill).
+    if (items.length) {
+      rows.push(h("div.cust-ov-feed", {}, items.slice(0, 4).map(function (a) {
+        var n = parseInt(a && a.findings, 10) || 0;
+        return h("div.cust-ov-feed-row", {}, [
+          h("span.cust-ov-feed-host", { text: String((a && a.host) || "host") }),
+          h("span.cust-ov-feed-count", { text: n + (n === 1 ? " finding" : " findings") }),
+        ]);
+      })));
+    }
     rows.push(overviewLink("Assessments", "#/assessments"));
     return h("div", {}, rows);
   }
@@ -778,7 +789,15 @@
     var grants = (d && d.grants) || [];
     var active = grants.filter(function (g) { return g && g.active; }).length;
     var plan = d && d.plan;
-    var rows = [kv("Monitored", plan ? (active + " of " + (parseInt(plan.host_slots, 10) || 0)) : active)];
+    var slots = plan ? (parseInt(plan.host_slots, 10) || 0) : 0;
+    var rows = [kv("Monitored", plan ? (active + " of " + slots) : active)];
+    // the share of the plan's host slots in use, shown only where the server sent a plan (a manager): real data, so a
+    // non-manager — never sent a plan — gets no bar and no claim about one.
+    if (plan) {
+      var pm = slots > 0 ? (active / slots * 100) : 0;
+      pm = pm < 0 ? 0 : (pm > 100 ? 100 : pm);
+      rows.push(h("div.cust-ov-meter.cust-ov-meter-mon", {}, h("i", { style: { width: pm + "%" } })));
+    }
     if (d && d.can_manage && !plan) { rows.push(h("p.cust-muted", { text: "No active AEGIS plan." })); }
     rows.push(overviewLink("Monitoring", "#/monitoring"));
     return h("div", {}, rows);
@@ -789,6 +808,15 @@
     items.forEach(function (n) { if (n && n.id && !seen[n.id]) { unread++; } });
     var rows = items.length ? [kv("Unread", unread), kv("Total", items.length)]
                             : [h("p.cust-muted", { text: "No notifications yet." })];
+    // the most recent few, each with a severity dot — the real notifications the server sent (title where it has one).
+    if (items.length) {
+      rows.push(h("div.cust-ov-feed", {}, items.slice(0, 3).map(function (n) {
+        return h("div.cust-ov-feed-row", {}, [
+          h("span.cust-ov-dot.sev-" + String((n && n.severity) || "info").toLowerCase(), {}),
+          h("span.cust-ov-feed-host", { text: String((n && n.title) || "Notification") }),
+        ]);
+      })));
+    }
     // the bell is this card's full screen: the button opens its panel (never closes one already open)
     rows.push(h("div.row", {}, [h("button.btn", { type: "button", text: "Open notifications",
       onClick: function () { if (!ntf.open) { toggleNtf(); } } })]));
@@ -2522,9 +2550,14 @@
   function postureFill(d) {
     var points = (d && Array.isArray(d.points)) ? d.points : [];
     var last = points.length ? points[points.length - 1] : null;
-    var rows = (d && typeof d.current === "number")
-      ? [kv("Posture", d.current + "/100"), kv("Open findings", last ? (parseInt(last.open, 10) || 0) : null), postureDelta(d)]
-      : [h("p.cust-muted", { text: "No results yet." })];
+    var rows;
+    if (d && typeof d.current === "number") {
+      var pp = d.current < 0 ? 0 : (d.current > 100 ? 100 : d.current);
+      rows = [kv("Posture", d.current + "/100"), kv("Open findings", last ? (parseInt(last.open, 10) || 0) : null),
+        h("div.cust-ov-meter", {}, h("i", { style: { width: pp + "%" } })), postureDelta(d)];
+    } else {
+      rows = [h("p.cust-muted", { text: "No results yet." })];
+    }
     rows.push(overviewLink("Fix first", "#/fix-first"));
     return h("div", {}, rows);
   }
@@ -4589,11 +4622,29 @@
 
   // ---- shell --------------------------------------------------------------------------------------
   function navLink(label, hash) {
+    // A small leading stroke icon per sidebar nav item, reused from the shared kit's icon set (ui.js VUI.icon → a
+    // span.glyph wrapping an inline svg, no text). A hash with no mapped icon (the account name) renders without one.
+    // The label is a span of its own, so the button's textContent stays EXACTLY the label (the nav-link tests read it).
+    var icons = {
+      "#/": "home", "#/billing": "book", "#/invoices": "clip", "#/assets": "folder", "#/assessments": "assess",
+      "#/team": "key", "#/connect": "link", "#/monitoring": "shield", "#/live": "live", "#/fix-first": "bolt",
+      "#/attack-path": "search", "#/code": "brain", "#/plans": "book", "#/reports": "clip", "#/settings": "gear",
+      "#/privacy": "key", "#/seller-identity": "info", "#/guide": "book",
+    };
     var cur = (location.hash === hash || (hash === "#/" && (location.hash === "" || location.hash === "#")));
-    var props = { type: "button", text: label, onClick: function () { nav(hash); } };
+    var props = { type: "button", onClick: function () { nav(hash); } };
     if (cur) props["aria-current"] = "page";
     if (GUIDE_ON) props.dataset = { route: hash };          // the tour lights up the tab a step happens on
-    return h("button.cust-nav-link", props);
+    var ic = Object.prototype.hasOwnProperty.call(icons, hash) ? icons[hash] : null;
+    return h("button.cust-nav-link", props, [ic ? VUI.icon(ic) : null, h("span.cust-nav-label", { text: label })]);
+  }
+  // The mobile drawer: at narrow widths the sidebar is off-canvas behind a top bar with a hamburger. This flips a class
+  // on the live shell (the whole view re-renders on navigation, so picking a nav item closes it on its own). CSP-safe:
+  // the app's own code, no inline handler. Guarded so it is inert where there is no DOM (the extracted-function tests).
+  // Referenced only from onClick handlers below, so shell() itself takes on no new build-time dependency.
+  function toggleDrawer() {
+    try { var sh = VUI.$(".cust-shell"); if (sh && sh.classList) { sh.classList.toggle("cust-drawer-open"); } }
+    catch (e) { /* no live shell: nothing to toggle */ }
   }
 
   function shell(inner, current) {
@@ -4615,22 +4666,36 @@
         .concat(SELLER_IDENTITY_ON ? [navLink("Seller identity", "#/seller-identity")] : [])   // legal/governance S7
         .concat(GUIDE_ON ? [navLink("Guide", "#/guide")] : [])
       : [];
+    // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
+    var brandDark = { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" };
+    var brandLight = { src: "brand/vigil-wordmark.svg", alt: "VIGIL", width: "99", height: "22" };
+    // a read-only workspace identity at the top of the rail — NOT a switcher: this app serves the one workspace the
+    // server scopes every read to (admit_customer); it shows only the session's own workspace, never a list to pick.
+    var wsName = String(w.org_id || w.username || "Workspace");
     var right = authed()
       ? (SECURITY_ON ? accountLinks(w)
         : h("button.cust-nav-link", { type: "button", text: "Sign out (" + (w.username || "") + ")", onClick: doLogout }))
       : h("button.cust-nav-link", { type: "button", text: "Sign in", onClick: function () { nav("#/login"); } });
     return h("div.cust-shell", {}, [
+      // the mobile top bar: a hamburger that reveals the off-canvas rail, and the wordmark (hidden on wide viewports)
+      authed() ? h("div.cust-mtop", {}, [
+        h("button.cust-burger", { type: "button", "aria-label": "Menu", onClick: function () { toggleDrawer(); } },
+          [h("span.cust-burger-bars"), h("span.cust-sr-only", { text: "Menu" })]),
+        h("span.brand", {}, [h("img.vigil-logo.for-dark", brandDark), h("img.vigil-logo.for-light", brandLight)]),
+      ]) : null,
       h("div.cust-topbar", {}, [
-        // the owner's wordmark: white on the dark theme, the dark artwork on the light one (components.css)
-        h("span.brand", {}, [
-          h("img.vigil-logo.for-dark", { src: "brand/vigil-wordmark-white.svg", alt: "VIGIL", width: "99", height: "22" }),
-          h("img.vigil-logo.for-light", { src: "brand/vigil-wordmark.svg", alt: "VIGIL", width: "99", height: "22" }),
-        ]),
+        h("span.brand", {}, [h("img.vigil-logo.for-dark", brandDark), h("img.vigil-logo.for-light", brandLight)]),
+        authed() ? h("div.cust-ws", {}, [
+          h("span.cust-ws-mark", { text: (wsName.slice(0, 1) || "W").toUpperCase() }),
+          h("span.cust-ws-name", {}, [h("span.cust-ws-t", { text: wsName }), h("span.cust-ws-s", { text: "Workspace" })]),
+        ]) : null,
         h("nav", {}, links),
         h("span.spacer"),
         authed() ? ntfWidget() : null,
         right,
       ]),
+      // the scrim closes the mobile drawer on a tap outside it (desktop: hidden by CSS)
+      authed() ? h("div.cust-scrim", { onClick: function () { toggleDrawer(); } }) : null,
       h("div#cust-main", {}, inner),
     ]);
   }

@@ -80,6 +80,10 @@ SAAS_ENTRYPOINTS: tuple[str, ...] = (
     # AS-9b: the ingest receiver core (served by apps/aegis-ingest). Engine-leg; its closure must be as clean
     # of denied offense/SDK modules as the gateway's — so the deny-list gate covers the receiver serve path.
     "framework.v2.aegis.receiver",
+    # AS-10b: the EDR telemetry provider. Ships a ``python -m framework.v2.aegis.edr_provider`` module
+    # entrypoint (the poll otherwise rides the already-covered AS-30 jobs worker); its module-level import
+    # closure must stay as free of denied offense/SDK modules as the receiver's — so the gate covers it too.
+    "framework.v2.aegis.edr_provider",
 )
 
 # The defense-owned SERVING layer this slice authors and controls. A reachable module under this package

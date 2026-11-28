@@ -137,11 +137,18 @@ distribution, with caps and authenticated transport.
 |------|------|:---:|
 | Finding receiver (offense spine; DM-signer extends it) | `apps/sigil/sigil/inbound/finding_receiver.py` | yes |
 | AEGIS ingest service (own distribution; caps; HMAC/mTLS) | `apps/aegis-ingest/` **(to build — AS-9b)** | — |
-| Connector secrets broker | `connector_secrets.py` **(to build — AS-9a, on consumer registry)** | — |
+| Connector secrets broker | `connector_secrets.py` **(AS-9a, on consumer registry)** | yes |
+| AWS CloudTrail telemetry source (provider reader; pushes LEADs through the AS-9b receiver) | `framework/v2/aegis/cloudtrail_source.py` **(AS-17b, built)** | yes |
+| SIEM/notify connector emitter (the broker CONSUMER side) | `notify.py` **(AS-20 — outbound SIEM/notify push client)** | yes |
 
 - **Hot set:** SPOOL (receiver shares the spool chain tail).
-- **Slices:** AS-9a broker · AS-9b receiver · AS-31 Detection Mirror (DM-signer, cert
-  v2 defense delegation at `finding_receiver.py`).
+- **Slices:** AS-9a broker · AS-9b receiver · AS-20 notify/SIEM emitter (the connector
+  CONSUMER — reuses the AS-9a broker to STAMP an outbound credential; adds no OracleKind,
+  opens no serve route) · AS-31 Detection Mirror (DM-signer, cert v2 defense delegation at
+  `finding_receiver.py`) · **AS-17b AWS CloudTrail telemetry source (built)** — the engine-leg
+  provider reader normalizes CloudTrail, pushes INERT LEADs through the AS-9b receiver (no new
+  customer route → no Gate-5 census row), and tamper-evidences each record via AS-9c anchor-1;
+  DEFAULT-OFF `VIGIL_AEGIS_CLOUDTRAIL`.
 
 ## Domain 6 — Benchmark (scorecard engine for comparative claims)
 
@@ -205,7 +212,7 @@ Two supporting areas that every domain leans on:
 
 | Area | Path | Verified | Note |
 |------|------|:---:|------|
-| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-7b Coraza |
+| Detection content (Sigma/rules/efficacy) | `engine/crucible/framework/v2/defender/` | yes | AS-17a Sigma v2; AS-17b AWS CloudTrail normalizer + gated `detect_format` (`parse_cloudtrail`); AS-7b Coraza |
 | CODEOWNERS trust domains (`_CRITICAL_PREFIXES`) | `.github/CODEOWNERS`, `integration/tests/test_codeowners_coverage.py` | yes | AS-0: `aegis/`, `verify/`, `veracity/`, `vigil_core/` are critical prefixes |
 | Slice graph (acyclicity, levels, disjoint manifests) | `engine/crucible/framework/v2/aegis/slice_graph.json` + `aegis/tests/test_aegis_slice_graph.py` | yes | AS-0 graph gate (72 slices, 24 waves) |
 
