@@ -48,15 +48,29 @@ _REMOVE_CODEPOINTS = frozenset(
     | {0x200E, 0x200F}                                    # LRM RLM
 )
 
+#: Unicode general categories stripped wholesale (never a legitimate character in a form field):
+#:   * ``Cc`` — control characters: NUL, the rest of C0, DEL (U+007F), all of C1 (U+0080..U+009F).
+#:   * ``Cf`` — FORMAT characters: the entire invisible-format class, not just the explicit set above. This is what
+#:     closes the Trojan-Source / invisible-prompt-injection surface: it also removes the Tag block
+#:     (U+E0000..U+E007F, used to smuggle an invisible instruction into free text an LLM later reads), WORD JOINER
+#:     (U+2060), the invisible math operators (U+2061..U+2064), SOFT HYPHEN (U+00AD), the interlinear-annotation
+#:     anchors (U+FFF9..U+FFFB) and the Arabic/other format controls. The ordinary whitespace in ``_KEEP_WHITESPACE``
+#:     is category ``Cc`` but is restored by an explicit earlier check, so it survives this sweep.
+_REMOVE_CATEGORIES = frozenset({"Cc", "Cf"})
+
 
 def sanitize_text(s: str, *, max_chars: int) -> str:
     """Return ``s`` NFC-normalised, with dangerous characters removed and hard-truncated to ``max_chars``.
 
     Deterministic and network-free. Removes, in this order of consideration: the explicit invisible / bidirectional
-    code points in ``_REMOVE_CODEPOINTS``; then every Unicode ``Cc`` control character (NUL, the rest of C0, DEL and
-    all of C1) EXCEPT the ordinary whitespace in ``_KEEP_WHITESPACE`` (``\\t`` ``\\n`` ``\\r``; a plain space is not a
-    control character and is always kept). Truncation is applied LAST, on code points (Python ``str`` holds no
-    surrogate pairs), so the result is never longer than ``max_chars`` and NFC can never re-expand past the cap.
+    code points in ``_REMOVE_CODEPOINTS``; then every character whose Unicode general category is in
+    ``_REMOVE_CATEGORIES`` (``Cc`` control characters AND the whole ``Cf`` invisible-format class — Tag characters,
+    word joiner, soft hyphen, interlinear-annotation anchors, Arabic format controls, ...) EXCEPT the ordinary
+    whitespace in ``_KEEP_WHITESPACE`` (``\\t`` ``\\n`` ``\\r``; a plain space is category ``Zs`` and is always kept).
+    The result is then NFC-normalised AGAIN: stripping a zero-width separator can leave a base character adjacent to a
+    combining mark, and the second pass composes them so the return value genuinely honours the NFC contract (no
+    decomposed look-alike of a precomposed value survives). Truncation is applied LAST, on code points (Python ``str``
+    holds no surrogate pairs), so the result is never longer than ``max_chars`` and neither NFC pass can re-expand it.
 
     A non-``str`` argument is a programming error at the call site (``sanitize_body`` only ever passes ``str`` here)
     and raises ``TypeError`` rather than silently coercing.
@@ -71,10 +85,12 @@ def sanitize_text(s: str, *, max_chars: int) -> str:
         if ch in _KEEP_WHITESPACE:
             out.append(ch)
             continue
-        if unicodedata.category(ch) == "Cc":            # NUL / C0 / DEL / C1 control characters
+        if unicodedata.category(ch) in _REMOVE_CATEGORIES:   # Cc (controls) + Cf (invisible format incl. Tag chars)
             continue
         out.append(ch)
-    result = "".join(out)
+    # Re-normalise after stripping so a base + combining-mark pair left adjacent by a removed zero-width separator is
+    # composed; this is what makes the NFC contract (and the no-decomposed-look-alike guarantee) actually hold.
+    result = unicodedata.normalize("NFC", "".join(out))
     if len(result) > max_chars:
         result = result[:max_chars]
     return result

@@ -204,6 +204,25 @@ def test_attributes_are_bounded_and_control_free():
         d.put_group(G1, display_name="", now=_now())
 
 
+def test_clean_str_strips_invisible_format_class_and_refuses_c1_controls():
+    # A SCIM displayName / name.* is STORED and echoed back to the IdP and the operator member view, so the
+    # invisible-format (Cf) class is stripped (no Trojan-Source reorder / homoglyph display spoof) and the result is
+    # NFC-normalised; C0 / C1 / DEL control characters remain a hard refusal (fail-closed). Dangerous code points are
+    # built with chr() so the source carries no invisible/control byte (ruff PLE2502/PLE2515).
+    zwsp, rlo, acute = chr(0x200B), chr(0x202E), chr(0x0301)
+    tag_a, nel, c0 = chr(0xE0041), chr(0x85), chr(0x01)
+    assert sd._clean_str("Al" + zwsp + "ice" + rlo, "displayName") == "Alice"        # zero-width + RLO stripped
+    assert sd._clean_str("A" + tag_a + "dmin", "displayName") == "Admin"             # a TAG character stripped
+    assert sd._clean_str("cafe" + zwsp + acute, "displayName") == "caf" + chr(0xE9)  # re-NFC to precomposed form
+    assert sd._clean_str("Normal Name 123", "displayName") == "Normal Name 123"      # ordinary text untouched
+    with pytest.raises(DirectoryError):
+        sd._clean_str("a" + nel + "b", "displayName")                                # NEL (C1) now refused (was a gap)
+    with pytest.raises(DirectoryError):
+        sd._clean_str("a" + c0 + "b", "displayName")                                 # C0 control still refused
+    with pytest.raises(DirectoryError):
+        sd._clean_str(zwsp + rlo, "displayName", required=True)                      # all-invisible -> empty -> required
+
+
 def test_a_write_needs_the_owner_key():
     reg = _reg(_store())
     reg.owner_key = None
