@@ -192,7 +192,7 @@ out.badge = cbadge("a.example"); out.text = ctext("a.example"); out.buttons = bu
 out.op = text(document.querySelector("p.cust-mon-control-op")); out.calls = calls;
 """)
     assert out["badge"] == "Enforcing · Respond"
-    assert "blocking attacks on this host before they reach your app" in out["text"]
+    assert "blocking confirmed attacks on this host before they reach your app" in out["text"]
     assert "stand-down would pause enforcement back to observe" in out["text"]
     assert "Nothing is stood down from this screen" in out["text"]
     assert out["buttons"] == []                                                 # pure display — no button

@@ -3886,7 +3886,7 @@
       { text: enforcing ? "Enforcing · Respond" : "Observing" });
     var body = [h("div.cust-asset-head", {}, [h("span.host", { text: String(c.host) }), badge])];
     if (enforcing) {
-      body.push(kv("Now", "AEGIS is blocking attacks on this host before they reach your app."));
+      body.push(kv("Now", "AEGIS is blocking confirmed attacks on this host before they reach your app."));
       body.push(h("p.cust-muted", { text: c.standdown_available
         ? "An authorized stand-down would pause enforcement back to observe for this host. Nothing is stood down "
           + "from this screen."
