@@ -687,20 +687,26 @@
   // shows an estimate, a predicted cost or an engine name; the only amount shown is credits the customer holds.
   function viewOverview() {
     var w = state.get().who || {};
-    // One context per render: the route it was drawn for (each async fill checks the customer is still there) and
-    // whether a card already found the session ended (so sign-in is asked for once, not once per card).
+    // One context per render: the route it was drawn for (each async fill checks the customer is still there), a
+    // sign-in-asked-once latch (so an ended session asks for sign-in once, not once per card), and ONE aggregate read
+    // — credits, hosts, assessments and monitoring brought together — that EVERY card shares. The UI sends NO org id:
+    // the edge scopes the whole aggregate to the SESSION org (admit_customer), and the server composes each section
+    // from the SAME gated read its full screen uses, so a card whose section a role may not read degrades to an
+    // honest line while the sections the role may read still show. One round trip, not one per card.
     var view = { at: here(), ended: false };
+    view.summary = VUI.getJSON(API + "/overview");
     var cards = [
       VUI.card("Account", null, [kv("Signed in as", w.username), kv("Workspace", w.org_id)]),
-      overviewCard(view, "Credits", API + "/billing", "Billing", creditsFill),
-      overviewCard(view, "Authorized hosts", API + "/assets", "Assets", hostsFill),
-      overviewCard(view, "Assessments", API + "/assessments", "Assessments", assessFill),
+      overviewCard(view, "Credits", "credits", "Billing", creditsFill),
+      overviewCard(view, "Authorized hosts", "assets", "Assets", hostsFill),
+      overviewCard(view, "Assessments", "assessments", "Assessments", assessFill),
     ];
-    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does).
-    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", API + "/posture/trend", "Fix first", postureFill)); }
-    // Monitoring only while its screen is on (the same switch that serves its read); off, the card and its read are absent.
-    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", API + "/monitoring", "Monitoring", monFill)); }
-    cards.push(overviewCard(view, "Notifications", API + "/notifications", "Notifications", ntfFill));
+    // PR-B: the Posture card only while the Fix-first screen is on (read through pageFlag, as the top bar does); the
+    // server includes its section under the same switch, so card and section are never out of step.
+    if (pageFlag("posture")) { cards.push(overviewCard(view, "Posture", "posture", "Fix first", postureFill)); }
+    // Monitoring only while its screen is on (the same switch the server gates its section by); off, the card is absent.
+    if (MONITORING_ON) { cards.push(overviewCard(view, "Monitoring", "monitoring", "Monitoring", monFill)); }
+    cards.push(overviewCard(view, "Notifications", "notifications", "Notifications", ntfFill));
     var body = h("div.cust-overview", {}, [
       h("h2", { text: "Overview" }),
       h("p.cust-muted", { text: "Your credits, hosts, assessments and monitoring for this workspace, each scoped to "
@@ -710,28 +716,31 @@
     return shell(body, "#/");
   }
 
-  // One async summary card: render the card + a loading holder now, then fetch its OWN tenant-scoped read and fill it.
-  // A 401 means the session ended: the first card to see it asks who is signed in and routes to sign-in, the others
-  // stand down. A 403 is the honest role line; anything else (a read this deployment does not serve, a network
-  // failure) is an honest "could not load" line — never a raw error and never the server's own words. A read that
-  // resolves after the customer left the screen changes nothing.
-  function overviewCard(view, title, path, label, fill) {
+  // One summary card of the shared Overview aggregate: render the card + a loading holder now, then await the ONE
+  // session-org-scoped read and fill this card from its OWN section (data[key]). A 401 means the session ended: the
+  // first card to see it asks who is signed in and routes to sign-in, the others stand down. A section the role may
+  // not read is the honest role line (its section is {access:"forbidden"} — no data, no link); any read failure is an
+  // honest "could not load" line, never a raw error and never the server's own words. A read that resolves after the
+  // customer left the screen changes nothing.
+  function overviewCard(view, title, key, label, fill) {
     var holder = h("div.cust-ov-cell", {}, loadingHolder("Loading…"));
     (async function () {
       var data;
-      try { data = await VUI.getJSON(path); }
+      try { data = await view.summary; }
       catch (e) {
         if (here() !== view.at) { return; }
         if (e && e.status === 401) {
           if (!view.ended) { view.ended = true; await refreshWho(); nav("#/login"); }
           return;
         }
-        var msg = (e && e.status === 403) ? ("Your role does not have access to " + label + ".")
-                                          : ("Could not load " + label + " right now.");
-        return VUI.mount(holder, h("p.cust-muted", { text: msg }));
+        return VUI.mount(holder, h("p.cust-muted", { text: "Could not load " + label + " right now." }));
       }
       if (here() !== view.at) { return; }
-      VUI.mount(holder, fill(data));
+      var section = (data && data[key]) || {};
+      if (section.access === "forbidden") {
+        return VUI.mount(holder, h("p.cust-muted", { text: "Your role does not have access to " + label + "." }));
+      }
+      VUI.mount(holder, fill(section));
     })();
     return VUI.card(title, null, holder);
   }
