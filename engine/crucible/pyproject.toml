@@ -60,7 +60,7 @@ dependencies = [
 # <2.9: the older-model legacy API-version route (kernel/llm.py sampling_create_kwargs) relies on Bedrock /
 # Vertex request preparation verified on 2.8 only; widen after re-verifying it on the new minor.
 anthropic   = ["anthropic>=2.8.0,<2.9"]
-embeddings  = ["sentence-transformers>=2,<6"]
+embeddings  = ["sentence-transformers>=6.3.0,<7"]
 analysis    = ["semgrep>=1.186.0"]
 smt         = ["z3-solver>=5.4.1.0,<6"]
 numerics    = ["numpy>=2.4.6,<3"]
