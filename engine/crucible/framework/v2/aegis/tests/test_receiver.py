@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import tempfile
@@ -297,17 +298,30 @@ def _unix_http(sock_path: str, raw: bytes, *, read_timeout: float = 3.0) -> byte
     s.connect(sock_path)
     try:
         s.sendall(raw)
-        chunks = []
-        while True:
+        chunks: "list[bytes]" = []
+
+        def _complete() -> bool:
+            # Stop only once the FULL response is in: headers plus, if a Content-Length is declared, that many body
+            # bytes. Breaking on the end-of-headers marker alone races a body that arrives in a later TCP segment
+            # (e.g. the 2-byte "ok" health body), which intermittently dropped the body and failed the assertion.
+            data = b"".join(chunks)
+            sep = data.find(b"\r\n\r\n")
+            if sep < 0:
+                return False                                   # headers not fully received yet
+            head, body = data[:sep], data[sep + 4:]
+            m = re.search(rb"(?im)^content-length:[ \t]*(\d+)[ \t]*\r?$", head)
+            if m is None:
+                return True                                    # no declared body: headers complete is enough
+            return len(body) >= int(m.group(1))                # full declared body received
+
+        while not _complete():
             try:
                 b = s.recv(4096)
             except socket.timeout:
                 break
             if not b:
-                break
+                break                                          # server closed (Connection: close)
             chunks.append(b)
-            if b"\r\n\r\n" in b"".join(chunks) and len(b) < 4096:
-                break
         return b"".join(chunks)
     finally:
         s.close()
