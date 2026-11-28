@@ -2058,6 +2058,15 @@ class Handler(BaseHTTPRequestHandler):
             return p.customer_assets(requester, str(body.get("org_id", "")), ip=ip)
         if action == "notifications":
             return p.customer_notifications(requester, str(body.get("org_id", "")), ip=ip)
+        # C7 — the Overview home screen's ONE aggregate read: credits + authorized hosts + assessments + monitoring
+        # (plus the notifications / posture cards) COMPOSED from the already-gated per-area reads, org from the edge
+        # SESSION (never a free body field). Absent (unknown action -> 404) unless VIGIL_CUSTOMER_OVERVIEW is on — the
+        # same flag that serves its edge route and writes data-overview into the page.
+        if action == "customer_overview_summary":
+            from .. import config as _config
+            if not _config.customer_overview_enabled():
+                return None
+            return p.customer_overview_summary(requester, str(body.get("org_id", "")), ip=ip)
         # Legal/governance S5 — the AI / human-in-the-loop governance disclosure (read-only). Org from the edge
         # SESSION; absent (unknown action -> 404) unless VIGIL_CUSTOMER_AI_GOVERNANCE is on, the same flag that serves
         # its edge route.

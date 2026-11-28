@@ -4879,6 +4879,43 @@ class Provisioner:
         return self._customer_read(requester, requester_org_id, "view_assessments",
                                    lambda s, o: _own.assets_overview(s, o, now=_t.time()))
 
+    def customer_overview_summary(self, requester: str, requester_org_id: str, *, ip: str = "") -> dict:
+        """C7 — ONE session-org-scoped aggregate for the Overview home screen (#/): credits, authorized hosts,
+        assessments and monitoring brought TOGETHER, each COMPOSED from the SAME already-gated per-area read its own
+        full screen uses — never a second gate of its own and never a bypass. ``requester``/``requester_org_id`` are
+        the hop-bound session principal, NEVER a body field, so the aggregate reads ONLY the caller's own tenant (each
+        sub-read re-runs ``admit_customer`` for THIS org). A section the caller's role may not read comes back as
+        ``{"access": "forbidden"}`` — the card then says so plainly, with no data and no link — and an OPTIONAL section
+        whose screen this deployment does not serve is simply absent; the notifications and posture cards ride the same
+        one read so the home screen makes a single round trip. No section is ever an estimate, a predicted cost or an
+        engine name: the only money-shaped figure anywhere is the credits the customer holds."""
+        from .. import config
+
+        def _section(read):
+            # The honest per-card refusal (a role that may not read this area) degrades to a marked section, NOT a
+            # whole-aggregate failure, so a billing role still sees its Credits beside the others' honest lines. Any
+            # OTHER failure propagates (the edge renders one honest "could not load", never the server's own words).
+            try:
+                return read()
+            except ProvisionDenied:
+                return {"access": "forbidden"}
+
+        out: "dict[str, Any]" = {
+            "org_id": requester_org_id,
+            "credits": _section(lambda: self.customer_billing(requester, requester_org_id, ip=ip)),
+            "assets": _section(lambda: self.customer_assets(requester, requester_org_id, ip=ip)),
+            "assessments": _section(lambda: self.customer_assessments(requester, requester_org_id, ip=ip)),
+        }
+        # Monitoring and posture are OPTIONAL cards, each gated by the SAME switch that serves its own screen (and that
+        # the Overview UI reads to decide whether to show the card): included only while on, so the aggregate and the
+        # page are never out of step, and absent (no card, no claim) when the deployment does not serve them.
+        if config.customer_monitoring_enabled():
+            out["monitoring"] = _section(lambda: self.monitor_list(requester, requester_org_id, ip=ip))
+        if config.customer_posture_enabled():
+            out["posture"] = _section(lambda: self.customer_posture_trend(requester, requester_org_id, ip=ip))
+        out["notifications"] = _section(lambda: self.customer_notifications(requester, requester_org_id, ip=ip))
+        return out
+
     # -- Legal/governance S12: the read-only Authorizations surface (behind VIGIL_CUSTOMER_AUTHORIZATIONS) -------------
     # DISCLOSURE, never a mint. ``customer_authorizations_list`` READS the owner-signed EngagementAuthorities on record
     # for the SESSION org's OWN proven-owned hosts (re-derived per-(org,host) slug, so org A never sees org B's), and

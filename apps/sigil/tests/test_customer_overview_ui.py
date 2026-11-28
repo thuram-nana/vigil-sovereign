@@ -121,26 +121,26 @@ def _node(script: str, *, overview: str = "1", monitoring: str = "0", guide: str
     return json.loads(r.stdout)
 
 
-# What the server sends a founder who may read every card (a member who manages monitoring, on a 5-host plan).
+# What the ONE aggregate read (api/customer/overview) sends a founder who may read every card (a member who manages
+# monitoring, on a 5-host plan): each section is the SAME shape its per-area read returns, so the card fills are
+# unchanged — the server composes the sections from those gated reads, and the UI makes a single round trip.
 _SERVER = r"""
 server = {
-  "GET api/customer/billing": { data: { org_id: "org_x", credits: { available: 500, persistent: 500, plan_live: 0 } } },
-  "GET api/customer/assets": { data: { assets: [{ host: "a.example", status: "verified" },
-                                                 { host: "b.example", status: "expired" },
-                                                 { host: "c.example", status: "pending" }] } },
-  "GET api/customer/assessments": { data: { assessments: [{ slug: "s1", host: "a.example", findings: 2 },
-                                                           { slug: "s2", host: "c.example", findings: 1 }] } },
-  "GET api/customer/monitoring": { data: { grants: [{ host: "a.example", active: true }, { host: "b.example", active: false }],
-                                           can_manage: true, plan: { host_slots: 5, respond: true, period_end: 1 } } },
-  "GET api/customer/notifications": { data: { notifications: [{ id: "f1", severity: "high" },
-                                                              { id: "f2", severity: "low" }], count: 2 } },
+  "GET api/customer/overview": { data: { org_id: "org_x",
+    credits: { credits: { available: 500, persistent: 500, plan_live: 0 } },
+    assets: { assets: [{ host: "a.example", status: "verified" }, { host: "b.example", status: "expired" },
+                       { host: "c.example", status: "pending" }] },
+    assessments: { assessments: [{ slug: "s1", host: "a.example", findings: 2 },
+                                 { slug: "s2", host: "c.example", findings: 1 }] },
+    monitoring: { grants: [{ host: "a.example", active: true }, { host: "b.example", active: false }],
+                  can_manage: true, plan: { host_slots: 5, respond: true, period_end: 1 } },
+    notifications: { notifications: [{ id: "f1", severity: "high" }, { id: "f2", severity: "low" }], count: 2 } } },
 };
 localStorage.setItem("vigil.ntf.seen.ana", JSON.stringify(["f1"]));     // f1 was already read at the bell
 """
 _EMPTY = r"""
-server = { "GET api/customer/billing": { data: { credits: {} } }, "GET api/customer/assets": { data: { assets: [] } },
-           "GET api/customer/assessments": { data: { assessments: [] } },
-           "GET api/customer/notifications": { data: { notifications: [] } } };
+server = { "GET api/customer/overview": { data: { credits: { credits: {} }, assets: { assets: [] },
+           assessments: { assessments: [] }, notifications: { notifications: [] } } } };
 """
 
 # The one line C7 added inside viewDashboard; without it the function is the pre-C7 dashboard byte for byte.
@@ -208,10 +208,9 @@ out.navs = navs;
         "Notifications": ["Unread1", "Total2"],                         # f1 was read at the bell
     }
     assert out["opens"] == ["Open Billing", "Open Assets", "Open Assessments", "Open Monitoring", "Open notifications"]
-    # the UI sends NO org id: every call is just ["GET", <relative path>] (no body, no org selector)
-    assert out["calls"] == [["GET", "api/customer/billing"], ["GET", "api/customer/assets"],
-                            ["GET", "api/customer/assessments"], ["GET", "api/customer/monitoring"],
-                            ["GET", "api/customer/notifications"]]
+    # the UI makes ONE aggregate read and sends NO org id: a single ["GET", "api/customer/overview"] (no body, no
+    # org selector) — every card renders from its own section of that read, not a per-card round trip
+    assert out["calls"] == [["GET", "api/customer/overview"]]
     assert out["navs"] == ["#/billing", "#/assets", "#/assessments", "#/monitoring"]   # each card opens its screen
 
 
@@ -235,13 +234,15 @@ out.opens = document.querySelectorAll("button").map(b => b.textContent);
 
 # --- a role-forbidden card is honest, never a raw error -----------------------------------------------------------
 def test_a_role_forbidden_card_shows_the_honest_message_not_an_error():
-    """A billing role (org_admin) reads Credits but may not read hosts or assessments (billing is not testing): those
-    cards say so in fixed words, with no Open button to a screen that would refuse too and never the server's text."""
+    """A billing role (org_admin) reads Credits but may not read hosts or assessments (billing is not testing): the
+    server composes the aggregate from each area's OWN gate, so those sections come back {"access":"forbidden"} and
+    their cards say so in fixed words, with no Open button to a screen that would refuse too and never the server's
+    text — while the sections the role may read still render."""
     out = _node(r"""
-const deny = { status: 403, data: { error: "requester may not read this org (view_assessments)" } };
-server = { "GET api/customer/billing": { data: { credits: { available: 120 } } },
-           "GET api/customer/assets": deny, "GET api/customer/assessments": deny,
-           "GET api/customer/notifications": { data: { notifications: [] } } };
+server = { "GET api/customer/overview": { data: {
+  credits: { credits: { available: 120 } },
+  assets: { access: "forbidden" }, assessments: { access: "forbidden" },
+  notifications: { notifications: [] } } } };
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 out.hosts = text(card("Authorized hosts")); out.assess = text(card("Assessments")); out.credits = text(card("Credits"));
 out.forbiddenOpens = card("Authorized hosts").querySelectorAll("button").length
@@ -255,22 +256,20 @@ out.forbiddenOpens = card("Authorized hosts").querySelectorAll("button").length
 
 # --- a read the edge does not serve, a failure, an ended session ----------------------------------------------------
 def test_an_absent_read_or_an_ended_session_is_handled_honestly():
+    # the ONE aggregate read fails (an edge that does not serve it, or an upstream error): every card degrades to its
+    # own honest "could not load <area>" line — never the server's own words, never a raw error
     out = _node(r"""
-server = { "GET api/customer/billing": { status: 404, data: { error: "unknown route /api/customer/billing" } },
-           "GET api/customer/assets": { status: 502, data: { error: "upstream relay timed out at 10.0.0.7" } },
-           "GET api/customer/assessments": { data: { assessments: [] } },
-           "GET api/customer/notifications": { data: { notifications: [] } } };
+server = { "GET api/customer/overview": { status: 502, data: { error: "upstream relay timed out at 10.0.0.7" } } };
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 out.credits = text(card("Credits")); out.hosts = text(card("Authorized hosts")); out.navs = navs.slice();
 """)
     assert out["credits"] == "CreditsCould not load Billing right now."          # never the server's own words
     assert out["hosts"] == "Authorized hostsCould not load Assets right now."
     assert out["navs"] == []
-    # every read answers 401 (the session ended): ONE card asks who is signed in and routes to sign-in; the rest stand down
+    # the aggregate read answers 401 (the session ended): ONE card asks who is signed in and routes to sign-in; the
+    # rest stand down — nothing is rendered as an error on the way out
     ended = _node(r"""
-server = {};
-["billing", "assets", "assessments", "monitoring", "notifications"].forEach(p => {
-  server["GET api/customer/" + p] = { status: 401, data: { error: "login required" } }; });
+server = { "GET api/customer/overview": { status: 401, data: { error: "login required" } } };
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 out.whoRefreshes = whoRefreshes; out.navs = navs;
 out.cells = document.querySelectorAll("div.cust-ov-cell").map(e => e.textContent);
@@ -283,13 +282,10 @@ out.cells = document.querySelectorAll("div.cust-ov-cell").map(e => e.textContent
 def test_a_read_that_resolves_after_the_customer_left_changes_nothing():
     out = _node(r"""
 let release; const gate = new Promise(r => { release = r; });
-const fail = s => gate.then(() => { const e = new Error("x"); e.status = s; e.data = {}; throw e; });
-server = { "GET api/customer/billing": { wait: gate.then(() => ({ credits: { available: 9 } })) },
-           "GET api/customer/assets": { wait: fail(401) },
-           "GET api/customer/assessments": { wait: fail(403) },
-           "GET api/customer/notifications": { wait: gate.then(() => ({ notifications: [] })) } };
+// the ONE aggregate read answers 401 only AFTER the customer has opened another screen
+server = { "GET api/customer/overview": { wait: gate.then(() => { const e = new Error("x"); e.status = 401; e.data = {}; throw e; }) } };
 const view = viewDashboard(); document.body.appendChild(view);
-location.hash = "#/billing";                   // the customer opened another screen before the reads came back
+location.hash = "#/billing";                   // the customer opened another screen before the read came back
 release(); await flush();
 out.cells = document.querySelectorAll("div.cust-ov-cell").map(e => e.textContent);
 out.navs = navs; out.whoRefreshes = whoRefreshes;
@@ -300,22 +296,24 @@ out.navs = navs; out.whoRefreshes = whoRefreshes;
 
 # --- the Monitoring card ----------------------------------------------------------------------------------------------
 def test_the_monitoring_card_appears_only_when_monitoring_is_on():
+    # the monitoring section rides the ONE aggregate read; the card itself shows only while the Monitoring screen's
+    # page flag is on (the server composes the section under the same switch), and the single read is unchanged
     script = _EMPTY + r"""
-server["GET api/customer/monitoring"] = { data: { grants: [], can_manage: false } };
+server["GET api/customer/overview"].data.monitoring = { grants: [], can_manage: false };
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 out.cards = titles(); out.reads = calls.map(c => c[1]);
 """
     on = _node(script, monitoring="1")
-    assert "Monitoring" in on["cards"] and "api/customer/monitoring" in on["reads"]
+    assert "Monitoring" in on["cards"] and on["reads"] == ["api/customer/overview"]
     for flag in ("0", "", "__VIGIL_MONITORING__"):
         off = _node(script, monitoring=flag)
-        assert "Monitoring" not in off["cards"] and "api/customer/monitoring" not in off["reads"], flag
+        assert "Monitoring" not in off["cards"] and off["reads"] == ["api/customer/overview"], flag
 
 
 def test_the_monitoring_card_tells_only_what_the_server_sent():
     def mon(answer: dict) -> dict:
         return _node(_EMPTY + r"""
-server["GET api/customer/monitoring"] = { data: ANSWER };
+server["GET api/customer/overview"].data.monitoring = ANSWER;
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 out.rows = card("Monitoring").querySelectorAll("div.cust-kv").map(e => e.textContent);
 out.text = text(card("Monitoring"));
@@ -339,7 +337,7 @@ out.text = text(card("Monitoring"));
 # --- the Notifications card opens the bell -------------------------------------------------------------------------
 def test_open_notifications_opens_the_bell_and_never_closes_it():
     out = _node(_EMPTY + r"""
-server["GET api/customer/notifications"] = { data: { notifications: [{ id: "n1", severity: "high" }] } };
+server["GET api/customer/overview"].data.notifications = { notifications: [{ id: "n1", severity: "high" }] };
 const view = viewDashboard(); document.body.appendChild(view); await flush();
 const open = button(card("Notifications"), "Open notifications");
 open.click(); out.first = [ntfOpened, ntf.open];
@@ -412,24 +410,33 @@ def test_the_edge_writes_the_overview_flag_into_the_page(tmp_path, monkeypatch):
 
 # --- the Overview's reads over the real edge hop, role-scoped, no org id ------------------------------------------
 def test_overview_card_reads_over_the_edge_role_scoped(tmp_path, monkeypatch):
-    """Every card reads an EXISTING session-org-scoped read: over the real edge hop a signup org_admin reads its Credits
-    (billing) and its notifications, but the Hosts and Assessments cards' reads are refused (billing is not testing) —
-    the honest-card path — and the UI sends no org id (the edge scopes every read to the SESSION org)."""
-    from sigil.ui.custui import _READS
-    for p in ("billing", "assets", "assessments", "notifications"):      # monitoring is its own flagged route
-        assert f"/api/customer/{p}" in _READS, p
+    """The Overview's ONE aggregate read (api/customer/overview) is session-org-scoped and COMPOSES the existing gated
+    per-area reads: over the real edge hop a signup org_admin gets its Credits section (billing) and its notifications,
+    while the Hosts and Assessments sections come back {"access":"forbidden"} (billing is not testing) — never another
+    role's data — and the UI sends no org id (the edge scopes the whole aggregate to the SESSION org). With the flag
+    off the route is absent (404), fail-closed."""
+    from sigil.ui.custui import _overview_on
+    monkeypatch.setenv("VIGIL_CUSTOMER_OVERVIEW", "1")
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
     try:
+        assert _overview_on()                                        # the edge serves the aggregate route only while on
         op = _opener()
         t = _post(op, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
         conf = _post(op, ep, "/api/customer/signup/confirm",
                      {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
         oid = conf["org_id"]
-        c, ov = _get(op, ep, "/api/customer/billing")
-        assert c == 200 and ov["org_id"] == oid and "available" in ov["credits"]   # Credits card data, session-scoped
-        assert _get(op, ep, "/api/customer/assessments")[0] == 403                  # Assessments card -> honest line
-        assert _get(op, ep, "/api/customer/assets")[0] == 403                       # Hosts card -> honest line
-        c, n = _get(op, ep, "/api/customer/notifications")
-        assert c == 200 and isinstance(n.get("notifications"), list)                # Notifications card read is served
+        c, ov = _get(op, ep, "/api/customer/overview")
+        assert c == 200 and ov["org_id"] == oid
+        assert "available" in ov["credits"]["credits"]              # the Credits section, session-scoped (view_billing)
+        assert ov["assets"] == {"access": "forbidden"}             # Hosts section -> the honest card line, no data
+        assert ov["assessments"] == {"access": "forbidden"}        # Assessments section -> the honest card line
+        assert isinstance(ov["notifications"].get("notifications"), list)   # Notifications section is served
+    finally:
+        sov.shutdown(); edge.shutdown()
+    # fail-closed: with the flag off the aggregate route is genuinely absent (404), not a masked 401
+    monkeypatch.setenv("VIGIL_CUSTOMER_OVERVIEW", "0")
+    sov, edge, ep, _ = _stack(tmp_path / "off", monkeypatch)
+    try:
+        assert _get(_opener(), ep, "/api/customer/overview")[0] == 404
     finally:
         sov.shutdown(); edge.shutdown()
