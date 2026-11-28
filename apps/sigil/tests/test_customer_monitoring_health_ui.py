@@ -5,14 +5,14 @@ a HOST HEALTH section and a per-viewer ACKNOWLEDGE, both built ENTIRELY over the
 (GET api/customer/monitoring for the armed grants + verified hosts, GET api/customer/monitoring/events for the
 gateway-reported attacks). It adds NO route, NO write, NO flag and NO new authority.
 
-* HEALTH is honest and grounded: an armed (active) host shows "Watching · <mode>"; a manager's armed host whose
-  ownership PROOF is no longer current (not in the server's verified `hosts`) shows "Proof of control lapsed" with the
-  honest note that its monitoring cannot be renewed until it is verified again. The events stream is ATTACK reports, not
-  a telemetry heartbeat, so "no events" renders "No attacks reported yet" (good), never "telemetry down".
+* HEALTH is honest and grounded: an armed (active) host shows "Watching · <mode>". A host whose ownership PROOF has
+  lapsed is ABSENT from the grants the read returns (it goes inactive and shows as expired in Assets), so the section
+  only ever shows watched hosts and makes NO proof-currency claim. The events stream is ATTACK reports, not a telemetry
+  heartbeat, so "no events" renders "No attacks reported yet" (good), never "telemetry down".
 * The LAST REPORT line is a plain fact: when AEGIS last reported on the host and whether that report was confirmed.
 * ACKNOWLEDGE is a PER-VIEWER mark-as-seen in THIS browser's storage (namespaced by signed-in user, capped). It makes
   NO server call, updates the card in place, and the next poll shows it seen. A new report_id (a fresh attack) is
-  unacknowledged again. With storage off the feature still works (nothing is remembered).
+  unacknowledged again. With storage off it does NOT claim it saved anything — it says so honestly.
 * The health/acknowledge path reaches the network through NO route at all (source scan): acknowledge is purely local.
 
 app.js's own functions are extracted verbatim and run on the customer UI kit (ui.js) with a minimal DOM + a localStorage
@@ -228,17 +228,18 @@ out.calls = calls;
     assert out["calls"] == [["GET", "api/customer/monitoring"], ["GET", "api/customer/monitoring/events"]]
 
 
-def test_a_managers_armed_host_with_a_lapsed_proof_shows_an_honest_health_warning():
-    lapsed = {"org_id": "org_x", "can_manage": True, "plan": _MANAGER["plan"],
-              "hosts": [{"host": "b.example", "expires_at": _PE}],                 # a.example's proof is NOT current
-              "grants": [{"host": "a.example", "mode": "observe", "not_before": 1.0, "not_after": _PE, "active": True}]}
-    out = _screen(lapsed, r"""
-out.badge = hbadge("a.example"); out.text = htext("a.example"); out.buttons = hbuttons("a.example");
+def test_an_armed_hosts_badge_is_always_watching_and_never_claims_proof_currency():
+    # A host whose ownership proof lapsed is ABSENT from the grants a monitor_list read returns (its grant goes
+    # inactive, so it shows as expired in Assets, not here). Every host the Host-health section DOES show is therefore
+    # active, i.e. watched — so the badge states only that honest fact and makes NO proof-currency claim to anyone
+    # (manager or not). (Regression: the old "Proof of control lapsed" branch was unreachable dead code + an overclaim.)
+    out = _screen(_MANAGER, r"""
+out.aBadge = hbadge("a.example"); out.aProof = htext("a.example").indexOf("Proof") >= 0;
+out.bBadge = hbadge("b.example"); out.bProof = htext("b.example").indexOf("Proof") >= 0;
 """)
-    assert out["badge"] == "Proof of control lapsed"
-    assert "verify it again in Assets" in out["text"] and "cannot be renewed" in out["text"]
-    assert out["buttons"] == []                                              # the lapse is a read-only honest signal
-    # a NON-manager is never told the verified hosts, so no proof claim is made — the host just shows Watching
+    assert out["aBadge"] == "Watching · Observe" and out["aProof"] is False
+    assert out["bBadge"] == "Watching · Respond" and out["bProof"] is False
+    # a NON-manager viewer sees the same honest badge, still no proof claim
     viewer = {"org_id": "org_x", "can_manage": False,
               "grants": [{"host": "a.example", "mode": "observe", "not_before": 1.0, "not_after": _PE, "active": True}]}
     out = _screen(viewer, 'out.badge = hbadge("a.example"); out.hasProof = htext("a.example").indexOf("Proof") >= 0;')
@@ -291,16 +292,22 @@ out.otherUser = hbuttons("a.example");
     assert out["otherUser"] == ["Acknowledge"]            # ana's ack never speaks for ben
 
 
-def test_with_storage_off_the_card_still_updates_even_though_nothing_is_remembered():
+def test_with_storage_off_acknowledge_says_honestly_it_could_not_be_saved():
     evs = [_ev("a.example", 1_700_000_900.0, "confirmed", "RID-1")]
     out = _screen(_MANAGER, r"""
 out.before = hbuttons("a.example");
 button(hcard("a.example"), "Acknowledge").click(); await flush();
 out.afterClick = [hbuttons("a.example"), htext("a.example")];
+out.toasts = toasts;
 out.sent = calls.filter(c => c[0] === "POST").length;
 """, events=evs, storage=False)
     assert out["before"] == ["Acknowledge"]
-    assert out["afterClick"][0] == [] and "Acknowledged on this device" in out["afterClick"][1]
+    # storage off (e.g. private browsing): it must NOT claim an acknowledgement it cannot keep — it says so honestly,
+    # so the button reappearing on the next poll is consistent with what the user was told. (Regression: the old code
+    # toasted "Acknowledged on this device" even when nothing was saved.)
+    assert "Acknowledged on this device" not in out["afterClick"][1]
+    assert "storage is off" in out["afterClick"][1]
+    assert any("storage is off" in t for t in out["toasts"])
     assert out["sent"] == 0                               # still no server call with storage unavailable
 
 

@@ -374,7 +374,7 @@
           clicks: ["VIGIL sets your host up behind the managed AEGIS gateway with you.",
                    "Open Monitoring to see the events for your hosts, newest first. Only your workspace sees them.",
                    "Each event shows when it happened, the host, the kind of attack, whether it was confirmed and what AEGIS did, such as Blocked.",
-                   "The Host health section lists each monitored host: whether its monitoring is live and, for a manager, whether its proof of control is still current, with the time AEGIS last reported on it.",
+                   "The Host health section lists each monitored host that is being watched, with the time AEGIS last reported on it.",
                    "Select Acknowledge to mark a host's latest confirmed attack as seen on this device. It is a reminder for you on this browser only — it changes nothing on the server and nothing for anyone else.",
                    "The list refreshes by itself while Monitoring is open. The bell in the top bar tells you when something new arrives."],
           why: "Each event is checked before it reaches you; a report that cannot be verified is never shown." },

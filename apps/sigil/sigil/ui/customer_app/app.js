@@ -2819,11 +2819,11 @@
   function monAckSeen(id) { return id != null && Object.prototype.hasOwnProperty.call(monAckSet(), String(id)); }
   function monAckMark(id) {
     var s = monAckStore();
-    if (!s || id == null) { return; }                      // storage off: the ack holds for this view only, remembers nothing
+    if (!s || id == null) { return false; }                // storage off: nothing can be remembered — report that
     var cur = Object.keys(monAckSet());
     if (cur.indexOf(String(id)) < 0) { cur.push(String(id)); }
     if (cur.length > MON_ACK_CAP) { cur = cur.slice(cur.length - MON_ACK_CAP); }
-    try { s.setItem(monAckKey(), JSON.stringify(cur)); } catch (e) { /* storage off: nothing remembered */ }
+    try { s.setItem(monAckKey(), JSON.stringify(cur)); return true; } catch (e) { return false; }
   }
   // the newest event per host; the events are newest-first already, so the first one seen for a host is its latest.
   function monLatestByHost(events) {
@@ -2846,22 +2846,15 @@
     var grants = ((d && d.grants) || []).filter(function (g) { return g && g.active && g.host; })
       .sort(function (a, b) { return a.host < b.host ? -1 : (a.host > b.host ? 1 : 0); });
     if (!grants.length) { return h("div"); }               // nothing armed: the Hosts section already says so
-    var verified = Object.create(null);
-    ((d && d.hosts) || []).forEach(function (x) { if (x && x.host) { verified[String(x.host)] = 1; } });
-    var canManage = !!(d && d.can_manage), latest = monLatestByHost(events);
-    return h("div.cust-grid", {}, grants.map(function (g) { return monHealthCard(g, latest[String(g.host)], verified, canManage); }));
+    var latest = monLatestByHost(events);
+    return h("div.cust-grid", {}, grants.map(function (g) { return monHealthCard(g, latest[String(g.host)]); }));
   }
-  function monHealthCard(g, ev, verified, canManage) {
-    // a manager is told which hosts' proofs are current, so an armed host missing from that set has a LAPSED proof — a
-    // real health problem (it cannot be renewed until verified again). A non-manager is not told, so no proof claim.
-    var proofLapsed = canManage && !verified[String(g.host)];
-    var badge = proofLapsed ? h("span.cust-badge.cust-badge-off", { text: "Proof of control lapsed" })
-                            : h("span.cust-badge.cust-badge-on", { text: "Watching · " + (own(MON_MODE, g.mode) || "On") });
+  function monHealthCard(g, ev) {
+    // Every host shown here is ARMED and active, which by construction means its ownership proof is still current: an
+    // expired or revoked proof makes the grant inert, so a lapsed host is simply ABSENT from this section (it shows as
+    // expired in Assets instead) rather than flagged here. So the badge states only that honest fact — it is watched.
+    var badge = h("span.cust-badge.cust-badge-on", { text: "Watching · " + (own(MON_MODE, g.mode) || "On") });
     var body = [h("div.cust-asset-head", {}, [h("span.cust-mon-health-host", { text: String(g.host) }), badge])];
-    if (proofLapsed) {
-      body.push(h("p.cust-muted", { text: "Its proof of control is no longer current, so its monitoring cannot be "
-        + "renewed until you verify it again in Assets." }));
-    }
     // last report — a plain fact about the gateway-reported attacks, NEVER a claim that telemetry is or is not flowing.
     if (ev && ev.ts != null) {
       var confirmed = ev.decision === "confirmed";
@@ -2882,9 +2875,15 @@
   // Acknowledge is a PER-VIEWER mark-as-seen in this browser only: it makes no server call and changes nothing for the
   // workspace. It updates this card's cue in place (no full re-render, no re-read), and the next poll shows it seen.
   function monAcknowledge(id, acts) {
-    monAckMark(id);
-    VUI.toast("Acknowledged on this device.");
-    VUI.mount(acts, h("p.cust-muted", { text: "Acknowledged on this device." }));
+    if (monAckMark(id)) {
+      VUI.toast("Acknowledged on this device.");
+      VUI.mount(acts, h("p.cust-muted", { text: "Acknowledged on this device." }));
+    } else {
+      // storage is off/blocked (e.g. private browsing): nothing was remembered, so say so honestly rather than claim
+      // an acknowledgement that the next poll would silently undo.
+      VUI.toast("This device can't save acknowledgements (storage is off).");
+      VUI.mount(acts, h("p.cust-muted", { text: "Could not be saved on this device — storage is off." }));
+    }
   }
 
   // The events refresh politely: every MON_POLL_MS, and only while the Monitoring screen is shown to someone signed in
