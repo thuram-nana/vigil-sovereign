@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         AuthorityV2Paths,
         MonotoneEpochFloor,
     )
+    from .attribution import AttributionMeter
     from .capacity import CapacityBudget, CapacityGovernor
     from .impact_budget import ImpactBudget, ImpactBudgetMeter
     from .probe_socket import ProbeSocketServer
@@ -197,6 +198,26 @@ def _impact_budget_flag() -> bool:
     return (os.environ.get(IMPACT_BUDGET_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# AS-5b (attribution): the default-OFF switch for the deterministic read-only DENIAL-SOURCE ATTRIBUTION rollup —
+# which sources hold the current shed/denial pressure (from the AS-5a per-caller buckets), paired with the AS-5e
+# per-reason breakdown. Kept in LOCKSTEP with ``attribution.ATTRIBUTION_ENV`` (a test asserts they match) and read
+# here directly so the attribution module (and, through it, capacity/impact_budget/receipts) is NOT eagerly
+# import-reachable from the gateway (it is imported only when the flag is on AND both deps — the AS-5a governor and
+# the AS-5e meter — exist).
+ATTRIBUTION_ENV = "VIGIL_AEGIS_ATTRIBUTION"
+
+
+def _attribution_flag() -> bool:
+    """AS-5b attribution switch — strict, fail-closed, DEFAULT OFF (read when the gateway is built, and re-read
+    per snapshot so a live flip-OFF stops surfacing the rollup at once). OFF ⇒ no meter is built, nothing is
+    computed, and the gateway data path (and the AS-5c probe snapshot) are byte-identical. The rollup is ALSO
+    inert whenever any dependency is off — the AS-5a capacity plane (the per-caller SOURCE signal) or the AS-5e
+    impact rollup (and, through it, AS-5d receipts) — there is no source load, or no reason breakdown, to attribute
+    otherwise."""
+    import os
+    return (os.environ.get(ATTRIBUTION_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_owner_roots() -> "list":
     """The owner-root OVERLAP SET for V2 DUAL-ACCEPT. Today: the single pinned authority root; during an
     authority-root rotation the reconciler (6a/2h) extends this with the incoming/retiring root so a grant /
@@ -330,6 +351,22 @@ class GatewaySettings:
         if _impact_budget_flag() and self.receipt_ledger is not None:
             from .impact_budget import ImpactBudgetMeter
             self.impact_budget_meter = ImpactBudgetMeter(self.receipt_ledger, impact_budget)
+        # AS-5b (attribution) — the deterministic, READ-ONLY denial-SOURCE rollup: which sources currently hold the
+        # shed/denial pressure (read from the AS-5a per-caller buckets, the only plane with per-caller state),
+        # paired with the AS-5e per-reason breakdown (the "what"). Built ONCE, only when the default-OFF
+        # VIGIL_AEGIS_ATTRIBUTION flag is on at construction AND BOTH dependencies exist: the AS-5a capacity
+        # governor (its SOURCE input) AND the AS-5e impact meter (its formal dependency + the reason "what"). It
+        # holds NO mutable state (beyond an opaque-id salt) and NEVER mutates a bucket, a receipt, or any chain
+        # state: it only READS. It MEASURES and never acts — naming a heavy source drives no admit/shed/allow/block
+        # decision (only a fired oracle blocks; shedding rides solely on the AS-5a budget). Every surfaced source
+        # is an OPAQUE id, never a raw address. OFF (or any dep off) ⇒ no meter is built, nothing is computed, and
+        # the gateway data path (and the probe snapshot) are byte-identical. Importing the module lazily here keeps
+        # it (and, through it, capacity/impact_budget/receipts) OFF the eager __init__/__main__ import path.
+        self.attribution_meter: "AttributionMeter | None" = None
+        if (_attribution_flag() and self.capacity_governor is not None
+                and self.impact_budget_meter is not None):
+            from .attribution import AttributionMeter
+            self.attribution_meter = AttributionMeter(self.capacity_governor, self.impact_budget_meter)
         self._v2_subject = None
         self._v2_paths = None
         self._v2_cache = None
@@ -439,6 +476,18 @@ class GatewaySettings:
             if meter is not None and self.impact_budget_active:
                 snap["impact_budget_active"] = True
                 snap["impact"] = meter.snapshot()
+        except Exception:
+            pass
+        # AS-5b (attribution): surface the deterministic read-only denial-SOURCE rollup — which sources hold the
+        # current shed/denial pressure (address-free, opaque ids, from the AS-5a buckets) paired with the AS-5e
+        # per-reason breakdown — ONLY when the meter is active, so a gateway without the feature answers a probe
+        # byte-identically to AS-5e. Metadata only (no raw address, no secret). It MEASURES, it never acts. Total:
+        # any read error degrades this field, never the probe.
+        try:
+            attrib = self.attribution_meter
+            if attrib is not None and self.attribution_active:
+                snap["attribution_active"] = True
+                snap["attribution"] = attrib.snapshot()
         except Exception:
             pass
         return snap
@@ -591,6 +640,20 @@ class GatewaySettings:
         return (self.impact_budget_meter is not None
                 and _impact_budget_flag()
                 and self.receipts_active)
+
+    @property
+    def attribution_active(self) -> bool:
+        """Is the AS-5b denial-source attribution rollup active for THIS snapshot? Only when the meter was built
+        (the default-OFF VIGIL_AEGIS_ATTRIBUTION flag was on at construction AND both deps — the AS-5a governor and
+        the AS-5e meter — exist) AND the flag is STILL on AND BOTH deps are STILL active (``capacity_active`` for
+        the per-caller source signal, ``impact_budget_active`` for the reason breakdown, which transitively
+        requires the AS-5d receipts flag). So flipping ANY of the attribution / capacity / impact-budget / receipts
+        flags off at runtime stops surfacing the rollup live. Read-only / observational: it never gates
+        enforcement."""
+        return (self.attribution_meter is not None
+                and _attribution_flag()
+                and self.capacity_active
+                and self.impact_budget_active)
 
     def record_outcome(self, outcome: str, reason: str = "") -> None:
         """Append ONE enforcement-outcome receipt (AS-5d). Total + fail-safe: a no-op unless the ledger is active,
